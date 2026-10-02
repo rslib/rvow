@@ -466,7 +466,16 @@ pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     let changes = proof::active(project, &living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        return Ok(None);
+        let plans: Vec<String> = crate::plan::check(project, cwd, None)?
+            .into_iter()
+            .filter(|r| r.change.stage == change::Stage::Backlog)
+            .map(|r| r.change.id.to_string())
+            .collect();
+        return Ok(match plans.as_slice() {
+            [] => None,
+            [one] => Some(format!("rvow {one}: plan waits for accept")),
+            many => Some(format!("rvow: {} plans wait for accept", many.len())),
+        });
     }
     let config = config::load(project, home)?;
     let now = Now {
@@ -577,6 +586,20 @@ mod tests {
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         crate::vow::commit(&p, prepared).unwrap();
         assert_eq!(edit(&p, &repo, "src/lib.rs"), None);
+    }
+
+    #[test]
+    fn status_line_names_a_waiting_plan() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        assert_eq!(status_line(&p, &home, &repo).unwrap(), None);
+        let c = change::new(&p, "T", "main", true).unwrap();
+        assert_eq!(
+            status_line(&p, &home, &repo).unwrap(),
+            Some(format!("rvow {}: plan waits for accept", c.id))
+        );
     }
 
     #[test]
