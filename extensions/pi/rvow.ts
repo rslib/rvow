@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
 const BIN = process.env.RVOW_BIN || "rvow";
 const MAX_CONTINUES = 8;
@@ -60,9 +61,105 @@ async function brief(cwd: string): Promise<string | undefined> {
   return typeof text === "string" && text ? text : undefined;
 }
 
+type Paint = { fg: (color: any, text: string) => string; bold: (text: string) => string };
+const PLAIN: Paint = { fg: (_c, t) => t, bold: (t) => t };
+
+const MARKS: Record<string, [string, string]> = {
+  proved: ["✓", "success"],
+  failed: ["✗", "error"],
+  stale: ["~", "warning"],
+  flaky: ["≈", "warning"],
+  blocked: ["⊘", "accent"],
+  missing: ["·", "dim"],
+};
+const DRIFT_COLOR: Record<string, string> = { weaken: "error", confirm: "warning" };
+
+function plural(n: number, one: string, many = one + "s"): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function needsYou(v: any): string {
+  const n = v?.needs_you ?? {};
+  const parts = [
+    n.amendments > 0 && plural(n.amendments, "amendment"),
+    n.questions > 0 && plural(n.questions, "question"),
+    n.plans > 0 && plural(n.plans, "plan"),
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function summary(v: any, p: Paint): string[] {
+  const lines: string[] = [];
+  for (const c of v.changes ?? []) {
+    const tasks: any[] = c.tasks ?? [];
+    const proved = tasks.filter((t) => t.state === "proved").length;
+    lines.push(`rvow ${c.id}: ${proved}/${tasks.length} proved`);
+  }
+  const need = needsYou(v);
+  if (need) lines.push(p.fg("warning", `needs you: ${need}`));
+  return lines;
+}
+
+function detail(v: any, p: Paint, width: number): string[] {
+  const out: string[] = [];
+  const add = (s = "") => out.push(truncateToWidth(s, width));
+  for (const c of v.changes ?? []) {
+    if (out.length) add();
+    add(`${p.fg("dim", c.id)} ${p.bold(c.title)}${v.branch ? p.fg("dim", `  (${v.branch})`) : ""}`);
+    for (const t of c.tasks ?? []) {
+      const [mark, color] = MARKS[t.state] ?? ["?", "dim"];
+      const why = t.reasons?.length ? p.fg("dim", ` (${t.reasons.join(", ")})`) : "";
+      add(`  ${p.fg(color, mark)} ${p.fg("dim", t.id)} ${t.title}${why}`);
+    }
+    if (c.drift?.length) {
+      add();
+      add(p.bold("Drift"));
+      for (const d of c.drift) add(`  ${p.fg(DRIFT_COLOR[d.class] ?? "dim", d.class)} ${d.what}`);
+    }
+    if (c.pending?.length) {
+      add();
+      add(`${p.bold("Pending amendments")} ${p.fg("dim", "/rvow-confirm")}`);
+      for (const a of c.pending) add(`  ${p.fg("warning", a.id)} ${a.reason}`);
+    }
+  }
+  if (v.plans?.length) {
+    if (out.length) add();
+    add(p.bold("Plans waiting for accept"));
+    for (const pl of v.plans) {
+      add(`  ${p.fg("dim", pl.id)} ${pl.title}`);
+      for (const q of (v.questions ?? []).filter((x: any) => x.change === pl.id)) {
+        add(`    ${p.fg("warning", "?")} ${q.question}`);
+        if (q.recommended) add(p.fg("dim", `      recommended: ${q.recommended}`));
+      }
+    }
+  }
+  if (v.next) {
+    if (out.length) add();
+    add(`${p.bold("Next")} ${p.fg("dim", v.next.task)} ${v.next.title}`);
+    if (v.next.verify) add(p.fg("dim", `  verify: ${v.next.verify}`));
+  }
+  return out;
+}
+
 export default function (pi: ExtensionAPI) {
   let resend = false;
   let continues = 0;
+  let cached: any;
+
+  async function refresh(ctx: ExtensionContext) {
+    cached = await hook("view", ctx.cwd, {}, SLOW_MS);
+    if (!ctx.hasUI) return;
+    const v = cached;
+    ctx.ui.setWidget(
+      "rvow",
+      v
+        ? (_tui, theme) => ({
+            invalidate() {},
+            render: (width: number) => summary(v, theme).map((l) => truncateToWidth(l, width)),
+          })
+        : undefined,
+    );
+  }
 
   pi.on("tool_call", async (event, ctx) => {
     const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
@@ -77,6 +174,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const text = await brief(ctx.cwd);
     if (text) pi.sendMessage({ customType: "rvow", content: text, display: false });
+    await refresh(ctx);
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    await refresh(ctx);
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    const cmd = (event.input as Record<string, unknown>).command;
+    if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd)) await refresh(ctx);
   });
 
   pi.on("session_compact", () => {
@@ -102,6 +209,27 @@ export default function (pi: ExtensionAPI) {
     continues++;
     const entry = { type: "custom_message" as const, customType: "rvow", content: reason, display: false };
     return { entries: [...event.entries, entry], continue: true };
+  });
+
+  pi.registerCommand("rvow", {
+    description: "Show the rvow view of this branch",
+    handler: async (_args, ctx) => {
+      await refresh(ctx);
+      const v = cached;
+      if (!v) return ctx.ui.notify("no active rvow change on this branch", "info");
+      if (ctx.mode !== "tui") return ctx.ui.notify(detail(v, PLAIN, 80).join("\n"), "info");
+      await ctx.ui.custom<void>((tui, theme, _kb, done) => ({
+        invalidate() {},
+        render: (width: number) => {
+          const w = Math.min(width, 80);
+          return ["", ...detail(v, theme, w), "", theme.fg("dim", "esc to close")].map((l) => truncateToWidth(l, w));
+        },
+        handleInput(data: string) {
+          if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "q")) done();
+          tui.requestRender();
+        },
+      }));
+    },
   });
 
   pi.registerCommand("rvow-confirm", {
