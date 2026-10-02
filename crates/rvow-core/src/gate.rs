@@ -179,7 +179,15 @@ pub fn gate(
     for c in &queue {
         check_change(project, c, &now, opts, &mut r)?;
     }
-    check_scope(project, &top, &config.base, &queue, &mut r)?;
+    check_scope(
+        project,
+        &top,
+        &config.base,
+        &branch,
+        &living,
+        &queue,
+        &mut r,
+    )?;
 
     let tree = if opts.rerun {
         Some(Worktree::add(&top)?)
@@ -383,6 +391,8 @@ fn check_scope(
     project: &Project,
     top: &Path,
     base: &str,
+    branch: &str,
+    living: &[CapSpec],
     queue: &[&Active],
     r: &mut Report,
 ) -> Result<()> {
@@ -407,10 +417,17 @@ fn check_scope(
             ));
         }
     }
-    let globs: Vec<String> = queue
+    let mut globs: Vec<String> = queue
         .iter()
         .flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()))
         .collect();
+    let (all, _) = change::list(project)?;
+    for d in all.iter().filter(|d| d.stage == Stage::Done) {
+        let loaded = change::load(&d.path, living)?;
+        if loaded.proposal.branch == branch {
+            globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
+        }
+    }
     let set = globset(&globs)?;
     let repo_dir = format!("{REPO_DIR}/");
     let outside: Vec<String> = changed_files(top, &mb)?
@@ -490,6 +507,44 @@ mod tests {
             },
         );
         assert!(!r.passed(), "strict fails on stale");
+    }
+
+    #[test]
+    fn archived_change_files_are_in_scope() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let id = proof::active(&p, &change::load_living(&p).unwrap().0).unwrap()[0]
+            .dir
+            .id
+            .to_string();
+        crate::archive::archive(&p, &home, &repo, &id).unwrap();
+
+        let c = change::new(&p, "Next", "main", false).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new2 Write more\n  covers: REQ-new2\n  verify: grep -q ok more.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: more.txt\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c.path.join("specs/more.md"),
+            "## ADD REQ-new2 More\nrvow SHALL write more.\n### Scenario: s\n- WHEN it runs\n- THEN more.txt holds ok\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(&p, prepared).unwrap();
+
+        std::fs::write(repo.join("more.txt"), "ok").unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(!r.failures.iter().any(|f| f.contains("outside")), "{r:?}");
+        std::fs::write(repo.join("stray.txt"), "x").unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        let outside = r.failures.iter().find(|f| f.contains("outside")).unwrap();
+        assert!(
+            outside.contains("stray.txt") && !outside.contains("out.txt"),
+            "{r:?}"
+        );
     }
 
     #[test]
