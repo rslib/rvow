@@ -112,7 +112,7 @@ enum Cmd {
     Clarify {
         /// The change id; default: every open change on this branch.
         change: Option<String>,
-        /// Print the next round (at most 4) in the shape of Claude Code's AskUserQuestion.
+        /// Print the next round (at most 4) as JSON: question, options, recommended first.
         #[arg(long)]
         json: bool,
     },
@@ -123,6 +123,9 @@ enum Cmd {
         /// The user's choice, as given.
         #[arg(required = true, num_args = 1..)]
         choice: Vec<String>,
+        /// How the user answered: in a dialog, or in chat relayed by the agent.
+        #[arg(long, value_enum, default_value = "chat")]
+        via: ViaArg,
     },
     /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
     Hook {
@@ -286,7 +289,11 @@ fn main() -> ExitCode {
         Cmd::Install { claude, scope } => install(claude, scope),
         Cmd::Check { change } => check(change.as_deref()),
         Cmd::Clarify { change, json } => clarify(change.as_deref(), json),
-        Cmd::Answer { reference, choice } => answer(&reference, &choice.join(" ")),
+        Cmd::Answer {
+            reference,
+            choice,
+            via,
+        } => answer(&reference, &choice.join(" "), via),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend {
@@ -1028,16 +1035,20 @@ fn clarify(target: Option<&str>, json: bool) -> Result<bool> {
         println!("no open questions");
     } else {
         println!(
-            "ask the user with AskUserQuestion (rvow clarify --json gives the round), then record each answer with rvow answer <ref> \"<choice>\""
+            "ask the user with the rvow_ask tool, or ask in chat and record each answer with rvow answer <ref> \"<choice>\""
         );
     }
     Ok(true)
 }
 
-fn answer(reference: &str, choice: &str) -> Result<bool> {
+fn answer(reference: &str, choice: &str, via: ViaArg) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
-    let a = interview::answer(&p, reference, choice)?;
+    let via = match via {
+        ViaArg::Dialog => interview::Via::Dialog,
+        ViaArg::Chat => interview::Via::Chat,
+    };
+    let a = interview::answer(&p, reference, choice, via)?;
     let how = if a.recommended {
         "the recommended answer"
     } else {
@@ -1051,4 +1062,10 @@ fn answer(reference: &str, choice: &str) -> Result<bool> {
         "Now update the requirement or task this answer affects, and remove any text it contradicts."
     );
     Ok(true)
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ViaArg {
+    Dialog,
+    Chat,
 }

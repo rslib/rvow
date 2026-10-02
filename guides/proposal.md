@@ -19,8 +19,9 @@ Write `proposal.md` first. Keep it to 150 words. Say why and what, never how.
 
 - First search the code and run `rvow spec list` and `rvow show <id>`. Ask only what changes the plan and what the code cannot answer.
 - Mark each open point as `[NEEDS CLARIFICATION: question | recommended: answer | options: b; c | why: what it decides]`. Keep at most 3 in the change.
-- Run `rvow clarify --json` and ask that round with AskUserQuestion. Ask scope and behavior first. Hold a question that depends on an open answer for the next round.
-- Record each answer with `rvow answer <ref> "<choice>"`, then edit the text the answer changes.
+- Ask a round with the `rvow_ask` tool when your harness has it: it shows the user each question and records the answer. Otherwise run `rvow clarify --json`, ask that round in chat and record each answer with `rvow answer <ref> "<choice>"`.
+- Ask scope and behavior first. Hold a question that depends on an open answer for the next round.
+- After each answer, edit the text the answer changes.
 - Stop when no open point would change the plan, or when the user says to use your defaults. `rvow accept` refuses while a marker remains.
 
 ## Example

@@ -73,7 +73,7 @@ fn planning(project: &Project, cwd: &Path) -> Result<String> {
             r.missing.len()
         ));
         let next = if !r.questions.is_empty() {
-            "next: run rvow clarify --json, ask the user with AskUserQuestion, record each answer with rvow answer <ref> \"<choice>\""
+            "next: ask the open questions with the rvow_ask tool, or ask in chat and record each answer with rvow answer <ref> \"<choice>\""
         } else if r.blocking() {
             "next: run rvow check and fix what it reports"
         } else {
@@ -252,7 +252,7 @@ mod tests {
             b.contains(&format!("plan {} waits for accept: 1 open questions", c.id)),
             "{b}"
         );
-        assert!(b.contains("rvow clarify --json"), "{b}");
+        assert!(b.contains("rvow_ask"), "{b}");
     }
 
     #[test]

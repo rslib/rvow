@@ -17,7 +17,7 @@ The brief at session start names the next task. `rvow brief` prints it again.
 
 ## Before accept
 
-- While a plan waits for accept, code edits are denied. Run `rvow guide proposal` and follow its interview steps: `rvow clarify --json`, ask with AskUserQuestion, record with `rvow answer`.
+- While a plan waits for accept, code edits are denied. Run `rvow guide proposal` and follow its interview steps: ask with the `rvow_ask` tool, or ask in chat and record with `rvow answer`.
 - Then run `rvow check` and ask the user to run `/rvow-accept <id>`.
 
 ## When the plan must change

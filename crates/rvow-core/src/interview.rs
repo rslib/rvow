@@ -77,6 +77,23 @@ pub fn round(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Valu
     Ok(json!({"questions": all, "remaining": remaining}))
 }
 
+/// How the user gave an answer: in a dialog the user answered directly, or in
+/// chat, relayed by the agent through `rvow answer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    Dialog,
+    Chat,
+}
+
+impl Via {
+    pub fn name(self) -> &'static str {
+        match self {
+            Via::Dialog => "dialog",
+            Via::Chat => "chat",
+        }
+    }
+}
+
 /// What `answer` recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
@@ -90,7 +107,7 @@ pub struct Answered {
 /// (`CHG-id:file:line`): removes its marker in place, so the references of the
 /// other open questions stay valid, and appends the decision to the
 /// proposal's `## Clarifications`.
-pub fn answer(project: &Project, reference: &str, choice: &str) -> Result<Answered> {
+pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Result<Answered> {
     let bad_ref = || {
         Error::new(
             "ref",
@@ -165,8 +182,9 @@ pub fn answer(project: &Project, reference: &str, choice: &str) -> Result<Answer
         "overridden"
     };
     let entry = format!(
-        "- Q: {} -> A: {answer} ({how}, {})",
+        "- Q: {} -> A: {answer} ({how}, {}, {})",
         found.question,
+        via.name(),
         crate::archive::today()
     );
     let proposal = c.path.join(PROPOSAL);
@@ -243,20 +261,23 @@ mod tests {
         let first = q0["ref"].as_str().unwrap().to_string();
         let second = r["questions"][1]["ref"].as_str().unwrap().to_string();
 
-        let a = answer(&p, &first, "a1 (Recommended)").unwrap();
+        let a = answer(&p, &first, "a1 (Recommended)", Via::Dialog).unwrap();
         assert!(a.recommended);
-        let b = answer(&p, &second, "my own").unwrap();
+        let b = answer(&p, &second, "my own", Via::Chat).unwrap();
         assert!(!b.recommended);
-        assert_eq!(answer(&p, &first, "x").unwrap_err().code, "no-question");
+        assert_eq!(
+            answer(&p, &first, "x", Via::Chat).unwrap_err().code,
+            "no-question"
+        );
 
         let text = std::fs::read_to_string(&prop).unwrap();
         assert!(
-            text.contains("- Q: Q1? -> A: a1 (recommended,")
+            text.contains("- Q: Q1? -> A: a1 (recommended, dialog,")
                 && !text.contains("[NEEDS CLARIFICATION: Q1?"),
             "{text}"
         );
         assert!(
-            text.contains("- Q: Q2? -> A: my own (overridden,"),
+            text.contains("- Q: Q2? -> A: my own (overridden, chat,"),
             "{text}"
         );
         assert_eq!(
@@ -288,7 +309,7 @@ mod tests {
         let r = round(&p, &repo, None).unwrap();
         assert_eq!(r["questions"][0]["options"][1]["label"], DECIDE_LATER);
         let reference = r["questions"][0]["ref"].as_str().unwrap().to_string();
-        let a = answer(&p, &reference, DECIDE_LATER).unwrap();
+        let a = answer(&p, &reference, DECIDE_LATER, Via::Chat).unwrap();
         assert_eq!(a.answer, "20 lines");
         assert!(a.recommended);
     }
