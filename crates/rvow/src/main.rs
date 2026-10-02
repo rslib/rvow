@@ -1443,14 +1443,24 @@ fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
                 "old settings hooks",
                 install::remove_claude_settings(&settings)?,
             );
-            r.line("to load the mod in Claude Code, run once:");
-            r.line(format!("  claude plugin marketplace add {}", dir.display()));
-            r.line("  claude plugin install rvow@rvow");
-            r.line(
-                "after a later rvow install, refresh the copy Claude Code caches, then restart it:",
-            );
-            r.line("  claude plugin marketplace update rvow");
-            r.line("  claude plugin update rvow@rvow");
+            match which("claude") {
+                Some(claude) => match install::register_claude_mod(&claude, &dir) {
+                    Ok(done) => {
+                        for d in done {
+                            r.line(format!("Claude Code: {d}"));
+                        }
+                    }
+                    Err(e) => {
+                        r.line(format!("Claude Code: {}", e.message));
+                        r.line(format!("  {}", e.fix));
+                    }
+                },
+                None => {
+                    r.line("Claude Code: claude is not on PATH; to load the mod, run once:");
+                    r.line(format!("  claude plugin marketplace add {}", dir.display()));
+                    r.line("  claude plugin install rvow@rvow");
+                }
+            }
         }
         ClaudeMode::Settings => {
             report(&mut r, "skill", install::skill(&claude)?);
@@ -1629,4 +1639,12 @@ fn answer(reference: &str, choice: &str, via: ViaArg) -> Result<bool> {
         "Now update the requirement or task this answer affects, and remove any text it contradicts."
     );
     Ok(true)
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())
+    })
 }
