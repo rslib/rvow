@@ -345,11 +345,9 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// A living spec and its capability name.
 pub type CapSpec = (String, Spec);
 
-/// The living specs, keyed by capability, and their parse findings.
-pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
+/// The text of each living spec, keyed by capability, in name order.
+pub fn living_texts(project: &Project) -> Result<Vec<(String, String)>> {
     let dir = project.root.join("specs");
-    let mut specs = Vec::new();
-    let mut findings = Vec::new();
     let mut caps: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(entries) => entries
             .flatten()
@@ -360,18 +358,35 @@ pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
         Err(e) => return Err(Error::io(&dir, e)),
     };
     caps.sort();
+    let mut out = Vec::new();
     for cap_dir in caps {
         let cap = cap_dir.file_name().unwrap().to_string_lossy().into_owned();
         let path = cap_dir.join("spec.md");
-        if !path.is_file() {
-            continue;
+        if path.is_file() {
+            out.push((cap, read(&path)?));
         }
-        let (spec, diags) = parse_spec(&read(&path)?);
+    }
+    Ok(out)
+}
+
+/// Parses and checks living spec texts as `living_texts` returns them.
+pub fn living_from(texts: &[(String, String)]) -> (Vec<CapSpec>, Vec<Finding>) {
+    let mut specs = Vec::new();
+    let mut findings = Vec::new();
+    for (cap, text) in texts {
+        let (spec, diags) = parse_spec(text);
         let rel = format!("specs/{cap}/spec.md");
         findings.extend(diags.into_iter().map(|d| (rel.clone(), d)));
-        specs.push((cap, spec));
+        specs.push((cap.clone(), spec));
     }
     findings.extend(Living { specs: &specs }.lint());
+    (specs, findings)
+}
+
+/// The living specs, keyed by capability, and their parse findings, with the
+/// findings of untouched imported requirements marked legacy.
+pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
+    let (specs, mut findings) = living_from(&living_texts(project)?);
     mark_legacy(&mut findings, &specs, &record::load(project)?);
     Ok((specs, findings))
 }

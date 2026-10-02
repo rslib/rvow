@@ -469,6 +469,26 @@ pub fn snapshot(
     Ok(data)
 }
 
+/// The living hash of each requirement that a CHANGE, DEPRECATE, MOVE or
+/// REMOVE names: the base that `archive` expects to find.
+pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
+    let living_hash: HashMap<String, String> = living
+        .iter()
+        .flat_map(|(_, s)| s.requirements.iter())
+        .map(|r| (r.id.to_string(), requirement_hash(r)))
+        .collect();
+    let mut out = Map::new();
+    for (_, file) in &loaded.deltas {
+        for d in file.deltas.iter().filter(|d| d.op != DeltaOp::Add) {
+            let id = d.req.id.to_string();
+            if let Some(h) = living_hash.get(&id) {
+                out.insert(id, h.clone().into());
+            }
+        }
+    }
+    out
+}
+
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     let Prepared {
@@ -494,20 +514,6 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     }
 
     let mut data = snapshot(project, &top, &config, &loaded, &branch)?;
-    let mut bases = Map::new();
-    let living_hash: HashMap<String, String> = living
-        .iter()
-        .flat_map(|(_, s)| s.requirements.iter())
-        .map(|r| (r.id.to_string(), requirement_hash(r)))
-        .collect();
-    for (_, file) in &loaded.deltas {
-        for d in file.deltas.iter().filter(|d| d.op != DeltaOp::Add) {
-            let id = d.req.id.to_string();
-            if let Some(h) = living_hash.get(&id) {
-                bases.insert(id, h.clone().into());
-            }
-        }
-    }
     let minted_names: HashMap<String, String> = minted
         .iter()
         .map(|(from, to)| (from.clone(), to.to_string()))
@@ -524,7 +530,7 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
 
     data.insert("change".into(), change.id.to_string().into());
     data.insert("base_commit".into(), base_commit.into());
-    data.insert("bases".into(), bases.into());
+    data.insert("bases".into(), bases(&loaded, &living).into());
     data.insert("baseline".into(), baseline.into());
     let event = ledger::append(&change.path.join(LEDGER), &lock, Kind::Vow, data)?;
 

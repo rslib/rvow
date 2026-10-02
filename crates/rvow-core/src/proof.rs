@@ -59,6 +59,33 @@ impl Active {
         base
     }
 
+    /// The base hashes of the effective baseline. An amendment from before
+    /// bases were snapshotted has none, so the vow's apply.
+    pub fn bases(&self) -> Map<String, Value> {
+        self.baseline()
+            .and_then(|b| b.get("bases"))
+            .or_else(|| self.vow()?.data.get("bases"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Each base whose living requirement changed or went away since it was
+    /// recorded, with the current living hash.
+    pub fn moved_bases(&self, living: &[CapSpec]) -> Vec<(String, Option<String>)> {
+        self.bases()
+            .into_iter()
+            .filter_map(|(id, base)| {
+                let now = living
+                    .iter()
+                    .flat_map(|(_, s)| s.requirements.iter())
+                    .find(|r| r.id.to_string() == id)
+                    .map(requirement_hash);
+                (now.as_deref() != base.as_str()).then_some((id, now))
+            })
+            .collect()
+    }
+
     pub fn branch(&self) -> Option<&str> {
         self.baseline()?.get("branch")?.as_str()
     }

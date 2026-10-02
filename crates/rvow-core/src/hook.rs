@@ -208,6 +208,16 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
             "{name} is written only by rvow; use rvow commands"
         )));
     }
+    if target.starts_with(&format!("{root}/archive/")) {
+        return Ok(Some(
+            "an archived change is history and does not change; start a new change instead".into(),
+        ));
+    }
+    if target.starts_with(&format!("{root}/specs/")) {
+        return Ok(Some(
+            "living specs change only through a change and rvow archive".into(),
+        ));
+    }
     if target.starts_with(&format!("{top_key}/.git/")) {
         return Ok(Some(
             ".git/ is not edited by hand; the hooks there run the gate".into(),
@@ -640,6 +650,29 @@ mod tests {
         let bash = json!({"cwd": repo.to_str().unwrap(), "tool_name": "Bash", "tool_input": {"command": "rvow accept x"}});
         let out = claude_pre_tool_use(&p, &bash).unwrap().unwrap();
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn edits_of_living_specs_and_the_archive_are_denied() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &tmp.0.join("home"), crate::store::Mode::Home).unwrap();
+        let reason = |file: PathBuf| {
+            edit(&p, &repo, file.to_str().unwrap()).map(|v| {
+                v["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+        };
+        assert_eq!(
+            reason(p.root.join("specs/cap/spec.md")).unwrap(),
+            "rvow: living specs change only through a change and rvow archive"
+        );
+        let archived = reason(p.root.join("archive/done/2026-10-01-CHG-7k2mq8-x/tasks.md"));
+        assert!(archived.unwrap().contains("history"));
+        let c = change::new(&p, "T", "main", false).unwrap();
+        assert_eq!(reason(c.path.join("specs/cap.md")), None);
     }
 
     #[test]

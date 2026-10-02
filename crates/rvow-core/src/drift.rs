@@ -269,6 +269,19 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
         .collect();
     delta_items(&old_deltas, &new_deltas, &mut out);
 
+    let (living, _) = crate::change::load_living(project)?;
+    for (id, now) in change.moved_bases(&living) {
+        let what = match now {
+            Some(_) => format!(
+                "the living {id} changed since its base was recorded; update the delta to the new living text"
+            ),
+            None => {
+                format!("the living {id} was removed since its base was recorded; update the delta")
+            }
+        };
+        out.push(item(Class::Confirm, what));
+    }
+
     let config_now = sha256_hex(config.canonical().as_bytes());
     let config_then = base.get("config").and_then(Value::as_str).unwrap_or("");
     if config_now != config_then {
@@ -320,13 +333,16 @@ pub fn snapshot_now(
     config: &Config,
     change: &Active,
 ) -> Result<Map<String, Value>> {
-    vow::snapshot(
+    let mut data = vow::snapshot(
         project,
         top,
         config,
         &change.loaded,
         &change.loaded.proposal.branch,
-    )
+    )?;
+    let (living, _) = crate::change::load_living(project)?;
+    data.insert("bases".into(), vow::bases(&change.loaded, &living).into());
+    Ok(data)
 }
 
 #[cfg(test)]

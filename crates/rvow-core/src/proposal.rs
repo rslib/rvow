@@ -5,6 +5,8 @@ pub struct Proposal {
     pub branch: String,
     pub title: String,
     pub sections: Vec<String>,
+    /// Changes that must be archived before this one, from `after: CHG-a, CHG-b`.
+    pub after: Vec<String>,
 }
 
 const REQUIRED: [&str; 3] = ["Why", "What changes", "Out of scope"];
@@ -15,6 +17,7 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
     let mut branch = String::new();
     let mut title = String::new();
     let mut sections = Vec::new();
+    let mut after = Vec::new();
     let mut words = 0;
     for (i, line) in src.lines().enumerate() {
         if !line.starts_with('#') && !line.starts_with("branch:") && !line.starts_with("after:") {
@@ -29,6 +32,13 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
                 ));
             }
             branch = b.trim().to_string();
+        } else if let Some(a) = line.strip_prefix("after:") {
+            after.extend(
+                a.split(',')
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(String::from),
+            );
         } else if let Some(t) = line.strip_prefix("# ") {
             if title.is_empty() {
                 title = t.trim().to_string();
@@ -67,6 +77,7 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
             branch,
             title,
             sections,
+            after,
         },
         diags,
     )
@@ -83,10 +94,17 @@ mod tests {
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(p.branch, "feat/x");
+        assert!(p.after.is_empty());
         assert_eq!(
             p.sections,
             ["Why", "What changes", "Out of scope", "Assumptions"]
         );
+    }
+
+    #[test]
+    fn after_lists_changes() {
+        let (p, _) = parse_proposal("branch: b\nafter: CHG-7k2mq8, CHG-p3x8a1\n## Why\n");
+        assert_eq!(p.after, ["CHG-7k2mq8", "CHG-p3x8a1"]);
     }
 
     #[test]

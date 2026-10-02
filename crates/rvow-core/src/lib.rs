@@ -1,4 +1,5 @@
 pub mod amend;
+pub mod archive;
 pub mod brief;
 pub mod change;
 pub mod config;

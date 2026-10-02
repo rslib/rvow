@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use rvow_core::amend;
+use rvow_core::archive;
 use rvow_core::brief;
 use rvow_core::change::{self, Stage};
 use rvow_core::diag::Severity;
@@ -179,6 +180,35 @@ enum Cmd {
         #[arg(long, conflicts_with = "all")]
         json: bool,
     },
+    /// Merge an active change into the living specs and move it to archive/done/.
+    Archive {
+        /// The change id or a unique prefix of it.
+        change: String,
+    },
+    /// Give up a backlog or active change; the specs stay as they are.
+    Drop {
+        /// The change id or a unique prefix of it.
+        change: String,
+        /// Why the change is dropped.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Replace a backlog or active change with another open change.
+    Supersede {
+        /// The change that is replaced.
+        old: String,
+        /// The open change that replaces it.
+        #[arg(long)]
+        by: String,
+        /// Why the change is replaced.
+        #[arg(long)]
+        reason: String,
+    },
+    /// List every change that touched a requirement, oldest first.
+    Trace {
+        /// A REQ id or a unique prefix of it.
+        id: String,
+    },
     /// Check the active changes of this branch.
     Gate {
         /// Fail on stale and flaky proofs too.
@@ -261,6 +291,10 @@ fn main() -> ExitCode {
         Cmd::Prove { .. } => prove_stale(),
         Cmd::Status { all, json } => status(all, json),
         Cmd::Gate { strict, rerun } => gate(Options { strict, rerun }),
+        Cmd::Archive { change } => archive(&change),
+        Cmd::Drop { change, reason } => drop_change(&change, &reason),
+        Cmd::Supersede { old, by, reason } => supersede(&old, &by, &reason),
+        Cmd::Trace { id } => trace(&id),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
@@ -637,6 +671,50 @@ fn gate(opts: Options) -> Result<bool> {
         println!("gate failed: {} problems", r.failures.len());
     }
     Ok(r.passed())
+}
+
+fn archive(target: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let a = archive::archive(&p, &home, &cwd()?, target)?;
+    for (op, id) in &a.merged {
+        println!("  {} {id}", op.word());
+    }
+    println!("archived {} to {}", a.id, a.path.display());
+    Ok(true)
+}
+
+fn drop_change(target: &str, reason: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let path = archive::drop_change(&project(&home)?, target, reason)?;
+    println!("dropped to {}", path.display());
+    Ok(true)
+}
+
+fn supersede(old: &str, by: &str, reason: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let path = archive::supersede(&project(&home)?, old, by, reason)?;
+    println!("superseded to {}", path.display());
+    Ok(true)
+}
+
+fn trace(id: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let (id, touches) = archive::trace(&project(&home)?, id)?;
+    if touches.is_empty() {
+        println!("no change touched {id}");
+    }
+    for t in &touches {
+        let date = t.date.as_deref().unwrap_or("-");
+        println!(
+            "{} {:<10} {date:<10} {:<10} {}",
+            t.change,
+            t.stage.name(),
+            t.ops.join(","),
+            t.title
+        );
+    }
+    Ok(true)
 }
 
 fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result<bool> {
