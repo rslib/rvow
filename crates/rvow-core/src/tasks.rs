@@ -3,6 +3,8 @@
 //! instead of a task that silently goes missing.
 
 use crate::diag::{Diagnostic, Rule};
+use std::time::Duration;
+
 use crate::id::{Kind, Ref};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +16,7 @@ pub struct Task {
     pub verify: Option<String>,
     pub files: Vec<String>,
     pub baseline_pass: bool,
+    pub timeout: Option<Duration>,
     pub line: usize,
 }
 
@@ -52,6 +55,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                         verify: None,
                         files: Vec::new(),
                         baseline_pass: false,
+                        timeout: None,
                         line: n,
                     });
                     seen_fields.clear();
@@ -106,6 +110,14 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
             "verify" if !value.is_empty() => task.verify = Some(value.to_string()),
             "files" => task.files = split_list(value).map(String::from).collect(),
             "baseline" if value == "pass" => task.baseline_pass = true,
+            "timeout" => match parse_duration(value) {
+                Some(d) => task.timeout = Some(d),
+                None => diags.push(Diagnostic::new(
+                    Rule::TaskField,
+                    n,
+                    format!("timeout: {value:?} is not a duration such as 90s, 20m or 1h"),
+                )),
+            },
             "baseline" => diags.push(Diagnostic::new(
                 Rule::TaskField,
                 n,
@@ -116,7 +128,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                     Rule::TaskField,
                     n,
                     format!(
-                        "unknown or empty field {key}:, expected covers, verify, files or baseline"
+                        "unknown or empty field {key}:, expected covers, verify, files, baseline or timeout"
                     ),
                 ));
                 continue;
@@ -147,6 +159,19 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
     (tasks, diags)
 }
 
+/// Parses `90s`, `20m` or `1h`.
+pub fn parse_duration(s: &str) -> Option<Duration> {
+    let unit = s.chars().last()?;
+    let n: u64 = s.strip_suffix(unit)?.parse().ok()?;
+    let secs = match unit {
+        's' => n,
+        'm' => n.checked_mul(60)?,
+        'h' => n.checked_mul(3600)?,
+        _ => return None,
+    };
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
 fn split_list(value: &str) -> impl Iterator<Item = &str> {
     value.split(',').map(str::trim).filter(|s| !s.is_empty())
 }
@@ -168,6 +193,7 @@ mod tests {
 - TSK-p3x8a1 Second
   verify: true
   files: **
+  timeout: 20m
 ";
         let (tasks, diags) = parse_tasks(src);
         assert!(diags.is_empty(), "{diags:?}");
@@ -182,6 +208,18 @@ mod tests {
         assert_eq!(t.files, ["crates/rvow-core/**", "Cargo.toml"]);
         assert!(t.baseline_pass);
         assert!(!tasks[1].baseline_pass);
+        assert_eq!(tasks[1].timeout, Some(Duration::from_secs(1200)));
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration("0m"), None);
+        assert_eq!(parse_duration("5"), None);
+        assert_eq!(parse_duration("m"), None);
+        assert_eq!(parse_duration("5d"), None);
+        assert_eq!(parse_duration("5\u{e9}"), None);
     }
 
     #[test]
