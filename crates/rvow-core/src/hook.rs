@@ -53,6 +53,14 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
             ));
         }
     }
+    let rvow_answer = w.iter().any(|x| base_name(x) == "rvow") && w.iter().any(|x| x == "answer");
+    let via_dialog = w.windows(2).any(|p| p[0] == "--via" && p[1] == "dialog")
+        || w.iter().any(|x| x == "--via=dialog");
+    if rvow_answer && via_dialog {
+        return Some(
+            "only the rvow_ask tool records an answer as given in a dialog; record a chat answer with rvow answer <ref> \"<choice>\"".into(),
+        );
+    }
     let git = w.iter().any(|x| base_name(x) == "git");
     if git && w.iter().any(|x| x == "--no-verify") {
         return Some("--no-verify skips the hooks that check the plan".into());
@@ -521,6 +529,8 @@ mod tests {
             "echo '{}' >> ~/.local/share/rvow/x/active/c/ledger.jsonl",
             "cat ids.jsonl",
             "rm .git/hooks/pre-push",
+            "rvow answer CHG-x:proposal.md:3 yes --via dialog",
+            "rvow answer CHG-x:proposal.md:3 yes --via=dialog",
         ];
         for cmd in denied {
             assert!(bash_denial(cmd).is_some(), "{cmd}");
@@ -528,6 +538,7 @@ mod tests {
         let allowed = [
             "rvow prove x7k",
             "rvow status",
+            "rvow answer CHG-x:proposal.md:3 yes",
             "rvow amend --reason 'accept the new name'",
             "cargo test confirm_flow",
             "git commit -m 'confirm accept'",
