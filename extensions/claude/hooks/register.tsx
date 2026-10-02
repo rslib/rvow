@@ -19,6 +19,7 @@ const viewAtom = atom({ plugin: 'rvow', key: 'view' } as const, null)
 const reviewAtom = atom({ plugin: 'rvow', key: 'review' } as const, {})
 const amendmentsAtom = atom({ plugin: 'rvow', key: 'amendments' } as const, null)
 const noticeAtom = atom({ plugin: 'rvow', key: 'notice' } as const, null)
+const TABS = ['backlog', 'active', 'archive']
 const tabAtom = atom({ plugin: 'rvow', key: 'tab' } as const, null)
 const selectedAtom = atom({ plugin: 'rvow', key: 'selected' } as const, [])
 const detailsAtom = atom({ plugin: 'rvow', key: 'details' } as const, [])
@@ -221,7 +222,25 @@ async function userOnly(
   if (origin.kind !== 'composer') return { text: `/${name} runs only when you type it yourself.` }
   const r = await rvow($, argv)
   await refresh($)
+  const prompt = r.tone === 'ok' ? decisionPrompt(argv, r.text) : null
+  // The engine refuses a submit made while this hook still holds the command.
+  if (prompt) later($, async () => queue($, prompt))
   return { text: r.text }
+}
+
+/** What the agent hears after the person decided, or null when argv decided nothing. */
+function decisionPrompt(argv: string[], out: string): string | null {
+  const [verb, id] = argv
+  if (verb === 'archive') return `I archived ${id}. The change is closed.`
+  if (verb === 'accept') {
+    const next = out.split('\n').find((l) => l.startsWith('next:'))
+    return `I accepted ${id}.${next ? ` ${next}.` : ''} Continue with it.`
+  }
+  const ids = [...new Set(`${argv.join(' ')}\n${out}`.match(/AMD-[\w-]+/g) ?? [])].join(', ')
+  if (argv.includes('--accept')) return `I accepted the plan edit ${ids}. Continue the tasks.`
+  if (argv.includes('--reject'))
+    return `I rejected the plan edit ${ids}. Undo it, or amend it again with a different change.`
+  return null
 }
 
 const REFINE_STEPS =
@@ -240,13 +259,18 @@ function refinePrompt(plans: RvowPlan[]): string {
   ].join('\n')
 }
 
-/** Queues the refine prompt as the agent's next turn. */
-async function refine($: EngineInterface, plans: RvowPlan[]) {
+/** Queues a prompt as the agent's next turn, as the user. */
+function queue($: EngineInterface, text: string) {
   void $.prompt
-    .submit({ text: refinePrompt(plans), asUser: true })
+    .submit({ text, asUser: true })
     .catch((err: unknown) =>
       update($, noticeAtom, () => ({ tone: 'fail', text: `cannot queue: ${String(err)}` })),
     )
+}
+
+/** Queues the refine prompt as the agent's next turn. */
+async function refine($: EngineInterface, plans: RvowPlan[]) {
+  queue($, refinePrompt(plans))
   await update($, noticeAtom, () => ({ tone: 'ok', text: 'queued for the agent' }))
 }
 
@@ -406,10 +430,11 @@ export const register: Register = (on) => {
 
   on('command.run', { command: 'rvow-status' }, async ($) => {
     await refresh($)
-    await update($, tabAtom, () => null)
+    const saved = await $.store.get('tab').catch(() => undefined)
+    await update($, tabAtom, () => (TABS.includes(saved as RvowTab) ? (saved as RvowTab) : null))
     await update($, detailsAtom, () => [])
     await $.ui.open(OPEN)
-    return { text: 'rvow pane opened.' }
+    return {}
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -878,6 +903,7 @@ export const register: Register = (on) => {
                 onPress={async () => {
                   await update($, detailsAtom, () => [])
                   await update($, tabAtom, () => id)
+                  await $.store.set('tab', id).catch(() => {})
                 }}
               />
             ))}
