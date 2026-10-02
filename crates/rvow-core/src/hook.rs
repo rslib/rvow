@@ -14,6 +14,7 @@ use crate::drift;
 use crate::error::Result;
 use crate::fingerprint;
 use crate::git;
+use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 
@@ -80,7 +81,7 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
 
 /// The absolute, symlink-free form of `path`, also when the file does not
 /// exist yet: the nearest existing ancestor is resolved and the rest appended.
-fn real_path(path: &Path, cwd: &Path) -> PathBuf {
+pub(crate) fn real_path(path: &Path, cwd: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -116,7 +117,7 @@ fn real_path(path: &Path, cwd: &Path) -> PathBuf {
 
 /// macOS file systems ignore case by default, so `Tests/T.sh` names
 /// `tests/t.sh`.
-fn key(p: &Path) -> String {
+pub(crate) fn key(p: &Path) -> String {
     let s = p.to_string_lossy().into_owned();
     if cfg!(target_os = "macos") {
         s.to_lowercase()
@@ -168,7 +169,7 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
             "{rel} configures the hooks that enforce the plan; changing it is for the user"
         )));
     }
-    if protected(project, top)?.contains(rel) {
+    if protected(project, top)?.contains(rel) && !unlocked(project, top, rel)? {
         return Ok(Some(format!(
             "{rel} is a protected test or test setup file; to change it, run rvow amend --unlock {rel} --reason \"...\" and ask the user to confirm"
         )));
@@ -176,8 +177,62 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
     Ok(None)
 }
 
+/// The path of `file` relative to the repository top, in the form the
+/// protected set uses, or `None` outside the repository.
+pub(crate) fn rel_path(file: &Path, cwd: &Path, top: &Path) -> Option<String> {
+    let target = key(&real_path(file, cwd));
+    let top = key(&real_path(top, cwd));
+    target.strip_prefix(&format!("{top}/")).map(String::from)
+}
+
+/// Whether the user confirmed an unlock of `rel` and no proof of a task whose
+/// files match it has happened since.
+fn unlocked(project: &Project, top: &Path, rel: &str) -> Result<bool> {
+    let (living, _) = change::load_living(project)?;
+    let branch = git::branch(top)?.unwrap_or_default();
+    let mut open = false;
+    for c in proof::active(project, &living)?
+        .iter()
+        .filter(|c| c.branch() == Some(branch.as_str()))
+    {
+        let unlock_ids: BTreeSet<&str> = c
+            .events
+            .iter()
+            .filter(|e| {
+                e.kind == Kind::Amend && e.data.get("unlock").and_then(Value::as_str) == Some(rel)
+            })
+            .filter_map(|e| e.data.get("amendment").and_then(Value::as_str))
+            .collect();
+        for e in &c.events {
+            let field = |k: &str| e.data.get(k).and_then(Value::as_str);
+            match e.kind {
+                Kind::Confirm
+                    if field("decision") == Some("accept")
+                        && field("amendment").is_some_and(|a| unlock_ids.contains(a)) =>
+                {
+                    open = true;
+                }
+                Kind::Prove if open => {
+                    let task = c
+                        .loaded
+                        .tasks
+                        .iter()
+                        .find(|t| Some(t.id.to_string().as_str()) == field("task"));
+                    if let Some(t) = task
+                        && fingerprint::globset(&t.files)?.is_match(rel)
+                    {
+                        open = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(open)
+}
+
 /// The protected paths of every active change, from their baselines.
-fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String>> {
+pub(crate) fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String>> {
     let (living, _) = change::load_living(project)?;
     let mut out = BTreeSet::new();
     let branch = git::branch(top)?.unwrap_or_default();
@@ -407,6 +462,51 @@ mod tests {
     }
 
     #[test]
+    fn unlock_opens_a_protected_file_until_the_next_matching_proof() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.sh"), "exit 1").unwrap();
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 T\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/**\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = crate::vow::commit(&p, prepared).unwrap();
+        let task = vowed.minted[0].1.to_string();
+
+        assert!(edit(&p, &repo, "tests/t.sh").is_some());
+        let err = amend::amend(&p, &home, &repo, None, "fix", Some("src/x.rs")).unwrap_err();
+        assert_eq!(err.code, "unlock");
+        let a = amend::amend(
+            &p,
+            &home,
+            &repo,
+            None,
+            "the test is wrong",
+            Some("tests/t.sh"),
+        )
+        .unwrap();
+        assert!(
+            edit(&p, &repo, "tests/t.sh").is_some(),
+            "pending is still locked"
+        );
+        amend::confirm(&p, &[a[0].id.to_string()], amend::Decision::Accept, None).unwrap();
+        assert_eq!(edit(&p, &repo, "tests/t.sh"), None);
+
+        std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+        proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        assert!(
+            edit(&p, &repo, "tests/t.sh").is_some(),
+            "a proof locks it again"
+        );
+    }
+
+    #[test]
     fn stop_blocks_on_open_tasks_and_drift_but_not_on_pending() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
@@ -430,7 +530,7 @@ mod tests {
         let out = claude_stop(&p, &home, &input).unwrap().unwrap();
         assert!(out["reason"].as_str().unwrap().contains("amend"), "{out}");
 
-        amend::amend(&p, &home, &repo, None, "rename").unwrap();
+        amend::amend(&p, &home, &repo, None, "rename", None).unwrap();
         assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
 
         let start = claude_session_start(&p, &home, &input).unwrap().unwrap();

@@ -132,7 +132,7 @@ mod tests {
         let tasks = dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
         std::fs::write(&tasks, text.replace("Write ok", "Write ok, spec fixed")).unwrap();
-        let ids: Vec<String> = amend::amend(&p, &home, &repo, None, "fix the task")
+        let ids: Vec<String> = amend::amend(&p, &home, &repo, None, "fix the task", None)
             .unwrap()
             .iter()
             .map(|a| a.id.to_string())

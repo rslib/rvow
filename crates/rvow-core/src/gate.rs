@@ -446,7 +446,7 @@ mod tests {
             "{r:?}"
         );
 
-        crate::amend::amend(&p, &home, &repo, None, "simpler check").unwrap();
+        crate::amend::amend(&p, &home, &repo, None, "simpler check", None).unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(
             r.failures.iter().any(|f| f.contains("waits for the user")),

@@ -16,6 +16,10 @@ use crate::store::Project;
 use crate::tasks::{Task, parse_tasks};
 use crate::vow::{self, protected_files, requirement_hash, sha256_hex};
 
+/// Protected files up to this size, before and after together, show their
+/// text in an amendment so the user can review the change.
+const SHOW_LIMIT: usize = 8 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
@@ -291,7 +295,15 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
             Some(path) => {
                 let bytes = std::fs::read(path).map_err(|e| Error::io(path, e))?;
                 if &sha256_hex(&bytes) != hash {
-                    out.push(item(Class::Weaken, format!("protected file {rel} changed")));
+                    let what = format!("protected file {rel} changed");
+                    let old = object(project, hash).ok();
+                    let new = String::from_utf8(bytes).ok();
+                    out.push(match (old, new) {
+                        (Some(o), Some(n)) if o.len() + n.len() <= SHOW_LIMIT => {
+                            changed(Class::Weaken, what, &o, &n)
+                        }
+                        _ => item(Class::Weaken, what),
+                    });
                 }
             }
         }

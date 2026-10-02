@@ -10,6 +10,7 @@ use crate::config;
 use crate::drift::{self, Item};
 use crate::error::{Error, Result};
 use crate::git;
+use crate::hook;
 use crate::id::{self, Id, Kind as IdKind};
 use crate::ledger::{self, Kind, short_hash};
 use crate::proof::{self, Active};
@@ -98,6 +99,7 @@ pub fn amend(
     cwd: &Path,
     target: Option<&str>,
     reason: &str,
+    unlock: Option<&str>,
 ) -> Result<Vec<Amended>> {
     if reason.trim().is_empty() {
         return Err(Error::new(
@@ -115,6 +117,27 @@ pub fn amend(
         .map(|c| c.id);
     let branch = git::branch(&top)?;
     let config = config::load(project, home)?;
+    let unlock = match unlock {
+        Some(path) => {
+            let rel = hook::rel_path(Path::new(path), cwd, &top).ok_or_else(|| {
+                Error::new(
+                    "unlock",
+                    format!("{path} is outside the repository"),
+                    "name a file in this repository",
+                )
+            })?;
+            if !hook::protected(project, &top)?.contains(&rel) {
+                return Err(Error::new(
+                    "unlock",
+                    format!("{rel} is not protected"),
+                    "edit it without an unlock",
+                ));
+            }
+            Some(rel)
+        }
+        None => None,
+    };
+    let unlock = unlock.as_deref();
     let lock = project.lock()?;
     let mut out = Vec::new();
     for c in &changes {
@@ -125,19 +148,37 @@ pub fn amend(
         if !selected {
             continue;
         }
-        let items = drift::drift(project, &top, &config, c)?;
-        if items.is_empty() {
-            continue;
-        }
-        let id = registry::mint(project, &lock, IdKind::Amd, Some(&c.dir.id))?;
         let mut data = Map::new();
+        let items = match unlock {
+            // An unlock keeps the current baseline, so accepting it cannot
+            // also accept other drift the user did not see.
+            Some(rel) => {
+                let base = c.baseline().cloned().unwrap_or_default();
+                data.insert("unlock".into(), rel.into());
+                data.insert("snapshot".into(), Value::Object(base));
+                vec![Item {
+                    class: drift::Class::Weaken,
+                    what: format!("unlock protected file {rel} for editing"),
+                    before: None,
+                    after: None,
+                }]
+            }
+            None => {
+                let items = drift::drift(project, &top, &config, c)?;
+                if items.is_empty() {
+                    continue;
+                }
+                data.insert(
+                    "snapshot".into(),
+                    Value::Object(drift::snapshot_now(project, &top, &config, c)?),
+                );
+                items
+            }
+        };
+        let id = registry::mint(project, &lock, IdKind::Amd, Some(&c.dir.id))?;
         data.insert("amendment".into(), id.to_string().into());
         data.insert("reason".into(), reason.trim().into());
         data.insert("items".into(), json!(items));
-        data.insert(
-            "snapshot".into(),
-            Value::Object(drift::snapshot_now(project, &top, &config, c)?),
-        );
         ledger::append(&c.dir.path.join(LEDGER), &lock, Kind::Amend, data)?;
         out.push(Amended {
             id,
@@ -259,18 +300,18 @@ mod tests {
         let (tmp, p, repo, _) = accepted();
         let home = tmp.0.join("home");
         assert_eq!(
-            amend(&p, &home, &repo, None, "x").unwrap_err().code,
+            amend(&p, &home, &repo, None, "x", None).unwrap_err().code,
             "no-drift"
         );
         assert_eq!(
-            amend(&p, &home, &repo, None, " ").unwrap_err().code,
+            amend(&p, &home, &repo, None, " ", None).unwrap_err().code,
             "reason"
         );
 
         let tasks = active_dir(&p).join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
         std::fs::write(&tasks, text.replace("Write ok", "Write ok now")).unwrap();
-        let a = amend(&p, &home, &repo, None, "clearer title").unwrap();
+        let a = amend(&p, &home, &repo, None, "clearer title", None).unwrap();
         assert_eq!(a.len(), 1);
         let (drift, pend) = state(&p, &home, &repo);
         assert_eq!((drift, pend.len()), (1, 1));
@@ -288,10 +329,10 @@ mod tests {
         let tasks = active_dir(&p).join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
         std::fs::write(&tasks, text.replace("Write ok", "Other")).unwrap();
-        amend(&p, &home, &repo, None, "one").unwrap();
+        amend(&p, &home, &repo, None, "one", None).unwrap();
         let (_, pend) = state(&p, &home, &repo);
         let first = digest(&pend);
-        amend(&p, &home, &repo, None, "two").unwrap();
+        amend(&p, &home, &repo, None, "two", None).unwrap();
 
         let err = confirm(&p, &[], Decision::Accept, Some(&first)).unwrap_err();
         assert_eq!(err.code, "digest");

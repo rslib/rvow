@@ -97,6 +97,9 @@ enum Cmd {
         /// The change id; default: every active change on this branch.
         #[arg(long)]
         change: Option<String>,
+        /// Ask to edit a protected test or setup file instead of recording drift.
+        #[arg(long, value_name = "PATH")]
+        unlock: Option<String>,
     },
     /// List pending amendments, or accept or reject them (user only).
     #[command(group(ArgGroup::new("decision").args(["accept", "reject"])))]
@@ -159,7 +162,11 @@ fn main() -> ExitCode {
         Cmd::Hook { harness, event } => return hook(harness, event),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
-        Cmd::Amend { reason, change } => amend(&reason, change.as_deref()),
+        Cmd::Amend {
+            reason,
+            change,
+            unlock,
+        } => amend(&reason, change.as_deref(), unlock.as_deref()),
         Cmd::Confirm {
             ids,
             accept,
@@ -493,10 +500,10 @@ fn gate(opts: Options) -> Result<bool> {
     Ok(r.passed())
 }
 
-fn amend(reason: &str, target: Option<&str>) -> Result<bool> {
+fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
-    for a in amend::amend(&p, &home, &cwd()?, target, reason)? {
+    for a in amend::amend(&p, &home, &cwd()?, target, reason, unlock)? {
         println!("{} for {}:", a.id, a.change);
         for i in &a.items {
             println!("  {}: {}", i.class.name(), i.what);
