@@ -425,6 +425,12 @@ pub struct Question {
     pub line: usize,
     pub question: String,
     pub recommended: Option<String>,
+    /// The other choices, without the recommended one.
+    pub options: Vec<String>,
+    /// Why the decision matters.
+    pub why: Option<String>,
+    /// The marker exactly as written, so `rvow answer` can remove it.
+    pub marker: String,
 }
 
 /// Every `[NEEDS CLARIFICATION` marker outside code. `accept` refuses a
@@ -444,19 +450,36 @@ pub fn questions(texts: &[(String, String)]) -> Vec<Question> {
             for (start, _) in plain.match_indices(CLARIFICATION) {
                 let rest = &plain[start + CLARIFICATION.len()..];
                 let body = rest.split(']').next().unwrap_or("");
-                let body = body.strip_prefix(':').unwrap_or(body).trim();
-                let (question, recommended) = match body.split_once("| recommended:") {
-                    Some((q, r)) => (
-                        q.trim(),
-                        Some(r.trim().to_string()).filter(|r| !r.is_empty()),
-                    ),
-                    None => (body, None),
-                };
+                let marker = format!("{CLARIFICATION}{body}]");
+                let body = body.strip_prefix(':').unwrap_or(body);
+                let mut parts = body.split('|').map(str::trim);
+                let question = parts.next().unwrap_or("");
+                let (mut recommended, mut options, mut why) = (None, Vec::new(), None);
+                for part in parts {
+                    let (key, value) = part.split_once(':').unwrap_or((part, ""));
+                    let value = value.trim();
+                    match key.trim() {
+                        "recommended" if !value.is_empty() => recommended = Some(value.to_string()),
+                        "options" => {
+                            options = value
+                                .split(';')
+                                .map(str::trim)
+                                .filter(|o| !o.is_empty())
+                                .map(String::from)
+                                .collect()
+                        }
+                        "why" if !value.is_empty() => why = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
                 out.push(Question {
                     path: path.clone(),
                     line: i + 1,
                     question: question.to_string(),
                     recommended,
+                    options,
+                    why,
+                    marker,
                 });
             }
         }
@@ -810,6 +833,16 @@ rvow SHALL run.
         )]);
         assert_eq!(q[0].question, "Which store?");
         assert_eq!(q[0].recommended.as_deref(), Some("home"));
+        assert_eq!(
+            q[0].marker,
+            "[NEEDS CLARIFICATION: Which store? | recommended: home]"
+        );
+        let q = questions(&[(
+            "p.md".to_string(),
+            "[NEEDS CLARIFICATION: Where? | recommended: home | options: repo; both | why: sets the layout]".to_string(),
+        )]);
+        assert_eq!(q[0].options, ["repo", "both"]);
+        assert_eq!(q[0].why.as_deref(), Some("sets the layout"));
         let quoted = vec![(
             "design.md".to_string(),
             "`[NEEDS CLARIFICATION]` marks a question.\n```\n[NEEDS CLARIFICATION: x]\n```\n"

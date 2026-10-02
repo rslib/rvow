@@ -13,10 +13,15 @@ Write `proposal.md` first. Keep it to 150 words. Say why and what, never how.
 
 - Describe behavior, not code. Put a technical decision in `design.md` and only when the design guide allows it.
 - A change that alters no behavior stays small. Run `rvow new` without `--spec` and write tasks only. Do not invent a requirement to fill a form. Write a task with a real check instead.
-- Mark an open point as `[NEEDS CLARIFICATION: question | recommended: answer]`. Keep at most 3 in the change.
-- Ask the user one open point at a time and offer the recommended answer. Write each answer into the proposal at once.
-- Move a point that the user does not answer into Assumptions, with the recommended answer. `rvow accept` refuses while a marker remains.
 - Do not restate the proposal in other files. Link to it by change id.
+
+## Interview the user
+
+- First search the code and run `rvow spec list` and `rvow show <id>`. Ask only what changes the plan and what the code cannot answer.
+- Mark each open point as `[NEEDS CLARIFICATION: question | recommended: answer | options: b; c | why: what it decides]`. Keep at most 3 in the change.
+- Run `rvow clarify --json` and ask that round with AskUserQuestion. Ask scope and behavior first. Hold a question that depends on an open answer for the next round.
+- Record each answer with `rvow answer <ref> "<choice>"`, then edit the text the answer changes.
+- Stop when no open point would change the plan, or when the user says to use your defaults. `rvow accept` refuses while a marker remains.
 
 ## Example
 

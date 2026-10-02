@@ -58,8 +58,35 @@ fn fits(text: &str) -> bool {
     text.lines().count() <= MAX_LINES && text.len() <= MAX_CHARS
 }
 
+/// The brief while the branch has only plans waiting for accept: what is
+/// open and the next steps, so an agent keeps interviewing after compaction.
+fn planning(project: &Project, cwd: &Path) -> Result<String> {
+    let mut out = String::new();
+    for r in crate::plan::check(project, cwd, None)?
+        .into_iter()
+        .filter(|r| r.change.stage == crate::change::Stage::Backlog)
+    {
+        let id = &r.change.id;
+        out.push_str(&format!(
+            "plan {id} waits for accept: {} open questions, {} checks that cannot run\n",
+            r.questions.len(),
+            r.missing.len()
+        ));
+        let next = if !r.questions.is_empty() {
+            "next: run rvow clarify --json, ask the user with AskUserQuestion, record each answer with rvow answer <ref> \"<choice>\""
+        } else if r.blocking() {
+            "next: run rvow check and fix what it reports"
+        } else {
+            "next: ask the user to run /rvow-accept <id> (or ! rvow accept <id>); code edits wait for it"
+        };
+        out.push_str(&next.replace("<id>", &id.to_string()));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// The brief for the current branch, or an empty string when the branch has no
-/// active change.
+/// active change and no plan waiting for accept.
 pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
@@ -76,7 +103,7 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
     };
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        return Ok(String::new());
+        return planning(project, cwd);
     }
     let config = config::load(project, home)?;
     let now = Now {
@@ -204,6 +231,28 @@ mod tests {
         assert!(b.contains("scenario: s\n"));
         assert!(b.contains("more: rvow path REQ-"));
         assert!(b.contains(&format!("next: {task} Write ok\n  verify:")));
+    }
+
+    #[test]
+    fn a_waiting_plan_gets_a_planning_brief() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let home = tmp.0.join("home");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = crate::change::new(&p, "T", "main", true).unwrap();
+        let prop = c.path.join("proposal.md");
+        let text = std::fs::read_to_string(&prop).unwrap();
+        std::fs::write(
+            &prop,
+            text + "[NEEDS CLARIFICATION: Which? | recommended: this]\n",
+        )
+        .unwrap();
+        let b = brief(&p, &home, &repo).unwrap();
+        assert!(
+            b.contains(&format!("plan {} waits for accept: 1 open questions", c.id)),
+            "{b}"
+        );
+        assert!(b.contains("rvow clarify --json"), "{b}");
     }
 
     #[test]

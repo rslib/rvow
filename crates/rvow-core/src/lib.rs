@@ -15,6 +15,7 @@ pub mod hook;
 pub mod id;
 pub mod import;
 pub mod install;
+pub mod interview;
 pub mod ledger;
 pub mod lint;
 pub mod notes;

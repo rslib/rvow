@@ -15,6 +15,7 @@ use rvow_core::guide;
 use rvow_core::hook;
 use rvow_core::import;
 use rvow_core::install;
+use rvow_core::interview;
 use rvow_core::lint::Finding;
 use rvow_core::notes;
 use rvow_core::plan;
@@ -111,6 +112,17 @@ enum Cmd {
     Clarify {
         /// The change id; default: every open change on this branch.
         change: Option<String>,
+        /// Print the next round (at most 4) in the shape of Claude Code's AskUserQuestion.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the user's answer to an open question and remove its marker.
+    Answer {
+        /// The question ref that rvow clarify printed, as CHG-xxxxxx:proposal.md:12.
+        reference: String,
+        /// The user's choice, as given.
+        #[arg(required = true, num_args = 1..)]
+        choice: Vec<String>,
     },
     /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
     Hook {
@@ -273,7 +285,8 @@ fn main() -> ExitCode {
         Cmd::Hook { harness, event } => return hook(harness, event),
         Cmd::Install { claude, scope } => install(claude, scope),
         Cmd::Check { change } => check(change.as_deref()),
-        Cmd::Clarify { change } => clarify(change.as_deref()),
+        Cmd::Clarify { change, json } => clarify(change.as_deref(), json),
+        Cmd::Answer { reference, choice } => answer(&reference, &choice.join(" ")),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend {
@@ -993,16 +1006,20 @@ fn check(target: Option<&str>) -> Result<bool> {
     Ok(ok)
 }
 
-fn clarify(target: Option<&str>) -> Result<bool> {
+fn clarify(target: Option<&str>, json: bool) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
+    if json {
+        println!("{}", interview::round(&p, &cwd()?, target)?);
+        return Ok(true);
+    }
     let mut count = 0;
     for r in plan::check(&p, &cwd()?, target)? {
         for q in &r.questions {
             count += 1;
             let rec = q.recommended.as_deref().unwrap_or("none given");
             println!(
-                "{} {}:{}: {} (recommended: {rec})",
+                "{}:{}:{}: {} (recommended: {rec})",
                 r.change.id, q.path, q.line, q.question
             );
         }
@@ -1011,8 +1028,27 @@ fn clarify(target: Option<&str>) -> Result<bool> {
         println!("no open questions");
     } else {
         println!(
-            "ask the user one question at a time with its recommended answer; write each answer into the plan and remove its marker; an unanswered question becomes an Assumption"
+            "ask the user with AskUserQuestion (rvow clarify --json gives the round), then record each answer with rvow answer <ref> \"<choice>\""
         );
     }
+    Ok(true)
+}
+
+fn answer(reference: &str, choice: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let a = interview::answer(&p, reference, choice)?;
+    let how = if a.recommended {
+        "the recommended answer"
+    } else {
+        "an answer other than the recommended one"
+    };
+    println!(
+        "Recorded for {}: {} -> {} ({how}).",
+        a.change, a.question, a.answer
+    );
+    println!(
+        "Now update the requirement or task this answer affects, and remove any text it contradicts."
+    );
     Ok(true)
 }

@@ -30,7 +30,7 @@ pub struct Archived {
 }
 
 /// Today's local date as `YYYY-MM-DD`.
-fn today() -> String {
+pub(crate) fn today() -> String {
     let secs = ledger::now_ms() / 1000;
     #[cfg(unix)]
     {
