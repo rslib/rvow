@@ -22,7 +22,11 @@ impl Error {
 
     /// A state that the code ruled out, reported instead of a panic.
     pub fn internal(what: impl std::fmt::Display) -> Error {
-        Error::new("internal", what.to_string(), "run the command again; if it fails again, report it to the rvow maintainers")
+        Error::new(
+            "internal",
+            what.to_string(),
+            "run the command again; if it fails again, open an issue at https://github.com/rslib/rvow/issues with this message",
+        )
     }
 
     pub fn random<const N: usize>() -> Result<[u8; N]> {
