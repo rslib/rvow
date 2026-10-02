@@ -286,7 +286,7 @@ export default function (pi: ExtensionAPI) {
     return { entries: [...event.entries, entry], continue: true };
   });
 
-  pi.registerCommand("rvow", {
+  pi.registerCommand("rvow-status", {
     description: "Show the rvow view of this branch",
     handler: async (_args, ctx) => {
       await refresh(ctx);

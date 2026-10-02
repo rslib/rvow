@@ -134,7 +134,7 @@ export const register: Register = (on) => {
         'List pending rvow amendments, or: accept|reject <AMD-id>..., accept --all <digest>',
     })
     await $.command.register({
-      name: 'rvow',
+      name: 'rvow-status',
       description: 'Show the rvow state of this branch in a pane',
     })
     await $.tool.register({
@@ -205,7 +205,7 @@ export const register: Register = (on) => {
     return userOnly($, e.origin, 'rvow-accept', argv)
   })
 
-  on('command.run', { command: 'rvow' }, async ($) => {
+  on('command.run', { command: 'rvow-status' }, async ($) => {
     await refresh($)
     await $.ui.open({ id: PANE, title: 'rvow' })
     return { text: 'rvow pane opened.' }

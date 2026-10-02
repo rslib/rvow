@@ -34,7 +34,7 @@ async function seed($: any, on: any, stdout: string) {
     const { Text } = $.ui.resolve(e)
     return <Text>fallthrough</Text>
   })
-  await $.command.run({ command: 'rvow', args: '', origin: { kind: 'composer' } })
+  await $.command.run({ command: 'rvow-status', args: '', origin: { kind: 'composer' } })
 }
 
 test('pane and band draw the view', async ($, on) => {
