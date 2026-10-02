@@ -1157,10 +1157,10 @@ fn archive(target: &str) -> Result<Reply> {
     }
     r.line(format!("archived {} to {}", a.id, a.path.display()));
     r.line("next: pick the next plan with rvow ls");
-    r.set("next", "pick the next plan with rvow ls");
     r.set("archived", a.id.to_string());
     r.set("path", a.path.display().to_string());
     r.table("merged", rows, "0 spec deltas");
+    r.set("next", "pick the next plan with rvow ls");
     Ok(r)
 }
 

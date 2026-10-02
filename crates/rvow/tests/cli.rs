@@ -307,6 +307,29 @@ fn stale_digest_prints_the_list() {
 }
 
 #[test]
+fn archive_prints_next_last() {
+    let (r, _root, id) = accepted("archivelast");
+    let brief = r.ok(&["brief"]);
+    let task = brief
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("next: "))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap()
+        .to_owned();
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    let proved = r
+        .cmd(env!("CARGO_BIN_EXE_rvow"))
+        .args(["prove", &task])
+        .output()
+        .unwrap();
+    assert!(proved.status.success());
+    let out = r.ok(&["archive", &id]);
+    let at = |key: &str| out.find(key).unwrap_or_else(|| panic!("no {key} in {out}"));
+    assert!(at("archived:") < at("merged"), "{out}");
+    assert!(at("merged") < at("next:"), "{out}");
+}
+
+#[test]
 fn version_is_bare() {
     let r = Repo::new("version");
     for flag in ["--version", "-V", "-v"] {
