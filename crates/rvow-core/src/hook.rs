@@ -201,6 +201,7 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
         && (name == LEDGER
             || name == IDS_FILE
             || name == PROJECT_FILE
+            || name == crate::record::RECORD_FILE
             || target.starts_with(&format!("{root}/objects/")))
     {
         return Ok(Some(format!(

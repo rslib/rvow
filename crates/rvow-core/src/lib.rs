@@ -18,6 +18,7 @@ pub mod notes;
 pub mod plan;
 pub mod proof;
 pub mod proposal;
+pub mod record;
 pub mod registry;
 pub mod runner;
 pub mod show;
