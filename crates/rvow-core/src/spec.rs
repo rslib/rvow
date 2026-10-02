@@ -112,11 +112,6 @@ pub fn parse_deltas(src: &str) -> (DeltaFile, Vec<Diagnostic>) {
                 req.line,
                 "only ADD takes a placeholder id",
             )),
-            (_, Ref::Id(id)) if op == DeltaOp::Add => diags.push(Diagnostic::new(
-                Rule::IdForm,
-                req.line,
-                format!("ADD takes a placeholder such as REQ-new1, not {id}"),
-            )),
             _ => {}
         }
         if op.has_body() && req.title.is_empty() {
@@ -402,7 +397,7 @@ rvow SHALL append one proof event.
     #[test]
     fn delta_id_and_body_rules() {
         let src = "\
-## ADD REQ-k3f9m2 Real id on ADD
+## ADD REQ-k3f9m2 Real id on ADD, as after accept
 ## CHANGE REQ-new2 Placeholder on CHANGE
 ## REMOVE REQ-7xq2a5
 rvow SHALL not have text here.
@@ -414,7 +409,6 @@ rvow SHALL not have text here.
             got,
             [
                 (Rule::Structure, 5),
-                (Rule::IdForm, 1),
                 (Rule::IdForm, 2),
                 (Rule::Structure, 3)
             ]

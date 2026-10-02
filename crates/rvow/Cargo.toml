@@ -1,0 +1,10 @@
+[package]
+name = "rvow"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rvow-core = { version = "0.1.0", path = "../rvow-core" }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"

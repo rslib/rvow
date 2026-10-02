@@ -1,0 +1,569 @@
+//! `rvow accept`: validate a backlog change, run the baseline, mint real ids,
+//! store the vowed content and move the change to `active/`.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::change::{self, ChangeDir, LEDGER, Loaded, Stage};
+use crate::config::{self, Config, ENFORCEMENT};
+use crate::diag::Severity;
+use crate::error::{Error, Result};
+use crate::git;
+use crate::id::{Id, Ref};
+use crate::ledger::{self, Kind};
+use crate::lint::{Finding, clarifications};
+use crate::registry;
+use crate::runner::{self, Outcome};
+use crate::spec::{DeltaOp, Requirement, Spec, StepKind};
+use crate::store::Project;
+use crate::tasks::Task;
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Stores `bytes` in `objects/` under their SHA-256 and returns the hash.
+pub fn put_object(project: &Project, bytes: &[u8]) -> Result<String> {
+    let hash = sha256_hex(bytes);
+    let path = project.root.join("objects").join(&hash);
+    if !path.exists() {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes).map_err(|e| Error::io(&tmp, e))?;
+        std::fs::rename(&tmp, &path).map_err(|e| Error::io(&path, e))?;
+    }
+    Ok(hash)
+}
+
+pub fn task_hash(t: &Task) -> String {
+    let covers: Vec<String> = t.covers.iter().map(Ref::to_string).collect();
+    let v = json!({
+        "title": t.title,
+        "verify": t.verify,
+        "covers": covers,
+        "files": t.files,
+        "baseline_pass": t.baseline_pass,
+        "timeout_secs": t.timeout.map(|d| d.as_secs()),
+    });
+    sha256_hex(v.to_string().as_bytes())
+}
+
+pub fn requirement_hash(r: &Requirement) -> String {
+    let scenarios: Vec<Value> = r
+        .scenarios
+        .iter()
+        .map(|s| {
+            let steps: Vec<Value> = s
+                .steps
+                .iter()
+                .map(|st| {
+                    let k = match st.kind {
+                        StepKind::Given => "GIVEN",
+                        StepKind::When => "WHEN",
+                        StepKind::Then => "THEN",
+                        StepKind::And => "AND",
+                    };
+                    json!([k, st.text])
+                })
+                .collect();
+            json!({"title": s.title, "steps": steps})
+        })
+        .collect();
+    let v = json!({
+        "title": r.title,
+        "text": r.text,
+        "deprecated": r.deprecated,
+        "scenarios": scenarios,
+    });
+    sha256_hex(v.to_string().as_bytes())
+}
+
+/// Replaces whole-token occurrences of `from`, so `REQ-new1` does not touch
+/// `REQ-new12`.
+fn replace_token(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(from) {
+        let before = rest[..i].chars().last().or(out.chars().last());
+        let before_ok = !before.is_some_and(|c| c.is_ascii_alphanumeric());
+        let after = rest[i + from.len()..].chars().next();
+        let after_ok = !after.is_some_and(|c| c.is_ascii_alphanumeric());
+        out.push_str(&rest[..i]);
+        out.push_str(if before_ok && after_ok { to } else { from });
+        rest = &rest[i + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[derive(Debug, Clone)]
+pub struct Baseline {
+    pub task: Ref,
+    pub outcome: Outcome,
+}
+
+/// A change that passed validation and its baseline run, ready to vow.
+#[derive(Debug)]
+pub struct Prepared {
+    pub change: ChangeDir,
+    pub loaded: Loaded,
+    pub living: Vec<(String, Spec)>,
+    pub top: PathBuf,
+    pub branch: String,
+    pub base_commit: String,
+    pub config: Config,
+    pub baseline: Vec<Baseline>,
+}
+
+fn findings_error(code: &'static str, what: &str, items: &[String], fix: &str) -> Error {
+    Error::new(code, format!("{what}:\n  {}", items.join("\n  ")), fix)
+}
+
+fn format_finding((path, d): &Finding) -> String {
+    format!("{path}:{}: {}: {}", d.line, d.rule.code(), d.message)
+}
+
+fn base_commit(top: &Path, base: &str) -> Result<String> {
+    for r in [
+        format!("refs/remotes/origin/{base}"),
+        format!("refs/heads/{base}"),
+    ] {
+        if git::run(top, &["rev-parse", "--verify", "--quiet", &r]).is_ok() {
+            return git::run(top, &["merge-base", "HEAD", &r]);
+        }
+    }
+    Err(Error::new(
+        "base",
+        format!("neither origin/{base} nor {base} exists"),
+        "set base in config.toml to the branch this work merges into",
+    ))
+}
+
+/// Validates a backlog change and runs every verify command once. Fails when a
+/// check would pass before any work starts.
+pub fn prepare(
+    project: &Project,
+    home: &Path,
+    change: ChangeDir,
+    cwd: &Path,
+    echo: &mut dyn Write,
+) -> Result<Prepared> {
+    if change.stage != Stage::Backlog {
+        return Err(Error::new(
+            "stage",
+            format!(
+                "{} is in {}, not in backlog",
+                change.id,
+                change.stage.name()
+            ),
+            "only a backlog change can be accepted",
+        ));
+    }
+    let top = git::toplevel(cwd)?;
+    let (living, living_findings) = change::load_living(project)?;
+    let loaded = change::load(&change.path, &living)?;
+    let branch = git::branch(&top)?.ok_or_else(|| {
+        Error::new(
+            "detached",
+            "HEAD is detached",
+            "check out the change's branch",
+        )
+    })?;
+    if branch != loaded.proposal.branch {
+        return Err(Error::new(
+            "branch",
+            format!(
+                "the change belongs to {:?} but HEAD is on {branch:?}",
+                loaded.proposal.branch
+            ),
+            format!("run git checkout {}", loaded.proposal.branch),
+        ));
+    }
+
+    let touched_caps: HashSet<String> = {
+        let living_view = crate::lint::Living { specs: &living };
+        let index: HashMap<&Id, &str> = living_view.index();
+        let mut caps: HashSet<String> = loaded.deltas.iter().map(|(c, _)| c.clone()).collect();
+        let refs = loaded
+            .deltas
+            .iter()
+            .flat_map(|(_, f)| f.deltas.iter().map(|d| &d.req.id))
+            .chain(loaded.tasks.iter().flat_map(|t| t.covers.iter()));
+        for r in refs {
+            if let Ref::Id(id) = r
+                && let Some(cap) = index.get(id)
+            {
+                caps.insert(cap.to_string());
+            }
+        }
+        caps
+    };
+    let mut errors: Vec<String> = loaded.errors().map(format_finding).collect();
+    errors.extend(
+        living_findings
+            .iter()
+            .filter(|(p, d)| {
+                d.severity() == Severity::Error
+                    && touched_caps
+                        .iter()
+                        .any(|c| *p == format!("specs/{c}/spec.md"))
+            })
+            .map(format_finding),
+    );
+    if !errors.is_empty() {
+        return Err(findings_error(
+            "invalid",
+            "the change does not validate",
+            &errors,
+            "fix each finding, then run rvow accept again",
+        ));
+    }
+    if loaded.tasks.is_empty() {
+        return Err(Error::new(
+            "no-tasks",
+            "tasks.md has no task",
+            "add tasks as `- TSK-new1 <title>` with verify: and files:",
+        ));
+    }
+    let open: Vec<String> = clarifications(&loaded.texts)
+        .into_iter()
+        .map(|(p, l)| format!("{p}:{l}"))
+        .collect();
+    if !open.is_empty() {
+        return Err(findings_error(
+            "clarification",
+            "open questions remain",
+            &open,
+            "answer each [NEEDS CLARIFICATION] and remove the marker",
+        ));
+    }
+
+    let config = config::load(project, home)?;
+    let base_commit = base_commit(&top, &config.base)?;
+    let mut baseline = Vec::new();
+    let mut refused = Vec::new();
+    for task in &loaded.tasks {
+        let cmd = task.verify.as_deref().expect("validated tasks have verify");
+        let _ = writeln!(echo, "baseline {}: {cmd}", task.id);
+        let timeout = task.timeout.unwrap_or(config.timeout());
+        let outcome = runner::run(cmd, &top, timeout, echo)?;
+        let ran_tests = outcome.tests_run != Some(0);
+        if outcome.passed() && ran_tests && !task.baseline_pass {
+            refused.push(format!(
+                "{} passes before any work ({} tests run): {cmd}",
+                task.id,
+                outcome
+                    .tests_run
+                    .map_or("unknown".into(), |n| n.to_string())
+            ));
+        }
+        if task.baseline_pass && !outcome.passed() {
+            refused.push(format!(
+                "{} says baseline: pass but fails now: {cmd}",
+                task.id
+            ));
+        }
+        baseline.push(Baseline {
+            task: task.id.clone(),
+            outcome,
+        });
+    }
+    if !refused.is_empty() {
+        return Err(findings_error(
+            "baseline",
+            "the baseline run refused some tasks",
+            &refused,
+            "make each check fail before the work, or mark a check that must stay green with baseline: pass",
+        ));
+    }
+    Ok(Prepared {
+        change,
+        loaded,
+        living,
+        top,
+        branch,
+        base_commit,
+        config,
+        baseline,
+    })
+}
+
+/// The result of a vow.
+#[derive(Debug)]
+pub struct Vowed {
+    pub id: Id,
+    pub path: PathBuf,
+    /// Placeholder to real id, in mint order.
+    pub minted: Vec<(String, Id)>,
+    pub event: String,
+}
+
+fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
+    let mut b = GlobSetBuilder::new();
+    let patterns = config
+        .test_globs
+        .iter()
+        .chain(&config.protect_infra)
+        .map(String::as_str)
+        .chain(ENFORCEMENT.iter().copied());
+    for p in patterns {
+        let glob = GlobBuilder::new(p)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| {
+                Error::new(
+                    "config",
+                    format!("bad glob {p:?}: {e}"),
+                    "fix the glob in config.toml",
+                )
+            })?;
+        b.add(glob);
+    }
+    let set: GlobSet = b.build().expect("globs built");
+    let list = git::run(top, &["ls-files", "-co", "--exclude-standard"])?;
+    Ok(list
+        .lines()
+        .filter(|f| set.is_match(f))
+        .map(|f| (f.to_string(), top.join(f)))
+        .collect())
+}
+
+/// Mints real ids, stores the vowed content and records the vow.
+pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
+    let Prepared {
+        change,
+        loaded,
+        living,
+        top,
+        branch,
+        base_commit,
+        config,
+        baseline,
+    } = prepared;
+    let lock = project.lock()?;
+
+    let mut placeholders: Vec<Ref> = Vec::new();
+    let mut seen = HashSet::new();
+    let all_refs = loaded
+        .deltas
+        .iter()
+        .flat_map(|(_, f)| f.deltas.iter().map(|d| &d.req.id))
+        .chain(
+            loaded
+                .tasks
+                .iter()
+                .flat_map(|t| std::iter::once(&t.id).chain(&t.covers)),
+        );
+    for r in all_refs {
+        if matches!(r, Ref::Placeholder { .. }) && seen.insert(r.clone()) {
+            placeholders.push(r.clone());
+        }
+    }
+    let mut minted = Vec::new();
+    for p in &placeholders {
+        let id = registry::mint(project, &lock, p.kind(), Some(&change.id))?;
+        minted.push((p.to_string(), id));
+    }
+    for (rel, text) in &loaded.texts {
+        let mut new = text.clone();
+        for (from, to) in &minted {
+            new = replace_token(&new, from, &to.to_string());
+        }
+        if &new != text {
+            let path = change.path.join(rel);
+            std::fs::write(&path, new).map_err(|e| Error::io(&path, e))?;
+        }
+    }
+    let loaded = change::load(&change.path, &living)?;
+    if let Some(f) = loaded.errors().next() {
+        return Err(Error::new(
+            "invalid",
+            format!("after minting ids: {}", format_finding(f)),
+            "report this as an rvow bug",
+        ));
+    }
+
+    let mut files = Map::new();
+    for (rel, text) in &loaded.texts {
+        files.insert(rel.clone(), put_object(project, text.as_bytes())?.into());
+    }
+    let config_hash = put_object(project, config.canonical().as_bytes())?;
+    let mut protected = Map::new();
+    for (rel, path) in protected_files(&top, &config)? {
+        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
+        protected.insert(rel, put_object(project, &bytes)?.into());
+    }
+    let protected_root = put_object(project, Value::Object(protected).to_string().as_bytes())?;
+
+    let tasks: Map<String, Value> = loaded
+        .tasks
+        .iter()
+        .map(|t| (t.id.to_string(), task_hash(t).into()))
+        .collect();
+    let mut requirements = Map::new();
+    let mut bases = Map::new();
+    let living_hash: HashMap<String, String> = living
+        .iter()
+        .flat_map(|(_, s)| s.requirements.iter())
+        .map(|r| (r.id.to_string(), requirement_hash(r)))
+        .collect();
+    for (_, file) in &loaded.deltas {
+        for d in &file.deltas {
+            let id = d.req.id.to_string();
+            if d.op.has_body() {
+                requirements.insert(id.clone(), requirement_hash(&d.req).into());
+            }
+            if d.op != DeltaOp::Add
+                && let Some(h) = living_hash.get(&id)
+            {
+                bases.insert(id, h.clone().into());
+            }
+        }
+    }
+    let minted_names: HashMap<String, String> = minted
+        .iter()
+        .map(|(from, to)| (from.clone(), to.to_string()))
+        .collect();
+    let baseline: Map<String, Value> = baseline
+        .into_iter()
+        .map(|b| {
+            let key = b.task.to_string();
+            let key = minted_names.get(&key).cloned().unwrap_or(key);
+            let v = json!({"exit": b.outcome.exit, "tests_run": b.outcome.tests_run, "timed_out": b.outcome.timed_out});
+            (key, v)
+        })
+        .collect();
+
+    let mut data = Map::new();
+    data.insert("change".into(), change.id.to_string().into());
+    data.insert("branch".into(), branch.into());
+    data.insert("base_commit".into(), base_commit.into());
+    data.insert("config".into(), config_hash.into());
+    data.insert("files".into(), files.into());
+    data.insert("tasks".into(), tasks.into());
+    data.insert("requirements".into(), requirements.into());
+    data.insert("bases".into(), bases.into());
+    data.insert("protected".into(), protected_root.into());
+    data.insert("baseline".into(), baseline.into());
+    let event = ledger::append(&change.path.join(LEDGER), &lock, Kind::Vow, data)?;
+
+    let dest = project
+        .root
+        .join(Stage::Active.dir())
+        .join(change.path.file_name().expect("change dir has a name"));
+    std::fs::rename(&change.path, &dest).map_err(|e| Error::io(&dest, e))?;
+    Ok(Vowed {
+        id: change.id,
+        path: dest,
+        minted,
+        event: event.hash,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testrepo::*;
+    use crate::store::{Mode, init};
+
+    #[test]
+    fn token_replace_is_whole_word() {
+        assert_eq!(
+            replace_token(
+                "REQ-new1 REQ-new12 xREQ-new1 (REQ-new1)",
+                "REQ-new1",
+                "REQ-abc"
+            ),
+            "REQ-abc REQ-new12 xREQ-new1 (REQ-abc)"
+        );
+    }
+
+    fn setup(tasks: &str) -> (TempDir, Project, PathBuf, ChangeDir) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let c = change::new(&p, "Output tail", "main", false).unwrap();
+        std::fs::write(c.path.join("tasks.md"), tasks).unwrap();
+        std::fs::write(
+            c.path.join("specs/ledger.md"),
+            "## ADD REQ-new1 Tail\nrvow SHALL keep the tail.\n### Scenario: s\n- WHEN a run ends\n- THEN the tail is kept\n",
+        )
+        .unwrap();
+        (tmp, p, repo, c)
+    }
+
+    #[test]
+    fn accept_mints_ids_records_the_vow_and_moves_the_change() {
+        let (tmp, p, repo, c) = setup(
+            "- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 0 passed; 0 failed;'\n  files: src/**\n",
+        );
+        let prepared = prepare(&p, &tmp.0.join("home"), c, &repo, &mut std::io::sink()).unwrap();
+        assert_eq!(prepared.baseline[0].outcome.tests_run, Some(0));
+        let vowed = commit(&p, prepared).unwrap();
+        assert_eq!(vowed.minted.len(), 2);
+        assert!(vowed.path.starts_with(p.root.join("active")));
+        let tasks = std::fs::read_to_string(vowed.path.join("tasks.md")).unwrap();
+        assert!(!tasks.contains("-new1"), "{tasks}");
+        let (events, diags) = ledger::read(&vowed.path.join(LEDGER)).unwrap();
+        assert!(diags.is_empty());
+        assert_eq!(events.len(), 1);
+        let protected = &events[0].data["protected"];
+        let obj = std::fs::read_to_string(p.root.join("objects").join(protected.as_str().unwrap()))
+            .unwrap();
+        assert!(obj.contains("tests/t.sh"), "{obj}");
+        assert_eq!(registry::load(&p).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn baseline_refuses_a_check_that_already_passes() {
+        let (tmp, p, repo, c) = setup(
+            "- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 2 passed; 0 failed;'\n  files: src/**\n",
+        );
+        let err = prepare(&p, &tmp.0.join("home"), c, &repo, &mut std::io::sink()).unwrap_err();
+        assert_eq!(err.code, "baseline");
+    }
+
+    #[test]
+    fn baseline_pass_must_hold_and_branch_must_match() {
+        let (tmp, p, repo, c) = setup(
+            "- TSK-new1 Tail\n  covers: REQ-new1\n  verify: false\n  files: src/**\n  baseline: pass\n",
+        );
+        let home = tmp.0.join("home");
+        let err = prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).unwrap_err();
+        assert_eq!(err.code, "baseline");
+        git(&repo, &["checkout", "-q", "-b", "other"]);
+        let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
+        assert_eq!(err.code, "branch");
+    }
+
+    #[test]
+    fn invalid_and_unanswered_changes_are_refused() {
+        let (tmp, p, repo, c) = setup("- TSK-new1 No verify\n  files: src/**\n");
+        let home = tmp.0.join("home");
+        let err = prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).unwrap_err();
+        assert_eq!(err.code, "invalid");
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 T\n  covers: REQ-new1\n  verify: false\n  files: src/**\n",
+        )
+        .unwrap();
+        let prop = std::fs::read_to_string(c.path.join("proposal.md")).unwrap();
+        std::fs::write(
+            c.path.join("proposal.md"),
+            prop + "[NEEDS CLARIFICATION: which?]\n",
+        )
+        .unwrap();
+        let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
+        assert_eq!(err.code, "clarification");
+    }
+}

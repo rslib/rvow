@@ -461,6 +461,16 @@ impl Change<'_> {
                     (Ref::Placeholder { .. }, DeltaOp::Add) => {
                         added.insert(&req.id);
                     }
+                    (Ref::Id(id), DeltaOp::Add) => {
+                        added.insert(&req.id);
+                        if let Some(home) = index.get(id) {
+                            push(Diagnostic::new(
+                                Rule::DuplicateId,
+                                req.line,
+                                format!("ADD {id} is already in specs/{home}/spec.md"),
+                            ));
+                        }
+                    }
                     (Ref::Id(id), op) if op != DeltaOp::Add => match index.get(id) {
                         None => push(Diagnostic::new(
                             Rule::UnknownId,
@@ -501,7 +511,7 @@ impl Change<'_> {
                 covered.insert(c);
                 let known = match c {
                     Ref::Placeholder { .. } => added.contains(c),
-                    Ref::Id(id) => index.contains_key(id),
+                    Ref::Id(id) => index.contains_key(id) || added.contains(c),
                 };
                 if !known {
                     push(Diagnostic::new(
@@ -700,6 +710,11 @@ rvow SHALL store the head.
 - THEN b
 ## REMOVE REQ-zzzzzz
 ## MOVE REQ-k3f9m2
+## ADD REQ-k3f9m2 Again
+rvow SHALL run.
+### Scenario: s
+- WHEN a
+- THEN b
 ",
             )
             .0,
@@ -733,8 +748,11 @@ rvow SHALL store the head.
             [
                 ("specs/ledger.md", Rule::UnknownId, 11),
                 ("specs/ledger.md", Rule::Structure, 12),
+                ("specs/ledger.md", Rule::DuplicateId, 13),
+                ("specs/ledger.md", Rule::DuplicateId, 13),
                 ("tasks.md", Rule::UnknownId, 1),
                 ("specs/ledger.md", Rule::Uncovered, 6),
+                ("specs/ledger.md", Rule::Uncovered, 13),
                 ("proposal.md", Rule::Clarification, 3),
             ]
         );

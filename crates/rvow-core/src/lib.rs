@@ -1,3 +1,5 @@
+pub mod change;
+pub mod config;
 pub mod diag;
 pub mod error;
 pub mod git;
@@ -6,6 +8,8 @@ pub mod ledger;
 pub mod lint;
 pub mod proposal;
 pub mod registry;
+pub mod runner;
 pub mod spec;
 pub mod store;
 pub mod tasks;
+pub mod vow;
