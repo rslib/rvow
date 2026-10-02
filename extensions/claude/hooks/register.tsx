@@ -134,6 +134,15 @@ async function refresh($: EngineInterface) {
         } as RvowView)
       : null
   await update($, viewAtom, () => view)
+  for (const d of await read($, detailsAtom)) {
+    const r = await showText($, d)
+    // Keeps the old text on a failed show; ids and kinds are unchanged, so the saved pane stays.
+    if (r.tone === 'ok') {
+      await update($, detailsAtom, (s) =>
+        s.map((x) => (x.id === d.id && x.kind === d.kind ? { ...x, text: r.text } : x)),
+      )
+    }
+  }
   await refreshStatus($)
 }
 
@@ -216,10 +225,10 @@ async function restore($: EngineInterface) {
   } catch {}
 }
 
-/** Pushes a detail view and fills it with `rvow show <id> --human`; a task also gets its covered requirements. */
-async function openDetail($: EngineInterface, d: Omit<RvowDetail, 'text'>) {
-  await setDetails($, (s) => [...s, { ...d, text: null }])
-  let text = (await rvow($, ['show', d.id, '--human'])).text
+/** `rvow show <id> --human`; a task also gets its covered requirements. */
+async function showText($: EngineInterface, d: Omit<RvowDetail, 'text'>): Promise<RvowNotice> {
+  const shown = await rvow($, ['show', d.id, '--human'])
+  let text = shown.text
   if (d.kind === 'task') {
     const covers = /^\s*covers:\s*(.+)$/m.exec(text)?.[1]?.match(ID) ?? []
     for (const req of covers) {
@@ -231,6 +240,13 @@ async function openDetail($: EngineInterface, d: Omit<RvowDetail, 'text'>) {
       text += `\n\n${(await rvow($, ['show', req, '--human'])).text}`
     }
   }
+  return { tone: shown.tone, text }
+}
+
+/** Pushes a detail view and fills it with its show text. */
+async function openDetail($: EngineInterface, d: Omit<RvowDetail, 'text'>) {
+  await setDetails($, (s) => [...s, { ...d, text: null }])
+  const { text } = await showText($, d)
   await update($, detailsAtom, (s) =>
     s.map((x) => (x.id === d.id && x.text === null ? { ...x, text } : x)),
   )
@@ -781,15 +797,24 @@ export const register: Register = (on) => {
           <Box flexDirection="column" marginTop={1}>
             {c.tasks.map((t) => {
               const [mark, color] = MARKS[t.state] ?? ['?', undefined]
+              const reasons = t.reasons.length > 0 ? ` (${t.reasons.join(', ')})` : ''
               return (
-                <Text wrap="truncate-end">
+                <Box key={`task-line:${t.id}`} gap={1}>
                   <Text color={color} dimColor={!color}>
                     {mark}
-                  </Text>{' '}
-                  <Text dimColor>{t.id} </Text>
-                  {t.title}
-                  {t.reasons.length > 0 && <Text dimColor> ({t.reasons.join(', ')})</Text>}
-                </Text>
+                  </Text>
+                  <Button
+                    key={`task:${t.id}`}
+                    plain
+                    label={cut(`${t.id} ${t.title}`, cols - 6 - reasons.length)}
+                    onPress={() => openDetail($, { kind: 'task', id: t.id, title: t.title })}
+                  />
+                  {reasons && (
+                    <Text dimColor wrap="truncate-end">
+                      {reasons}
+                    </Text>
+                  )}
+                </Box>
               )
             })}
           </Box>
