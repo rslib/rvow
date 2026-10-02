@@ -10,6 +10,7 @@ pub mod gate;
 pub mod git;
 pub mod hook;
 pub mod id;
+pub mod install;
 pub mod ledger;
 pub mod lint;
 pub mod notes;

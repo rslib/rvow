@@ -11,6 +11,7 @@ use rvow_core::error::{Error, Result};
 use rvow_core::gate::{self, Options};
 use rvow_core::git;
 use rvow_core::hook;
+use rvow_core::install;
 use rvow_core::lint::Finding;
 use rvow_core::notes;
 use rvow_core::proof::{self, State};
@@ -66,6 +67,12 @@ enum Cmd {
     },
     /// Print the short generated brief for this branch.
     Brief,
+    /// Install the skill, the Claude Code hooks, the pi extension and the pre-push gate.
+    Install {
+        /// Where the Claude Code hooks go: your user settings, or this repository's .claude/settings.json.
+        #[arg(long, value_enum, default_value = "user")]
+        scope: Scope,
+    },
     /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
     Hook {
         #[arg(value_enum)]
@@ -160,6 +167,7 @@ fn main() -> ExitCode {
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
         Cmd::Hook { harness, event } => return hook(harness, event),
+        Cmd::Install { scope } => install(scope),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend {
@@ -641,4 +649,68 @@ fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
     }
     ExitCode::SUCCESS
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Scope {
+    User,
+    Project,
+}
+
+fn report(what: &str, o: install::Outcome) {
+    match o {
+        install::Outcome::Written(p) => println!("{what}: wrote {}", p.display()),
+        install::Outcome::Unchanged(p) => println!("{what}: up to date at {}", p.display()),
+        install::Outcome::KeptEdit(p) => {
+            println!(
+                "{what}: kept your edits in {}; delete it to get the new version",
+                p.display()
+            )
+        }
+        install::Outcome::AddLine { path, line } => {
+            println!(
+                "{what}: another hook manager owns {}; add this line to it:\n  {line}",
+                path.display()
+            )
+        }
+    }
+}
+
+fn install(scope: Scope) -> Result<bool> {
+    let rvow = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| Error::io(Path::new("rvow"), e))?;
+    let env_dir = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home =
+        env_dir("HOME").ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
+    let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
+    report("skill", install::skill(&claude)?);
+    let settings = match scope {
+        Scope::User => claude.join("settings.json"),
+        Scope::Project => git::toplevel(&cwd()?)?.join(".claude/settings.json"),
+    };
+    report(
+        "Claude Code hooks",
+        install::claude_settings(&settings, &rvow)?,
+    );
+    let pi = home.join(".pi/agent");
+    if pi.is_dir() {
+        report("pi extension", install::pi_extension(&pi)?);
+    } else {
+        println!("pi extension: skipped, {} does not exist", pi.display());
+    }
+    match store::find(&cwd()?, &store::home_dir()?) {
+        Ok(Some(_)) => report(
+            "pre-push gate",
+            install::pre_push(&git::toplevel(&cwd()?)?, &rvow)?,
+        ),
+        _ => println!(
+            "pre-push gate: skipped, run rvow install inside a repository with an rvow tree"
+        ),
+    }
+    Ok(true)
 }
