@@ -14,6 +14,11 @@ pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow.ts");
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
 const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.tsx");
+/// Modules `register.tsx` imports; the engine cannot follow `$` or an atom across an import, so these hold pure code.
+const MOD_MODULES: [(&str, &str); 1] = [(
+    "format.ts",
+    include_str!("../../../extensions/claude/hooks/format.ts"),
+)];
 const MOD_TYPES: &str = include_str!("../../../extensions/claude/types/index.d.ts");
 pub const MARKETPLACE_DIR: &str = "claude-plugin";
 const MARK: &str = "rvow-managed sha256:";
@@ -79,10 +84,17 @@ pub fn skill(claude_dir: &Path) -> Result<Outcome> {
             return Ok(Outcome::KeptEdit(path));
         }
     }
-    let dir = path.parent().expect("skill path has a parent");
-    std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    }
     std::fs::write(&path, full).map_err(|e| Error::io(&path, e))?;
     Ok(Outcome::Written(path))
+}
+
+fn pretty(value: &Value) -> Result<String> {
+    serde_json::to_string_pretty(value)
+        .map(|text| text + "\n")
+        .map_err(|e| Error::internal(format!("JSON does not serialize: {e}")))
 }
 
 fn split_front_matter(text: &str) -> (&str, &str) {
@@ -103,12 +115,15 @@ pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
         "'__RVOW_BIN__'",
         &format!("{:?}", rvow.display().to_string()),
     );
+    let modules: String = MOD_MODULES.iter().map(|(_, src)| *src).collect();
     let version = format!(
         "{}+{}",
         env!("CARGO_PKG_VERSION"),
-        &sha256_hex(format!("{register}{SKILL}{MOD_HOOKS_JSON}{MOD_TYPES}").as_bytes())[..12]
+        &sha256_hex(format!("{register}{modules}{SKILL}{MOD_HOOKS_JSON}{MOD_TYPES}").as_bytes())
+            [..12]
     );
-    let mut plugin: Value = serde_json::from_str(MOD_PLUGIN_JSON).expect("plugin.json is JSON");
+    let mut plugin: Value = serde_json::from_str(MOD_PLUGIN_JSON)
+        .map_err(|e| Error::internal(format!("the bundled plugin.json is not JSON: {e}")))?;
     plugin["version"] = version.into();
     let marketplace = json!({
         "name": "rvow",
@@ -120,28 +135,43 @@ pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
             "description": plugin["description"].clone(),
         }],
     });
-    let files = [
+    let mut files = vec![
         (
-            ".claude-plugin/marketplace.json",
-            serde_json::to_string_pretty(&marketplace).expect("json") + "\n",
+            ".claude-plugin/marketplace.json".to_string(),
+            pretty(&marketplace)?,
         ),
         (
-            "plugins/rvow/.claude-plugin/plugin.json",
-            serde_json::to_string_pretty(&plugin).expect("json") + "\n",
+            "plugins/rvow/.claude-plugin/plugin.json".to_string(),
+            pretty(&plugin)?,
         ),
-        ("plugins/rvow/hooks/hooks.json", MOD_HOOKS_JSON.to_string()),
-        ("plugins/rvow/hooks/register.tsx", register),
-        ("plugins/rvow/types/index.d.ts", MOD_TYPES.to_string()),
-        ("plugins/rvow/skills/rvow/SKILL.md", SKILL.to_string()),
+        (
+            "plugins/rvow/hooks/hooks.json".to_string(),
+            MOD_HOOKS_JSON.to_string(),
+        ),
+        ("plugins/rvow/hooks/register.tsx".to_string(), register),
+        (
+            "plugins/rvow/types/index.d.ts".to_string(),
+            MOD_TYPES.to_string(),
+        ),
+        (
+            "plugins/rvow/skills/rvow/SKILL.md".to_string(),
+            SKILL.to_string(),
+        ),
     ];
+    files.extend(
+        MOD_MODULES
+            .iter()
+            .map(|(name, src)| (format!("plugins/rvow/hooks/{name}"), (*src).to_string())),
+    );
     let mut changed = false;
     for (rel, body) in files {
         let path = dir.join(rel);
         if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
             continue;
         }
-        let parent = path.parent().expect("file has a parent");
-        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        }
         std::fs::write(&path, body).map_err(|e| Error::io(&path, e))?;
         changed = true;
     }
@@ -167,7 +197,7 @@ pub fn remove_claude_settings(path: &Path) -> Result<Outcome> {
     for list in hooks.values_mut().filter_map(Value::as_array_mut) {
         list.retain(|x| !is_rvow_entry(x));
     }
-    let text = serde_json::to_string_pretty(&settings).expect("settings serialize") + "\n";
+    let text = pretty(&settings)?;
     if text == old {
         return Ok(Outcome::Unchanged(path.to_path_buf()));
     }
@@ -330,7 +360,7 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
         arr.retain(|x| !is_rvow_entry(x));
         arr.push(e);
     }
-    let text = serde_json::to_string_pretty(&settings).expect("settings serialize") + "\n";
+    let text = pretty(&settings)?;
     if old.as_deref() == Some(text.as_str()) {
         return Ok(Outcome::Unchanged(path.to_path_buf()));
     }
@@ -491,6 +521,10 @@ mod tests {
             "{reg}"
         );
         assert!(dir.join("plugins/rvow/skills/rvow/SKILL.md").is_file());
+        for (name, src) in MOD_MODULES {
+            let installed = std::fs::read_to_string(dir.join("plugins/rvow/hooks").join(name));
+            assert_eq!(installed.unwrap(), src, "{name} lands in the hooks dir");
+        }
         let m: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".claude-plugin/marketplace.json")).unwrap(),
         )
