@@ -7,14 +7,19 @@ pub struct Proposal {
     pub sections: Vec<String>,
 }
 
-const REQUIRED: [&str; 2] = ["Why", "What changes"];
+const REQUIRED: [&str; 3] = ["Why", "What changes", "Out of scope"];
+pub const MAX_WORDS: usize = 150;
 
 pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
     let mut diags = Vec::new();
     let mut branch = String::new();
     let mut title = String::new();
     let mut sections = Vec::new();
+    let mut words = 0;
     for (i, line) in src.lines().enumerate() {
+        if !line.starts_with('#') && !line.starts_with("branch:") && !line.starts_with("after:") {
+            words += line.split_whitespace().count();
+        }
         if let Some(b) = line.strip_prefix("branch:") {
             if !sections.is_empty() || !branch.is_empty() {
                 diags.push(Diagnostic::new(
@@ -37,6 +42,15 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
             Rule::Structure,
             1,
             "proposal needs a `branch: <name>` line",
+        ));
+    }
+    if words > MAX_WORDS {
+        diags.push(Diagnostic::new(
+            Rule::Size,
+            1,
+            format!(
+                "the proposal has {words} words, more than {MAX_WORDS}; say why and what, not how"
+            ),
         ));
     }
     for name in REQUIRED {
@@ -64,11 +78,15 @@ mod tests {
 
     #[test]
     fn parses_branch_and_sections() {
-        let (p, diags) =
-            parse_proposal("branch: feat/x\n\n## Why\nbecause\n## What changes\n## Assumptions\n");
+        let (p, diags) = parse_proposal(
+            "branch: feat/x\n\n## Why\nbecause\n## What changes\n## Out of scope\n## Assumptions\n",
+        );
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(p.branch, "feat/x");
-        assert_eq!(p.sections, ["Why", "What changes", "Assumptions"]);
+        assert_eq!(
+            p.sections,
+            ["Why", "What changes", "Out of scope", "Assumptions"]
+        );
     }
 
     #[test]
@@ -80,6 +98,15 @@ mod tests {
     }
 
     #[test]
+    fn long_proposals_warn() {
+        let body = "word ".repeat(MAX_WORDS + 1);
+        let src = format!("branch: b\n## Why\n{body}\n## What changes\n## Out of scope\n");
+        let (_, diags) = parse_proposal(&src);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, Rule::Size);
+    }
+
+    #[test]
     fn missing_parts_are_errors() {
         let (_, diags) = parse_proposal("## Why\n");
         let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
@@ -87,7 +114,8 @@ mod tests {
             msgs,
             [
                 "proposal needs a `branch: <name>` line",
-                "proposal needs a `## What changes` section"
+                "proposal needs a `## What changes` section",
+                "proposal needs a `## Out of scope` section"
             ]
         );
     }

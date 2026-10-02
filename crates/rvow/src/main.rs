@@ -14,6 +14,7 @@ use rvow_core::hook;
 use rvow_core::install;
 use rvow_core::lint::Finding;
 use rvow_core::notes;
+use rvow_core::plan;
 use rvow_core::proof::{self, State};
 use rvow_core::store::{self, Mode, Project};
 use rvow_core::vow;
@@ -39,9 +40,9 @@ enum Cmd {
         /// The change title.
         #[arg(required = true, num_args = 1..)]
         title: Vec<String>,
-        /// A small change: proposal and tasks, no spec deltas.
+        /// Add spec deltas; without it the change is small: proposal and tasks.
         #[arg(long)]
-        small: bool,
+        spec: bool,
     },
     /// Check the specs and every open change.
     Validate,
@@ -75,6 +76,16 @@ enum Cmd {
         /// For --claude settings: your user settings, or this repository's .claude/settings.json.
         #[arg(long, value_enum, default_value = "user")]
         scope: Scope,
+    },
+    /// Report on a plan before accept: findings, checks that cannot run, open questions.
+    Check {
+        /// The change id; default: every open change on this branch.
+        change: Option<String>,
+    },
+    /// List the open questions of a plan, each with its recommended answer.
+    Clarify {
+        /// The change id; default: every open change on this branch.
+        change: Option<String>,
     },
     /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
     Hook {
@@ -162,7 +173,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::Init { in_repo } => init(in_repo),
-        Cmd::New { title, small } => new(&title.join(" "), small),
+        Cmd::New { title, spec } => new(&title.join(" "), !spec),
         Cmd::Validate => validate(),
         Cmd::Accept { change, yes } => accept(&change, yes),
         Cmd::Ls => ls(),
@@ -171,6 +182,8 @@ fn main() -> ExitCode {
         Cmd::Brief => brief(),
         Cmd::Hook { harness, event } => return hook(harness, event),
         Cmd::Install { claude, scope } => install(claude, scope),
+        Cmd::Check { change } => check(change.as_deref()),
+        Cmd::Clarify { change } => clarify(change.as_deref()),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend {
@@ -347,6 +360,7 @@ fn accept(target: &str, yes: bool) -> Result<bool> {
             .map_or("signal".to_string(), |n| n.to_string());
         println!("  {}: baseline exit {exit}, {tests} tests", b.task);
     }
+    println!("{REVIEW}");
     if !yes && !ask_yes("record the vow?")? {
         println!("not accepted");
         return Ok(false);
@@ -740,6 +754,71 @@ fn install(mode: ClaudeMode, scope: Scope) -> Result<bool> {
         _ => println!(
             "pre-push gate: skipped, run rvow install inside a repository with an rvow tree"
         ),
+    }
+    Ok(true)
+}
+
+const REVIEW: &str = "\
+before you accept, check:
+  1. Does each requirement say what the system does, not how?
+  2. Does each task's check fail today for the reason the task fixes?
+  3. Is anything in Out of scope that you need now?
+  4. Is every Assumption one you agree with?
+  5. Is the change small enough to review its diff in one sitting?";
+
+fn check(target: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let reports = plan::check(&p, &cwd()?, target)?;
+    if reports.is_empty() {
+        println!("no open change on this branch");
+        return Ok(true);
+    }
+    let mut ok = true;
+    for r in &reports {
+        println!("{} ({})", r.change.id, r.change.stage.name());
+        print_findings("  ", &r.findings);
+        for (task, prog) in &r.missing {
+            println!(
+                "  {task}: error[missing-program]: {prog} is neither on PATH nor in the repository"
+            );
+        }
+        for q in &r.questions {
+            println!("  {}:{}: open question: {}", q.path, q.line, q.question);
+        }
+        if r.blocking() {
+            ok = false;
+            println!("  not ready to accept");
+        } else {
+            println!(
+                "  ready to accept: ask the user to run /rvow-accept {} (or ! rvow accept {})",
+                r.change.id, r.change.id
+            );
+        }
+    }
+    Ok(ok)
+}
+
+fn clarify(target: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let mut count = 0;
+    for r in plan::check(&p, &cwd()?, target)? {
+        for q in &r.questions {
+            count += 1;
+            let rec = q.recommended.as_deref().unwrap_or("none given");
+            println!(
+                "{} {}:{}: {} (recommended: {rec})",
+                r.change.id, q.path, q.line, q.question
+            );
+        }
+    }
+    if count == 0 {
+        println!("no open questions");
+    } else {
+        println!(
+            "ask the user one question at a time with its recommended answer; write each answer into the plan and remove its marker; an unanswered question becomes an Assumption"
+        );
     }
     Ok(true)
 }

@@ -64,6 +64,7 @@ pub const DESIGN: &str = "design.md";
 pub const TASKS: &str = "tasks.md";
 pub const DELTAS: &str = "specs";
 pub const LEDGER: &str = "ledger.jsonl";
+pub const MAX_DESIGN_LINES: usize = 300;
 
 /// Splits `CHG-xxxxxx-slug`, with an optional `YYYY-MM-DD-` prefix in the
 /// archive, into id and slug.
@@ -244,7 +245,7 @@ pub fn slugify(title: &str) -> String {
 
 fn proposal_template(branch: &str, title: &str) -> String {
     format!(
-        "branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Assumptions\n\n## Non-goals\n"
+        "branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Out of scope\n\n## Assumptions\n"
     )
 }
 
@@ -376,6 +377,17 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
     findings.extend(tag(TASKS, diags));
     texts.push((TASKS.to_string(), tasks_text));
     if let Ok(design) = std::fs::read_to_string(dir.join(DESIGN)) {
+        let lines = design.lines().count();
+        if lines > MAX_DESIGN_LINES {
+            findings.push((
+                DESIGN.to_string(),
+                Diagnostic::new(
+                    crate::diag::Rule::Size,
+                    1,
+                    format!("design.md has {lines} lines, more than {MAX_DESIGN_LINES}; keep only decisions, constraints and reasons"),
+                ),
+            ));
+        }
         texts.push((DESIGN.to_string(), design));
     }
     let mut deltas = Vec::new();

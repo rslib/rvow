@@ -14,6 +14,7 @@ pub mod install;
 pub mod ledger;
 pub mod lint;
 pub mod notes;
+pub mod plan;
 pub mod proof;
 pub mod proposal;
 pub mod registry;

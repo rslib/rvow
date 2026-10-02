@@ -31,9 +31,26 @@ async function refreshStatus($: EngineInterface) {
   $.ui.status(typeof out?.status === 'string' ? out.status : undefined)
 }
 
+async function userOnly($: EngineInterface, origin: { kind: string }, name: string, argv: string[]) {
+  // Only the person's own Enter may decide: the engine stamps `composer`
+  // and no hook or model can.
+  if (origin.kind !== 'composer') return { text: `/${name} runs only when you type it yourself.` }
+  try {
+    const r = await $.process.run([BIN, ...argv], { cwd: await $.session.cwd(), timeoutMs: 600_000 })
+    await refreshStatus($)
+    return { text: (r.stdout + r.stderr).trim() || 'no output' }
+  } catch (err) {
+    return { text: `cannot run ${BIN}: ${String(err)}` }
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    await $.command.register({
+      name: 'rvow-accept',
+      description: 'Show the rvow plan summary and review checklist: <CHG-id>; record the vow: <CHG-id> yes',
+    })
     await $.command.register({
       name: 'rvow-confirm',
       description: 'List pending rvow amendments, or: accept|reject <AMD-id>..., accept --all <digest>',
@@ -79,22 +96,17 @@ export const register: Register = on => {
     return done
   })
 
-  // Only the person's own Enter may decide amendments: the engine stamps
-  // `composer` and no hook or model can.
   on('command.run', { command: 'rvow-confirm' }, async ($, e) => {
-    if (e.origin.kind !== 'composer') {
-      return { text: '/rvow-confirm runs only when you type it yourself.' }
-    }
-    const words = e.args.trim().split(/\s+/).filter(Boolean)
-    const [verb, ...rest] = words
+    const [verb, ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
     const argv =
       verb === 'accept' || verb === 'reject' ? ['confirm', `--${verb}`, ...rest] : ['confirm']
-    try {
-      const r = await $.process.run([BIN, ...argv], { cwd: await $.session.cwd(), timeoutMs: 60_000 })
-      await refreshStatus($)
-      return { text: (r.stdout + r.stderr).trim() || 'no output' }
-    } catch (err) {
-      return { text: `cannot run ${BIN}: ${String(err)}` }
-    }
+    return userOnly($, e.origin, 'rvow-confirm', argv)
+  })
+
+  on('command.run', { command: 'rvow-accept' }, async ($, e) => {
+    const [id, answer] = e.args.trim().split(/\s+/).filter(Boolean)
+    if (!id) return { text: 'usage: /rvow-accept <CHG-id>, then /rvow-accept <CHG-id> yes' }
+    const argv = answer === 'yes' ? ['accept', id, '--yes'] : ['accept', id]
+    return userOnly($, e.origin, 'rvow-accept', argv)
   })
 }

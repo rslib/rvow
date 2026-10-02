@@ -215,6 +215,13 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
     let Some(rel) = target.strip_prefix(&format!("{top_key}/")) else {
         return Ok(None);
     };
+    if !target.starts_with(&format!("{root}/"))
+        && let Some(id) = unaccepted_plan(project, top)?
+    {
+        return Ok(Some(format!(
+            "the plan {id} is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept {id} (or ! rvow accept {id}) before you edit code"
+        )));
+    }
     if ENFORCEMENT.iter().any(|e| key(Path::new(e)) == rel) {
         return Ok(Some(format!(
             "{rel} configures the hooks that enforce the plan; changing it is for the user"
@@ -280,6 +287,28 @@ fn unlocked(project: &Project, top: &Path, rel: &str) -> Result<bool> {
         }
     }
     Ok(open)
+}
+
+/// The backlog change whose plan blocks code edits: the branch has one and no
+/// active change, so the user has not accepted a plan to work on yet.
+fn unaccepted_plan(project: &Project, top: &Path) -> Result<Option<crate::id::Id>> {
+    let Some(branch) = git::branch(top)? else {
+        return Ok(None);
+    };
+    let (living, _) = change::load_living(project)?;
+    if !proof::on_branch(&proof::active(project, &living)?, &branch).is_empty() {
+        return Ok(None);
+    }
+    let (all, _) = change::list(project)?;
+    for c in all
+        .into_iter()
+        .filter(|c| c.stage == change::Stage::Backlog)
+    {
+        if change::load(&c.path, &living)?.proposal.branch == branch {
+            return Ok(Some(c.id));
+        }
+    }
+    Ok(None)
 }
 
 /// The protected paths of every active change, from their baselines.
@@ -492,6 +521,34 @@ mod tests {
         for cmd in allowed {
             assert_eq!(bash_denial(cmd), None, "{cmd}");
         }
+    }
+
+    #[test]
+    fn a_backlog_plan_blocks_code_edits_until_accept() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        assert_eq!(edit(&p, &repo, "src/lib.rs"), None);
+        let c = change::new(&p, "T", "main", true).unwrap();
+        let denied = edit(&p, &repo, "src/lib.rs").unwrap();
+        let reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains(&c.id.to_string()), "{reason}");
+        assert_eq!(
+            edit(&p, &repo, c.path.join("tasks.md").to_str().unwrap()),
+            None
+        );
+
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 T\n  verify: false\n  files: src/**\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(&p, prepared).unwrap();
+        assert_eq!(edit(&p, &repo, "src/lib.rs"), None);
     }
 
     #[test]

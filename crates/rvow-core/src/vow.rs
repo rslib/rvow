@@ -246,6 +246,20 @@ pub fn prepare(
         ));
     }
 
+    let missing: Vec<String> = crate::plan::missing_programs(&top, &loaded.tasks)
+        .into_iter()
+        .map(|(task, prog)| {
+            format!("{task} runs {prog}, which is neither on PATH nor in the repository")
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(findings_error(
+            "missing-program",
+            "some verify commands cannot run",
+            &missing,
+            "fix the command; a check that cannot run fails for the wrong reason",
+        ));
+    }
     let config = config::load(project, home)?;
     let base_commit = base_commit(&top, &config.base)?;
     let mut baseline = Vec::new();

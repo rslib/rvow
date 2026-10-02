@@ -30,6 +30,7 @@ pub enum Rule {
     Size,
     Ledger,
     LedgerTail,
+    ClarifyForm,
 }
 
 impl Rule {
@@ -43,7 +44,8 @@ impl Rule {
             | Rule::ScenarioTitle
             | Rule::DesignInSpec
             | Rule::Size
-            | Rule::LedgerTail => Severity::Warning,
+            | Rule::LedgerTail
+            | Rule::ClarifyForm => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -71,6 +73,7 @@ impl Rule {
             Rule::Size => "size",
             Rule::Ledger => "ledger",
             Rule::LedgerTail => "ledger-tail",
+            Rule::ClarifyForm => "clarify-form",
         }
     }
 
@@ -99,6 +102,7 @@ impl Rule {
             Rule::Size => "split the requirement or the capability",
             Rule::Ledger => "restore the ledger from git or a backup",
             Rule::LedgerTail => "none needed, the next write removes the partial line",
+            Rule::ClarifyForm => "write [NEEDS CLARIFICATION: question | recommended: answer]",
         }
     }
 }
