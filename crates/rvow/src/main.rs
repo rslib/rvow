@@ -20,6 +20,7 @@ use rvow_core::plan;
 use rvow_core::proof::{self, State};
 use rvow_core::show;
 use rvow_core::store::{self, Mode, Project};
+use rvow_core::view;
 use rvow_core::vow;
 
 /// Hold a coding agent to an accepted plan.
@@ -174,6 +175,9 @@ enum Cmd {
         /// Show every active change, not only this branch's.
         #[arg(long)]
         all: bool,
+        /// Print this branch's view as JSON, the shape the harness UIs draw.
+        #[arg(long, conflicts_with = "all")]
+        json: bool,
     },
     /// Check the active changes of this branch.
     Gate {
@@ -255,7 +259,7 @@ fn main() -> ExitCode {
         } => confirm(&ids, accept, reject, all.as_deref()),
         Cmd::Prove { task: Some(t), .. } => prove(&t),
         Cmd::Prove { .. } => prove_stale(),
-        Cmd::Status { all } => status(all),
+        Cmd::Status { all, json } => status(all, json),
         Cmd::Gate { strict, rerun } => gate(Options { strict, rerun }),
     };
     match result {
@@ -579,9 +583,14 @@ fn brief() -> Result<bool> {
     Ok(true)
 }
 
-fn status(all: bool) -> Result<bool> {
+fn status(all: bool, json: bool) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
+    if json {
+        let v = view::view(&p, &home, &cwd()?)?.unwrap_or(serde_json::Value::Null);
+        println!("{v}");
+        return Ok(true);
+    }
     let changes = proof::status(&p, &home, &cwd()?, all)?;
     if changes.is_empty() {
         println!("no active change on this branch");
@@ -737,6 +746,7 @@ enum HookEvent {
     SessionStart,
     Stop,
     Status,
+    View,
 }
 
 /// Hooks never fail the harness: outside an rvow project they print nothing,
@@ -764,6 +774,7 @@ fn hook(harness: Harness, event: HookEvent) -> ExitCode {
                 hook::claude_session_start(&p, &home, &input)
             }
             (Harness::Claude, HookEvent::Stop) => hook::claude_stop(&p, &home, &input),
+            (Harness::Claude, HookEvent::View) => view::view(&p, &home, &cwd),
             (Harness::Claude, HookEvent::Status) => {
                 Ok(hook::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s })))
             }
