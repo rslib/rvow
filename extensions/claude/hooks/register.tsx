@@ -1,7 +1,7 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 
-import type { RvowChange, RvowNotice, RvowPlan, RvowView } from '../types'
+import type { RvowChange, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
 
 // `rvow install` writes the absolute path of the binary here.
 const INSTALLED_BIN = '__RVOW_BIN__'
@@ -16,6 +16,8 @@ const viewAtom = atom({ plugin: 'rvow', key: 'view' } as const, null)
 const reviewAtom = atom({ plugin: 'rvow', key: 'review' } as const, {})
 const amendmentsAtom = atom({ plugin: 'rvow', key: 'amendments' } as const, null)
 const noticeAtom = atom({ plugin: 'rvow', key: 'notice' } as const, null)
+const tabAtom = atom({ plugin: 'rvow', key: 'tab' } as const, null)
+const selectedAtom = atom({ plugin: 'rvow', key: 'selected' } as const, [])
 const ACCENT = 'cyan'
 // The checklist `rvow accept` prints (crates/rvow/src/main.rs REVIEW).
 const REVIEW = [
@@ -36,6 +38,24 @@ const MARKS: Record<string, [string, string | undefined]> = {
   missing: ['·', undefined],
 }
 const DRIFT: Record<string, string | undefined> = { weaken: 'red', confirm: 'yellow' }
+const OUTCOME = {
+  done: ['✓', 'green'],
+  dropped: ['✗', 'red'],
+  superseded: ['↷', 'yellow'],
+} as const
+
+const firstTab = (v: RvowView): RvowTab =>
+  v.changes.length > 0 ? 'active' : v.backlog.length > 0 ? 'backlog' : 'archive'
+
+/** Why a plan cannot be accepted here, in the order the author should fix it. */
+const blocker = (p: RvowPlan) =>
+  !p.here
+    ? 'take it to this branch first'
+    : p.questions > 0
+      ? 'answer the open questions first'
+      : p.issues > 0
+        ? 'fix what rvow check reports'
+        : 'add at least one task with a verify command'
 
 let blocks = 0
 
@@ -63,7 +83,15 @@ async function refreshStatus($: EngineInterface) {
 /** Fetches the view into `$.state` so render hooks read it synchronously, then the status line. */
 async function refresh($: EngineInterface) {
   const out = await hook($, 'view', {})
-  const view = out && Array.isArray(out.changes) ? (out as RvowView) : null
+  // An older rvow binary has no `backlog` or `archive`; fall back so the pane still draws.
+  const view =
+    out && Array.isArray(out.changes)
+      ? ({
+          ...out,
+          backlog: out.backlog ?? out.plans ?? [],
+          archive: out.archive ?? [],
+        } as RvowView)
+      : null
   await update($, viewAtom, () => view)
   await refreshStatus($)
 }
@@ -120,6 +148,32 @@ async function userOnly(
   const r = await rvow($, argv)
   await refresh($)
   return { text: r.text }
+}
+
+const REFINE_STEPS =
+  'Follow `rvow guide proposal`, `rvow guide spec` and `rvow guide tasks`. Ask me about open points with the rvow_ask tool before changing scope. Then tighten the proposal and tasks so `rvow check` passes, and tell me what changed.'
+
+/** The prompt that asks the agent to refine one plan, or several one at a time. */
+function refinePrompt(plans: RvowPlan[]): string {
+  const [p] = plans
+  if (plans.length === 1 && p) {
+    return `Review and refine the rvow plan ${p.id} (${p.title}). Run \`rvow show ${p.id}\` and \`rvow check ${p.id}\`. ${REFINE_STEPS}`
+  }
+  return [
+    'Review and refine these rvow plans, one plan at a time, in this order:',
+    ...plans.map((x) => `- ${x.id} (${x.title})`),
+    `For each plan: run \`rvow show <id>\` and \`rvow check <id>\`. ${REFINE_STEPS}`,
+  ].join('\n')
+}
+
+/** Queues the refine prompt as the agent's next turn. */
+async function refine($: EngineInterface, plans: RvowPlan[]) {
+  void $.prompt
+    .submit({ text: refinePrompt(plans) })
+    .catch((err: unknown) =>
+      update($, noticeAtom, () => ({ tone: 'fail', text: `cannot queue: ${String(err)}` })),
+    )
+  await update($, noticeAtom, () => ({ tone: 'ok', text: 'queued for the agent' }))
 }
 
 const ASK = 'mcp__rvow__rvow_ask'
@@ -253,6 +307,7 @@ export const register: Register = (on) => {
 
   on('command.run', { command: 'rvow-status' }, async ($) => {
     await refresh($)
+    await update($, tabAtom, () => null)
     await $.ui.open({ id: PANE, title: 'rvow', focus: true })
     return { text: 'rvow pane opened.' }
   })
@@ -264,8 +319,16 @@ export const register: Register = (on) => {
     const listing = await read($, amendmentsAtom)
     const notice = await read($, noticeAtom)
     const cols = e.props.bodyColumns
+    const home = await $.env.get('HOME')
+    const selected = await read($, selectedAtom)
 
-    // Only the first card of a kind takes hotkeys: two Buttons with one hotkey clash.
+    // Two Buttons with one hotkey clash, so only the first drawn takes it.
+    const taken = new Set<string>()
+    const hot = (k: string) => {
+      if (taken.has(k)) return undefined
+      taken.add(k)
+      return k
+    }
     const button = (
       id: string,
       label: string,
@@ -305,34 +368,35 @@ export const register: Register = (on) => {
       </Box>
     )
 
+    const empty = (line: string, hint?: RenderChildren) => (
+      <Box borderStyle="round" borderDimColor flexDirection="column" paddingX={1}>
+        <Text>{line}</Text>
+        {hint}
+      </Box>
+    )
+    const startHint = (
+      <Text wrap="truncate-end">
+        <Text dimColor>Start a plan: </Text>
+        <Text color={ACCENT}>{'rvow new "<title>"'}</Text>
+      </Text>
+    )
+
     if (!view) {
       return (
         <Box flexDirection="column">
           {header}
           {noticeBox}
-          <Box borderStyle="round" borderDimColor flexDirection="column" paddingX={1}>
-            <Text>No rvow change on this branch.</Text>
-            <Text wrap="truncate-end">
-              <Text dimColor>Start a plan: </Text>
-              <Text color={ACCENT}>{'rvow new "<title>"'}</Text>
-            </Text>
-          </Box>
+          {empty('No rvow change on this branch.', startHint)}
         </Box>
       )
     }
 
     const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-    const planCard = (p: RvowPlan, i: number) => {
-      const hot = (k: string) => (i === 0 ? k : undefined)
-      const guide =
-        p.questions > 0
-          ? 'Answer the open questions first.'
-          : p.issues > 0
-            ? 'Fix what rvow check reports.'
-            : p.tasks === 0
-              ? 'Add tasks with verify commands.'
-              : 'Review the plan, then accept it.'
+    const planCard = (p: RvowPlan) => {
+      const why = p.ready && p.here ? null : blocker(p)
+      const picked = selected.includes(p.id)
+      const files = home && p.path.startsWith(`${home}/`) ? `~${p.path.slice(home.length)}` : p.path
       const body = review[p.id] ? (
         <Box flexDirection="column" marginTop={1}>
           {REVIEW.map((line, n) => (
@@ -354,10 +418,12 @@ export const register: Register = (on) => {
         </Box>
       ) : (
         <Box flexDirection="column">
-          <Text wrap="truncate-end">
-            <Text color={ACCENT}>▸ </Text>
-            {guide}
-          </Text>
+          {!why && (
+            <Text wrap="truncate-end">
+              <Text color={ACCENT}>▸ </Text>
+              Review the plan, then accept it.
+            </Text>
+          )}
           {view.questions
             .filter((q) => q.change === p.id)
             .map((q) => (
@@ -368,15 +434,26 @@ export const register: Register = (on) => {
               </Text>
             ))}
           <Box gap={3} marginTop={1}>
-            {p.ready &&
+            {button(
+              `accept:${p.id}`,
+              'Review & accept',
+              hot('a'),
+              () =>
+                why
+                  ? update($, noticeAtom, () => ({ tone: 'fail', text: `Not ready: ${why}.` }))
+                  : setReview(p.id, true),
+              !why,
+            )}
+            {!p.here &&
               button(
-                `accept:${p.id}`,
-                'Review & accept',
-                hot('a'),
-                () => setReview(p.id, true),
+                `claim:${p.id}`,
+                'Take to this branch',
+                hot('t'),
+                () => act($, ['claim', p.id]),
                 true,
               )}
-            {p.questions > 0 &&
+            {p.here &&
+              p.questions > 0 &&
               button(
                 `ask:${p.id}`,
                 'Answer questions',
@@ -388,6 +465,19 @@ export const register: Register = (on) => {
                 },
                 true,
               )}
+          </Box>
+          {why && (
+            <Text dimColor wrap="truncate-end">
+              to accept: {why}
+            </Text>
+          )}
+          <Box gap={3} marginTop={1}>
+            {button(`refine:${p.id}`, 'Refine with agent', hot('e'), () => refine($, [p]))}
+            {button(`select:${p.id}`, picked ? 'Unselect' : 'Select', hot('s'), () =>
+              update($, selectedAtom, (ids) =>
+                ids.includes(p.id) ? ids.filter((x) => x !== p.id) : [...ids, p.id],
+              ),
+            )}
             {button(`refresh:${p.id}`, 'Refresh', hot('r'), () => refresh($))}
           </Box>
         </Box>
@@ -396,6 +486,9 @@ export const register: Register = (on) => {
         <Box borderStyle="round" borderColor="yellow" flexDirection="column" paddingX={1}>
           <Box justifyContent="space-between" gap={1}>
             <Text wrap="truncate-end">
+              <Text color={picked ? ACCENT : undefined} dimColor={!picked}>
+                {picked ? '◉' : '○'}
+              </Text>{' '}
               <Text inverse bold color="yellow">
                 {' PLAN '}
               </Text>{' '}
@@ -403,7 +496,13 @@ export const register: Register = (on) => {
             </Text>
             <Text dimColor>{p.id}</Text>
           </Box>
-          <Text color="yellow">● waiting for your accept</Text>
+          {p.here ? (
+            <Text color="yellow">● waiting for your accept</Text>
+          ) : (
+            <Text dimColor wrap="truncate-end">
+              on {p.branch}
+            </Text>
+          )}
           <Text wrap="truncate-end">
             <Text dimColor>
               {plural(p.tasks, 'task')} · {plural(p.questions, 'open question')} · check:{' '}
@@ -416,13 +515,15 @@ export const register: Register = (on) => {
               <Text color="yellow">not ready</Text>
             )}
           </Text>
+          <Text dimColor wrap="truncate-end">
+            files: {files}
+          </Text>
           {body}
         </Box>
       )
     }
 
-    const changeCard = (c: RvowChange, i: number) => {
-      const hot = (k: string) => (i === 0 ? k : undefined)
+    const changeCard = (c: RvowChange) => {
       const proved = c.tasks.filter((t) => t.state === 'proved').length
       const label = ` ${proved}/${c.tasks.length} proved`
       // The card's border and padding take 4 cells.
@@ -544,13 +645,82 @@ export const register: Register = (on) => {
       )
     }
 
+    const tab = (await read($, tabAtom)) ?? firstTab(view)
+    const picks = view.backlog.filter((p) => selected.includes(p.id))
+    const tabs = [
+      ['backlog', `Backlog (${view.backlog.length})`],
+      ['active', `Active (${view.changes.length})`],
+      ['archive', `Archive (${view.archive.length})`],
+    ] as const
+    // A plain Button takes no color, so a bar under the selected one marks it;
+    // each draws as `k: label` with a gap of 3.
+    const at = tabs.findIndex(([id]) => id === tab)
+    const offset = tabs.slice(0, at).reduce((n, [, label]) => n + label.length + 6, 0)
+    const tabBar = (
+      <Box flexDirection="column" marginBottom={1}>
+        <Box gap={3}>
+          {tabs.map(([id, label], n) =>
+            button(
+              `tab:${id}`,
+              label,
+              String(n + 1),
+              () => update($, tabAtom, () => id),
+              id === tab,
+            ),
+          )}
+        </Box>
+        <Text bold color={ACCENT}>
+          {' '.repeat(offset)}
+          {'━'.repeat((tabs[at]?.[1].length ?? 0) + 3)}
+        </Text>
+      </Box>
+    )
+    const body =
+      tab === 'backlog'
+        ? view.backlog.length > 0
+          ? [
+              picks.length > 0 && (
+                <Box key="refine-picked">
+                  {button('refine-picked', `Refine ${picks.length} selected`, 'f', async () => {
+                    await refine($, picks)
+                    await update($, selectedAtom, () => [])
+                  })}
+                </Box>
+              ),
+              ...view.backlog.map(planCard),
+            ]
+          : empty('No plan in the backlog.', startHint)
+        : tab === 'active'
+          ? view.changes.length > 0
+            ? view.changes.map(changeCard)
+            : empty(
+                'No active change on this branch.',
+                <Text dimColor wrap="truncate-end">
+                  Accept a plan on the Backlog tab first.
+                </Text>,
+              )
+          : view.archive.length > 0
+            ? view.archive.map((a) => {
+                const [mark, color] = OUTCOME[a.outcome] ?? ['?', undefined]
+                return (
+                  <Text wrap="truncate-end">
+                    <Text color={color}>{mark}</Text>{' '}
+                    <Text dimColor>
+                      {a.date} {a.id}
+                    </Text>{' '}
+                    {a.title}
+                  </Text>
+                )
+              })
+            : empty('Nothing archived yet.')
+
     return (
       <Box flexDirection="column">
         {header}
+        {tabBar}
         {noticeBox}
-        <Box flexDirection="column" gap={1}>
-          {view.plans.map(planCard)}
-          {view.changes.map(changeCard)}
+        <Box flexDirection="column" gap={tab === 'archive' ? 0 : 1}>
+          {body}
         </Box>
       </Box>
     )
