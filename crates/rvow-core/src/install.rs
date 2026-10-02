@@ -11,6 +11,10 @@ use crate::vow::sha256_hex;
 
 pub const SKILL: &str = include_str!("../../../skills/rvow/SKILL.md");
 pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow.ts");
+const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
+const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
+const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.ts");
+pub const MARKETPLACE_DIR: &str = "claude-plugin";
 const MARK: &str = "rvow-managed sha256:";
 const PRE_PUSH_MARK: &str = "# rvow pre-push gate";
 const TOOLS: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*";
@@ -88,6 +92,89 @@ fn split_front_matter(text: &str) -> (&str, &str) {
         return (&text[..cut], &text[cut..]);
     }
     ("", text)
+}
+
+/// Writes the rvow Claude Code mod as a local marketplace in `dir`, with the
+/// binary path filled in and the skill inside. rvow owns this folder, so every
+/// file is rewritten to match.
+pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
+    let register = MOD_REGISTER.replace(
+        "'__RVOW_BIN__'",
+        &format!("{:?}", rvow.display().to_string()),
+    );
+    let version = format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        &sha256_hex(format!("{register}{SKILL}{MOD_HOOKS_JSON}").as_bytes())[..12]
+    );
+    let mut plugin: Value = serde_json::from_str(MOD_PLUGIN_JSON).expect("plugin.json is JSON");
+    plugin["version"] = version.into();
+    let marketplace = json!({
+        "name": "rvow",
+        "owner": {"name": "rvow"},
+        "metadata": {"description": "The rvow plugin, written by `rvow install`"},
+        "plugins": [{
+            "name": "rvow",
+            "source": "./plugins/rvow",
+            "description": plugin["description"].clone(),
+        }],
+    });
+    let files = [
+        (
+            ".claude-plugin/marketplace.json",
+            serde_json::to_string_pretty(&marketplace).expect("json") + "\n",
+        ),
+        (
+            "plugins/rvow/.claude-plugin/plugin.json",
+            serde_json::to_string_pretty(&plugin).expect("json") + "\n",
+        ),
+        ("plugins/rvow/hooks/hooks.json", MOD_HOOKS_JSON.to_string()),
+        ("plugins/rvow/hooks/register.ts", register),
+        ("plugins/rvow/skills/rvow/SKILL.md", SKILL.to_string()),
+    ];
+    let mut changed = false;
+    for (rel, body) in files {
+        let path = dir.join(rel);
+        if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
+            continue;
+        }
+        let parent = path.parent().expect("file has a parent");
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        std::fs::write(&path, body).map_err(|e| Error::io(&path, e))?;
+        changed = true;
+    }
+    Ok(if changed {
+        Outcome::Written(dir.to_path_buf())
+    } else {
+        Outcome::Unchanged(dir.to_path_buf())
+    })
+}
+
+/// Removes the rvow entries that the settings-hook install wrote, so the mod
+/// and the settings hooks never both answer. Other hooks stay.
+pub fn remove_claude_settings(path: &Path) -> Result<Outcome> {
+    let Ok(old) = std::fs::read_to_string(path) else {
+        return Ok(Outcome::Unchanged(path.to_path_buf()));
+    };
+    let Ok(mut settings) = serde_json::from_str::<Value>(&old) else {
+        return Ok(Outcome::Unchanged(path.to_path_buf()));
+    };
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(Outcome::Unchanged(path.to_path_buf()));
+    };
+    for list in hooks.values_mut().filter_map(Value::as_array_mut) {
+        list.retain(|x| !is_rvow_entry(x));
+    }
+    let text = serde_json::to_string_pretty(&settings).expect("settings serialize") + "\n";
+    if text == old {
+        return Ok(Outcome::Unchanged(path.to_path_buf()));
+    }
+    let backup = path.with_extension("json.rvow-backup");
+    if !backup.exists() {
+        std::fs::write(&backup, &old).map_err(|e| Error::io(&backup, e))?;
+    }
+    std::fs::write(path, text).map_err(|e| Error::io(path, e))?;
+    Ok(Outcome::Written(path.to_path_buf()))
 }
 
 pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
@@ -299,6 +386,59 @@ mod tests {
             2,
             "old rvow entry replaced"
         );
+    }
+
+    #[test]
+    fn mod_marketplace_fills_the_binary_and_is_stable() {
+        let tmp = TempDir::new();
+        let dir = tmp.0.join("claude-plugin");
+        let bin = Path::new("/opt/bin/rvow");
+        assert!(matches!(
+            claude_mod(&dir, bin).unwrap(),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            claude_mod(&dir, bin).unwrap(),
+            Outcome::Unchanged(_)
+        ));
+        let reg = std::fs::read_to_string(dir.join("plugins/rvow/hooks/register.ts")).unwrap();
+        assert!(
+            reg.contains(r#"const INSTALLED_BIN = "/opt/bin/rvow""#),
+            "{reg}"
+        );
+        assert!(dir.join("plugins/rvow/skills/rvow/SKILL.md").is_file());
+        let m: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".claude-plugin/marketplace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(m["plugins"][0]["source"], "./plugins/rvow");
+        assert!(matches!(
+            claude_mod(&dir, Path::new("/new/rvow")).unwrap(),
+            Outcome::Written(_)
+        ));
+    }
+
+    #[test]
+    fn switching_to_the_mod_removes_settings_hooks() {
+        let tmp = TempDir::new();
+        let path = tmp.0.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]}}"#,
+        )
+        .unwrap();
+        claude_settings(&path, Path::new("/opt/rvow")).unwrap();
+        assert!(matches!(
+            remove_claude_settings(&path).unwrap(),
+            Outcome::Written(_)
+        ));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 0);
+        assert!(matches!(
+            remove_claude_settings(&path).unwrap(),
+            Outcome::Unchanged(_)
+        ));
     }
 
     #[test]

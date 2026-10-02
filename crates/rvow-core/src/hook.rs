@@ -137,9 +137,60 @@ fn writes_files(tool: &str) -> bool {
     matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") || tool.starts_with("mcp__")
 }
 
+/// Files outside any repository that enforce rvow: the installed mod, Claude
+/// Code's plugins and settings, and the pi extension.
+fn enforcement_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(home) = crate::store::home_dir() {
+        out.push(home.join(crate::install::MARKETPLACE_DIR));
+    }
+    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let h = PathBuf::from(h);
+        let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|c| !c.is_empty())
+            .map_or_else(|| h.join(".claude"), PathBuf::from);
+        out.push(claude.join("plugins"));
+        out.push(claude.join("settings.json"));
+        out.push(claude.join("settings.local.json"));
+        out.push(h.join(".pi/agent/extensions/rvow.ts"));
+    }
+    out
+}
+
+const WRITERS: &[&str] = &[
+    "rm", "mv", "cp", "tee", "sed", "perl", "python", "python3", "chmod", "ln", "truncate", "dd",
+    "install",
+];
+
+/// Why a Bash command that names an enforcement file must not run: a write to
+/// one of them could switch rvow off.
+fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let named = paths.iter().find(|p| {
+        let full = p.display().to_string();
+        let tilde = full.replacen(&home, "~", 1);
+        cmd.contains(&full) || (!home.is_empty() && cmd.contains(&tilde))
+    })?;
+    let writes = cmd.contains('>') || words(cmd).iter().any(|w| WRITERS.contains(&base_name(w)));
+    writes.then(|| {
+        format!(
+            "{} enforces rvow; changing it is for the user",
+            named.display()
+        )
+    })
+}
+
 /// Why an edit of `file` must not happen, or `None`.
 fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Option<String>> {
     let target = key(&real_path(Path::new(file), cwd));
+    for p in enforcement_paths() {
+        let p = key(&real_path(&p, cwd));
+        if target == p || target.starts_with(&format!("{p}/")) {
+            return Ok(Some(format!(
+                "{p} enforces rvow; changing it is for the user"
+            )));
+        }
+    }
     let root = key(&real_path(&project.root, cwd));
     let top_key = key(&real_path(top, cwd));
     let name = Path::new(&target)
@@ -264,9 +315,9 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
     let reason = if tool == "Bash" {
-        args.get("command")
-            .and_then(Value::as_str)
-            .and_then(bash_denial)
+        args.get("command").and_then(Value::as_str).and_then(|c| {
+            bash_denial(c).or_else(|| bash_enforcement_denial(c, &enforcement_paths()))
+        })
     } else if writes_files(tool) {
         match file_arg(&args) {
             Some(f) => edit_denial(project, &git::toplevel(&cwd)?, &cwd, &f)?,
@@ -350,6 +401,54 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     }))
 }
 
+/// One line for a status bar: proved tasks, drift and pending amendments of
+/// the branch's active changes, or `None` when the branch has none.
+pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
+    let top = git::toplevel(cwd)?;
+    let Some(branch) = git::branch(&top)? else {
+        return Ok(None);
+    };
+    let (living, _) = change::load_living(project)?;
+    let changes = proof::active(project, &living)?;
+    let queue = proof::on_branch(&changes, &branch);
+    if queue.is_empty() {
+        return Ok(None);
+    }
+    let config = config::load(project, home)?;
+    let now = Now {
+        top: &top,
+        config: &config,
+        env: fingerprint::env(&top, &config)?,
+        living: &living,
+    };
+    let (mut proved, mut total, mut drift_count) = (0, 0, 0);
+    for c in &queue {
+        for t in &c.loaded.tasks {
+            total += 1;
+            if proof::state(c, t, &now)? == State::Proved {
+                proved += 1;
+            }
+        }
+        drift_count += drift::drift(project, &top, &config, c)?
+            .iter()
+            .filter(|i| i.class.blocks())
+            .count();
+    }
+    let pending = amend::pending(&changes).len();
+    let name = match queue.as_slice() {
+        [one] => one.dir.id.to_string(),
+        many => format!("{} changes", many.len()),
+    };
+    let mut line = format!("rvow {name}: {proved}/{total} proved");
+    if drift_count > 0 {
+        line.push_str(&format!(", {drift_count} drift"));
+    }
+    if pending > 0 {
+        line.push_str(&format!(", {pending} pending"));
+    }
+    Ok(Some(line))
+}
+
 /// Claude Code `Stop`: a block response, or `None` to let the agent stop.
 pub fn claude_stop(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
@@ -393,6 +492,24 @@ mod tests {
         for cmd in allowed {
             assert_eq!(bash_denial(cmd), None, "{cmd}");
         }
+    }
+
+    #[test]
+    fn writes_to_enforcement_files_are_denied() {
+        let paths = vec![
+            PathBuf::from("/h/.claude/settings.json"),
+            PathBuf::from("/h/.local/share/rvow/claude-plugin"),
+        ];
+        assert!(bash_enforcement_denial("echo {} > /h/.claude/settings.json", &paths).is_some());
+        assert!(
+            bash_enforcement_denial("rm -rf /h/.local/share/rvow/claude-plugin/plugins", &paths)
+                .is_some()
+        );
+        assert_eq!(
+            bash_enforcement_denial("cat /h/.claude/settings.json", &paths),
+            None
+        );
+        assert_eq!(bash_enforcement_denial("rm -rf build", &paths), None);
     }
 
     #[test]
@@ -533,6 +650,18 @@ mod tests {
         amend::amend(&p, &home, &repo, None, "rename", None).unwrap();
         assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
 
+        assert_eq!(
+            status_line(&p, &home, &repo).unwrap().unwrap(),
+            format!(
+                "rvow {}: 0/1 proved, 1 drift, 1 pending",
+                dir.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .get(..10)
+                    .unwrap()
+            )
+        );
         let start = claude_session_start(&p, &home, &input).unwrap().unwrap();
         assert!(
             start["hookSpecificOutput"]["additionalContext"]

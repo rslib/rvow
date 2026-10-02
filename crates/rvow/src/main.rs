@@ -69,7 +69,10 @@ enum Cmd {
     Brief,
     /// Install the skill, the Claude Code hooks, the pi extension and the pre-push gate.
     Install {
-        /// Where the Claude Code hooks go: your user settings, or this repository's .claude/settings.json.
+        /// How rvow joins Claude Code: a mod (plugin), or hooks in a settings file.
+        #[arg(long, value_enum, default_value = "mod")]
+        claude: ClaudeMode,
+        /// For --claude settings: your user settings, or this repository's .claude/settings.json.
         #[arg(long, value_enum, default_value = "user")]
         scope: Scope,
     },
@@ -167,7 +170,7 @@ fn main() -> ExitCode {
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
         Cmd::Hook { harness, event } => return hook(harness, event),
-        Cmd::Install { scope } => install(scope),
+        Cmd::Install { claude, scope } => install(claude, scope),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend {
@@ -517,7 +520,7 @@ fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result<boo
             println!("  {}: {}", i.class.name(), i.what);
         }
     }
-    println!("ask the user to run: ! rvow confirm");
+    println!("ask the user to run /rvow-confirm (or ! rvow confirm)");
     Ok(true)
 }
 
@@ -614,6 +617,7 @@ enum HookEvent {
     PreToolUse,
     SessionStart,
     Stop,
+    Status,
 }
 
 /// Hooks never fail the harness: outside an rvow project they print nothing,
@@ -641,6 +645,9 @@ fn hook(harness: Harness, event: HookEvent) -> ExitCode {
                 hook::claude_session_start(&p, &home, &input)
             }
             (Harness::Claude, HookEvent::Stop) => hook::claude_stop(&p, &home, &input),
+            (Harness::Claude, HookEvent::Status) => {
+                Ok(hook::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s })))
+            }
         }
     };
     match run() {
@@ -676,7 +683,13 @@ fn report(what: &str, o: install::Outcome) {
     }
 }
 
-fn install(scope: Scope) -> Result<bool> {
+#[derive(Clone, Copy, ValueEnum)]
+enum ClaudeMode {
+    Mod,
+    Settings,
+}
+
+fn install(mode: ClaudeMode, scope: Scope) -> Result<bool> {
     let rvow = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| Error::io(Path::new("rvow"), e))?;
@@ -688,15 +701,31 @@ fn install(scope: Scope) -> Result<bool> {
     let home =
         env_dir("HOME").ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
-    report("skill", install::skill(&claude)?);
     let settings = match scope {
         Scope::User => claude.join("settings.json"),
         Scope::Project => git::toplevel(&cwd()?)?.join(".claude/settings.json"),
     };
-    report(
-        "Claude Code hooks",
-        install::claude_settings(&settings, &rvow)?,
-    );
+    match mode {
+        ClaudeMode::Mod => {
+            let dir = store::home_dir()?.join(install::MARKETPLACE_DIR);
+            report("Claude Code mod", install::claude_mod(&dir, &rvow)?);
+            report(
+                "old settings hooks",
+                install::remove_claude_settings(&settings)?,
+            );
+            println!("to load the mod in Claude Code, run once:");
+            println!("  claude plugin marketplace add {}", dir.display());
+            println!("  claude plugin install rvow@rvow");
+            println!("after a later rvow install, run: claude plugin marketplace update rvow");
+        }
+        ClaudeMode::Settings => {
+            report("skill", install::skill(&claude)?);
+            report(
+                "Claude Code hooks",
+                install::claude_settings(&settings, &rvow)?,
+            );
+        }
+    }
     let pi = home.join(".pi/agent");
     if pi.is_dir() {
         report("pi extension", install::pi_extension(&pi)?);

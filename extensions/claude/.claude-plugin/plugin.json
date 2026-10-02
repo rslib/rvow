@@ -1,0 +1,8 @@
+{
+  "name": "rvow",
+  "version": "0.1.0",
+  "description": "rvow: hold the agent to the accepted plan with checks outside the model",
+  "author": {
+    "name": "rvow"
+  }
+}

@@ -17,7 +17,7 @@ The brief at session start names the next task. `rvow brief` prints it again.
 
 ## When the plan must change
 
-- Edit the plan files, then run `rvow amend --reason "..."` and ask the user to run `! rvow confirm`.
+- Edit the plan files, then run `rvow amend --reason "..."` and ask the user to run `/rvow-confirm` (or `! rvow confirm`).
 - To change a protected test or test setup file, run `rvow amend --unlock <path> --reason "..."` first and wait for the user.
 - You never run `rvow accept` or `rvow confirm`. The hooks deny them.
 
