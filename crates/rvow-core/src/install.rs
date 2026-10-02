@@ -13,7 +13,8 @@ pub const SKILL: &str = include_str!("../../../skills/rvow/SKILL.md");
 pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow.ts");
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
-const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.ts");
+const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.tsx");
+const MOD_TYPES: &str = include_str!("../../../extensions/claude/types/index.d.ts");
 pub const MARKETPLACE_DIR: &str = "claude-plugin";
 const MARK: &str = "rvow-managed sha256:";
 const PRE_PUSH_MARK: &str = "# rvow pre-push gate";
@@ -105,7 +106,7 @@ pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
     let version = format!(
         "{}+{}",
         env!("CARGO_PKG_VERSION"),
-        &sha256_hex(format!("{register}{SKILL}{MOD_HOOKS_JSON}").as_bytes())[..12]
+        &sha256_hex(format!("{register}{SKILL}{MOD_HOOKS_JSON}{MOD_TYPES}").as_bytes())[..12]
     );
     let mut plugin: Value = serde_json::from_str(MOD_PLUGIN_JSON).expect("plugin.json is JSON");
     plugin["version"] = version.into();
@@ -129,7 +130,8 @@ pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
             serde_json::to_string_pretty(&plugin).expect("json") + "\n",
         ),
         ("plugins/rvow/hooks/hooks.json", MOD_HOOKS_JSON.to_string()),
-        ("plugins/rvow/hooks/register.ts", register),
+        ("plugins/rvow/hooks/register.tsx", register),
+        ("plugins/rvow/types/index.d.ts", MOD_TYPES.to_string()),
         ("plugins/rvow/skills/rvow/SKILL.md", SKILL.to_string()),
     ];
     let mut changed = false;
@@ -401,7 +403,7 @@ mod tests {
             claude_mod(&dir, bin).unwrap(),
             Outcome::Unchanged(_)
         ));
-        let reg = std::fs::read_to_string(dir.join("plugins/rvow/hooks/register.ts")).unwrap();
+        let reg = std::fs::read_to_string(dir.join("plugins/rvow/hooks/register.tsx")).unwrap();
         assert!(
             reg.contains(r#"const INSTALLED_BIN = "/opt/bin/rvow""#),
             "{reg}"

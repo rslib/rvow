@@ -4,5 +4,6 @@
   "description": "rvow: hold the agent to the accepted plan with checks outside the model",
   "author": {
     "name": "rvow"
-  }
+  },
+  "types": "./types/index.d.ts"
 }
