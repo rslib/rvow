@@ -1446,7 +1446,11 @@ fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
             r.line("to load the mod in Claude Code, run once:");
             r.line(format!("  claude plugin marketplace add {}", dir.display()));
             r.line("  claude plugin install rvow@rvow");
-            r.line("after a later rvow install, run: claude plugin marketplace update rvow");
+            r.line(
+                "after a later rvow install, refresh the copy Claude Code caches, then restart it:",
+            );
+            r.line("  claude plugin marketplace update rvow");
+            r.line("  claude plugin update rvow@rvow");
         }
         ClaudeMode::Settings => {
             report(&mut r, "skill", install::skill(&claude)?);
