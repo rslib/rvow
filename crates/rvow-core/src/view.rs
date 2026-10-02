@@ -8,7 +8,7 @@
 //!                  "reasons": [..] } ],
 //!                  "drift": [ { "class", "what" } ],
 //!                  "pending": [ { "id", "reason" } ] } ],
-//!   "plans": [ { "id", "title" } ],
+//!   "plans": [ { "id", "title", "tasks", "questions", "issues", "ready" } ],
 //!   "questions": [ { "change", "question", "recommended" } ],
 //!   "next": { "change", "task", "title", "verify", "state" } | null,
 //!   "needs_you": { "amendments", "questions", "blocked", "plans" } }
@@ -56,14 +56,24 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
         if Some(&loaded.proposal.branch) != branch.as_ref() {
             continue;
         }
-        for q in questions(&loaded.texts) {
+        let asked = questions(&loaded.texts);
+        for q in &asked {
             open_questions.push(json!({
                 "change": c.id.to_string(),
                 "question": q.question,
                 "recommended": q.recommended,
             }));
         }
-        plans.push(json!({"id": c.id.to_string(), "title": loaded.proposal.title}));
+        let missing = crate::plan::missing_programs(&top, &loaded.tasks).len();
+        let errors = loaded.errors().count();
+        plans.push(json!({
+            "id": c.id.to_string(),
+            "title": loaded.proposal.title,
+            "tasks": loaded.tasks.len(),
+            "questions": asked.len(),
+            "issues": errors + missing,
+            "ready": asked.is_empty() && errors + missing == 0 && !loaded.tasks.is_empty(),
+        }));
     }
     if queue.is_empty() && plans.is_empty() {
         return Ok(None);
@@ -161,6 +171,9 @@ mod tests {
         .unwrap();
         let v = view(&p, &home, &repo).unwrap().unwrap();
         assert_eq!(v["plans"][0]["id"], plan.id.to_string().as_str());
+        assert_eq!(v["plans"][0]["questions"], 1);
+        assert_eq!(v["plans"][0]["tasks"], 0);
+        assert_eq!(v["plans"][0]["ready"], false);
         assert_eq!(v["questions"][0]["recommended"], "this");
         assert_eq!(v["needs_you"]["questions"], 1);
 
