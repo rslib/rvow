@@ -9,7 +9,12 @@ const SLOW_MS = 60_000;
 
 let warned = false;
 
-function run(args: string[], cwd: string, stdin: string, timeoutMs: number): Promise<{ code: number; out: string } | undefined> {
+function run(
+  args: string[],
+  cwd: string,
+  stdin: string,
+  timeoutMs: number,
+): Promise<{ code: number; out: string } | undefined> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
@@ -22,7 +27,9 @@ function run(args: string[], cwd: string, stdin: string, timeoutMs: number): Pro
     const fail = () => {
       if (!warned) {
         warned = true;
-        console.error(`rvow: cannot run '${BIN}'; its checks are off (set RVOW_BIN or put rvow on PATH)`);
+        console.error(
+          `rvow: cannot run '${BIN}'; its checks are off (set RVOW_BIN or put rvow on PATH)`,
+        );
       }
       finish();
     };
@@ -57,7 +64,8 @@ async function hook(event: string, cwd: string, extra: object, timeoutMs: number
 const CLAUDE_NAMES: Record<string, string> = { bash: "Bash", edit: "Edit", write: "Write" };
 
 async function brief(cwd: string): Promise<string | undefined> {
-  const text = (await hook("session-start", cwd, {}, SLOW_MS))?.hookSpecificOutput?.additionalContext;
+  const text = (await hook("session-start", cwd, {}, SLOW_MS))?.hookSpecificOutput
+    ?.additionalContext;
   return typeof text === "string" && text ? text : undefined;
 }
 
@@ -163,9 +171,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
-    if (typeof input.path === "string" && input.file_path === undefined) input.file_path = input.path;
+    if (typeof input.path === "string" && input.file_path === undefined)
+      input.file_path = input.path;
     const name = CLAUDE_NAMES[event.toolName] ?? event.toolName;
-    const out = (await hook("pre-tool-use", ctx.cwd, { tool_name: name, tool_input: input }, FAST_MS))?.hookSpecificOutput;
+    const out = (
+      await hook("pre-tool-use", ctx.cwd, { tool_name: name, tool_input: input }, FAST_MS)
+    )?.hookSpecificOutput;
     if (out?.permissionDecision === "deny") {
       return { block: true, reason: String(out.permissionDecisionReason ?? "rvow: denied") };
     }
@@ -183,7 +194,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     const cmd = (event.input as Record<string, unknown>).command;
-    if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd)) await refresh(ctx);
+    if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd))
+      await refresh(ctx);
   });
 
   pi.on("session_compact", () => {
@@ -195,7 +207,13 @@ export default function (pi: ExtensionAPI) {
     resend = false;
     const text = await brief(ctx.cwd);
     if (!text) return;
-    const msg = { role: "custom" as const, customType: "rvow", content: text, display: false, timestamp: Date.now() };
+    const msg = {
+      role: "custom" as const,
+      customType: "rvow",
+      content: text,
+      display: false,
+      timestamp: Date.now(),
+    };
     return { messages: [...event.messages, msg] };
   });
 
@@ -207,7 +225,12 @@ export default function (pi: ExtensionAPI) {
     }
     if (continues >= MAX_CONTINUES) return;
     continues++;
-    const entry = { type: "custom_message" as const, customType: "rvow", content: reason, display: false };
+    const entry = {
+      type: "custom_message" as const,
+      customType: "rvow",
+      content: reason,
+      display: false,
+    };
     return { entries: [...event.entries, entry], continue: true };
   });
 
@@ -222,10 +245,13 @@ export default function (pi: ExtensionAPI) {
         invalidate() {},
         render: (width: number) => {
           const w = Math.min(width, 80);
-          return ["", ...detail(v, theme, w), "", theme.fg("dim", "esc to close")].map((l) => truncateToWidth(l, w));
+          return ["", ...detail(v, theme, w), "", theme.fg("dim", "esc to close")].map((l) =>
+            truncateToWidth(l, w),
+          );
         },
         handleInput(data: string) {
-          if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "q")) done();
+          if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "q"))
+            done();
           tui.requestRender();
         },
       }));
@@ -241,14 +267,28 @@ export default function (pi: ExtensionAPI) {
       }
       const list = await run(["confirm"], ctx.cwd, "", SLOW_MS);
       if (!list) return ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
-      const ids = list.out.split("\n").filter((l) => l.startsWith("AMD-")).map((l) => l.split(/\s/)[0]);
+      const ids = list.out
+        .split("\n")
+        .filter((l) => l.startsWith("AMD-"))
+        .map((l) => l.split(/\s/)[0]);
       if (list.code !== 0 || ids.length === 0) {
-        return ctx.ui.notify(list.out.trim() || "No pending amendments.", list.code === 0 ? "info" : "error");
+        return ctx.ui.notify(
+          list.out.trim() || "No pending amendments.",
+          list.code === 0 ? "info" : "error",
+        );
       }
       for (const id of ids) {
         const accept = await ctx.ui.confirm(`rvow ${id}`, `${list.out.trim()}\n\nAccept ${id}?`);
-        const r = await run(["confirm", id, accept ? "--accept" : "--reject"], ctx.cwd, "", SLOW_MS);
-        ctx.ui.notify(r?.out.trim() || `${id}: ${accept ? "accepted" : "rejected"}`, r?.code === 0 ? "info" : "error");
+        const r = await run(
+          ["confirm", id, accept ? "--accept" : "--reject"],
+          ctx.cwd,
+          "",
+          SLOW_MS,
+        );
+        ctx.ui.notify(
+          r?.out.trim() || `${id}: ${accept ? "accepted" : "rejected"}`,
+          r?.code === 0 ? "info" : "error",
+        );
       }
     },
   });

@@ -28,3 +28,45 @@ repos:
         entry: sh -c 'LC_ALL=C grep -n "$(printf "[^\t -~]")" "$@"; test $? -eq 1' --
         language: system
         files: \.rs$
+      - id: ext-drift
+        name: extension version drift
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run drift'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-biome
+        name: biome check
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run lint'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-tsc-pi
+        name: tsc pi extension
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run typecheck:pi'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-tsc-claude
+        name: tsc claude mod
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run typecheck:claude'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-claude-validate
+        name: claude plugin validate
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run validate:claude'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-claude-test
+        name: claude plugin test
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run test:claude'
+        language: system
+        files: ^extensions/
+        pass_filenames: false

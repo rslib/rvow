@@ -1,5 +1,5 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
+import { atom, read, update } from 'claude-code'
 
 import type { RvowChange, RvowView } from '../types'
 
@@ -55,12 +55,20 @@ async function refresh($: EngineInterface) {
   await refreshStatus($)
 }
 
-async function userOnly($: EngineInterface, origin: { kind: string }, name: string, argv: string[]) {
+async function userOnly(
+  $: EngineInterface,
+  origin: { kind: string },
+  name: string,
+  argv: string[],
+) {
   // Only the person's own Enter may decide: the engine stamps `composer`
   // and no hook or model can.
   if (origin.kind !== 'composer') return { text: `/${name} runs only when you type it yourself.` }
   try {
-    const r = await $.process.run([BIN, ...argv], { cwd: await $.session.cwd(), timeoutMs: 600_000 })
+    const r = await $.process.run([BIN, ...argv], {
+      cwd: await $.session.cwd(),
+      timeoutMs: 600_000,
+    })
     await refresh($)
     return { text: (r.stdout + r.stderr).trim() || 'no output' }
   } catch (err) {
@@ -68,18 +76,23 @@ async function userOnly($: EngineInterface, origin: { kind: string }, name: stri
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
-      description: 'Show the rvow plan summary and review checklist: <CHG-id>; record the vow: <CHG-id> yes',
+      description:
+        'Show the rvow plan summary and review checklist: <CHG-id>; record the vow: <CHG-id> yes',
     })
     await $.command.register({
       name: 'rvow-confirm',
-      description: 'List pending rvow amendments, or: accept|reject <AMD-id>..., accept --all <digest>',
+      description:
+        'List pending rvow amendments, or: accept|reject <AMD-id>..., accept --all <digest>',
     })
-    await $.command.register({ name: 'rvow', description: 'Show the rvow state of this branch in a pane' })
+    await $.command.register({
+      name: 'rvow',
+      description: 'Show the rvow state of this branch in a pane',
+    })
     await refresh($)
     return started
   })
@@ -137,7 +150,7 @@ export const register: Register = on => {
     return userOnly($, e.origin, 'rvow-accept', argv)
   })
 
-  on('command.run', { command: 'rvow' }, async $ => {
+  on('command.run', { command: 'rvow' }, async ($) => {
     await refresh($)
     await $.ui.open({ id: PANE, title: 'rvow' })
     return { text: 'rvow pane opened.' }
@@ -155,24 +168,30 @@ export const register: Register = on => {
           <Text dimColor>{c.id} </Text>
           <Text bold>{c.title}</Text>
         </Text>
-        {c.tasks.map(t => {
+        {c.tasks.map((t) => {
           const [mark, color] = MARKS[t.state] ?? ['?', undefined]
           return (
             <Text wrap="truncate-end">
-              <Text color={color} dimColor={!color}>{mark}</Text> <Text dimColor>{t.id} </Text>
+              <Text color={color} dimColor={!color}>
+                {mark}
+              </Text>{' '}
+              <Text dimColor>{t.id} </Text>
               {t.title}
               {t.reasons.length > 0 && <Text dimColor> ({t.reasons.join(', ')})</Text>}
             </Text>
           )
         })}
         {c.drift.length > 0 && head('drift')}
-        {c.drift.map(d => (
+        {c.drift.map((d) => (
           <Text wrap="truncate-end">
-            <Text color={DRIFT[d.class]} dimColor={!DRIFT[d.class]}>{d.class}</Text> {d.what}
+            <Text color={DRIFT[d.class]} dimColor={!DRIFT[d.class]}>
+              {d.class}
+            </Text>{' '}
+            {d.what}
           </Text>
         ))}
         {c.pending.length > 0 && head('pending amendments')}
-        {c.pending.map(p => (
+        {c.pending.map((p) => (
           <Text wrap="truncate-end">
             <Text dimColor>{p.id} </Text>
             {p.reason} <Text dimColor>/rvow-confirm</Text>
@@ -186,13 +205,13 @@ export const register: Register = on => {
         {view.branch && <Text dimColor>branch {view.branch}</Text>}
         {view.changes.map(section)}
         {view.plans.length > 0 && head('plans waiting for accept')}
-        {view.plans.map(p => (
+        {view.plans.map((p) => (
           <Text wrap="truncate-end">
             <Text dimColor>{p.id} </Text>
             {p.title} <Text dimColor>/rvow-accept {p.id}</Text>
           </Text>
         ))}
-        {view.questions.map(q => (
+        {view.questions.map((q) => (
           <Text wrap="truncate-end">
             <Text dimColor>{q.change} </Text>? {q.question}
             {q.recommended && <Text dimColor> (recommended: {q.recommended})</Text>}
@@ -205,7 +224,9 @@ export const register: Register = on => {
               <Text dimColor>{view.next.task} </Text>
               {view.next.title}
             </Text>
-            <Text dimColor wrap="truncate-end">$ {view.next.verify}</Text>
+            <Text dimColor wrap="truncate-end">
+              $ {view.next.verify}
+            </Text>
           </Box>
         )}
       </Box>

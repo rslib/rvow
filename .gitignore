@@ -1,2 +1,4 @@
 /target
 PLAN.md
+node_modules
+extensions/claude/.claude-plugin/types

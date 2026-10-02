@@ -46,16 +46,16 @@ test('pane and band draw the view', async ($, on) => {
     requestId: 'rvow',
     props: { title: 'rvow', isFocused: false, bodyColumns: 80, placement: 'inline' } as any,
   })
-  const lines = (await pane.findAll({ type: 'Text' })).map(t => t.text)
+  const lines = (await pane.findAll({ type: 'Text' })).map((t) => t.text)
   for (const mark of ['✓', '✗', '~', '≈', '⊘', '·']) {
-    expect(lines.some(l => l.startsWith(mark))).toBe(true)
+    expect(lines.some((l) => l.startsWith(mark))).toBe(true)
   }
   const all = await pane.findAll({ type: 'Text' })
-  const colors = async (mark: string) => all.find(t => t.text === mark)?.props.color
+  const colors = async (mark: string) => all.find((t) => t.text === mark)?.props.color
   expect(await colors('✓')).toBe('green')
   expect(await colors('✗')).toBe('red')
   expect(await colors('⊘')).toBe('magenta')
-  expect(lines.some(l => l.includes('$ cargo test'))).toBe(true)
+  expect(lines.some((l) => l.includes('$ cargo test'))).toBe(true)
 
   const band = await $.ui.mount({
     plugin: 'rvow',
