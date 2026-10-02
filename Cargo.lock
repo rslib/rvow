@@ -312,6 +312,7 @@ dependencies = [
  "clap",
  "libc",
  "rvow-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ use rvow_core::diag::Severity;
 use rvow_core::error::{Error, Result};
 use rvow_core::gate::{self, Options};
 use rvow_core::git;
+use rvow_core::hook;
 use rvow_core::lint::Finding;
 use rvow_core::notes;
 use rvow_core::proof::{self, State};
@@ -65,6 +66,13 @@ enum Cmd {
     },
     /// Print the short generated brief for this branch.
     Brief,
+    /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
+    Hook {
+        #[arg(value_enum)]
+        harness: Harness,
+        #[arg(value_enum)]
+        event: HookEvent,
+    },
     /// Record that a task cannot be finished as written.
     Block {
         /// The task id or a unique prefix of it.
@@ -148,6 +156,7 @@ fn main() -> ExitCode {
         Cmd::Path { id } => path(&id),
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
+        Cmd::Hook { harness, event } => return hook(harness, event),
         Cmd::Block { task, reason } => block(&task, &reason),
         Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend { reason, change } => amend(&reason, change.as_deref()),
@@ -578,4 +587,51 @@ fn note(kind: NoteArg, text: &str) -> Result<bool> {
         );
     }
     Ok(true)
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Harness {
+    Claude,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HookEvent {
+    PreToolUse,
+    SessionStart,
+    Stop,
+}
+
+/// Hooks never fail the harness: outside an rvow project they print nothing,
+/// and an internal error allows the call and goes to stderr, so a bug in rvow
+/// cannot lock the agent out of every repository.
+fn hook(harness: Harness, event: HookEvent) -> ExitCode {
+    let mut text = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let run = || -> Result<Option<serde_json::Value>> {
+        let home = store::home_dir()?;
+        let cwd = input
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .map_or_else(cwd, Ok)?;
+        let Ok(Some(p)) = store::find(&cwd, &home) else {
+            return Ok(None);
+        };
+        match (harness, event) {
+            (Harness::Claude, HookEvent::PreToolUse) => hook::claude_pre_tool_use(&p, &input),
+            (Harness::Claude, HookEvent::SessionStart) => {
+                hook::claude_session_start(&p, &home, &input)
+            }
+            (Harness::Claude, HookEvent::Stop) => hook::claude_stop(&p, &home, &input),
+        }
+    };
+    match run() {
+        Ok(Some(out)) => println!("{out}"),
+        Ok(None) => {}
+        Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
+    }
+    ExitCode::SUCCESS
 }

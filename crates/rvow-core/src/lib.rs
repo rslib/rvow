@@ -8,6 +8,7 @@ pub mod error;
 pub mod fingerprint;
 pub mod gate;
 pub mod git;
+pub mod hook;
 pub mod id;
 pub mod ledger;
 pub mod lint;
