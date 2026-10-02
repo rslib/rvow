@@ -128,6 +128,11 @@ enum Cmd {
         /// The change id; default: every open change on this branch.
         change: Option<String>,
     },
+    /// Move a backlog plan to the current branch, so it can be accepted here.
+    Claim {
+        /// The change id or a unique prefix of it.
+        change: String,
+    },
     /// List the open questions of a plan, each with its recommended answer.
     Clarify {
         /// The change id; default: every open change on this branch.
@@ -325,6 +330,7 @@ fn main() -> ExitCode {
         Cmd::Install { claude, scope } => install(claude, scope),
         Cmd::Check { change } => check(change.as_deref()),
         Cmd::Clarify { change, json } => clarify(change.as_deref(), json),
+        Cmd::Claim { change } => claim(&change),
         Cmd::Answer {
             reference,
             choice,
@@ -1647,4 +1653,20 @@ fn which(name: &str) -> Option<PathBuf> {
             .map(|d| d.join(name))
             .find(|p| p.is_file())
     })
+}
+
+fn claim(target: &str) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let from = plan::claim(&p, &cwd()?, target)?;
+    let branch = branch_label();
+    let mut r = Reply::new();
+    r.line(format!("moved {target} from {from} to {branch}"));
+    r.set("claimed", target.to_string());
+    r.set("from", from);
+    r.set("to", branch);
+    r.help(format!(
+        "Run `rvow check {target}` to see if the plan is ready"
+    ));
+    Ok(r)
 }

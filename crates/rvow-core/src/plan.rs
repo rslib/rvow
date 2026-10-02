@@ -118,11 +118,66 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
     Ok(out)
 }
 
+/// Moves a backlog plan to the current branch by rewriting its `branch:` line,
+/// so it can be accepted here. Returns the branch it came from.
+pub fn claim(project: &Project, cwd: &Path, input: &str) -> Result<String> {
+    let c = change::resolve(project, input)?;
+    if c.stage != Stage::Backlog {
+        return Err(crate::error::Error::new(
+            "stage",
+            format!(
+                "{} is {}; only a backlog plan moves between branches",
+                c.id,
+                c.stage.name()
+            ),
+            "an accepted change keeps its branch; amend it instead",
+        ));
+    }
+    let branch = git::branch(&git::toplevel(cwd)?)?.ok_or_else(|| {
+        crate::error::Error::new(
+            "detached",
+            "HEAD is detached",
+            "check out the branch to claim the plan for",
+        )
+    })?;
+    let _lock = project.lock()?;
+    let path = c.path.join(change::PROPOSAL);
+    let text = std::fs::read_to_string(&path).map_err(|e| crate::error::Error::io(&path, e))?;
+    let mut old = String::new();
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        match line.strip_prefix("branch:") {
+            Some(rest) if old.is_empty() => {
+                old = rest.trim().to_string();
+                out.push_str(&format!("branch: {branch}\n"));
+            }
+            _ => out.push_str(line),
+        }
+    }
+    if old.is_empty() {
+        out = format!("branch: {branch}\n{text}");
+    }
+    std::fs::write(&path, out).map_err(|e| crate::error::Error::io(&path, e))?;
+    Ok(old)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
     use crate::store::{Mode, init};
+
+    #[test]
+    fn claim_moves_a_backlog_plan_to_this_branch() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = change::new(&p, "T", "elsewhere", true).unwrap();
+        assert_eq!(claim(&p, &repo, &c.id.to_string()).unwrap(), "elsewhere");
+        let text = std::fs::read_to_string(c.path.join(change::PROPOSAL)).unwrap();
+        assert!(text.starts_with("branch: main\n"), "{text}");
+        assert_eq!(check(&p, &repo, None).unwrap().len(), 1);
+    }
 
     #[test]
     fn programs_skip_assignments_and_env() {
