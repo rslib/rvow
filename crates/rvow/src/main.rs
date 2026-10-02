@@ -2,27 +2,72 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use clap::{Parser, Subcommand};
 use rvow_core::change::{self, Stage};
 use rvow_core::diag::Severity;
 use rvow_core::error::{Error, Result};
+use rvow_core::gate::{self, Options};
 use rvow_core::git;
 use rvow_core::lint::Finding;
+use rvow_core::proof::{self, State};
 use rvow_core::store::{self, Mode, Project};
 use rvow_core::vow;
 
-const USAGE: &str = "\
-rvow: hold a coding agent to an accepted plan
+/// Hold a coding agent to an accepted plan.
+#[derive(Parser)]
+#[command(name = "rvow", version)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
 
-usage:
-  rvow init [--in-repo]          create the rvow tree for this repository
-  rvow new <title> [--small]     create a change in backlog/
-  rvow validate                  check specs and changes
-  rvow accept <change> [--yes]   run the baseline and record the vow
-";
-
-enum Exit {
-    Ok,
-    Failed,
+#[derive(Subcommand)]
+enum Cmd {
+    /// Create the rvow tree for this repository.
+    Init {
+        /// Keep the tree in rvow/ inside the repository instead of the home store.
+        #[arg(long)]
+        in_repo: bool,
+    },
+    /// Create a change in backlog/.
+    New {
+        /// The change title.
+        #[arg(required = true, num_args = 1..)]
+        title: Vec<String>,
+        /// A small change: proposal and tasks, no spec deltas.
+        #[arg(long)]
+        small: bool,
+    },
+    /// Check the specs and every open change.
+    Validate,
+    /// Run the baseline and record the vow (user only).
+    Accept {
+        /// The change id or a unique prefix of it.
+        change: String,
+        /// Record the vow without asking.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Run a task's stored verify command and record the proof.
+    Prove {
+        /// The task id or a unique prefix of it.
+        task: String,
+    },
+    /// Show the state of each task on this branch.
+    Status {
+        /// Show every active change, not only this branch's.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Check the active changes of this branch.
+    Gate {
+        /// Fail on stale and flaky proofs too.
+        #[arg(long)]
+        strict: bool,
+        /// Run every verify command again in a clean worktree of HEAD.
+        #[arg(long)]
+        rerun: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -32,59 +77,25 @@ fn main() -> ExitCode {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some((cmd, rest)) = args.split_first() else {
-        print!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    let result = match cmd.as_str() {
-        "init" => init(rest),
-        "new" => new(rest),
-        "validate" => validate(rest),
-        "accept" => accept(rest),
-        "-h" | "--help" | "help" => {
-            print!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        _ => {
-            eprintln!("error: unknown command {cmd:?}\n\n{USAGE}");
-            return ExitCode::from(2);
-        }
+    let cli = Cli::parse();
+    let result = match cli.cmd {
+        Cmd::Init { in_repo } => init(in_repo),
+        Cmd::New { title, small } => new(&title.join(" "), small),
+        Cmd::Validate => validate(),
+        Cmd::Accept { change, yes } => accept(&change, yes),
+        Cmd::Prove { task } => prove(&task),
+        Cmd::Status { all } => status(all),
+        Cmd::Gate { strict, rerun } => gate(Options { strict, rerun }),
     };
     match result {
-        Ok(Exit::Ok) => ExitCode::SUCCESS,
-        Ok(Exit::Failed) => ExitCode::FAILURE,
-        Err(e) if e.code == "usage" => {
-            eprintln!("error: {}\n\n{USAGE}", e.message);
-            ExitCode::from(2)
-        }
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
         Err(e) => {
             println!("error[{}]: {}", e.code, e.message);
             println!("  fix: {}", e.fix);
             ExitCode::FAILURE
         }
     }
-}
-
-fn usage(msg: &str) -> Error {
-    Error::new("usage", msg, "")
-}
-
-/// Splits arguments into flags from `allowed` and positional words.
-fn parse<'a>(args: &'a [String], allowed: &[&str]) -> Result<(Vec<&'a str>, Vec<&'a str>)> {
-    let mut flags = Vec::new();
-    let mut words = Vec::new();
-    for a in args {
-        if a.starts_with("--") {
-            if !allowed.contains(&a.as_str()) {
-                return Err(usage(&format!("unknown flag {a}")));
-            }
-            flags.push(a.as_str());
-        } else {
-            words.push(a.as_str());
-        }
-    }
-    Ok((flags, words))
 }
 
 fn cwd() -> Result<PathBuf> {
@@ -101,27 +112,14 @@ fn project(home: &Path) -> Result<Project> {
     })
 }
 
-fn init(args: &[String]) -> Result<Exit> {
-    let (flags, words) = parse(args, &["--in-repo"])?;
-    if !words.is_empty() {
-        return Err(usage("init takes no arguments"));
-    }
-    let mode = if flags.contains(&"--in-repo") {
-        Mode::Repo
-    } else {
-        Mode::Home
-    };
+fn init(in_repo: bool) -> Result<bool> {
+    let mode = if in_repo { Mode::Repo } else { Mode::Home };
     let p = store::init(&cwd()?, &store::home_dir()?, mode)?;
     println!("created {}", p.root.display());
-    Ok(Exit::Ok)
+    Ok(true)
 }
 
-fn new(args: &[String]) -> Result<Exit> {
-    let (flags, words) = parse(args, &["--small"])?;
-    if words.is_empty() {
-        return Err(usage("new needs a title"));
-    }
-    let title = words.join(" ");
+fn new(title: &str, small: bool) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     let branch = git::branch(&cwd()?)?.ok_or_else(|| {
@@ -139,14 +137,14 @@ fn new(args: &[String]) -> Result<Exit> {
             std::fs::read_to_string(c.path.join(change::PROPOSAL))
                 .is_ok_and(|t| t.lines().any(|l| l.trim() == format!("branch: {branch}")))
         });
-    let c = change::new(&p, &title, &branch, flags.contains(&"--small"))?;
+    let c = change::new(&p, title, &branch, small)?;
     println!("created {} at {}", c.id, c.path.display());
     if busy {
         println!(
             "hint: {branch} already has an active change; one change per branch is the standard"
         );
     }
-    Ok(Exit::Ok)
+    Ok(true)
 }
 
 fn print_findings(prefix: &str, findings: &[Finding]) -> usize {
@@ -172,11 +170,7 @@ fn print_findings(prefix: &str, findings: &[Finding]) -> usize {
     errors
 }
 
-fn validate(args: &[String]) -> Result<Exit> {
-    let (_, words) = parse(args, &[])?;
-    if !words.is_empty() {
-        return Err(usage("validate takes no arguments"));
-    }
+fn validate() -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     let (living, findings) = change::load_living(&p)?;
@@ -189,11 +183,11 @@ fn validate(args: &[String]) -> Result<Exit> {
             path.strip_prefix(&p.root).unwrap_or(&path).display()
         );
     }
-    let open = changes
-        .iter()
-        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active));
     let mut count = 0;
-    for c in open {
+    for c in changes
+        .iter()
+        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
+    {
         count += 1;
         let loaded = change::load(&c.path, &living)?;
         let prefix = format!(
@@ -206,7 +200,7 @@ fn validate(args: &[String]) -> Result<Exit> {
         "checked {} specs and {count} open changes: {errors} errors",
         living.len()
     );
-    Ok(if errors == 0 { Exit::Ok } else { Exit::Failed })
+    Ok(errors == 0)
 }
 
 fn confirm(question: &str) -> Result<bool> {
@@ -228,11 +222,7 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-fn accept(args: &[String]) -> Result<Exit> {
-    let (flags, words) = parse(args, &["--yes"])?;
-    let [target] = words[..] else {
-        return Err(usage("accept needs one change id"));
-    };
+fn accept(target: &str, yes: bool) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     let c = change::resolve(&p, target)?;
@@ -255,9 +245,9 @@ fn accept(args: &[String]) -> Result<Exit> {
             .map_or("signal".to_string(), |n| n.to_string());
         println!("  {}: baseline exit {exit}, {tests} tests", b.task);
     }
-    if !flags.contains(&"--yes") && !confirm("record the vow?")? {
+    if !yes && !confirm("record the vow?")? {
         println!("not accepted");
-        return Ok(Exit::Failed);
+        return Ok(false);
     }
     let vowed = vow::commit(&p, prepared)?;
     for (from, to) in &vowed.minted {
@@ -269,5 +259,89 @@ fn accept(args: &[String]) -> Result<Exit> {
         vowed.path.display(),
         vowed.event
     );
-    Ok(Exit::Ok)
+    Ok(true)
+}
+
+fn prove(task: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let r = proof::prove(&p, &home, &cwd()?, task, &mut std::io::stderr())?;
+    let o = &r.outcome;
+    let tests = o.tests_run.map_or("unknown".to_string(), |n| n.to_string());
+    let verdict = if r.proved {
+        "proved".to_string()
+    } else if o.timed_out {
+        "failed: timed out".to_string()
+    } else if o.passed() {
+        "failed: the command passed but ran 0 tests".to_string()
+    } else {
+        format!(
+            "failed: exit {}",
+            o.exit.map_or("signal".into(), |e| e.to_string())
+        )
+    };
+    println!(
+        "{} {verdict} ({tests} tests, {} ms, event {})",
+        r.task, o.duration_ms, r.event
+    );
+    for f in &r.lfs_pointers {
+        println!("warning: {f} is a Git LFS pointer, run git lfs pull");
+    }
+    if r.looping {
+        println!(
+            "hint: the same failure {} times in a row; if the task cannot pass as written, run rvow block {} --reason \"...\"",
+            proof::LOOP_RUNS,
+            r.task
+        );
+    }
+    match &r.next {
+        Some(next) => print!("next: {next}"),
+        None => println!("next: every task on this branch is proved or blocked"),
+    }
+    Ok(r.proved)
+}
+
+fn status(all: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let changes = proof::status(&p, &home, &cwd()?, all)?;
+    if changes.is_empty() {
+        println!("no active change on this branch");
+        return Ok(true);
+    }
+    for c in &changes {
+        println!("{} on {}", c.id, c.branch);
+        for t in &c.tasks {
+            let state = match &t.state {
+                State::Stale(why) => format!("stale ({})", why.join(", ")),
+                s => s.name().to_string(),
+            };
+            println!("  {:<10} {:<20} {}", t.task, state, t.title);
+        }
+        for problem in &c.problems {
+            println!("  error: {problem}");
+        }
+    }
+    Ok(true)
+}
+
+fn gate(opts: Options) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let r = gate::gate(&p, &home, &cwd()?, opts, &mut std::io::stderr())?;
+    for (task, ms) in &r.timings {
+        println!("rerun {task}: {ms} ms");
+    }
+    for w in &r.warnings {
+        println!("warning: {w}");
+    }
+    for f in &r.failures {
+        println!("fail: {f}");
+    }
+    if r.passed() {
+        println!("gate passed ({} active changes on this branch)", r.changes);
+    } else {
+        println!("gate failed: {} problems", r.failures.len());
+    }
+    Ok(r.passed())
 }
