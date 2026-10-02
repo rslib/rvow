@@ -112,6 +112,9 @@ pub struct Diagnostic {
     pub rule: Rule,
     pub line: usize,
     pub message: String,
+    /// The finding sits in an imported requirement that no change has touched
+    /// yet, so it counts as a warning whatever its rule says.
+    pub legacy: bool,
 }
 
 impl Diagnostic {
@@ -120,10 +123,14 @@ impl Diagnostic {
             rule,
             line,
             message: message.into(),
+            legacy: false,
         }
     }
 
     pub fn severity(&self) -> Severity {
+        if self.legacy {
+            return Severity::Warning;
+        }
         self.rule.severity()
     }
 }

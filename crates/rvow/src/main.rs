@@ -12,6 +12,7 @@ use rvow_core::gate::{self, Options};
 use rvow_core::git;
 use rvow_core::guide;
 use rvow_core::hook;
+use rvow_core::import;
 use rvow_core::install;
 use rvow_core::lint::Finding;
 use rvow_core::notes;
@@ -72,6 +73,11 @@ enum Cmd {
     Spec {
         #[command(subcommand)]
         cmd: SpecCmd,
+    },
+    /// Convert an OpenSpec tree into specs and backlog changes.
+    Import {
+        #[command(subcommand)]
+        cmd: ImportCmd,
     },
     /// Print the short guide for writing one plan artifact.
     Guide {
@@ -186,6 +192,19 @@ enum SpecCmd {
     List,
 }
 
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Import the living specs and open changes of an OpenSpec folder.
+    Openspec {
+        /// The OpenSpec folder; default: openspec/ at the repository top.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Print the report and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum Artifact {
     Proposal,
@@ -211,6 +230,9 @@ fn main() -> ExitCode {
         Cmd::Path { id } => path(&id),
         Cmd::Show { id } => show(&id),
         Cmd::Spec { cmd: SpecCmd::List } => spec_list(),
+        Cmd::Import {
+            cmd: ImportCmd::Openspec { from, dry_run },
+        } => import_openspec(from, dry_run),
         Cmd::Guide { artifact } => guide(artifact),
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
@@ -268,16 +290,34 @@ fn init(in_repo: bool) -> Result<bool> {
     Ok(true)
 }
 
-fn new(title: &str, small: bool) -> Result<bool> {
-    let home = store::home_dir()?;
-    let p = project(&home)?;
-    let branch = git::branch(&cwd()?)?.ok_or_else(|| {
+fn current_branch() -> Result<String> {
+    git::branch(&cwd()?)?.ok_or_else(|| {
         Error::new(
             "detached",
             "HEAD is detached, so the change has no branch",
             "check out a branch first",
         )
-    })?;
+    })
+}
+
+fn import_openspec(from: Option<PathBuf>, dry_run: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let from = match from {
+        Some(dir) => dir,
+        None => git::toplevel(&cwd()?)?.join("openspec"),
+    };
+    print!(
+        "{}",
+        import::openspec(&p, &from, &current_branch()?, dry_run)?
+    );
+    Ok(true)
+}
+
+fn new(title: &str, small: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let branch = current_branch()?;
     let (changes, _) = change::list(&p)?;
     let busy = changes
         .iter()

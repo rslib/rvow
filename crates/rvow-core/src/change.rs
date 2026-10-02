@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::id::{self, Id, Kind, Ref};
 use crate::lint::{self, Finding, Living};
 use crate::proposal::{Proposal, parse_proposal};
+use crate::record::{self, Record};
 use crate::registry;
 use crate::spec::{DeltaFile, DeltaOp, Spec, parse_deltas, parse_spec};
 use crate::store::Project;
@@ -371,7 +372,25 @@ pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
         specs.push((cap, spec));
     }
     findings.extend(Living { specs: &specs }.lint());
+    mark_legacy(&mut findings, &specs, &record::load(project)?);
     Ok((specs, findings))
+}
+
+/// Marks each finding whose line lies in the block of a legacy requirement.
+fn mark_legacy(findings: &mut [Finding], specs: &[CapSpec], record: &Record) {
+    for (path, d) in findings {
+        let Some((_, spec)) = specs
+            .iter()
+            .find(|(cap, _)| *path == format!("specs/{cap}/spec.md"))
+        else {
+            continue;
+        };
+        let owner = spec.requirements.iter().rfind(|r| r.line <= d.line);
+        d.legacy = owner.is_some_and(|r| match &r.id {
+            Ref::Id(id) => record.get(&id.to_string()).is_some_and(|e| e.legacy),
+            Ref::Placeholder { .. } => false,
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
