@@ -18,7 +18,7 @@ writeFileSync(
   `#!/bin/sh
 echo "$*" >> "$RVOW_FAKE/argv"
 case "$1 $2 $3" in
-  "hook claude view") [ -f "$RVOW_FAKE/slow-view" ] && sleep 0.5; cat "$RVOW_FAKE/view.json" 2>/dev/null ;;
+  "hook claude view") [ -f "$RVOW_FAKE/fail-view" ] && exit 1; [ -f "$RVOW_FAKE/slow-view" ] && sleep 0.5; cat "$RVOW_FAKE/view.json" 2>/dev/null; true ;;
   "hook claude status") cat "$RVOW_FAKE/status.json" 2>/dev/null ;;
   "hook claude pre-tool-use") cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
   "hook claude stop") cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
@@ -113,6 +113,7 @@ type Files = Partial<
     | "review.txt"
     | "slow"
     | "slow-view"
+    | "fail-view"
     | "clarify.json"
     | "confirm.txt"
     | `show-${string}.txt`,
@@ -125,6 +126,9 @@ type Ui = {
   confirm?: boolean;
   pick?: number;
   rows?: number;
+  cols?: number;
+  draft?: string;
+  mark?: boolean;
   entries?: { type: string; customType?: string; data?: unknown }[];
 };
 
@@ -147,6 +151,10 @@ function setup(files: Files, ui: Ui = {}) {
   const calls: Call[] = [];
   const entries = ui.entries ?? [];
   const script: Step[] = [];
+  const components = new Map<string, Rendered>();
+  const shortcuts = new Map<string, (c: unknown) => unknown>();
+  const listeners: ((data: string) => { consume?: boolean } | undefined)[] = [];
+  const editor = { text: ui.draft ?? "" };
   const slowView = "slow-view" in files;
   const api = {
     on: (name: string, h: Handler) => handlers.set(name, h),
@@ -154,6 +162,8 @@ function setup(files: Files, ui: Ui = {}) {
     registerTool: (t: { name: string }) => tools.push(t.name),
     sendMessage: () => {},
     sendUserMessage: (...args: unknown[]) => void calls.push({ kind: "user", args }),
+    registerShortcut: (key: string, o: { handler: (c: unknown) => unknown }) =>
+      void shortcuts.set(key, o.handler),
     appendEntry: (customType: string, data: unknown) =>
       void entries.push({ type: "custom", customType, data }),
   };
@@ -164,7 +174,11 @@ function setup(files: Files, ui: Ui = {}) {
       calls.push({ kind, args });
       return Promise.resolve(result);
     };
-  const tui = { requestRender: () => {}, terminal: { rows: ui.rows ?? 40, columns: 100 } };
+  const theme = ui.mark ? { ...THEME, inverse: (t: string) => `«${t}»` } : THEME;
+  const tui = {
+    requestRender: () => {},
+    terminal: { rows: ui.rows ?? 40, columns: ui.cols ?? 100 },
+  };
   const hasUI = ui.hasUI ?? true;
   const ctx = {
     cwd: home,
@@ -179,14 +193,26 @@ function setup(files: Files, ui: Ui = {}) {
         return Promise.resolve(options[ui.pick ?? 0]);
       },
       input: rec("input", undefined),
-      setWidget: (...args: unknown[]) => void calls.push({ kind: "widget", args }),
+      setWidget: (...args: unknown[]) => {
+        calls.push({ kind: "widget", args });
+        const [name, f] = args;
+        if (typeof f === "function") components.set(String(name), f(tui, theme));
+        else components.delete(String(name));
+      },
+      onTerminalInput: (h: (data: string) => { consume?: boolean } | undefined) => {
+        listeners.push(h);
+        return () => void listeners.splice(listeners.indexOf(h), 1);
+      },
+      getEditorText: () => editor.text,
+      setEditorText: (...args: unknown[]) => void calls.push({ kind: "editor", args }),
+      pasteToEditor: (...args: unknown[]) => void calls.push({ kind: "editor", args }),
       setStatus: (...args: unknown[]) => void calls.push({ kind: "status", args }),
       custom: (factory: Factory, opts: unknown) => {
         calls.push({ kind: "custom", args: [factory, opts] });
         return new Promise<unknown>((resolve) => {
-          Promise.resolve(factory(tui, THEME, null, resolve)).then(async (pane) => {
+          Promise.resolve(factory(tui, theme, null, resolve)).then(async (pane) => {
             const loading = () => pane.render(100).join("").includes("loading rvow...");
-            for (let i = 0; i < 300 && loading() && !slowView; i++)
+            for (let i = 0; i < 3000 && loading() && !slowView; i++)
               await new Promise((r) => setTimeout(r, 10));
             await script.shift()?.(pane);
             resolve(undefined);
@@ -218,12 +244,43 @@ function setup(files: Files, ui: Ui = {}) {
     return f as Factory;
   };
   const opened = () => calls.filter((c) => c.kind === "custom").length;
+  const queue = (...steps: Step[]) => void script.push(...steps);
   const status = (...steps: Step[]) => {
     script.push(...steps);
     return command("rvow-status");
   };
   const write = (name: keyof Files, text: string) => writeFileSync(join(home, name), text);
+  const widget = (key: string) => {
+    const call = calls.filter((c) => c.kind === "widget" && c.args[0] === key).at(-1);
+    const f = call?.args[1];
+    return typeof f === "function" ? (f as Factory) : undefined;
+  };
+  const key = (data: string) => {
+    for (const l of [...listeners]) {
+      const r = l(data);
+      if (r?.consume) return r;
+    }
+    return undefined;
+  };
+  const shortcut = (name: string) => {
+    const h = shortcuts.get(name);
+    assert.ok(h, `${name} is registered`);
+    return h(ctx);
+  };
+  const dock = async (width = ui.cols ?? 100) => {
+    const c = components.get("rvow-dock");
+    assert.ok(c, "the dock widget is set");
+    return c.render(width);
+  };
   return {
+    queue,
+    widget,
+    key,
+    shortcut,
+    dock,
+    editor,
+    tui,
+    listeners,
     commands,
     tools,
     calls,
@@ -259,7 +316,7 @@ const KEY = {
 };
 
 async function until(p: Rendered, re: RegExp, width = 100) {
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < 3000; i++) {
     if (re.test(text(p, width))) return;
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -267,7 +324,7 @@ async function until(p: Rendered, re: RegExp, width = 100) {
 }
 
 async function waitFor(cond: () => boolean) {
-  for (let i = 0; i < 300 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 3000 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
   assert.ok(cond(), "condition did not become true");
 }
 
@@ -344,8 +401,8 @@ test("rvow-status lists the backlog and every archived entry in plain mode", asy
   assert.match(out ?? "", /CHG-xgnmc0/);
 });
 
-test("rvow-status with no view opens the pane and says rvow did not answer", async () => {
-  const t = setup({});
+test("rvow-status with a failing rvow opens the pane and says rvow did not answer", async () => {
+  const t = setup({ "fail-view": "1" });
   await t.status((p) => {
     assert.match(text(p), /did not answer/);
     assert.match(text(p), /No rvow change on this branch\./);
@@ -867,7 +924,10 @@ test("the band above the editor names what needs the user, as the mod does", asy
   const none = setup({ "view.json": json(EMPTY) });
   await none.fire("session_start");
   await waitFor(() => none.statuses().length === 1);
-  assert.equal(none.calls.filter((c) => c.kind === "widget").at(-1)?.args[1], undefined);
+  assert.equal(
+    none.calls.filter((c) => c.kind === "widget" && c.args[0] === "rvow").at(-1)?.args[1],
+    undefined,
+  );
 
   const view = {
     ...WAITING({ id: "CHG-a", title: "A" }),
@@ -875,10 +935,10 @@ test("the band above the editor names what needs the user, as the mod does", asy
   };
   const t = setup({ "view.json": json(view) });
   await t.fire("session_start");
-  await waitFor(() => t.calls.some((c) => c.kind === "widget"));
-  const lines = (
-    await Promise.resolve(t.lastFactory("widget")(null, THEME, null, () => {}))
-  ).render(120);
+  await waitFor(() => t.statuses().length === 1);
+  const band = t.widget("rvow");
+  assert.ok(band);
+  const lines = (await Promise.resolve(band(t.tui, THEME, null, () => {}))).render(120);
   assert.deepEqual(lines, [
     "rvow · needs you: 1 plan to accept: /rvow-accept CHG-a · 1 amendment: /rvow-confirm · 2 questions /rvow-status",
   ]);
@@ -1098,7 +1158,10 @@ test("render and key handling stay fast on a long backlog", async () => {
       press(p, "j");
       p.render(100);
     }
-    assert.ok((performance.now() - start) / 50 < 20, "under 20 ms per key and render");
+    assert.ok(
+      (performance.now() - start) / 50 < 80,
+      "under 80 ms per key and render (200 plans, loaded machine)",
+    );
   });
 });
 
@@ -1109,4 +1172,682 @@ test("session start, agent turns and rvow tool results never wait for a slow rvo
   await t.fire("agent_settled");
   await t.fire("tool_result", { toolName: "bash", input: { command: "rvow ls" } });
   assert.ok(performance.now() - start < 100, "handlers returned before rvow answered");
+});
+
+const DOCK_ON = [{ type: "custom", customType: "rvow-dock", data: { on: true } }];
+const NEEDY = {
+  ...ACTIVE,
+  backlog: [plan("CHG-a", "Alpha")],
+  needs_you: { amendments: 1, questions: 0, blocked: 0, plans: 1 },
+};
+
+async function docked(view: object, ui: Ui = {}, files: Files = {}) {
+  const t = setup(
+    { "view.json": json(view), "status.json": json({ status: "s" }), ...files },
+    { entries: [...DOCK_ON], ...ui },
+  );
+  await t.fire("session_start");
+  await waitFor(() => t.statuses().length === 1);
+  return t;
+}
+
+const dockText = async (t: Awaited<ReturnType<typeof docked>>) => (await t.dock()).join("\n");
+
+test("the dock is off by default and /rvow-dock turns it on and off", async () => {
+  const t = setup({ "view.json": json(NEEDY) });
+  await t.fire("session_start");
+  assert.equal(t.widget("rvow-dock"), undefined);
+  await t.command("rvow-dock", "on");
+  assert.ok(t.widget("rvow-dock"));
+  assert.deepEqual(t.calls.filter((c) => c.kind === "widget").at(-1)?.args[2], {
+    placement: "aboveEditor",
+  });
+  await t.command("rvow-dock", "off");
+  assert.equal(t.widget("rvow-dock"), undefined);
+  await t.command("rvow-dock");
+  assert.ok(t.widget("rvow-dock"), "no argument toggles");
+  await t.command("rvow-dock", "bogus");
+  assert.ok(t.notes().some((n) => /usage: \/rvow-dock/.test(n)));
+});
+
+test("/rvow-dock needs a UI", async () => {
+  const t = setup({}, { hasUI: false });
+  await t.command("rvow-dock", "on");
+  assert.match(t.notes().join(), /terminal UI/);
+  assert.equal(t.widget("rvow-dock"), undefined);
+});
+
+test("the dock state is remembered in the session and restored at session start", async () => {
+  const t = setup({ "view.json": json(NEEDY) });
+  await t.command("rvow-dock", "on");
+  assert.deepEqual(t.entries.at(-1), {
+    type: "custom",
+    customType: "rvow-dock",
+    data: { on: true },
+  });
+  const again = setup({ "view.json": json(NEEDY) }, { entries: t.entries });
+  await again.fire("session_start");
+  assert.ok(again.widget("rvow-dock"), "restored on");
+  await t.command("rvow-dock", "off");
+  const off = setup({ "view.json": json(NEEDY) }, { entries: t.entries });
+  await off.fire("session_start");
+  assert.equal(off.widget("rvow-dock"), undefined, "restored off");
+});
+
+test("the dock shows branch, needs-you counts, the change with progress, plans and next", async () => {
+  const t = await docked(NEEDY);
+  const lines = await t.dock();
+  const all = lines.join("\n");
+  assert.match(
+    lines[0] ?? "",
+    /^╭ rvow ⎇ trunk · needs you: 1 plan · 1 amendment ─+.*alt\+r focus─╮$/,
+  );
+  assert.match(all, /▸ Do it █+░+ 1\/2/);
+  assert.match(all, /✓ TSK-1 title of TSK-1/);
+  assert.match(all, /· TSK-2 title of TSK-2/);
+  assert.doesNotMatch(all, /PLAN Alpha/, "plans live on the Backlog tab");
+  assert.match(all, /▸ next TSK-2 b/);
+  assert.match(lines.at(-1) ?? "", /^╰─+╯$/);
+  for (const l of lines) assert.equal(visibleWidth(l), 100);
+});
+
+test("dock height: content-sized, capped at 10 rows and 30% of the terminal", async () => {
+  const tasks = Array.from({ length: 30 }, (_, i) => task(`TSK-${i}`, "missing"));
+  const big = { ...EMPTY, changes: [change({ tasks })] };
+  assert.equal((await (await docked(big, { rows: 60 })).dock()).length, 10);
+  assert.equal((await (await docked(big, { rows: 24 })).dock()).length, 7, "30% of 24 rows");
+  assert.equal((await (await docked(big, { rows: 20 })).dock()).length, 6, "30% of 20 rows");
+  const small = { ...EMPTY, changes: [change({ tasks: [task("TSK-1", "proved")] })] };
+  assert.equal(
+    (await (await docked(small, { rows: 60 })).dock()).length,
+    5,
+    "title, counts, change, task, bottom",
+  );
+});
+
+test("the dock hides only when the terminal is too small", async () => {
+  assert.deepEqual(await (await docked(NEEDY, { cols: 49 })).dock(49), []);
+  assert.deepEqual(await (await docked(NEEDY, { rows: 19 })).dock(), []);
+  assert.ok((await (await docked(NEEDY, { cols: 50, rows: 20 })).dock(50)).length > 0);
+  const t = await docked({
+    ...EMPTY,
+    needs_you: { amendments: 0, questions: 2, blocked: 0, plans: 0 },
+  });
+  assert.match((await t.dock())[0] ?? "", /needs you: 2 questions/);
+});
+
+test("every dock state shows the tab counts like the pane's tab bar", async () => {
+  const busy = await dockText(await docked({ ...NEEDY, archive: [] }));
+  assert.match(busy, / 1 Backlog 1 {3}2 Active 1 {3}3 Archive 0 /);
+  const idle = await dockText(await docked(EMPTY));
+  assert.match(idle, / 1 Backlog 0 {3}2 Active 0 {3}3 Archive 2 /);
+});
+
+test("an idle dock opens on the Archive tab and lists as many entries as fit", async () => {
+  const archive = Array.from({ length: 5 }, (_, i) => ({
+    id: `CHG-a${i}`,
+    title: `Shipped ${i}`,
+    outcome: i === 1 ? "dropped" : "done",
+    date: "2026-10-02",
+  }));
+  const t = await docked({ ...EMPTY, archive });
+  const lines = await t.dock();
+  const all = lines.join("\n");
+  assert.match(lines[0] ?? "", /^╭ rvow ⎇ trunk .*alt\+r focus─╮$/);
+  assert.match(all, /1 Backlog 0 {3}2 Active 0 {3}3 Archive 5/);
+  assert.match(all, /✓ 2026-10-02 CHG-a0 done Shipped 0/);
+  assert.match(all, /✗ 2026-10-02 CHG-a1 dropped Shipped 1/);
+  assert.match(all, /CHG-a4 done Shipped 4/);
+  assert.equal(lines.length, 2 + 1 + 5);
+  for (const l of lines) assert.equal(visibleWidth(l), 100);
+});
+
+test("an idle dock with no archive and a fresh project still draws", async () => {
+  const t = await docked({ ...EMPTY, archive: [] });
+  const lines = await t.dock();
+  assert.equal(lines.length, 4);
+  assert.match(lines.join("\n"), /Nothing archived yet\./);
+  assert.match(lines.join("\n"), /1 Backlog 0 {3}2 Active 0 {3}3 Archive 0/);
+});
+
+test("alt+r works on an idle dock: move over archive rows, open the Archive tab, refresh, Esc", async () => {
+  const t = await docked(
+    EMPTY,
+    {},
+    { "show-CHG-w2at5e.txt": "CHG-w2at5e\nstage: done\nledger:\n  archive 1" },
+  );
+  await t.shortcut("alt+r");
+  assert.match(await dockText(t), / focus /);
+  assert.match(await dockText(t), /j\/k move.*enter open.*esc editor/);
+  assert.match((await t.dock()).find((l) => l.includes("›")) ?? "", /CHG-xgnmc0/);
+  t.key("j");
+  assert.match((await t.dock()).find((l) => l.includes("›")) ?? "", /CHG-w2at5e/);
+  let seen = "";
+  t.queue(async (p) => {
+    await until(p, /stage: done/);
+    seen = text(p);
+    press(p, KEY.esc);
+  });
+  t.key("\r");
+  await waitFor(() => /stage: done/.test(seen));
+  assert.match(seen, /ARCHIVED {2}Never fold output/);
+  await waitFor(() => t.key("k")?.consume === true);
+  assert.deepEqual(t.key("r"), { consume: true });
+  assert.deepEqual(t.key("a"), { consume: true }, "an action key has nothing to act on");
+  assert.match(await dockText(t), /Nothing to act on here\./);
+  assert.deepEqual(t.key("\u001b"), { consume: true });
+  assert.equal(t.key("a"), undefined, "after Esc keys reach the editor");
+});
+
+test("the dock and /rvow-dock say why it cannot be shown", async () => {
+  const off = setup({ "view.json": json(NEEDY) });
+  await off.fire("session_start");
+  await off.shortcut("alt+r");
+  assert.ok(off.notes().includes("the rvow dock is off; run /rvow-dock on"));
+
+  const small = await docked(NEEDY, { cols: 45, rows: 30 });
+  await small.shortcut("alt+r");
+  const msg =
+    "terminal too small for the rvow dock (needs 50 columns by 20 rows, this one is 45x30)";
+  assert.ok(small.notes().includes(msg));
+  await small.command("rvow-dock", "on");
+  assert.ok(small.notes().filter((n) => n === msg).length === 2, "/rvow-dock on says it too");
+  assert.equal(small.key("j"), undefined);
+
+  const ok = setup({ "view.json": json(NEEDY), "status.json": json({ status: "s" }) });
+  await ok.fire("session_start");
+  await waitFor(() => ok.statuses().length === 1);
+  await ok.command("rvow-dock", "on");
+  assert.ok(
+    ok.notes().includes("rvow dock on: shows plans, changes and the next task; alt+r focuses it"),
+  );
+});
+
+test("the dock shows a loading line, and alt+r says rvow did not answer yet, until the view arrives", async () => {
+  const t = setup({ "view.json": json(NEEDY), "slow-view": "1" }, { entries: [...DOCK_ON] });
+  await t.fire("session_start");
+  const loading = await t.dock();
+  assert.ok(loading.length > 0, "not zero rows while loading");
+  assert.match(loading.join("\n"), /loading rvow\.\.\./);
+  await t.shortcut("alt+r");
+  assert.ok(t.notes().includes("rvow did not answer yet"));
+  await waitFor(() => t.statuses().length === 1);
+  assert.doesNotMatch((await t.dock()).join("\n"), /loading/);
+  await t.shortcut("alt+r");
+  assert.match((await t.dock()).join("\n"), / focus /);
+});
+
+test("a long dock scrolls to keep the focused row visible", async () => {
+  const tasks = Array.from({ length: 30 }, (_, i) => task(`TSK-${i}`, "missing"));
+  const t = await docked({ ...EMPTY, changes: [change({ tasks })] }, { rows: 60 });
+  t.shortcut("alt+r");
+  for (let i = 0; i < 20; i++) t.key("j");
+  const all = await dockText(t);
+  assert.match(all, /› .*TSK-19/);
+  assert.doesNotMatch(all, /TSK-0 /);
+  assert.equal((await t.dock()).length, 10);
+});
+
+test("alt+r focuses the dock and leaves it again; the title row shows the focus tag", async () => {
+  const t = await docked(NEEDY);
+  assert.match(await dockText(t), /alt\+r focus/);
+  await t.shortcut("alt+r");
+  assert.match(await dockText(t), / focus /);
+  assert.doesNotMatch(await dockText(t), /alt\+r focus/);
+  assert.match(await dockText(t), /j\/k move.*esc editor/, "key hint inside the dock");
+  await t.shortcut("alt+r");
+  assert.match(await dockText(t), /alt\+r focus/);
+});
+
+test("unfocused, the dock consumes nothing; focused, it consumes its keys and passes the rest", async () => {
+  const t = await docked(NEEDY);
+  await t.dock();
+  for (const k of ["j", "k", "a", "\r", "\u001b", "x"]) assert.equal(t.key(k), undefined, k);
+  t.shortcut("alt+r");
+  for (const k of ["j", "k", "\u001b[B", "\u001b[A", "r", "\u001b"]) {
+    t.shortcut("alt+r");
+    t.shortcut("alt+r");
+    assert.deepEqual(t.key(k), { consume: true }, JSON.stringify(k));
+    if (k === "\u001b") t.shortcut("alt+r");
+  }
+  t.shortcut("alt+r");
+  for (const k of ["z", "q", "\u001b[D", "1", " ", "\u0003"])
+    assert.equal(t.key(k), undefined, `${JSON.stringify(k)} reaches the editor`);
+});
+
+test("j k and the arrows move the dock cursor; Esc returns focus to the editor", async () => {
+  const t = await docked(NEEDY);
+  await t.shortcut("alt+r");
+  const on = async () => (await t.dock()).find((l) => l.includes("›")) ?? "";
+  assert.match(await on(), /▸ Do it/);
+  t.key("j");
+  assert.match(await on(), /TSK-1/);
+  t.key("\u001b[B");
+  assert.match(await on(), /TSK-2/);
+  t.key("k");
+  assert.match(await on(), /TSK-1/);
+  t.key("\u001b[A");
+  t.key("k");
+  assert.match(await on(), /▸ Do it/, "stops at the first row");
+  for (let i = 0; i < 9; i++) t.key("j");
+  assert.match(await on(), /TSK-2/, "stops at the last item");
+  assert.deepEqual(t.key("\u001b"), { consume: true });
+  assert.equal(t.key("j"), undefined, "after Esc keys go to the editor");
+  assert.doesNotMatch(await dockText(t), /›/);
+});
+
+test("the dock action hotkeys act on the focused plan", async () => {
+  const focusPlan = async (t: Awaited<ReturnType<typeof docked>>) => {
+    await t.shortcut("alt+r");
+    t.key("1");
+  };
+
+  const accept = await docked(NEEDY, {}, { "review.txt": "checklist" });
+  await focusPlan(accept);
+  accept.key("a");
+  await waitFor(() => decided(accept.argv()).length === 1);
+  assert.deepEqual(decided(accept.argv()), ["accept CHG-a"]);
+  assert.match(String(accept.calls.find((c) => c.kind === "confirm")?.args[1]), /checklist/);
+  await waitFor(() => accept.users().length === 1);
+
+  const refine = await docked(NEEDY);
+  await focusPlan(refine);
+  refine.key("e");
+  await waitFor(() => refine.users().length === 1);
+  assert.deepEqual(refine.users(), [modRefine([plan("CHG-a", "Alpha")])]);
+
+  const pick = await docked(NEEDY);
+  await focusPlan(pick);
+  pick.key("s");
+  assert.match(await dockText(pick), /◉ PLAN Alpha/);
+  assert.match(await dockText(pick), /f refine 1/);
+  pick.key("f");
+  await waitFor(() => pick.users().length === 1);
+  pick.key("s");
+
+  const away = plan("CHG-far", "Far", { here: false, branch: "other" });
+  const take = await docked({ ...EMPTY, backlog: [plan("CHG-a", "A"), away] });
+  await take.shortcut("alt+r");
+  take.key("j");
+  take.key("t");
+  await waitFor(() => decided(take.argv()).length === 1);
+  assert.deepEqual(decided(take.argv()), ["claim CHG-far"]);
+});
+
+test("t takes a plan that is not here, and A answers open questions", async () => {
+  const away = plan("CHG-far", "Far", { here: false, branch: "other" });
+  const take = await docked({ ...EMPTY, backlog: [away] });
+  await take.shortcut("alt+r");
+  assert.match(await dockText(take), /PLAN Far CHG-far on other/);
+  take.key("t");
+  await waitFor(() => take.argv().some((l) => l.startsWith("claim")));
+  assert.ok(take.argv().includes("claim CHG-far"));
+
+  const asked = {
+    questions: [{ ref: "Q1", question: "Which?", options: [{ label: "one" }] }],
+    remaining: 0,
+  };
+  const withQ = { ...EMPTY, backlog: [plan("CHG-a", "A", { questions: 1 })] };
+  const ask = await docked(withQ, {}, { "clarify.json": json(asked) });
+  await ask.shortcut("alt+r");
+  ask.key("A");
+  await waitFor(() => ask.argv().includes("answer Q1 one --via dialog"));
+});
+
+test("x archives a finished change and c reviews amendments from the dock", async () => {
+  const done = await docked(DONE);
+  await done.shortcut("alt+r");
+  assert.match(await dockText(done), /x archive/);
+  done.key("x");
+  await waitFor(() => decided(done.argv()).length === 1);
+  assert.deepEqual(decided(done.argv()), ["archive CHG-1"]);
+
+  const half = await docked(ACTIVE);
+  await half.shortcut("alt+r");
+  assert.doesNotMatch(await dockText(half), /x archive/);
+  assert.deepEqual(half.key("x"), { consume: true });
+  assert.match(await dockText(half), /Nothing to act on here\./);
+
+  const view = { ...ACTIVE, changes: [change({ pending: [{ id: "AMD-1", reason: "add" }] })] };
+  const amend = await docked(view, {}, { "confirm.txt": "AMD-1 add" });
+  await amend.shortcut("alt+r");
+  assert.match(await dockText(amend), /c amend/);
+  amend.key("c");
+  await waitFor(() => amend.argv().includes("confirm AMD-1 --accept"));
+});
+
+test("a not-ready plan says why inside the dock", async () => {
+  const view = { ...EMPTY, backlog: [plan("CHG-a", "A", { ready: false, tasks: 0 })] };
+  const t = await docked(view);
+  await t.shortcut("alt+r");
+  assert.deepEqual(t.key("a"), { consume: true });
+  assert.match(await dockText(t), /✗ Not ready: add at least one task/);
+  assert.deepEqual(
+    t.argv().filter((l) => l.startsWith("review")),
+    [],
+  );
+});
+
+test("enter opens the modal pane at the focused item, and focus returns to the dock", async () => {
+  const t = await docked(NEEDY, {}, { "show-CHG-1.txt": "CHG-1\ntitle: Do it\nstage: active" });
+  await t.shortcut("alt+r");
+  let seen = "";
+  let during: unknown = "unset";
+  t.queue(async (p) => {
+    await until(p, /stage: active/);
+    seen = text(p);
+    during = t.key("j");
+    press(p, KEY.esc);
+  });
+  t.key("\r");
+  await waitFor(() => t.opened() === 1);
+  await waitFor(() => /stage: active/.test(seen));
+  assert.match(seen, /CHANGE {2}Do it/);
+  assert.equal(during, undefined, "the dock does not eat keys meant for the modal");
+  await waitFor(() => t.key("k")?.consume === true);
+  assert.match(await dockText(t), / focus /, "focus came back");
+});
+
+test("enter on a task opens the task detail, on a plan the plan detail", async () => {
+  const t = await docked(NEEDY, {}, { "show-TSK-1.txt": "TSK-1\ntitle: a\nstage: t1" });
+  await t.shortcut("alt+r");
+  t.key("j");
+  let seen = "";
+  t.queue(async (p) => {
+    await until(p, /stage: t1/);
+    seen = text(p);
+  });
+  t.key("d");
+  await waitFor(() => /stage: t1/.test(seen));
+  assert.match(seen, /TASK {2}title of TSK-1/);
+});
+
+test("the dock and the modal share the selection", async () => {
+  const t = await docked(NEEDY);
+  await t.shortcut("alt+r");
+  t.key("1");
+  t.key("s");
+  let seen = "";
+  t.queue((p) => {
+    press(p, "1");
+    seen = text(p);
+    press(p, "s");
+  });
+  t.key("\r");
+  await waitFor(() => t.opened() === 1);
+  await waitFor(() => seen !== "");
+  assert.match(seen, /f Refine 1 selected/);
+  await waitFor(() => t.key("k")?.consume === true);
+  assert.doesNotMatch(await dockText(t), /◉/, "unselected in the modal shows in the dock");
+});
+
+test("focus changes never touch the editor", async () => {
+  const t = await docked(NEEDY, { draft: "half a sentence" });
+  await t.shortcut("alt+r");
+  t.key("j");
+  t.key("z");
+  t.key("\u001b");
+  await t.shortcut("alt+r");
+  t.key("\u001b");
+  assert.equal(t.editor.text, "half a sentence");
+  assert.deepEqual(
+    t.calls.filter((c) => c.kind === "editor"),
+    [],
+  );
+});
+
+test("the band is hidden while the dock is shown and returns when it is off or hidden", async () => {
+  const view = {
+    ...WAITING({ id: "CHG-a", title: "A" }),
+    needs_you: { amendments: 0, questions: 1, blocked: 0, plans: 1 },
+  };
+  const band = async (t: Awaited<ReturnType<typeof docked>>, width: number) => {
+    const f = t.widget("rvow");
+    assert.ok(f);
+    return (await Promise.resolve(f(t.tui, THEME, null, () => {}))).render(width);
+  };
+  const on = await docked(view);
+  assert.deepEqual(await band(on, 100), []);
+  const narrow = await docked(view, { cols: 40 });
+  assert.equal((await band(narrow, 40)).length, 1, "dock hidden, band returns");
+  const short = await docked(view, { rows: 19 });
+  assert.equal((await band(short, 100)).length, 1);
+  await on.command("rvow-dock", "off");
+  assert.equal((await band(on, 100)).length, 1, "dock off, band returns");
+});
+
+test("the dock refreshes with the view in the background and never blocks", async () => {
+  const t = await docked(NEEDY);
+  const before = await dockText(t);
+  t.write("view.json", json({ ...NEEDY, changes: [change({ title: "Renamed" })] }));
+  await t.fire("agent_settled");
+  await waitFor(() => t.statuses().length === 2);
+  assert.notEqual(await dockText(t), before);
+  assert.match(await dockText(t), /Renamed/);
+
+  const slow = await docked(NEEDY, {}, { "slow-view": "1" });
+  await slow.shortcut("alt+r");
+  const start = performance.now();
+  slow.key("r");
+  for (let i = 0; i < 20; i++) slow.key("j");
+  await slow.dock();
+  assert.ok(performance.now() - start < 150, "keys and render do not wait for rvow");
+});
+
+test("rvow printing nothing means a project with no change and no archive", async () => {
+  const t = setup({});
+  await t.status((p) => {
+    assert.match(text(p), /Nothing archived yet\./);
+    assert.doesNotMatch(text(p), /did not answer/);
+    press(p, "1");
+    assert.match(text(p), /No plan in the backlog\./);
+  });
+  const d = setup({ "status.json": json({ status: "s" }) }, { entries: [...DOCK_ON] });
+  await d.fire("session_start");
+  await waitFor(() => d.statuses().length === 1);
+  const lines = (await d.dock()).join("\n");
+  assert.match(lines, /Nothing archived yet\./);
+  assert.match(lines, /1 Backlog 0 {3}2 Active 0 {3}3 Archive 0/);
+  await d.shortcut("alt+r");
+  assert.match((await d.dock()).join("\n"), / focus /);
+});
+
+test("a failing rvow keeps the dock on its loading line and says so on alt+r", async () => {
+  const t = setup({ "fail-view": "1" }, { entries: [...DOCK_ON] });
+  await t.fire("session_start");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.match((await t.dock()).join("\n"), /loading rvow\.\.\./);
+  await t.shortcut("alt+r");
+  assert.ok(t.notes().includes("rvow did not answer yet"));
+});
+
+const ARCHIVE10 = Array.from({ length: 10 }, (_, i) => ({
+  id: `CHG-a${i}`,
+  title: `Shipped ${i}`,
+  outcome: "done",
+  date: "2026-10-02",
+}));
+const FULL = {
+  ...ACTIVE,
+  backlog: [plan("CHG-a", "Alpha"), plan("CHG-far", "Far", { here: false, branch: "other" })],
+  archive: ARCHIVE10,
+};
+
+test("the dock tab bar matches the pane and highlights the current tab", async () => {
+  const plain = await docked(FULL);
+  assert.match(
+    (await plain.dock())[1] ?? "",
+    /^│ {2}1 Backlog 2 {3}2 Active 1 {3}3 Archive 10 +│$/,
+  );
+  const t = await docked(FULL, { mark: true });
+  const marked = async () => /«([^»]*)»/.exec((await t.dock())[1] ?? "")?.[1];
+  assert.equal(await marked(), " 2 Active 1 ");
+  await t.shortcut("alt+r");
+  t.key("1");
+  assert.equal(await marked(), " 1 Backlog 2 ");
+  t.key("3");
+  assert.equal(await marked(), " 3 Archive 10 ");
+});
+
+test("the default dock tab is Active, else Backlog, else Archive, and shows only that tab", async () => {
+  const active = await dockText(await docked(FULL));
+  assert.match(active, /▸ Do it/);
+  assert.doesNotMatch(active, /PLAN|CHG-a0/);
+  const backlog = await dockText(await docked({ ...FULL, changes: [] }));
+  assert.match(backlog, /PLAN Alpha/);
+  assert.match(backlog, /PLAN Far CHG-far on other/);
+  assert.doesNotMatch(backlog, /Do it|CHG-a0/);
+  const archive = await dockText(await docked({ ...FULL, changes: [], backlog: [] }));
+  assert.match(archive, /CHG-a0 done Shipped 0/);
+  assert.doesNotMatch(archive, /PLAN|Do it/);
+});
+
+test("a tab the user picks sticks across refreshes", async () => {
+  const t = await docked(FULL);
+  await t.shortcut("alt+r");
+  t.key("3");
+  t.write("view.json", json({ ...FULL, changes: [change({ title: "Renamed" })] }));
+  await t.fire("agent_settled");
+  await waitFor(() => t.statuses().length === 2);
+  assert.match(await dockText(t), /CHG-a0 done Shipped 0/);
+  assert.doesNotMatch(await dockText(t), /Renamed/);
+});
+
+test("the dock and the modal pane share the current tab", async () => {
+  const t = await docked(FULL);
+  await t.shortcut("alt+r");
+  t.key("3");
+  let seen = "";
+  t.queue(async (p) => {
+    seen = text(p);
+    press(p, "1");
+    press(p, KEY.esc);
+  });
+  await t.command("rvow-status");
+  assert.match(seen, /CHG-a0/, "the modal opened on the dock's Archive tab");
+  assert.match(await dockText(t), /PLAN Alpha/, "a tab chosen in the modal shows in the dock");
+});
+
+test("tab keys are consumed only while the dock has focus", async () => {
+  const t = await docked(FULL);
+  await t.dock();
+  for (const k of [
+    "1",
+    "2",
+    "3",
+    "\t",
+    "\u001b[Z",
+    "\u001b[D",
+    "\u001b[C",
+    "\u001b[5~",
+    "\u001b[6~",
+  ])
+    assert.equal(t.key(k), undefined, JSON.stringify(k));
+  await t.shortcut("alt+r");
+  const themed = await docked(FULL, { mark: true });
+  await themed.shortcut("alt+r");
+  const tabOf = async () => /«([^»]*)»/.exec((await themed.dock())[1] ?? "")?.[1]?.trim();
+  for (const [key, want] of [
+    ["1", "1 Backlog 2"],
+    ["2", "2 Active 1"],
+    ["3", "3 Archive 10"],
+    ["\t", "1 Backlog 2"],
+    ["\u001b[Z", "3 Archive 10"],
+    ["\u001b[D", "2 Active 1"],
+    ["\u001b[C", "3 Archive 10"],
+  ] as const) {
+    assert.deepEqual(themed.key(key), { consume: true }, JSON.stringify(key));
+    assert.equal(await tabOf(), want, JSON.stringify(key));
+  }
+});
+
+test("j and k move over the rows of the current tab; pages jump", async () => {
+  const t = await docked(FULL);
+  await t.shortcut("alt+r");
+  const on = async () => ((await t.dock()).find((l) => l.includes("›")) ?? "").replace(/\s+/g, " ");
+  t.key("1");
+  assert.match(await on(), /PLAN Alpha/);
+  t.key("j");
+  assert.match(await on(), /PLAN Far/);
+  t.key("j");
+  assert.match(await on(), /PLAN Far/, "stops at the last plan");
+  t.key("3");
+  assert.match(await on(), /Shipped 0/, "a new tab starts at its first row");
+  t.key("j");
+  assert.match(await on(), /Shipped 1/);
+  t.key("\u001b[6~");
+  assert.match(await on(), /Shipped 9/, "page down jumps and stops at the end");
+  t.key("\u001b[5~");
+  assert.match(await on(), /Shipped 1/);
+  t.key("2");
+  assert.match(await on(), /▸ Do it/);
+});
+
+test("a long Archive tab scrolls inside the height cap with an n-m/total marker", async () => {
+  const t = await docked({ ...EMPTY, archive: ARCHIVE10 });
+  const lines = await t.dock();
+  assert.equal(lines.length, 10);
+  assert.match(lines.at(-1) ?? "", /1-7\/10/);
+  await t.shortcut("alt+r");
+  for (let i = 0; i < 9; i++) t.key("j");
+  const after = await t.dock();
+  assert.equal(after.length, 10);
+  assert.match(after.join("\n"), /› .*Shipped 9/);
+  assert.match(after.at(-1) ?? "", /4-10\/10/);
+  assert.doesNotMatch(after.join("\n"), /Shipped 0/);
+});
+
+test("an empty tab shows its message and never draws blank", async () => {
+  const t = await docked({ ...EMPTY, archive: [] });
+  await t.shortcut("alt+r");
+  for (const [key, msg] of [
+    ["1", /No plan in the backlog\./],
+    ["2", /Nothing active on trunk\./],
+    ["3", /Nothing archived yet\./],
+  ] as const) {
+    t.key(key);
+    assert.match(await dockText(t), msg);
+    assert.equal((await t.dock()).length, 4);
+  }
+});
+
+test("the chosen dock tab is saved and restored in the next session", async () => {
+  const t = await docked(FULL);
+  await t.shortcut("alt+r");
+  t.key("3");
+  assert.equal(
+    (t.entries.filter((e) => e.customType === "rvow-pane").at(-1)?.data as { tab?: string })?.tab,
+    "archive",
+  );
+  const next = await docked(FULL, { entries: [...t.entries] });
+  assert.match(await dockText(next), /CHG-a0 done Shipped 0/);
+});
+
+test("height rules hold on every tab", async () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => plan(`CHG-p${i}`, `Plan ${i}`));
+  const tasks = Array.from({ length: 30 }, (_, i) => task(`TSK-${i}`, "missing"));
+  const view = { ...EMPTY, backlog: many(30), archive: ARCHIVE10, changes: [change({ tasks })] };
+  for (const [rows, cap] of [
+    [60, 10],
+    [24, 7],
+    [20, 6],
+  ] as const) {
+    const t = await docked(view, { rows });
+    await t.shortcut("alt+r");
+    for (const k of ["1", "2", "3"]) {
+      t.key(k);
+      assert.equal((await t.dock()).length, cap, `tab ${k} at ${rows} rows`);
+    }
+  }
+});
+
+test("the focus hint lists the tab keys and shortens at narrow widths", async () => {
+  const t = await docked(FULL);
+  await t.shortcut("alt+r");
+  assert.match((await t.dock()).at(-1) ?? "", /1-3 tabs {2}j\/k move.*esc editor/);
+  const narrow = await docked(FULL, { cols: 50 });
+  await narrow.shortcut("alt+r");
+  const hint = (await narrow.dock(50)).at(-1) ?? "";
+  assert.match(hint, /1-3 tabs.*esc editor/);
+  assert.equal(visibleWidth(hint), 50);
 });

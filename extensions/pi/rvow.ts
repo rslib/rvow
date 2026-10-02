@@ -113,9 +113,12 @@ async function hook(
   cwd: string,
   extra: object,
   timeoutMs: number,
+  emptyMeansNone = false,
 ): Promise<HookOutput | undefined> {
   const r = await run(["hook", "claude", event], cwd, JSON.stringify({ cwd, ...extra }), timeoutMs);
-  if (r?.code !== 0 || !r.out.trim()) return undefined;
+  if (r?.code !== 0) return undefined;
+  // rvow prints nothing for `view` in a project with no change and no archive at all.
+  if (!r.out.trim()) return emptyMeansNone ? { changes: [] } : undefined;
   try {
     const parsed: unknown = JSON.parse(r.out);
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
@@ -272,6 +275,7 @@ const TONE: Record<Notice["tone"], [string, ThemeColor]> = {
   fail: ["✗", "error"],
 };
 const ENTRY = "rvow-pane";
+const DOCK_ENTRY = "rvow-dock";
 
 const isTab = (v: unknown): v is Tab => TABS.some((t) => t === v);
 const isKind = (v: unknown): v is Kind => KINDS.some((k) => k === v);
@@ -560,6 +564,155 @@ function detailBody(
 const firstTab = (v: View): Tab =>
   v.changes.length > 0 ? "active" : v.backlog.length > 0 ? "backlog" : "archive";
 
+type DockRow = { text: string; item?: Item };
+type Dock = { lines: string[]; items: Item[] };
+type DockIn = {
+  picked: string[];
+  cursor: number;
+  focus: boolean;
+  notice?: Notice;
+  width: number;
+  cap: number;
+  keys: [string, string][];
+  loading?: boolean;
+  tab: Tab;
+};
+
+const DOCK_KEY = "alt+r";
+const NO_VIEW: View = {
+  branch: null,
+  changes: [],
+  backlog: [],
+  archive: [],
+  questions: [],
+  next: null,
+  needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
+};
+const ACTION_KEYS = "atesfxcA";
+const DOCK_MIN_COLS = 50;
+const DOCK_MIN_ROWS = 20;
+const DOCK_MAX_ROWS = 10;
+
+const needsText = (n: NeedsYou) =>
+  [
+    n.plans > 0 && plural(n.plans, "plan"),
+    n.amendments > 0 && plural(n.amendments, "amendment"),
+    n.questions > 0 && plural(n.questions, "question"),
+    n.blocked > 0 && `${n.blocked} blocked`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+function tabCounts(v: View, active: Tab | undefined, th: Paint): string {
+  const labels = [
+    `1 Backlog ${v.backlog.length}`,
+    `2 Active ${v.changes.length}`,
+    `3 Archive ${v.archive.length}`,
+  ];
+  return labels
+    .map((l, i) => {
+      const text = ` ${l} `;
+      return TABS[i] === active ? th.inverse(th.fg("accent", th.bold(text))) : th.fg("muted", text);
+    })
+    .join(" ");
+}
+
+function dockRows(v: View, o: DockIn, th: Paint): DockRow[] {
+  const rows: DockRow[] = [];
+  const dim = (t: string) => th.fg("dim", t);
+  if (o.tab === "active") {
+    for (const c of v.changes) {
+      const tasks = c.tasks ?? [];
+      const proved = tasks.filter((t) => t.state === "proved").length;
+      const fill = tasks.length ? Math.round((8 * proved) / tasks.length) : 0;
+      const pending = (c.pending ?? []).length;
+      rows.push({
+        text: `${th.fg("accent", "▸")} ${th.bold(c.title)} ${th.fg("success", "█".repeat(fill))}${dim("░".repeat(8 - fill))} ${proved}/${tasks.length}${pending ? th.fg("warning", ` · ${plural(pending, "amendment")}`) : ""}`,
+        item: { kind: "change", change: c },
+      });
+      for (const t of tasks) {
+        const [mark, color] = MARKS[t.state] ?? ["?", "dim"];
+        rows.push({
+          text: `  ${th.fg(color, mark)} ${cut(`${t.id} ${t.title}`, o.width - 10)}`,
+          item: { kind: "task", change: c, task: t },
+        });
+      }
+    }
+    if (v.changes.length === 0)
+      rows.push({ text: dim(`Nothing active${v.branch ? ` on ${v.branch}` : ""}.`) });
+    if (v.next)
+      rows.push({
+        text: `${th.fg("accent", "▸ next")} ${dim(v.next.task)} ${v.next.title}`,
+      });
+  } else if (o.tab === "backlog") {
+    for (const p of [...v.backlog.filter((x) => x.here), ...v.backlog.filter((x) => !x.here)]) {
+      const mark = o.picked.includes(p.id) ? th.fg("accent", "◉") : dim("○");
+      const where = dim(p.here ? p.id : `${p.id} on ${p.branch ?? "?"}`);
+      rows.push({
+        text: `${mark} ${th.fg(p.here ? "warning" : "dim", "PLAN")} ${p.title} ${where}`,
+        item: { kind: "plan", plan: p },
+      });
+    }
+    if (v.backlog.length === 0) rows.push({ text: dim("No plan in the backlog.") });
+  } else {
+    for (const a of v.archive) {
+      const [mark, color] = OUTCOME[a.outcome] ?? ["?", "dim"];
+      rows.push({
+        text: `${th.fg(color, mark)} ${dim(`${a.date ?? ""} ${a.id} ${a.outcome}`)} ${a.title}`,
+        item: { kind: "archive", entry: a },
+      });
+    }
+    if (v.archive.length === 0) rows.push({ text: dim("Nothing archived yet.") });
+  }
+  if (o.notice) {
+    const [glyph, color] = TONE[o.notice.tone];
+    rows.push({ text: `${th.fg(color, glyph)} ${o.notice.text.split("\n")[0] ?? ""}` });
+  }
+  return rows;
+}
+
+function dockPanel(v: View, o: DockIn, th: Paint): Dock {
+  const rows = o.loading ? [{ text: th.fg("warning", "loading rvow...") }] : dockRows(v, o, th);
+  const needs = needsText(v.needs_you);
+  const items = rows.flatMap((r) => (r.item ? [r.item] : []));
+  const at = Math.max(0, Math.min(o.cursor, items.length - 1));
+  const budget = Math.max(1, o.cap - (o.loading ? 2 : 3));
+  const first = rows.findIndex((r) => r.item === items[at]);
+  const start = o.focus
+    ? Math.max(0, Math.min(first - Math.floor(budget / 2), rows.length - budget))
+    : 0;
+  const w = o.width;
+  const edge = (c: string) => th.fg(o.focus ? "accent" : "borderMuted", c);
+  const tag = o.focus
+    ? th.inverse(th.bold(th.fg("accent", " focus ")))
+    : th.fg("dim", `${DOCK_KEY} focus`);
+  const head = ` rvow${v.branch ? ` ⎇ ${v.branch}` : ""}${needs ? ` · needs you: ${needs}` : ""} `;
+  const title = truncateToWidth(head, Math.max(1, w - visibleWidth(tag) - 5), "...");
+  const fill = Math.max(1, w - 3 - visibleWidth(title) - visibleWidth(tag));
+  const row = (text: string) => `${edge("│")} ${fit(text, w - 4)} ${edge("│")}`;
+  const marker =
+    rows.length > budget
+      ? ` ${start + 1}-${Math.min(rows.length, start + budget)}/${rows.length} `
+      : "";
+  const hintRoom = Math.max(0, w - 2 - visibleWidth(marker));
+  const hint = o.focus
+    ? truncateToWidth(` ${o.keys.map(([k, l]) => `${k} ${l}`).join("  ")} `, hintRoom, "")
+    : "";
+  const gap = Math.max(0, hintRoom - visibleWidth(hint));
+  const lines = [
+    `${edge("╭")}${th.bold(title)}${edge("─".repeat(fill))}${tag}${edge("─╮")}`,
+    ...(o.loading ? [] : [row(tabCounts(v, o.tab, th))]),
+    ...rows.slice(start, start + budget).map((r, i) => {
+      const on = o.focus && r.item !== undefined && r.item === items[at] && start + i === first;
+      return row(`${on ? th.fg("accent", "›") : " "} ${r.text}`);
+    }),
+    `${edge("╰")}${th.fg("dim", hint)}${edge("─".repeat(gap))}${th.fg("dim", marker)}${edge("╯")}`,
+  ];
+  return { lines, items };
+}
+
+type Sel = { plan?: Plan; change?: Change; v?: View };
+
 type Option = { label: string; description?: string };
 type Ask = { ref: string; question: string; header?: string; options: Option[] };
 
@@ -659,6 +812,10 @@ type State = {
   loaded: boolean;
   loading: boolean;
   saved: string;
+  dock: boolean;
+  dockFocus: boolean;
+  dockCursor: number;
+  modal: boolean;
 };
 
 export default function (pi: ExtensionAPI) {
@@ -673,12 +830,16 @@ export default function (pi: ExtensionAPI) {
     loaded: false,
     loading: false,
     saved: "",
+    dock: false,
+    dockFocus: false,
+    dockCursor: 0,
+    modal: false,
   };
   let redraw = () => {};
 
   async function refresh(ctx: ExtensionContext) {
     const [view, status] = await Promise.all([
-      hook("view", ctx.cwd, {}, SLOW_MS),
+      hook("view", ctx.cwd, {}, SLOW_MS, true),
       hook("status", ctx.cwd, {}, SLOW_MS),
     ]);
     const v = normalize(view);
@@ -691,19 +852,23 @@ export default function (pi: ExtensionAPI) {
       }),
     );
     if (!ctx.hasUI) return;
+    dockRedraw();
     ctx.ui.setStatus("rvow", typeof status?.status === "string" ? status.status : undefined);
     const line = v && band(v);
     ctx.ui.setWidget(
       "rvow",
       line
-        ? (_tui, theme) => ({
+        ? (tui, theme) => ({
             invalidate() {},
-            render: (width: number) => [
-              truncateToWidth(
-                `${theme.fg("warning", line)} ${theme.fg("dim", "/rvow-status")}`,
-                width,
-              ),
-            ],
+            render: (width: number) =>
+              dockShown(tui, theme, width)
+                ? []
+                : [
+                    truncateToWidth(
+                      `${theme.fg("warning", line)} ${theme.fg("dim", "/rvow-status")}`,
+                      width,
+                    ),
+                  ],
           })
         : undefined,
     );
@@ -757,6 +922,32 @@ export default function (pi: ExtensionAPI) {
     S.notice = { tone: r.code === 0 ? "ok" : "fail", text: text || "no output" };
   }
 
+  // The action hotkeys shared by the pane and the dock: undefined when `data` is no action key,
+  // {} when it was handled in place, {exit} when the action leaves the view.
+  function actionKey(data: string, { plan, change, v }: Sel): { exit?: Exit } | undefined {
+    const is = (k: KeyId) => matchesKey(data, k);
+    if (is("a") && plan) {
+      if (plan.ready && plan.here) return { exit: { act: "accept", id: plan.id } };
+      S.notice = { tone: "fail", text: `Not ready: ${blocker(plan)}.` };
+      return {};
+    }
+    if (is("t") && plan && !plan.here) return { exit: { act: "claim", id: plan.id } };
+    if (data === "A" && plan?.here && (plan.questions ?? 0) > 0)
+      return { exit: { act: "ask", id: plan.id } };
+    if (is("e") && plan) return { exit: { act: "refine", plans: [plan] } };
+    if (is("s") && plan) {
+      S.selected = S.selected.includes(plan.id)
+        ? S.selected.filter((x) => x !== plan.id)
+        : [...S.selected, plan.id];
+      return {};
+    }
+    if (is("f") && v && S.selected.length > 0)
+      return { exit: { act: "refine", plans: v.backlog.filter((p) => S.selected.includes(p.id)) } };
+    if (is("x") && change && archivable(change)) return { exit: { act: "archive", id: change.id } };
+    if (is("c") && change && (change.pending ?? []).length > 0) return { exit: { act: "amend" } };
+    return undefined;
+  }
+
   function layout(tui: TUI, th: Paint, wide: number) {
     const pw = Math.max(24, Math.min(wide, MAX_WIDTH));
     const w = pw - 4;
@@ -785,19 +976,7 @@ export default function (pi: ExtensionAPI) {
     const head: string[] = [];
     let title = "";
     if (v) {
-      const labels = [
-        `1 Backlog ${v.backlog.length}`,
-        `2 Active ${v.changes.length}`,
-        `3 Archive ${v.archive.length}`,
-      ];
-      const bar = labels
-        .map((l, i) => {
-          const text = ` ${l} `;
-          return TABS[i] === tab
-            ? th.inverse(th.fg("accent", th.bold(text)))
-            : th.fg("muted", text);
-        })
-        .join(" ");
+      const bar = tabCounts(v, tab, th);
       const branch = v.branch ? th.fg("dim", `⎇ ${v.branch}`) : "";
       title =
         branch && visibleWidth(bar) + 2 + visibleWidth(branch) <= w ? spread(bar, branch, w) : bar;
@@ -945,6 +1124,8 @@ export default function (pi: ExtensionAPI) {
         S.stack = [];
         S.tab = t;
         S.follow = true;
+        S.dockCursor = 0;
+        dockRedraw();
       };
       const finish = (e: Exit) => done(e);
 
@@ -968,24 +1149,11 @@ export default function (pi: ExtensionAPI) {
         tabTo(TABS[(TABS.indexOf(l.tab) + TABS.length - 1) % TABS.length] ?? "backlog");
       else if (is("enter") || is("d")) openItem(item);
       else if (is("r")) void reload();
-      else if (is("a") && plan) {
-        if (plan.ready && plan.here) return finish({ act: "accept", id: plan.id });
-        S.notice = { tone: "fail", text: `Not ready: ${blocker(plan)}.` };
-      } else if (is("t") && plan && !plan.here) return finish({ act: "claim", id: plan.id });
-      else if (data === "A" && plan?.here && (plan.questions ?? 0) > 0)
-        return finish({ act: "ask", id: plan.id });
-      else if (is("e") && plan) return finish({ act: "refine", plans: [plan] });
-      else if (is("s") && plan)
-        S.selected = S.selected.includes(plan.id)
-          ? S.selected.filter((x) => x !== plan.id)
-          : [...S.selected, plan.id];
-      else if (is("f") && v && S.selected.length > 0)
-        return finish({ act: "refine", plans: v.backlog.filter((p) => S.selected.includes(p.id)) });
-      else if (is("x") && change && archivable(change))
-        return finish({ act: "archive", id: change.id });
-      else if (is("c") && change && (change.pending ?? []).length > 0)
-        return finish({ act: "amend" });
-      else return;
+      else {
+        const r = actionKey(data, { plan, change, v });
+        if (!r) return;
+        if (r.exit) return finish(r.exit);
+      }
       tui.requestRender();
     }
 
@@ -1041,6 +1209,201 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  let dockTui: TUI | undefined;
+  let uiCtx: ExtensionContext | undefined;
+  let unlisten: (() => void) | undefined;
+  const dockRedraw = () => dockTui?.requestRender();
+
+  function dockNow(tui: TUI, th: Paint, width: number): Dock | undefined {
+    const rows = tui.terminal.rows;
+    if (!S.dock || width < DOCK_MIN_COLS || rows < DOCK_MIN_ROWS) return undefined;
+    const view = S.view ?? NO_VIEW;
+    const tab = S.tab ?? firstTab(view);
+    const items = dockItems(view, tab);
+    const item = items[Math.max(0, Math.min(S.dockCursor, items.length - 1))];
+    const plan = item?.kind === "plan" ? item.plan : undefined;
+    const change = item?.kind === "change" || item?.kind === "task" ? item.change : undefined;
+    const keys: [string, string][] = [
+      ["1-3", "tabs"],
+      ["j/k", "move"],
+    ];
+    if (item) keys.push(["enter", "open"]);
+    if (plan) keys.push(["a", "accept"], ["e", "refine"], ["s", "select"]);
+    if (plan && !plan.here) keys.push(["t", "take"]);
+    if (S.selected.length > 0) keys.push(["f", `refine ${S.selected.length}`]);
+    if (change && archivable(change)) keys.push(["x", "archive"]);
+    if (change && (change.pending ?? []).length > 0) keys.push(["c", "amend"]);
+    keys.push(["esc", "editor"]);
+    while (keys.length > 2 && keys.map(([k, l]) => `${k} ${l}`).join("  ").length > width - 6)
+      keys.splice(keys.length - 2, 1);
+    return dockPanel(
+      view,
+      {
+        loading: !S.view,
+        tab,
+        picked: S.selected,
+        cursor: S.dockCursor,
+        focus: S.dockFocus,
+        notice: S.notice,
+        width,
+        cap: Math.min(DOCK_MAX_ROWS, Math.floor(rows * 0.3)),
+        keys,
+      },
+      th,
+    );
+  }
+
+  const dockItems = (v: View, tab: Tab): Item[] =>
+    dockPanel(v, { picked: [], cursor: 0, focus: false, width: 80, cap: 99, keys: [], tab }, PLAIN)
+      .items;
+
+  function dockShown(tui: TUI, th: Paint, width: number): boolean {
+    return (dockNow(tui, th, width)?.lines.length ?? 0) > 0;
+  }
+
+  function syncDock(ctx: ExtensionContext) {
+    if (!ctx.hasUI) return;
+    ctx.ui.setWidget(
+      "rvow-dock",
+      S.dock
+        ? (tui, theme) => {
+            dockTui = tui;
+            return {
+              invalidate() {},
+              render: (width: number) =>
+                (dockNow(tui, theme, width)?.lines ?? []).map((l) =>
+                  truncateToWidth(l, width, "", true),
+                ),
+              dispose() {
+                dockTui = undefined;
+              },
+            };
+          }
+        : undefined,
+      { placement: "aboveEditor" },
+    );
+  }
+
+  function setDock(ctx: ExtensionContext, on: boolean) {
+    S.dock = on;
+    if (!on) S.dockFocus = false;
+    uiCtx = ctx;
+    syncDock(ctx);
+    pi.appendEntry(DOCK_ENTRY, { on });
+    if (on && !S.view) later(() => refresh(ctx));
+  }
+
+  function dockWhyNot(): string | undefined {
+    if (!S.dock) return "the rvow dock is off; run /rvow-dock on";
+    const { columns, rows } = dockTui?.terminal ?? { columns: DOCK_MIN_COLS, rows: DOCK_MIN_ROWS };
+    if (columns < DOCK_MIN_COLS || rows < DOCK_MIN_ROWS)
+      return `terminal too small for the rvow dock (needs ${DOCK_MIN_COLS} columns by ${DOCK_MIN_ROWS} rows, this one is ${columns}x${rows})`;
+    return S.view ? undefined : "rvow did not answer yet";
+  }
+
+  function toggleFocus(ctx: ExtensionContext) {
+    uiCtx = ctx;
+    const why = S.dockFocus ? undefined : dockWhyNot();
+    if (why) return ctx.ui.notify(why, "info");
+    S.dockFocus = !S.dockFocus;
+    dockRedraw();
+  }
+
+  async function modal(work: () => Promise<unknown>) {
+    S.modal = true;
+    try {
+      await work();
+    } finally {
+      S.modal = false;
+      dockRedraw();
+    }
+  }
+
+  function openAt(ctx: ExtensionContext, item: Item) {
+    const [kind, id, title, tab]: [Kind, string, string, Tab] =
+      item.kind === "plan"
+        ? ["plan", item.plan.id, item.plan.title, "backlog"]
+        : item.kind === "change"
+          ? ["change", item.change.id, item.change.title, "active"]
+          : item.kind === "task"
+            ? ["task", item.task.id, item.task.title, "active"]
+            : ["archive", item.entry.id, item.entry.title, "archive"];
+    const frame: Detail = { kind, id, title, text: null };
+    S.loaded = true;
+    S.notice = undefined;
+    S.stack = [frame];
+    S.tab = tab;
+    S.follow = true;
+    void showText(ctx.cwd, frame).then((r) => {
+      frame.text = r.text;
+      redraw();
+    });
+    return pane(ctx);
+  }
+
+  // Runs before pi's focused component. While the dock has focus it eats its own keys and
+  // passes every other key to the editor, so a draft in the editor is never touched.
+  function dockInput(data: string): { consume: true } | undefined {
+    const ctx = uiCtx;
+    if (!S.dockFocus || S.modal || !S.view || !ctx) return undefined;
+    const is = (k: KeyId) => matchesKey(data, k);
+    const tab = S.tab ?? firstTab(S.view);
+    const items = dockItems(S.view, tab);
+    const at = Math.max(0, Math.min(S.dockCursor, items.length - 1));
+    const item = items[at];
+    const eat = () => {
+      dockRedraw();
+      return { consume: true } as const;
+    };
+    const goTab = (t: Tab) => {
+      S.tab = t;
+      S.stack = [];
+      S.dockCursor = 0;
+      S.notice = undefined;
+      savePane();
+      return eat();
+    };
+    const page = Math.max(1, (dockTui?.terminal.rows ?? 30) * 0.3 - 4);
+    const step = (to: number) => {
+      S.dockCursor = Math.max(0, Math.min(items.length - 1, to));
+      return eat();
+    };
+    if (is("escape")) {
+      S.dockFocus = false;
+      return eat();
+    }
+    if (is("up") || is("k")) return step(at - 1);
+    if (is("down") || is("j")) return step(at + 1);
+    if (is("pageUp")) return step(at - Math.floor(page));
+    if (is("pageDown")) return step(at + Math.floor(page));
+    if (is("1")) return goTab("backlog");
+    if (is("2")) return goTab("active");
+    if (is("3")) return goTab("archive");
+    if (is("tab") || is("right")) return goTab(TABS[(TABS.indexOf(tab) + 1) % TABS.length] ?? tab);
+    if (is("shift+tab") || is("left"))
+      return goTab(TABS[(TABS.indexOf(tab) + TABS.length - 1) % TABS.length] ?? tab);
+    if (is("enter") || is("d")) {
+      if (item) void modal(() => openAt(ctx, item));
+      return eat();
+    }
+    if (is("r")) {
+      void refresh(ctx).then(dockRedraw);
+      return eat();
+    }
+    const plan = item?.kind === "plan" ? item.plan : undefined;
+    const change = item?.kind === "change" || item?.kind === "task" ? item.change : undefined;
+    S.notice = undefined;
+    const r = actionKey(data, { plan, change, v: S.view });
+    if (!r && ACTION_KEYS.includes(data) && data.length === 1) {
+      S.notice = { tone: "fail", text: "Nothing to act on here." };
+      return eat();
+    }
+    if (!r) return undefined;
+    const exit = r.exit;
+    if (exit && exit.act !== "close") void modal(() => perform(ctx, exit));
+    return eat();
+  }
+
   pi.on("tool_call", async (event, ctx) => {
     const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
     if (typeof input.path === "string" && input.file_path === undefined)
@@ -1059,6 +1422,25 @@ export default function (pi: ExtensionAPI) {
     S.loaded = false;
     S.stack = [];
     S.saved = "";
+    uiCtx = ctx;
+    const saved = ctx.sessionManager
+      .getEntries()
+      .filter((e) => e.type === "custom" && e.customType === DOCK_ENTRY)
+      .at(-1);
+    S.dock = saved?.type === "custom" && isRecord(saved.data) && saved.data.on === true;
+    S.dockFocus = false;
+    const savedPane = ctx.sessionManager
+      .getEntries()
+      .filter((e) => e.type === "custom" && e.customType === ENTRY)
+      .at(-1);
+    const savedTab =
+      savedPane?.type === "custom" && isRecord(savedPane.data) ? savedPane.data.tab : undefined;
+    S.tab = isTab(savedTab) ? savedTab : undefined;
+    if (ctx.hasUI) {
+      unlisten?.();
+      unlisten = ctx.ui.onTerminalInput(dockInput);
+      syncDock(ctx);
+    }
     later(async () => {
       const text = await brief(ctx.cwd);
       if (text) pi.sendMessage({ customType: "rvow", content: text, display: false });
@@ -1122,6 +1504,30 @@ export default function (pi: ExtensionAPI) {
       const tabs = TABS.map((t) => [t, ...tabBody(v, t, [], -1, 80, PLAIN).lines].join("\n"));
       ctx.ui.notify(tabs.join("\n\n"), "info");
     },
+  });
+
+  pi.registerCommand("rvow-dock", {
+    description: "Show or hide the rvow dock above the editor: on, off or toggle",
+    handler: async (args, ctx) => {
+      const arg = args.trim();
+      if (!ctx.hasUI) return ctx.ui.notify("The rvow dock needs a terminal UI.", "warning");
+      if (arg && !["on", "off", "toggle"].includes(arg))
+        return ctx.ui.notify("usage: /rvow-dock [on|off]", "info");
+      const on = arg === "on" || (arg !== "off" && !S.dock);
+      setDock(ctx, on);
+      const why = on ? dockWhyNot() : undefined;
+      ctx.ui.notify(
+        !on
+          ? "rvow dock off"
+          : (why ?? `rvow dock on: shows plans, changes and the next task; ${DOCK_KEY} focuses it`),
+        why ? "warning" : "info",
+      );
+    },
+  });
+
+  pi.registerShortcut(DOCK_KEY, {
+    description: "Focus or leave the rvow dock",
+    handler: (ctx) => toggleFocus(ctx),
   });
 
   async function confirmAmendments(ctx: ExtensionContext) {
