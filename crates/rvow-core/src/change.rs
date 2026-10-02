@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::diag::{Diagnostic, Severity};
 use crate::error::{Error, Result};
-use crate::id::{self, Id, Kind};
+use crate::id::{self, Id, Kind, Ref};
 use crate::lint::{self, Finding, Living};
 use crate::proposal::{Proposal, parse_proposal};
+use crate::record::{self, Record};
 use crate::registry;
-use crate::spec::{DeltaFile, Spec, parse_deltas, parse_spec};
+use crate::spec::{DeltaFile, DeltaOp, Spec, parse_deltas, parse_spec};
 use crate::store::Project;
 use crate::tasks::{Task, parse_tasks};
 
@@ -64,6 +65,7 @@ pub const DESIGN: &str = "design.md";
 pub const TASKS: &str = "tasks.md";
 pub const DELTAS: &str = "specs";
 pub const LEDGER: &str = "ledger.jsonl";
+pub const MAX_DESIGN_LINES: usize = 300;
 
 /// Splits `CHG-xxxxxx-slug`, with an optional `YYYY-MM-DD-` prefix in the
 /// archive, into id and slug.
@@ -149,6 +151,114 @@ pub fn resolve(project: &Project, input: &str) -> Result<ChangeDir> {
         .expect("resolved id is listed"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub id: Id,
+    pub stage: Stage,
+    pub branch: String,
+    pub title: String,
+}
+
+/// One line of data per change in every stage.
+pub fn summaries(project: &Project) -> Result<Vec<Summary>> {
+    let (changes, _) = list(project)?;
+    let mut out = Vec::new();
+    for c in changes {
+        let (p, _) = parse_proposal(&read(&c.path.join(PROPOSAL))?);
+        out.push(Summary {
+            id: c.id,
+            stage: c.stage,
+            branch: p.branch,
+            title: p.title,
+        });
+    }
+    Ok(out)
+}
+
+/// Where a change, task or requirement lives: a folder for a change, else a
+/// file and a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub id: Id,
+    pub file: PathBuf,
+    pub line: Option<usize>,
+}
+
+/// Finds a change, task or requirement by a unique prefix of its id. Tasks
+/// come from open changes, requirements from the living specs or from an open
+/// change that adds them.
+pub fn find(project: &Project, input: &str) -> Result<Place> {
+    let (changes, _) = list(project)?;
+    let (living, _) = load_living(project)?;
+    let mut places: Vec<Place> = changes
+        .iter()
+        .map(|c| Place {
+            id: c.id.clone(),
+            file: c.path.clone(),
+            line: None,
+        })
+        .collect();
+    for (cap, spec) in &living {
+        let file = project.root.join("specs").join(cap).join("spec.md");
+        for r in &spec.requirements {
+            if let Ref::Id(id) = &r.id {
+                places.push(Place {
+                    id: id.clone(),
+                    file: file.clone(),
+                    line: Some(r.line),
+                });
+            }
+        }
+    }
+    for c in changes
+        .iter()
+        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
+    {
+        let loaded = load(&c.path, &living)?;
+        for t in &loaded.tasks {
+            if let Ref::Id(id) = &t.id {
+                places.push(Place {
+                    id: id.clone(),
+                    file: c.path.join(TASKS),
+                    line: Some(t.line),
+                });
+            }
+        }
+        for (cap, f) in &loaded.deltas {
+            let file = c.path.join(DELTAS).join(format!("{cap}.md"));
+            for d in f.deltas.iter().filter(|d| d.op == DeltaOp::Add) {
+                if let Ref::Id(id) = &d.req.id {
+                    places.push(Place {
+                        id: id.clone(),
+                        file: file.clone(),
+                        line: Some(d.req.line),
+                    });
+                }
+            }
+        }
+    }
+    let id = id::resolve(input, places.iter().map(|p| &p.id)).map_err(|e| {
+        Error::new(
+            "path",
+            format!("{input}: {e}"),
+            "give more characters of the id, or run rvow ls to see the changes",
+        )
+    })?;
+    Ok(places
+        .into_iter()
+        .find(|p| p.id == id)
+        .expect("resolved id is listed"))
+}
+
+/// `find` as one printable location: a folder, or `file:line`.
+pub fn locate(project: &Project, input: &str) -> Result<String> {
+    let place = find(project, input)?;
+    Ok(match place.line {
+        Some(line) => format!("{}:{line}", place.file.display()),
+        None => place.file.display().to_string(),
+    })
+}
+
 /// A lowercase ASCII slug of at most 40 characters.
 pub fn slugify(title: &str) -> String {
     let mut slug = String::new();
@@ -168,7 +278,7 @@ pub fn slugify(title: &str) -> String {
 
 fn proposal_template(branch: &str, title: &str) -> String {
     format!(
-        "branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Assumptions\n\n## Non-goals\n"
+        "branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Out of scope\n\n## Assumptions\n"
     )
 }
 
@@ -235,11 +345,9 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// A living spec and its capability name.
 pub type CapSpec = (String, Spec);
 
-/// The living specs, keyed by capability, and their parse findings.
-pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
+/// The text of each living spec, keyed by capability, in name order.
+pub fn living_texts(project: &Project) -> Result<Vec<(String, String)>> {
     let dir = project.root.join("specs");
-    let mut specs = Vec::new();
-    let mut findings = Vec::new();
     let mut caps: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(entries) => entries
             .flatten()
@@ -250,19 +358,54 @@ pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
         Err(e) => return Err(Error::io(&dir, e)),
     };
     caps.sort();
+    let mut out = Vec::new();
     for cap_dir in caps {
         let cap = cap_dir.file_name().unwrap().to_string_lossy().into_owned();
         let path = cap_dir.join("spec.md");
-        if !path.is_file() {
-            continue;
+        if path.is_file() {
+            out.push((cap, read(&path)?));
         }
-        let (spec, diags) = parse_spec(&read(&path)?);
+    }
+    Ok(out)
+}
+
+/// Parses and checks living spec texts as `living_texts` returns them.
+pub fn living_from(texts: &[(String, String)]) -> (Vec<CapSpec>, Vec<Finding>) {
+    let mut specs = Vec::new();
+    let mut findings = Vec::new();
+    for (cap, text) in texts {
+        let (spec, diags) = parse_spec(text);
         let rel = format!("specs/{cap}/spec.md");
         findings.extend(diags.into_iter().map(|d| (rel.clone(), d)));
-        specs.push((cap, spec));
+        specs.push((cap.clone(), spec));
     }
     findings.extend(Living { specs: &specs }.lint());
+    (specs, findings)
+}
+
+/// The living specs, keyed by capability, and their parse findings, with the
+/// findings of untouched imported requirements marked legacy.
+pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
+    let (specs, mut findings) = living_from(&living_texts(project)?);
+    mark_legacy(&mut findings, &specs, &record::load(project)?);
     Ok((specs, findings))
+}
+
+/// Marks each finding whose line lies in the block of a legacy requirement.
+fn mark_legacy(findings: &mut [Finding], specs: &[CapSpec], record: &Record) {
+    for (path, d) in findings {
+        let Some((_, spec)) = specs
+            .iter()
+            .find(|(cap, _)| *path == format!("specs/{cap}/spec.md"))
+        else {
+            continue;
+        };
+        let owner = spec.requirements.iter().rfind(|r| r.line <= d.line);
+        d.legacy = owner.is_some_and(|r| match &r.id {
+            Ref::Id(id) => record.get(&id.to_string()).is_some_and(|e| e.legacy),
+            Ref::Placeholder { .. } => false,
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -300,6 +443,17 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
     findings.extend(tag(TASKS, diags));
     texts.push((TASKS.to_string(), tasks_text));
     if let Ok(design) = std::fs::read_to_string(dir.join(DESIGN)) {
+        let lines = design.lines().count();
+        if lines > MAX_DESIGN_LINES {
+            findings.push((
+                DESIGN.to_string(),
+                Diagnostic::new(
+                    crate::diag::Rule::Size,
+                    1,
+                    format!("design.md has {lines} lines, more than {MAX_DESIGN_LINES}; keep only decisions, constraints and reasons"),
+                ),
+            ));
+        }
         texts.push((DESIGN.to_string(), design));
     }
     let mut deltas = Vec::new();
@@ -381,6 +535,62 @@ mod tests {
 
         let loaded = load(&c.path, &[]).unwrap();
         assert_eq!(loaded.proposal.branch, "main");
+        assert_eq!(loaded.proposal.title, "Output tail");
+        let sums = summaries(&p).unwrap();
+        assert_eq!(sums.len(), 2);
+        assert!(
+            sums.iter()
+                .any(|s| s.id == c.id && s.stage == Stage::Backlog && s.title == "Output tail")
+        );
         assert_eq!(loaded.errors().count(), 0, "{:?}", loaded.findings);
+    }
+
+    #[test]
+    fn locate_finds_changes_tasks_and_requirements() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = new(&p, "Out", "main", false).unwrap();
+        std::fs::write(
+            c.path.join(TASKS),
+            "# Tasks\n\n- TSK-x7k2q4 Write\n  covers: REQ-k3f9m2\n  verify: true\n  files: a\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c.path.join("specs/out.md"),
+            "## ADD REQ-k3f9m2 Out\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n",
+        )
+        .unwrap();
+        let spec = p.root.join("specs/cap");
+        std::fs::create_dir_all(&spec).unwrap();
+        std::fs::write(
+            spec.join("spec.md"),
+            "# Cap\n\n## REQ-q8w2c7 Old\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            locate(&p, &c.id.to_string()).unwrap(),
+            c.path.display().to_string()
+        );
+        assert_eq!(
+            locate(&p, "x7k").unwrap(),
+            format!("{}:3", c.path.join(TASKS).display())
+        );
+        assert_eq!(
+            locate(&p, "REQ-k3f").unwrap(),
+            format!("{}:1", c.path.join("specs/out.md").display())
+        );
+        assert_eq!(
+            locate(&p, "q8w").unwrap(),
+            format!("{}:3", spec.join("spec.md").display())
+        );
+        assert_eq!(locate(&p, "zzz").unwrap_err().code, "path");
+        assert!(
+            locate(&p, "REQ-")
+                .unwrap_err()
+                .message
+                .contains("no id matches")
+        );
     }
 }

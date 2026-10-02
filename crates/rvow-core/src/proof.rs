@@ -37,8 +37,57 @@ impl Active {
         self.events.iter().find(|e| e.kind == Kind::Vow)
     }
 
+    /// The snapshot that drift is measured against: the snapshot of the latest
+    /// accepted amendment, else the vow.
+    pub fn baseline(&self) -> Option<&Map<String, Value>> {
+        let mut base = self.vow().map(|e| &e.data);
+        for e in self.events.iter().filter(|e| e.kind == Kind::Confirm) {
+            if e.data.get("decision").and_then(Value::as_str) != Some("accept") {
+                continue;
+            }
+            let id = e.data.get("amendment");
+            let snapshot = self
+                .events
+                .iter()
+                .find(|a| a.kind == Kind::Amend && a.data.get("amendment") == id)
+                .and_then(|a| a.data.get("snapshot"))
+                .and_then(Value::as_object);
+            if snapshot.is_some() {
+                base = snapshot;
+            }
+        }
+        base
+    }
+
+    /// The base hashes of the effective baseline. An amendment from before
+    /// bases were snapshotted has none, so the vow's apply.
+    pub fn bases(&self) -> Map<String, Value> {
+        self.baseline()
+            .and_then(|b| b.get("bases"))
+            .or_else(|| self.vow()?.data.get("bases"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Each base whose living requirement changed or went away since it was
+    /// recorded, with the current living hash.
+    pub fn moved_bases(&self, living: &[CapSpec]) -> Vec<(String, Option<String>)> {
+        self.bases()
+            .into_iter()
+            .filter_map(|(id, base)| {
+                let now = living
+                    .iter()
+                    .flat_map(|(_, s)| s.requirements.iter())
+                    .find(|r| r.id.to_string() == id)
+                    .map(requirement_hash);
+                (now.as_deref() != base.as_str()).then_some((id, now))
+            })
+            .collect()
+    }
+
     pub fn branch(&self) -> Option<&str> {
-        self.vow()?.data.get("branch")?.as_str()
+        self.baseline()?.get("branch")?.as_str()
     }
 
     fn vow_time(&self) -> u64 {
@@ -168,7 +217,12 @@ pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
         return Ok(State::Missing);
     };
     if last.kind == Kind::Block {
-        return Ok(State::Blocked);
+        // A confirmed amendment that changed the task ends the block.
+        return Ok(if str_of(last, "task_hash") == task_hash(task) {
+            State::Blocked
+        } else {
+            State::Missing
+        });
     }
     if !is_proved(last) {
         return Ok(State::Failed);
@@ -233,8 +287,7 @@ pub fn render_task(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> String {
                 for sc in &req.scenarios {
                     out.push_str(&format!("    scenario: {}\n", sc.title));
                     for st in &sc.steps {
-                        let k = format!("{:?}", st.kind).to_uppercase();
-                        out.push_str(&format!("      {k} {}\n", st.text));
+                        out.push_str(&format!("      {} {}\n", st.kind.word(), st.text));
                     }
                 }
             }
@@ -286,7 +339,7 @@ pub struct Proved {
 }
 
 /// Finds a task id among the active changes by a unique prefix.
-fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, &'a Task)> {
+pub fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, &'a Task)> {
     let ids: Vec<Id> = changes
         .iter()
         .flat_map(|c| c.loaded.tasks.iter())
@@ -377,6 +430,12 @@ pub fn prove(
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
+    if proved {
+        data.insert(
+            "tests".into(),
+            Value::Object(crate::guard::capture(project, &top, &config, task)?),
+        );
+    }
     data.insert(
         "run".into(),
         json!({
@@ -443,6 +502,8 @@ pub struct ChangeStatus {
     pub branch: String,
     pub tasks: Vec<TaskLine>,
     pub problems: Vec<String>,
+    pub drift: Vec<crate::drift::Item>,
+    pub pending: Vec<crate::amend::Pending>,
 }
 
 /// The state of every task in the active changes of the current branch, or of
@@ -491,7 +552,34 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
             branch: c.branch().unwrap_or("").to_string(),
             tasks,
             problems,
+            drift: crate::drift::drift(project, &top, &config, c)?,
+            pending: crate::amend::pending(std::slice::from_ref(c)),
         });
+    }
+    Ok(out)
+}
+
+/// The ids of the tasks on the current branch whose proof is stale, in queue
+/// order.
+pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> {
+    let top = git::toplevel(cwd)?;
+    let (living, _) = change::load_living(project)?;
+    let changes = active(project, &living)?;
+    let config = config::load(project, home)?;
+    let now = Now {
+        top: &top,
+        config: &config,
+        env: fingerprint::env(&top, &config)?,
+        living: &living,
+    };
+    let branch = git::branch(&top)?.unwrap_or_default();
+    let mut out = Vec::new();
+    for c in on_branch(&changes, &branch) {
+        for t in &c.loaded.tasks {
+            if matches!(state(c, t, &now)?, State::Stale(_)) {
+                out.push(t.id.to_string());
+            }
+        }
     }
     Ok(out)
 }
@@ -560,7 +648,10 @@ pub(crate) mod tests {
         let s = status(&p, &home, &repo, false).unwrap();
         assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed"]));
 
+        assert_eq!(stale_tasks(&p, &home, &repo).unwrap(), [task]);
+
         git(&repo, &["checkout", "-q", "-b", "other"]);
+        assert!(stale_tasks(&p, &home, &repo).unwrap().is_empty());
         assert!(status(&p, &home, &repo, false).unwrap().is_empty());
         assert_eq!(status(&p, &home, &repo, true).unwrap().len(), 1);
     }

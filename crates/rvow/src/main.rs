@@ -2,15 +2,27 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use rvow_core::amend;
+use rvow_core::archive;
+use rvow_core::brief;
 use rvow_core::change::{self, Stage};
 use rvow_core::diag::Severity;
 use rvow_core::error::{Error, Result};
 use rvow_core::gate::{self, Options};
 use rvow_core::git;
+use rvow_core::guide;
+use rvow_core::hook;
+use rvow_core::import;
+use rvow_core::install;
+use rvow_core::interview;
 use rvow_core::lint::Finding;
+use rvow_core::notes;
+use rvow_core::plan;
 use rvow_core::proof::{self, State};
+use rvow_core::show;
 use rvow_core::store::{self, Mode, Project};
+use rvow_core::view;
 use rvow_core::vow;
 
 /// Hold a coding agent to an accepted plan.
@@ -34,9 +46,9 @@ enum Cmd {
         /// The change title.
         #[arg(required = true, num_args = 1..)]
         title: Vec<String>,
-        /// A small change: proposal and tasks, no spec deltas.
+        /// Add spec deltas; without it the change is small: proposal and tasks.
         #[arg(long)]
-        small: bool,
+        spec: bool,
     },
     /// Check the specs and every open change.
     Validate,
@@ -48,16 +60,169 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Run a task's stored verify command and record the proof.
-    Prove {
+    /// List every change with its stage, branch and title.
+    Ls,
+    /// Print where a change, task or requirement lives.
+    Path {
+        /// A CHG, TSK or REQ id or a unique prefix of it.
+        id: String,
+    },
+    /// Print one requirement, task or change in full.
+    Show {
+        /// A REQ, TSK or CHG id or a unique prefix of it.
+        id: String,
+    },
+    /// Read the living specs.
+    Spec {
+        #[command(subcommand)]
+        cmd: SpecCmd,
+    },
+    /// Convert an OpenSpec tree into specs and backlog changes.
+    Import {
+        #[command(subcommand)]
+        cmd: ImportCmd,
+    },
+    /// Print the short guide for writing one plan artifact.
+    Guide {
+        #[arg(value_enum)]
+        artifact: Artifact,
+    },
+    /// Mint real ids for the placeholders of an active change.
+    Ids {
+        /// The change id or a unique prefix of it, default every active change on this branch.
+        change: Option<String>,
+    },
+    /// Print the short generated brief for this branch.
+    Brief,
+    /// Install the skill, the Claude Code hooks, the pi extension and the pre-push gate.
+    Install {
+        /// How rvow joins Claude Code: a mod (plugin), or hooks in a settings file.
+        #[arg(long, value_enum, default_value = "mod")]
+        claude: ClaudeMode,
+        /// For --claude settings: your user settings, or this repository's .claude/settings.json.
+        #[arg(long, value_enum, default_value = "user")]
+        scope: Scope,
+    },
+    /// Report on a plan before accept: findings, checks that cannot run, open questions.
+    Check {
+        /// The change id; default: every open change on this branch.
+        change: Option<String>,
+    },
+    /// List the open questions of a plan, each with its recommended answer.
+    Clarify {
+        /// The change id; default: every open change on this branch.
+        change: Option<String>,
+        /// Print the next round (at most 4) as JSON: question, options, recommended first.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the user's answer to an open question and remove its marker.
+    Answer {
+        /// The question ref that rvow clarify printed, as CHG-xxxxxx:proposal.md:12.
+        reference: String,
+        /// The user's choice, as given.
+        #[arg(required = true, num_args = 1..)]
+        choice: Vec<String>,
+        /// How the user answered: in a dialog, or in chat relayed by the agent.
+        #[arg(long, value_enum, default_value = "chat")]
+        via: ViaArg,
+    },
+    /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
+    Hook {
+        #[arg(value_enum)]
+        harness: Harness,
+        #[arg(value_enum)]
+        event: HookEvent,
+    },
+    /// Record that a task cannot be finished as written.
+    Block {
         /// The task id or a unique prefix of it.
         task: String,
+        /// What stops the task.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Append a decision, surprise or handoff note to this branch's change.
+    Note {
+        #[arg(value_enum)]
+        kind: NoteArg,
+        /// The note text.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+    },
+    /// Record the current plan edits as an amendment for the user to confirm.
+    Amend {
+        /// Why the plan changed.
+        #[arg(long)]
+        reason: String,
+        /// The change id; default: every active change on this branch.
+        #[arg(long)]
+        change: Option<String>,
+        /// Ask to edit a protected test or setup file instead of recording drift.
+        #[arg(long, value_name = "PATH")]
+        unlock: Option<String>,
+    },
+    /// List pending amendments, or accept or reject them (user only).
+    #[command(group(ArgGroup::new("decision").args(["accept", "reject"])))]
+    Confirm {
+        /// Amendment ids or unique prefixes.
+        ids: Vec<String>,
+        /// Accept the named amendments.
+        #[arg(long)]
+        accept: bool,
+        /// Reject the named amendments.
+        #[arg(long)]
+        reject: bool,
+        /// Decide every pending amendment; pass the digest that the list printed.
+        #[arg(long, value_name = "DIGEST", conflicts_with = "ids")]
+        all: Option<String>,
+    },
+    /// Run a task's stored verify command and record the proof.
+    #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
+    Prove {
+        /// The task id or a unique prefix of it.
+        task: Option<String>,
+        /// Prove every stale task on this branch.
+        #[arg(long)]
+        stale: bool,
     },
     /// Show the state of each task on this branch.
     Status {
         /// Show every active change, not only this branch's.
         #[arg(long)]
         all: bool,
+        /// Print this branch's view as JSON, the shape the harness UIs draw.
+        #[arg(long, conflicts_with = "all")]
+        json: bool,
+    },
+    /// Merge an active change into the living specs and move it to archive/done/.
+    Archive {
+        /// The change id or a unique prefix of it.
+        change: String,
+    },
+    /// Give up a backlog or active change; the specs stay as they are.
+    Drop {
+        /// The change id or a unique prefix of it.
+        change: String,
+        /// Why the change is dropped.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Replace a backlog or active change with another open change.
+    Supersede {
+        /// The change that is replaced.
+        old: String,
+        /// The open change that replaces it.
+        #[arg(long)]
+        by: String,
+        /// Why the change is replaced.
+        #[arg(long)]
+        reason: String,
+    },
+    /// List every change that touched a requirement, oldest first.
+    Trace {
+        /// A REQ id or a unique prefix of it.
+        id: String,
     },
     /// Check the active changes of this branch.
     Gate {
@@ -70,6 +235,33 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SpecCmd {
+    /// List each capability with its requirement ids and titles.
+    List,
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Import the living specs and open changes of an OpenSpec folder.
+    Openspec {
+        /// The OpenSpec folder; default: openspec/ at the repository top.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Print the report and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Artifact {
+    Proposal,
+    Spec,
+    Tasks,
+    Design,
+}
+
 fn main() -> ExitCode {
     #[cfg(unix)]
     // SAFETY: restores the default SIGPIPE action before any thread starts, so
@@ -80,12 +272,49 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::Init { in_repo } => init(in_repo),
-        Cmd::New { title, small } => new(&title.join(" "), small),
+        Cmd::New { title, spec } => new(&title.join(" "), !spec),
         Cmd::Validate => validate(),
         Cmd::Accept { change, yes } => accept(&change, yes),
-        Cmd::Prove { task } => prove(&task),
-        Cmd::Status { all } => status(all),
+        Cmd::Ls => ls(),
+        Cmd::Path { id } => path(&id),
+        Cmd::Show { id } => show(&id),
+        Cmd::Spec { cmd: SpecCmd::List } => spec_list(),
+        Cmd::Import {
+            cmd: ImportCmd::Openspec { from, dry_run },
+        } => import_openspec(from, dry_run),
+        Cmd::Guide { artifact } => guide(artifact),
+        Cmd::Ids { change } => ids(change.as_deref()),
+        Cmd::Brief => brief(),
+        Cmd::Hook { harness, event } => return hook(harness, event),
+        Cmd::Install { claude, scope } => install(claude, scope),
+        Cmd::Check { change } => check(change.as_deref()),
+        Cmd::Clarify { change, json } => clarify(change.as_deref(), json),
+        Cmd::Answer {
+            reference,
+            choice,
+            via,
+        } => answer(&reference, &choice.join(" "), via),
+        Cmd::Block { task, reason } => block(&task, &reason),
+        Cmd::Note { kind, text } => note(kind, &text.join(" ")),
+        Cmd::Amend {
+            reason,
+            change,
+            unlock,
+        } => amend(&reason, change.as_deref(), unlock.as_deref()),
+        Cmd::Confirm {
+            ids,
+            accept,
+            reject,
+            all,
+        } => confirm(&ids, accept, reject, all.as_deref()),
+        Cmd::Prove { task: Some(t), .. } => prove(&t),
+        Cmd::Prove { .. } => prove_stale(),
+        Cmd::Status { all, json } => status(all, json),
         Cmd::Gate { strict, rerun } => gate(Options { strict, rerun }),
+        Cmd::Archive { change } => archive(&change),
+        Cmd::Drop { change, reason } => drop_change(&change, &reason),
+        Cmd::Supersede { old, by, reason } => supersede(&old, &by, &reason),
+        Cmd::Trace { id } => trace(&id),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
@@ -119,16 +348,34 @@ fn init(in_repo: bool) -> Result<bool> {
     Ok(true)
 }
 
-fn new(title: &str, small: bool) -> Result<bool> {
-    let home = store::home_dir()?;
-    let p = project(&home)?;
-    let branch = git::branch(&cwd()?)?.ok_or_else(|| {
+fn current_branch() -> Result<String> {
+    git::branch(&cwd()?)?.ok_or_else(|| {
         Error::new(
             "detached",
             "HEAD is detached, so the change has no branch",
             "check out a branch first",
         )
-    })?;
+    })
+}
+
+fn import_openspec(from: Option<PathBuf>, dry_run: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let from = match from {
+        Some(dir) => dir,
+        None => git::toplevel(&cwd()?)?.join("openspec"),
+    };
+    print!(
+        "{}",
+        import::openspec(&p, &from, &current_branch()?, dry_run)?
+    );
+    Ok(true)
+}
+
+fn new(title: &str, small: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let branch = current_branch()?;
     let (changes, _) = change::list(&p)?;
     let busy = changes
         .iter()
@@ -203,7 +450,7 @@ fn validate() -> Result<bool> {
     Ok(errors == 0)
 }
 
-fn confirm(question: &str) -> Result<bool> {
+fn ask_yes(question: &str) -> Result<bool> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         return Err(Error::new(
@@ -245,7 +492,8 @@ fn accept(target: &str, yes: bool) -> Result<bool> {
             .map_or("signal".to_string(), |n| n.to_string());
         println!("  {}: baseline exit {exit}, {tests} tests", b.task);
     }
-    if !yes && !confirm("record the vow?")? {
+    println!("{REVIEW}");
+    if !yes && !ask_yes("record the vow?")? {
         println!("not accepted");
         return Ok(false);
     }
@@ -262,10 +510,7 @@ fn accept(target: &str, yes: bool) -> Result<bool> {
     Ok(true)
 }
 
-fn prove(task: &str) -> Result<bool> {
-    let home = store::home_dir()?;
-    let p = project(&home)?;
-    let r = proof::prove(&p, &home, &cwd()?, task, &mut std::io::stderr())?;
+fn print_result(r: &proof::Proved) {
     let o = &r.outcome;
     let tests = o.tests_run.map_or("unknown".to_string(), |n| n.to_string());
     let verdict = if r.proved {
@@ -294,6 +539,13 @@ fn prove(task: &str) -> Result<bool> {
             r.task
         );
     }
+}
+
+fn prove(task: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let r = proof::prove(&p, &home, &cwd()?, task, &mut std::io::stderr())?;
+    print_result(&r);
     match &r.next {
         Some(next) => print!("next: {next}"),
         None => println!("next: every task on this branch is proved or blocked"),
@@ -301,9 +553,98 @@ fn prove(task: &str) -> Result<bool> {
     Ok(r.proved)
 }
 
-fn status(all: bool) -> Result<bool> {
+fn prove_stale() -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
+    let cwd = cwd()?;
+    let stale = proof::stale_tasks(&p, &home, &cwd)?;
+    if stale.is_empty() {
+        println!("no stale tasks");
+        return Ok(true);
+    }
+    let mut all = true;
+    for task in &stale {
+        let r = proof::prove(&p, &home, &cwd, task, &mut std::io::stderr())?;
+        print_result(&r);
+        all &= r.proved;
+    }
+    Ok(all)
+}
+
+fn ls() -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    for s in change::summaries(&p)? {
+        println!("{} {:<10} {} {}", s.id, s.stage.name(), s.branch, s.title);
+    }
+    Ok(true)
+}
+
+fn path(id: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    println!("{}", change::locate(&project(&home)?, id)?);
+    Ok(true)
+}
+
+fn show(id: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    print!("{}", show::show(&project(&home)?, id)?);
+    Ok(true)
+}
+
+fn spec_list() -> Result<bool> {
+    let home = store::home_dir()?;
+    let (living, _) = change::load_living(&project(&home)?)?;
+    for (cap, lines) in show::overview(&living) {
+        println!("{cap}");
+        for line in lines {
+            println!("  {line}");
+        }
+    }
+    Ok(true)
+}
+
+fn guide(artifact: Artifact) -> Result<bool> {
+    print!(
+        "{}",
+        match artifact {
+            Artifact::Proposal => guide::PROPOSAL,
+            Artifact::Spec => guide::SPEC,
+            Artifact::Tasks => guide::TASKS,
+            Artifact::Design => guide::DESIGN,
+        }
+    );
+    Ok(true)
+}
+
+fn ids(target: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let minted = vow::mint_active(&p, &cwd()?, target)?;
+    for (from, to) in &minted {
+        println!("{from} -> {to}");
+    }
+    if minted.is_empty() {
+        println!("no placeholders");
+    }
+    Ok(true)
+}
+
+fn brief() -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    print!("{}", brief::brief(&p, &home, &cwd()?)?);
+    Ok(true)
+}
+
+fn status(all: bool, json: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    if json {
+        let v = view::view(&p, &home, &cwd()?)?.unwrap_or(serde_json::Value::Null);
+        println!("{v}");
+        return Ok(true);
+    }
     let changes = proof::status(&p, &home, &cwd()?, all)?;
     if changes.is_empty() {
         println!("no active change on this branch");
@@ -320,6 +661,12 @@ fn status(all: bool) -> Result<bool> {
         }
         for problem in &c.problems {
             println!("  error: {problem}");
+        }
+        for d in &c.drift {
+            println!("  drift {}: {}", d.class.name(), d.what);
+        }
+        for a in &c.pending {
+            println!("  pending {}: {}", a.id, a.reason);
         }
     }
     Ok(true)
@@ -344,4 +691,381 @@ fn gate(opts: Options) -> Result<bool> {
         println!("gate failed: {} problems", r.failures.len());
     }
     Ok(r.passed())
+}
+
+fn archive(target: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let a = archive::archive(&p, &home, &cwd()?, target)?;
+    for (op, id) in &a.merged {
+        println!("  {} {id}", op.word());
+    }
+    println!("archived {} to {}", a.id, a.path.display());
+    Ok(true)
+}
+
+fn drop_change(target: &str, reason: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let path = archive::drop_change(&project(&home)?, target, reason)?;
+    println!("dropped to {}", path.display());
+    Ok(true)
+}
+
+fn supersede(old: &str, by: &str, reason: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let path = archive::supersede(&project(&home)?, old, by, reason)?;
+    println!("superseded to {}", path.display());
+    Ok(true)
+}
+
+fn trace(id: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let (id, touches) = archive::trace(&project(&home)?, id)?;
+    if touches.is_empty() {
+        println!("no change touched {id}");
+    }
+    for t in &touches {
+        let date = t.date.as_deref().unwrap_or("-");
+        println!(
+            "{} {:<10} {date:<10} {:<10} {}",
+            t.change,
+            t.stage.name(),
+            t.ops.join(","),
+            t.title
+        );
+    }
+    Ok(true)
+}
+
+fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    for a in amend::amend(&p, &home, &cwd()?, target, reason, unlock)? {
+        println!("{} for {}:", a.id, a.change);
+        for i in &a.items {
+            println!("  {}: {}", i.class.name(), i.what);
+        }
+    }
+    println!("ask the user to run /rvow-confirm (or ! rvow confirm)");
+    Ok(true)
+}
+
+fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    if !accept && !reject {
+        if !ids.is_empty() || all.is_some() {
+            return Err(Error::new(
+                "decision",
+                "say what to do with the amendments",
+                "add --accept or --reject",
+            ));
+        }
+        let (living, _) = change::load_living(&p)?;
+        let pending = amend::pending(&proof::active(&p, &living)?);
+        if pending.is_empty() {
+            println!("no pending amendments");
+            return Ok(true);
+        }
+        for a in &pending {
+            println!("{} for {}", a.id, a.change);
+            for i in &a.items {
+                let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
+                println!("  {class}: {what}");
+                for (label, key) in [("before", "before"), ("after", "after")] {
+                    if let Some(v) = i.get(key).and_then(|v| v.as_str()) {
+                        for line in v.lines() {
+                            println!("    {label}: {line}");
+                        }
+                    }
+                }
+            }
+            println!("  reason (from the agent): {}", a.reason);
+        }
+        println!("digest {}", amend::digest(&pending));
+        println!("decide with: rvow confirm <id>... --accept|--reject, or --accept --all <digest>");
+        return Ok(true);
+    }
+    let decision = if accept {
+        amend::Decision::Accept
+    } else {
+        amend::Decision::Reject
+    };
+    for id in amend::confirm(&p, ids, decision, all)? {
+        println!("{id}: {}", if accept { "accepted" } else { "rejected" });
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum NoteArg {
+    Decision,
+    Surprise,
+    Handoff,
+}
+
+fn block(task: &str, reason: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let (change, task) = notes::block(&p, task, reason)?;
+    println!("{task} blocked in {change}");
+    println!("the gate refuses it until the user confirms an amendment that changes or drops it");
+    Ok(true)
+}
+
+fn note(kind: NoteArg, text: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let kind = match kind {
+        NoteArg::Decision => notes::NoteKind::Decision,
+        NoteArg::Surprise => notes::NoteKind::Surprise,
+        NoteArg::Handoff => notes::NoteKind::Handoff,
+    };
+    let (change, cut) = notes::note(&p, &cwd()?, kind, text)?;
+    println!("{} noted in {change}", kind.name());
+    if cut {
+        println!(
+            "warning: the handoff kept only its first {} lines",
+            notes::HANDOFF_LINES
+        );
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Harness {
+    Claude,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HookEvent {
+    PreToolUse,
+    SessionStart,
+    Stop,
+    Status,
+    View,
+}
+
+/// Hooks never fail the harness: outside an rvow project they print nothing,
+/// and an internal error allows the call and goes to stderr, so a bug in rvow
+/// cannot lock the agent out of every repository.
+fn hook(harness: Harness, event: HookEvent) -> ExitCode {
+    let mut text = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let run = || -> Result<Option<serde_json::Value>> {
+        let home = store::home_dir()?;
+        let cwd = input
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .map_or_else(cwd, Ok)?;
+        let Ok(Some(p)) = store::find(&cwd, &home) else {
+            return Ok(None);
+        };
+        match (harness, event) {
+            (Harness::Claude, HookEvent::PreToolUse) => hook::claude_pre_tool_use(&p, &input),
+            (Harness::Claude, HookEvent::SessionStart) => {
+                hook::claude_session_start(&p, &home, &input)
+            }
+            (Harness::Claude, HookEvent::Stop) => hook::claude_stop(&p, &home, &input),
+            (Harness::Claude, HookEvent::View) => view::view(&p, &home, &cwd),
+            (Harness::Claude, HookEvent::Status) => {
+                Ok(hook::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s })))
+            }
+        }
+    };
+    match run() {
+        Ok(Some(out)) => println!("{out}"),
+        Ok(None) => {}
+        Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
+    }
+    ExitCode::SUCCESS
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Scope {
+    User,
+    Project,
+}
+
+fn report(what: &str, o: install::Outcome) {
+    match o {
+        install::Outcome::Written(p) => println!("{what}: wrote {}", p.display()),
+        install::Outcome::Unchanged(p) => println!("{what}: up to date at {}", p.display()),
+        install::Outcome::KeptEdit(p) => {
+            println!(
+                "{what}: kept your edits in {}; delete it to get the new version",
+                p.display()
+            )
+        }
+        install::Outcome::AddLine { path, line } => {
+            println!(
+                "{what}: another hook manager owns {}; add this line to it:\n  {line}",
+                path.display()
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClaudeMode {
+    Mod,
+    Settings,
+}
+
+fn install(mode: ClaudeMode, scope: Scope) -> Result<bool> {
+    let rvow = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| Error::io(Path::new("rvow"), e))?;
+    let env_dir = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home =
+        env_dir("HOME").ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
+    let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
+    let settings = match scope {
+        Scope::User => claude.join("settings.json"),
+        Scope::Project => git::toplevel(&cwd()?)?.join(".claude/settings.json"),
+    };
+    match mode {
+        ClaudeMode::Mod => {
+            let dir = store::home_dir()?.join(install::MARKETPLACE_DIR);
+            report("Claude Code mod", install::claude_mod(&dir, &rvow)?);
+            report(
+                "old settings hooks",
+                install::remove_claude_settings(&settings)?,
+            );
+            println!("to load the mod in Claude Code, run once:");
+            println!("  claude plugin marketplace add {}", dir.display());
+            println!("  claude plugin install rvow@rvow");
+            println!("after a later rvow install, run: claude plugin marketplace update rvow");
+        }
+        ClaudeMode::Settings => {
+            report("skill", install::skill(&claude)?);
+            report(
+                "Claude Code hooks",
+                install::claude_settings(&settings, &rvow)?,
+            );
+        }
+    }
+    let pi = home.join(".pi/agent");
+    if pi.is_dir() {
+        report("pi extension", install::pi_extension(&pi)?);
+    } else {
+        println!("pi extension: skipped, {} does not exist", pi.display());
+    }
+    match store::find(&cwd()?, &store::home_dir()?) {
+        Ok(Some(_)) => report(
+            "pre-push gate",
+            install::pre_push(&git::toplevel(&cwd()?)?, &rvow)?,
+        ),
+        _ => println!(
+            "pre-push gate: skipped, run rvow install inside a repository with an rvow tree"
+        ),
+    }
+    Ok(true)
+}
+
+const REVIEW: &str = "\
+before you accept, check:
+  1. Does each requirement say what the system does, not how?
+  2. Does each task's check fail today for the reason the task fixes?
+  3. Is anything in Out of scope that you need now?
+  4. Is every Assumption one you agree with?
+  5. Is the change small enough to review its diff in one sitting?";
+
+fn check(target: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let reports = plan::check(&p, &cwd()?, target)?;
+    if reports.is_empty() {
+        println!("no open change on this branch");
+        return Ok(true);
+    }
+    let mut ok = true;
+    for r in &reports {
+        println!("{} ({})", r.change.id, r.change.stage.name());
+        print_findings("  ", &r.findings);
+        for (task, prog) in &r.missing {
+            println!(
+                "  {task}: error[missing-program]: {prog} is neither on PATH nor in the repository"
+            );
+        }
+        for q in &r.questions {
+            println!("  {}:{}: open question: {}", q.path, q.line, q.question);
+        }
+        if r.blocking() {
+            ok = false;
+            println!("  not ready to accept");
+        } else {
+            println!(
+                "  ready to accept: ask the user to run /rvow-accept {} (or ! rvow accept {})",
+                r.change.id, r.change.id
+            );
+        }
+    }
+    Ok(ok)
+}
+
+fn clarify(target: Option<&str>, json: bool) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    if json {
+        println!("{}", interview::round(&p, &cwd()?, target)?);
+        return Ok(true);
+    }
+    let mut count = 0;
+    for r in plan::check(&p, &cwd()?, target)? {
+        for q in &r.questions {
+            count += 1;
+            let rec = q.recommended.as_deref().unwrap_or("none given");
+            println!(
+                "{}:{}:{}: {} (recommended: {rec})",
+                r.change.id, q.path, q.line, q.question
+            );
+        }
+    }
+    if count == 0 {
+        println!("no open questions");
+    } else {
+        println!(
+            "ask the user with the rvow_ask tool, or ask in chat and record each answer with rvow answer <ref> \"<choice>\""
+        );
+    }
+    Ok(true)
+}
+
+fn answer(reference: &str, choice: &str, via: ViaArg) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let via = match via {
+        ViaArg::Dialog => interview::Via::Dialog,
+        ViaArg::Chat => interview::Via::Chat,
+    };
+    let a = interview::answer(&p, reference, choice, via)?;
+    let how = if a.recommended {
+        "the recommended answer"
+    } else {
+        "an answer other than the recommended one"
+    };
+    println!(
+        "Recorded for {}: {} -> {} ({how}).",
+        a.change, a.question, a.answer
+    );
+    println!(
+        "Now update the requirement or task this answer affects, and remove any text it contradicts."
+    );
+    Ok(true)
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ViaArg {
+    Dialog,
+    Chat,
 }

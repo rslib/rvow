@@ -6,16 +6,20 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::change::{self, LEDGER, Stage};
+use crate::amend;
+use crate::change::{self, CapSpec, LEDGER, Stage};
 use crate::config;
 use crate::diag::Severity;
+use crate::drift;
 use crate::error::Result;
 use crate::fingerprint::{self, globset};
 use crate::git;
 use crate::ledger::{self, Kind};
 use crate::proof::{self, Active, Now, State};
+use crate::record;
 use crate::runner;
 use crate::store::{Mode, Project, REPO_DIR};
+use crate::vow::requirement_hash;
 
 const MAX_LISTED: usize = 20;
 
@@ -135,17 +139,21 @@ pub fn gate(
             ));
         }
     }
-    let (all, _) = change::list(project)?;
-    for c in all.iter().filter(|c| c.stage == Stage::Backlog) {
-        let (events, _) = ledger::read(&c.path.join(LEDGER))?;
-        if events.iter().any(|e| e.kind == Kind::Vow) {
+    check_lifecycle(project, &mut r)?;
+    check_record(project, &living, &mut r)?;
+
+    if let Ok(dir) = git::run(&top, &["config", "--get", "core.hooksPath"])
+        && !dir.is_empty()
+    {
+        let hook = top.join(&dir).join("pre-push");
+        let runs_gate =
+            std::fs::read_to_string(&hook).is_ok_and(|t| t.contains("rvow") && t.contains("gate"));
+        if !runs_gate {
             r.failures.push(format!(
-                "{} has a vow but sits in backlog/; it was moved by hand",
-                c.id
+                "core.hooksPath points to {dir}, whose pre-push hook does not run rvow gate; run rvow install or add the line it prints"
             ));
         }
     }
-
     let Some(branch) = git::branch(&top)? else {
         if !changes.is_empty() {
             r.failures.push(format!(
@@ -169,7 +177,7 @@ pub fn gate(
         living: &living,
     };
     for c in &queue {
-        check_change(c, &now, opts, &mut r)?;
+        check_change(project, c, &now, opts, &mut r)?;
     }
     check_scope(project, &top, &config.base, &queue, &mut r)?;
 
@@ -229,7 +237,102 @@ pub fn gate(
     Ok(r)
 }
 
-fn check_change(c: &Active, now: &Now, opts: Options, r: &mut Report) -> Result<()> {
+/// The strict gate for one active change alone, as `archive` runs it: the
+/// vow, validation, drift, pending amendments and every task proved.
+pub fn change_gate(
+    project: &Project,
+    home: &Path,
+    cwd: &Path,
+    c: &Active,
+    living: &[CapSpec],
+) -> Result<Report> {
+    let top = git::toplevel(cwd)?;
+    let config = config::load(project, home)?;
+    let now = Now {
+        top: &top,
+        config: &config,
+        env: fingerprint::env(&top, &config)?,
+        living,
+    };
+    let mut r = Report {
+        changes: 1,
+        ..Report::default()
+    };
+    if c.vow().is_none() {
+        r.failures.push(format!(
+            "{} is in active/ without a vow event; it was moved by hand",
+            c.dir.id
+        ));
+    }
+    let opts = Options {
+        strict: true,
+        rerun: false,
+    };
+    check_change(project, c, &now, opts, &mut r)?;
+    Ok(r)
+}
+
+/// A change outside active/ whose ledger does not hold the event that moves it
+/// there was moved by hand.
+fn check_lifecycle(project: &Project, r: &mut Report) -> Result<()> {
+    let (all, _) = change::list(project)?;
+    for c in all.iter().filter(|c| c.stage != Stage::Active) {
+        let (events, _) = ledger::read(&c.path.join(LEDGER))?;
+        let has = |k: Kind| events.iter().any(|e| e.kind == k);
+        let problem = match c.stage {
+            Stage::Backlog if has(Kind::Vow) => "has a vow but sits in backlog/",
+            Stage::Done if !has(Kind::Archive) => "sits in archive/done/ without an archive event",
+            Stage::Dropped if !has(Kind::Drop) => "sits in archive/dropped/ without a drop event",
+            Stage::Superseded
+                if !events
+                    .iter()
+                    .any(|e| e.kind == Kind::Supersede && e.data.contains_key("superseded_by")) =>
+            {
+                "sits in archive/superseded/ without a supersede event"
+            }
+            _ => continue,
+        };
+        r.failures
+            .push(format!("{} {problem}; it was moved by hand", c.id));
+    }
+    Ok(())
+}
+
+/// Every living requirement matches the hash in spec-record.json. A project
+/// from before the record existed has none, and the check waits for one.
+fn check_record(project: &Project, living: &[CapSpec], r: &mut Report) -> Result<()> {
+    let mut record = record::load(project)?;
+    if record.is_empty() {
+        return Ok(());
+    }
+    for (cap, spec) in living {
+        for req in &spec.requirements {
+            let id = req.id.to_string();
+            let what = match record.remove(&id) {
+                None => "is not in spec-record.json",
+                Some(e) if e.hash != requirement_hash(req) => "does not match its recorded hash",
+                Some(_) => continue,
+            };
+            r.failures.push(format!(
+                "{id} in specs/{cap}/spec.md {what}; a living spec was edited outside a change"
+            ));
+        }
+    }
+    for id in record.keys() {
+        r.failures.push(format!(
+            "{id} is in spec-record.json but in no living spec; a living spec was edited outside a change"
+        ));
+    }
+    Ok(())
+}
+
+fn check_change(
+    project: &Project,
+    c: &Active,
+    now: &Now,
+    opts: Options,
+    r: &mut Report,
+) -> Result<()> {
     let id = &c.dir.id;
     for (path, d) in c.loaded.errors() {
         r.failures
@@ -242,12 +345,20 @@ fn check_change(c: &Active, now: &Now, opts: Options, r: &mut Report) -> Result<
             Severity::Warning => r.warnings.push(line),
         }
     }
-    if let Some(vowed) = c.branch()
-        && vowed != c.loaded.proposal.branch
+    for item in drift::drift(project, now.top, now.config, c)?
+        .into_iter()
+        .filter(|i| i.class.blocks())
     {
         r.failures.push(format!(
-            "{id}: branch: is {:?} but the vow says {vowed:?}; a branch change needs the user's confirmation",
-            c.loaded.proposal.branch
+            "{id}: {} drift: {}; record it with rvow amend --reason and ask the user to confirm",
+            item.class.name(),
+            item.what
+        ));
+    }
+    for p in amend::pending(std::slice::from_ref(c)) {
+        r.failures.push(format!(
+            "{id}: amendment {} waits for the user's confirmation",
+            p.id
         ));
     }
     if opts.rerun {
@@ -410,6 +521,85 @@ mod tests {
     }
 
     #[test]
+    fn drift_blocks_until_the_user_confirms() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let dir = std::fs::read_dir(p.root.join("active"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let tasks = dir.join("tasks.md");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        std::fs::write(&tasks, text.replace("grep -q ok out.txt", "true")).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            r.failures.iter().any(|f| f.contains("weaken drift")),
+            "{r:?}"
+        );
+
+        crate::amend::amend(&p, &home, &repo, None, "simpler check", None).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            r.failures.iter().any(|f| f.contains("waits for the user")),
+            "{r:?}"
+        );
+
+        crate::amend::confirm(
+            &p,
+            &[],
+            crate::amend::Decision::Accept,
+            Some(&{
+                let (living, _) = change::load_living(&p).unwrap();
+                crate::amend::digest(&crate::amend::pending(&proof::active(&p, &living).unwrap()))
+            }),
+        )
+        .unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            r.failures
+                .iter()
+                .all(|f| !f.contains("drift") && !f.contains("waits")),
+            "{r:?}"
+        );
+        assert!(
+            r.failures.iter().any(|f| f.contains("is stale"))
+                || r.warnings.iter().any(|w| w.contains("stale")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn hooks_path_must_run_the_gate() {
+        let (tmp, p, repo, _) = accepted();
+        let home = tmp.0.join("home");
+        git(&repo, &["config", "core.hooksPath", ".husky"]);
+        let hooks_path_failure =
+            |r: &Report| r.failures.iter().any(|f| f.contains("core.hooksPath"));
+        assert!(hooks_path_failure(&run_gate(
+            &p,
+            &home,
+            &repo,
+            Options::default()
+        )));
+        std::fs::create_dir_all(repo.join(".husky")).unwrap();
+        std::fs::write(
+            repo.join(".husky/pre-push"),
+            "npx lint\n'/opt/rvow' gate --strict --rerun\n",
+        )
+        .unwrap();
+        assert!(!hooks_path_failure(&run_gate(
+            &p,
+            &home,
+            &repo,
+            Options::default()
+        )));
+    }
+
+    #[test]
     fn checks_run_and_fail() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
@@ -421,5 +611,89 @@ mod tests {
             r.failures.iter().any(|f| f == "check failed: false"),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn hand_moves_into_the_archive_fail() {
+        let (tmp, p, repo, _) = accepted();
+        let home = tmp.0.join("home");
+        let dir = std::fs::read_dir(p.root.join("active"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let name = dir.file_name().unwrap();
+        for (stage, want) in [
+            (
+                Stage::Done,
+                "sits in archive/done/ without an archive event",
+            ),
+            (
+                Stage::Dropped,
+                "sits in archive/dropped/ without a drop event",
+            ),
+            (
+                Stage::Superseded,
+                "sits in archive/superseded/ without a supersede event",
+            ),
+        ] {
+            let to = p.root.join(stage.dir()).join(name);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            let src = Stage::ALL
+                .iter()
+                .map(|s| p.root.join(s.dir()).join(name))
+                .find(|d| d.is_dir())
+                .unwrap();
+            std::fs::rename(&src, &to).unwrap();
+            let r = run_gate(&p, &home, &repo, Options::default());
+            assert!(r.failures.iter().any(|f| f.contains(want)), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn living_specs_must_match_the_record() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let spec = p.root.join("specs/cap/spec.md");
+        std::fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        let text =
+            "# Cap\n\n## REQ-q8w2c7 Old\nrvow SHALL stay.\n### Scenario: s\n- WHEN a\n- THEN b\n";
+        std::fs::write(&spec, text).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(r.passed(), "an empty record skips the check: {r:?}");
+
+        let (living, _) = change::load_living(&p).unwrap();
+        let mut rec = record::Record::new();
+        rec.insert(
+            "REQ-q8w2c7".into(),
+            record::Entry {
+                hash: requirement_hash(&living[0].1.requirements[0]),
+                legacy: false,
+            },
+        );
+        rec.insert(
+            "REQ-7xq2a5".into(),
+            record::Entry {
+                hash: "x".into(),
+                legacy: false,
+            },
+        );
+        record::save(&p, &p.lock().unwrap(), &rec).unwrap();
+        let edited = text.replace("stay", "move")
+            + "\n## REQ-h4t6v9 New\nrvow SHALL be.\n### Scenario: s\n- WHEN a\n- THEN b\n";
+        std::fs::write(&spec, edited).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        let outside: Vec<&String> = r
+            .failures
+            .iter()
+            .filter(|f| f.ends_with("a living spec was edited outside a change"))
+            .collect();
+        assert_eq!(outside.len(), 3, "{r:?}");
+        assert!(outside[0].contains("REQ-q8w2c7 in specs/cap/spec.md does not match"));
+        assert!(outside[1].contains("REQ-h4t6v9 in specs/cap/spec.md is not in"));
+        assert!(outside[2].contains("REQ-7xq2a5 is in spec-record.json but in no living spec"));
     }
 }

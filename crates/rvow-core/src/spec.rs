@@ -12,6 +12,17 @@ pub enum StepKind {
     And,
 }
 
+impl StepKind {
+    pub fn word(self) -> &'static str {
+        match self {
+            StepKind::Given => "GIVEN",
+            StepKind::When => "WHEN",
+            StepKind::Then => "THEN",
+            StepKind::And => "AND",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
     pub kind: StepKind,
@@ -53,6 +64,16 @@ pub enum DeltaOp {
 }
 
 impl DeltaOp {
+    pub fn word(self) -> &'static str {
+        match self {
+            DeltaOp::Add => "ADD",
+            DeltaOp::Change => "CHANGE",
+            DeltaOp::Deprecate => "DEPRECATE",
+            DeltaOp::Move => "MOVE",
+            DeltaOp::Remove => "REMOVE",
+        }
+    }
+
     fn parse(s: &str) -> Option<DeltaOp> {
         Some(match s {
             "ADD" => DeltaOp::Add,

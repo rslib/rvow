@@ -1,0 +1,342 @@
+//! The read-only views behind `rvow spec list` and `rvow show`.
+
+use std::collections::BTreeMap;
+use std::fmt::Write;
+use std::time::Duration;
+
+use crate::change::{self, CapSpec, ChangeDir, Loaded, Stage};
+use crate::error::Result;
+use crate::id::{Id, Kind, Ref};
+use crate::ledger;
+use crate::proof::find_requirement;
+use crate::spec::Requirement;
+use crate::store::Project;
+use crate::tasks::Task;
+
+/// Each capability with one `REQ-id title` line per requirement. Never the text.
+pub fn overview(living: &[CapSpec]) -> Vec<(String, Vec<String>)> {
+    living
+        .iter()
+        .map(|(cap, spec)| {
+            let lines = spec
+                .requirements
+                .iter()
+                .map(|r| {
+                    let note = if r.deprecated { " (deprecated)" } else { "" };
+                    format!("{} {}{note}", r.id, r.title)
+                })
+                .collect();
+            (cap.clone(), lines)
+        })
+        .collect()
+}
+
+/// One requirement, task or change in full, found by a unique id prefix.
+pub fn show(project: &Project, input: &str) -> Result<String> {
+    let id = change::find(project, input)?.id;
+    let (living, _) = change::load_living(project)?;
+    let (dirs, _) = change::list(project)?;
+    if id.kind() == Kind::Chg {
+        let dir = dirs
+            .iter()
+            .find(|c| c.id == id)
+            .expect("found id is listed");
+        return show_change(dir, &living);
+    }
+    let mut open = Vec::new();
+    for dir in dirs
+        .into_iter()
+        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
+    {
+        let loaded = change::load(&dir.path, &living)?;
+        open.push((dir, loaded));
+    }
+    Ok(if id.kind() == Kind::Req {
+        show_requirement(project, &id, &living, &open)
+    } else {
+        show_task(&id, &living, &open)
+    })
+}
+
+fn render_requirement(req: &Requirement) -> String {
+    let mut out = format!("## {} {}\n", req.id, req.title);
+    if req.deprecated {
+        out.push_str("status: deprecated\n");
+    }
+    let _ = writeln!(out, "\n{}", req.text);
+    for sc in &req.scenarios {
+        let _ = writeln!(out, "\n### Scenario: {}", sc.title);
+        for st in &sc.steps {
+            let _ = writeln!(out, "- {} {}", st.kind.word(), st.text);
+        }
+    }
+    out
+}
+
+fn show_requirement(
+    project: &Project,
+    id: &Id,
+    living: &[CapSpec],
+    open: &[(ChangeDir, Loaded)],
+) -> String {
+    let want = Ref::Id(id.clone());
+    let rel = |p: &std::path::Path| {
+        p.strip_prefix(&project.root)
+            .unwrap_or(p)
+            .display()
+            .to_string()
+    };
+    let mut found = living.iter().find_map(|(cap, spec)| {
+        let req = spec.requirements.iter().find(|r| r.id == want)?;
+        Some((req, format!("specs/{cap}/spec.md")))
+    });
+    let mut touched = Vec::new();
+    for (dir, loaded) in open {
+        for (cap, file) in &loaded.deltas {
+            for d in file.deltas.iter().filter(|d| d.req.id == want) {
+                touched.push(format!("  {} {}", dir.id, d.op.word()));
+                if found.is_none() {
+                    let path = dir.path.join(change::DELTAS).join(format!("{cap}.md"));
+                    found = Some((&d.req, rel(&path)));
+                }
+            }
+        }
+    }
+    let (req, file) = found.expect("found id is in a spec or an ADD");
+    let mut out = render_requirement(req);
+    let _ = writeln!(out, "\nin: {file}");
+    if !touched.is_empty() {
+        let _ = writeln!(out, "touched by:\n{}", touched.join("\n"));
+    }
+    out
+}
+
+fn duration(d: Duration) -> String {
+    match d.as_secs() {
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
+}
+
+fn render_task(task: &Task) -> String {
+    let mut out = format!("- {} {}\n", task.id, task.title);
+    if !task.covers.is_empty() {
+        let covers: Vec<String> = task.covers.iter().map(Ref::to_string).collect();
+        let _ = writeln!(out, "  covers: {}", covers.join(", "));
+    }
+    let _ = writeln!(out, "  verify: {}", task.verify.as_deref().unwrap_or(""));
+    let _ = writeln!(out, "  files: {}", task.files.join(", "));
+    if task.baseline_pass {
+        out.push_str("  baseline: pass\n");
+    }
+    if let Some(t) = task.timeout {
+        let _ = writeln!(out, "  timeout: {}", duration(t));
+    }
+    out
+}
+
+fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> String {
+    let want = Ref::Id(id.clone());
+    let (dir, loaded, task) = open
+        .iter()
+        .find_map(|(d, l)| Some((d, l, l.tasks.iter().find(|t| t.id == want)?)))
+        .expect("found id is a task of an open change");
+    let mut out = render_task(task);
+    let _ = writeln!(out, "change: {}", dir.id);
+    for r in &task.covers {
+        match find_requirement(r, loaded, living) {
+            Some(req) => {
+                let _ = writeln!(out, "{r} {}", req.title);
+            }
+            None => {
+                let _ = writeln!(out, "{r} not found");
+            }
+        }
+    }
+    out
+}
+
+fn show_change(dir: &ChangeDir, living: &[CapSpec]) -> Result<String> {
+    let loaded = change::load(&dir.path, living)?;
+    let (events, _) = ledger::read(&dir.path.join(change::LEDGER))?;
+    let mut out = format!(
+        "{}\nstage: {}\nbranch: {}\ntitle: {}\n",
+        dir.id,
+        dir.stage.name(),
+        loaded.proposal.branch,
+        loaded.proposal.title
+    );
+    if !loaded.tasks.is_empty() {
+        out.push_str("tasks:\n");
+        for t in &loaded.tasks {
+            let _ = writeln!(out, "  {} {}", t.id, t.title);
+        }
+    }
+    let deltas: Vec<_> = loaded.deltas.iter().flat_map(|(_, f)| &f.deltas).collect();
+    if !deltas.is_empty() {
+        out.push_str("deltas:\n");
+        for d in deltas {
+            let title = find_requirement(&d.req.id, &loaded, living).map_or("", |r| &r.title);
+            let _ = writeln!(out, "  {} {} {title}", d.op.word(), d.req.id);
+        }
+    }
+    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+    for e in &events {
+        *kinds
+            .entry(format!("{:?}", e.kind).to_lowercase())
+            .or_default() += 1;
+    }
+    if !kinds.is_empty() {
+        out.push_str("ledger:\n");
+        for (kind, n) in kinds {
+            let _ = writeln!(out, "  {kind} {n}");
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testrepo::*;
+    use crate::ledger::{self, Kind as Ev};
+    use crate::store::{Mode, init};
+
+    const SPEC: &str = "# Ledger\n\n## REQ-q8w2c7 Old thing\nstatus: deprecated\n\nrvow SHALL keep it.\n\n### Scenario: kept\n- WHEN a\n- THEN b\n\n## REQ-k3f9m2 Record a proof run\n\nWHEN a task runs, rvow SHALL record one event.\n\n### Scenario: one run\n- GIVEN a task\n- WHEN it runs\n- THEN one event exists\n- AND it has exit 0\n";
+
+    fn fixture() -> (TempDir, Project, ChangeDir) {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let cap = p.root.join("specs/ledger");
+        std::fs::create_dir_all(&cap).unwrap();
+        std::fs::write(cap.join("spec.md"), SPEC).unwrap();
+        let c = change::new(&p, "Output tail", "main", false).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "# Tasks\n\n- TSK-x7k2q4 Write tail\n  covers: REQ-new1, REQ-k3f9m2\n  verify: cargo test tail\n  files: crates/**, Cargo.toml\n  baseline: pass\n  timeout: 20m\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c.path.join("specs/ledger.md"),
+            "## ADD REQ-new1 Tail\n\nWHEN a run ends, rvow SHALL keep the tail.\n\n### Scenario: tail\n- WHEN a run ends\n- THEN the tail is kept\n\n## DEPRECATE REQ-q8w2c7\n",
+        )
+        .unwrap();
+        (tmp, p, c)
+    }
+
+    #[test]
+    fn overview_lists_ids_and_titles_only() {
+        let (_t, p, _) = fixture();
+        let (living, _) = change::load_living(&p).unwrap();
+        assert_eq!(
+            overview(&living),
+            [(
+                "ledger".to_string(),
+                vec![
+                    "REQ-q8w2c7 Old thing (deprecated)".to_string(),
+                    "REQ-k3f9m2 Record a proof run".to_string()
+                ]
+            )]
+        );
+        assert!(overview(&[]).is_empty());
+    }
+
+    #[test]
+    fn shows_a_requirement_and_who_touches_it() {
+        let (_t, p, c) = fixture();
+        std::fs::write(
+            c.path.join("specs/ledger.md"),
+            "## DEPRECATE REQ-q8w2c7\n## CHANGE REQ-k3f9m2 Record a proof run\n\nWHEN a task runs, rvow SHALL record two events.\n\n### Scenario: s\n- WHEN a\n- THEN b\n",
+        )
+        .unwrap();
+        let out = show(&p, "REQ-q8w").unwrap();
+        assert!(
+            out.starts_with("## REQ-q8w2c7 Old thing\nstatus: deprecated\n\nrvow SHALL keep it.\n")
+        );
+        assert!(out.contains("\n### Scenario: kept\n- WHEN a\n- THEN b\n"));
+        assert!(out.contains("\nin: specs/ledger/spec.md\n"));
+        assert!(out.ends_with(&format!("touched by:\n  {} DEPRECATE\n", c.id)));
+        let out = show(&p, "k3f9").unwrap();
+        assert!(out.contains("- AND it has exit 0\n"));
+        assert!(!out.contains("status:"));
+        assert!(out.contains(&format!("touched by:\n  {} CHANGE", c.id)));
+    }
+
+    #[test]
+    fn shows_an_added_requirement_from_its_delta() {
+        let (_t, p, c) = fixture();
+        std::fs::write(
+            c.path.join("specs/ledger.md"),
+            "## ADD REQ-m4n5p6 Tail\n\nWHEN a run ends, rvow SHALL keep the tail.\n\n### Scenario: tail\n- WHEN a run ends\n- THEN the tail is kept\n",
+        )
+        .unwrap();
+        let out = show(&p, "m4n5").unwrap();
+        let rel = format!("backlog/{}-output-tail/specs/ledger.md", c.id);
+        assert!(out.contains(&format!("\nin: {rel}\n")), "{out}");
+        assert!(out.contains(&format!("touched by:\n  {} ADD", c.id)));
+    }
+
+    #[test]
+    fn shows_a_task_with_the_titles_it_covers() {
+        let (_t, p, c) = fixture();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-x7k2q4 Write tail\n  covers: REQ-k3f9m2, REQ-zzzzzz\n  verify: cargo test tail\n  files: crates/**, Cargo.toml\n  baseline: pass\n  timeout: 90s\n",
+        )
+        .unwrap();
+        let out = show(&p, "x7k").unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "- TSK-x7k2q4 Write tail\n  covers: REQ-k3f9m2, REQ-zzzzzz\n  verify: cargo test tail\n  files: crates/**, Cargo.toml\n  baseline: pass\n  timeout: 90s\nchange: {}\nREQ-k3f9m2 Record a proof run\nREQ-zzzzzz not found\n",
+                c.id
+            )
+        );
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\n",
+        )
+        .unwrap();
+        let out = show(&p, "x7k").unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\nchange: {}\n",
+                c.id
+            )
+        );
+    }
+
+    #[test]
+    fn durations_use_the_largest_whole_unit() {
+        assert_eq!(duration(Duration::from_secs(7200)), "2h");
+        assert_eq!(duration(Duration::from_secs(1200)), "20m");
+        assert_eq!(duration(Duration::from_secs(90)), "90s");
+    }
+
+    #[test]
+    fn shows_a_change_with_its_ledger_counts() {
+        let (_t, p, c) = fixture();
+        let lock = p.lock().unwrap();
+        for kind in [Ev::Note, Ev::Prove, Ev::Note] {
+            ledger::append(
+                &c.path.join(change::LEDGER),
+                &lock,
+                kind,
+                Default::default(),
+            )
+            .unwrap();
+        }
+        let out = show(&p, &c.id.to_string()).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "{}\nstage: backlog\nbranch: main\ntitle: Output tail\ntasks:\n  TSK-x7k2q4 Write tail\ndeltas:\n  ADD REQ-new1 Tail\n  DEPRECATE REQ-q8w2c7 Old thing\nledger:\n  note 2\n  prove 1\n",
+                c.id
+            )
+        );
+        assert_eq!(show(&p, "zzzzzz").unwrap_err().code, "path");
+    }
+}

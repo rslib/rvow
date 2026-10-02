@@ -1,0 +1,72 @@
+# Run with prek (https://github.com/j178/prek); install the git hook once with `prek install`.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo-test
+        name: cargo test
+        # Inside a git hook, git exports GIT_INDEX_FILE (and in some setups GIT_DIR and GIT_WORK_TREE)
+        # for this repository; the tests' own git repositories must not inherit them.
+        entry: env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE -u GIT_PREFIX -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES cargo test --quiet
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ascii
+        name: ASCII-only Rust source
+        # grep exits 1 when nothing matches; a match (0) or an error (2) fails the hook.
+        entry: sh -c 'LC_ALL=C grep -n "$(printf "[^\t -~]")" "$@"; test $? -eq 1' --
+        language: system
+        files: \.rs$
+      - id: ext-drift
+        name: extension version drift
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run drift'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-biome
+        name: biome check
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run lint'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-tsc-pi
+        name: tsc pi extension
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run typecheck:pi'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-tsc-claude
+        name: tsc claude mod
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run typecheck:claude'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-claude-validate
+        name: claude plugin validate
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run validate:claude'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
+      - id: ext-claude-test
+        name: claude plugin test
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run test:claude'
+        language: system
+        files: ^extensions/
+        pass_filenames: false

@@ -417,9 +417,25 @@ pub struct Change<'a> {
     pub texts: &'a [(String, String)],
 }
 
-/// Every `[NEEDS CLARIFICATION` marker, as (path, line). `accept` refuses a
+/// One open question, written as
+/// `[NEEDS CLARIFICATION: question | recommended: answer]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    pub path: String,
+    pub line: usize,
+    pub question: String,
+    pub recommended: Option<String>,
+    /// The other choices, without the recommended one.
+    pub options: Vec<String>,
+    /// Why the decision matters.
+    pub why: Option<String>,
+    /// The marker exactly as written, so `rvow answer` can remove it.
+    pub marker: String,
+}
+
+/// Every `[NEEDS CLARIFICATION` marker outside code. `accept` refuses a
 /// change with any.
-pub fn clarifications(texts: &[(String, String)]) -> Vec<(String, usize)> {
+pub fn questions(texts: &[(String, String)]) -> Vec<Question> {
     let mut out = Vec::new();
     for (path, text) in texts {
         let mut fenced = false;
@@ -430,12 +446,53 @@ pub fn clarifications(texts: &[(String, String)]) -> Vec<(String, usize)> {
             if fenced {
                 continue;
             }
-            for _ in prose(line).matches(CLARIFICATION) {
-                out.push((path.clone(), i + 1));
+            let plain = prose(line);
+            for (start, _) in plain.match_indices(CLARIFICATION) {
+                let rest = &plain[start + CLARIFICATION.len()..];
+                let body = rest.split(']').next().unwrap_or("");
+                let marker = format!("{CLARIFICATION}{body}]");
+                let body = body.strip_prefix(':').unwrap_or(body);
+                let mut parts = body.split('|').map(str::trim);
+                let question = parts.next().unwrap_or("");
+                let (mut recommended, mut options, mut why) = (None, Vec::new(), None);
+                for part in parts {
+                    let (key, value) = part.split_once(':').unwrap_or((part, ""));
+                    let value = value.trim();
+                    match key.trim() {
+                        "recommended" if !value.is_empty() => recommended = Some(value.to_string()),
+                        "options" => {
+                            options = value
+                                .split(';')
+                                .map(str::trim)
+                                .filter(|o| !o.is_empty())
+                                .map(String::from)
+                                .collect()
+                        }
+                        "why" if !value.is_empty() => why = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+                out.push(Question {
+                    path: path.clone(),
+                    line: i + 1,
+                    question: question.to_string(),
+                    recommended,
+                    options,
+                    why,
+                    marker,
+                });
             }
         }
     }
     out
+}
+
+/// Every `[NEEDS CLARIFICATION` marker, as (path, line).
+pub fn clarifications(texts: &[(String, String)]) -> Vec<(String, usize)> {
+    questions(texts)
+        .into_iter()
+        .map(|q| (q.path, q.line))
+        .collect()
 }
 
 impl Change<'_> {
@@ -538,6 +595,19 @@ impl Change<'_> {
             }
         }
 
+        for q in questions(self.texts)
+            .iter()
+            .filter(|q| q.recommended.is_none())
+        {
+            out.push((
+                q.path.clone(),
+                Diagnostic::new(
+                    Rule::ClarifyForm,
+                    q.line,
+                    "the open question has no recommended answer",
+                ),
+            ));
+        }
         let marks = clarifications(self.texts);
         if let Some((path, line)) = marks.get(MAX_CLARIFICATIONS) {
             out.push((
@@ -730,7 +800,7 @@ rvow SHALL run.
         assert!(diags.is_empty(), "{diags:?}");
         let texts = vec![(
             "proposal.md".to_string(),
-            "[NEEDS CLARIFICATION: a]\n[NEEDS CLARIFICATION: b]\n[NEEDS CLARIFICATION: c] [NEEDS CLARIFICATION: d]\n"
+            "[NEEDS CLARIFICATION: a | recommended: x]\n[NEEDS CLARIFICATION: b | recommended: x]\n[NEEDS CLARIFICATION: c | recommended: x] [NEEDS CLARIFICATION: d | recommended: x]\n"
                 .to_string(),
         )];
         let found = Change {
@@ -757,6 +827,22 @@ rvow SHALL run.
             ]
         );
         assert_eq!(clarifications(&texts).len(), 4);
+        let q = questions(&[(
+            "proposal.md".to_string(),
+            "x [NEEDS CLARIFICATION: Which store? | recommended: home] y\n".to_string(),
+        )]);
+        assert_eq!(q[0].question, "Which store?");
+        assert_eq!(q[0].recommended.as_deref(), Some("home"));
+        assert_eq!(
+            q[0].marker,
+            "[NEEDS CLARIFICATION: Which store? | recommended: home]"
+        );
+        let q = questions(&[(
+            "p.md".to_string(),
+            "[NEEDS CLARIFICATION: Where? | recommended: home | options: repo; both | why: sets the layout]".to_string(),
+        )]);
+        assert_eq!(q[0].options, ["repo", "both"]);
+        assert_eq!(q[0].why.as_deref(), Some("sets the layout"));
         let quoted = vec![(
             "design.md".to_string(),
             "`[NEEDS CLARIFICATION]` marks a question.\n```\n[NEEDS CLARIFICATION: x]\n```\n"

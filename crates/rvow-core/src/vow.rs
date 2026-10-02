@@ -17,10 +17,11 @@ use crate::git;
 use crate::id::{Id, Ref};
 use crate::ledger::{self, Kind};
 use crate::lint::{Finding, clarifications};
+use crate::proof;
 use crate::registry;
 use crate::runner::{self, Outcome};
 use crate::spec::{DeltaOp, Requirement, Spec, StepKind};
-use crate::store::Project;
+use crate::store::{Lock, Project};
 use crate::tasks::Task;
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -245,6 +246,20 @@ pub fn prepare(
         ));
     }
 
+    let missing: Vec<String> = crate::plan::missing_programs(&top, &loaded.tasks)
+        .into_iter()
+        .map(|(task, prog)| {
+            format!("{task} runs {prog}, which is neither on PATH nor in the repository")
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(findings_error(
+            "missing-program",
+            "some verify commands cannot run",
+            &missing,
+            "fix the command; a check that cannot run fails for the wrong reason",
+        ));
+    }
     let config = config::load(project, home)?;
     let base_commit = base_commit(&top, &config.base)?;
     let mut baseline = Vec::new();
@@ -305,7 +320,7 @@ pub struct Vowed {
     pub event: String,
 }
 
-fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
+pub fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
     let patterns: Vec<String> = config
         .test_globs
         .iter()
@@ -321,20 +336,14 @@ fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathB
         .collect())
 }
 
-/// Mints real ids, stores the vowed content and records the vow.
-pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
-    let Prepared {
-        change,
-        loaded,
-        living,
-        top,
-        branch,
-        base_commit,
-        config,
-        baseline,
-    } = prepared;
-    let lock = project.lock()?;
-
+/// Mints a real id for every placeholder of a change, rewrites each Markdown
+/// file of the change and returns the mapping in mint order.
+pub fn mint_placeholders(
+    project: &Project,
+    lock: &Lock,
+    change: &ChangeDir,
+    loaded: &Loaded,
+) -> Result<Vec<(String, Id)>> {
     let mut placeholders: Vec<Ref> = Vec::new();
     let mut seen = HashSet::new();
     let all_refs = loaded
@@ -354,7 +363,7 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     }
     let mut minted = Vec::new();
     for p in &placeholders {
-        let id = registry::mint(project, &lock, p.kind(), Some(&change.id))?;
+        let id = registry::mint(project, lock, p.kind(), Some(&change.id))?;
         minted.push((p.to_string(), id));
     }
     for (rel, text) in &loaded.texts {
@@ -367,6 +376,134 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
             std::fs::write(&path, new).map_err(|e| Error::io(&path, e))?;
         }
     }
+    Ok(minted)
+}
+
+/// `rvow ids`: mints ids for the placeholders of `target`, or of every active
+/// change on the current branch, and returns the mapping in mint order.
+pub fn mint_active(
+    project: &Project,
+    cwd: &Path,
+    target: Option<&str>,
+) -> Result<Vec<(String, Id)>> {
+    let lock = project.lock()?;
+    let (living, _) = change::load_living(project)?;
+    let dirs = match target {
+        Some(t) => {
+            let c = change::resolve(project, t)?;
+            if c.stage != Stage::Active {
+                let fix = if c.stage == Stage::Backlog {
+                    "placeholders stay valid in backlog; accept mints them"
+                } else {
+                    "only an active change has placeholders to mint"
+                };
+                return Err(Error::new(
+                    "stage",
+                    format!("{} is in {}, not in active", c.id, c.stage.name()),
+                    fix,
+                ));
+            }
+            vec![c]
+        }
+        None => {
+            let branch = git::branch(cwd)?;
+            proof::active(project, &living)?
+                .into_iter()
+                .filter(|a| a.branch() == branch.as_deref())
+                .map(|a| a.dir)
+                .collect()
+        }
+    };
+    let mut out = Vec::new();
+    for dir in dirs {
+        let loaded = change::load(&dir.path, &living)?;
+        out.extend(mint_placeholders(project, &lock, &dir, &loaded)?);
+    }
+    Ok(out)
+}
+
+/// Stores the content of a change and returns the snapshot that a vow or an
+/// amendment records: branch, effective config, every Markdown file, the hash
+/// of each task and delta requirement, and the protected files.
+pub fn snapshot(
+    project: &Project,
+    top: &Path,
+    config: &Config,
+    loaded: &Loaded,
+    branch: &str,
+) -> Result<Map<String, Value>> {
+    let mut files = Map::new();
+    for (rel, text) in &loaded.texts {
+        files.insert(rel.clone(), put_object(project, text.as_bytes())?.into());
+    }
+    let mut protected = Map::new();
+    for (rel, path) in protected_files(top, config)? {
+        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
+        protected.insert(rel, put_object(project, &bytes)?.into());
+    }
+    let tasks: Map<String, Value> = loaded
+        .tasks
+        .iter()
+        .map(|t| (t.id.to_string(), task_hash(t).into()))
+        .collect();
+    let requirements: Map<String, Value> = loaded
+        .deltas
+        .iter()
+        .flat_map(|(_, f)| f.deltas.iter())
+        .filter(|d| d.op.has_body())
+        .map(|d| (d.req.id.to_string(), requirement_hash(&d.req).into()))
+        .collect();
+    let mut data = Map::new();
+    data.insert("branch".into(), branch.into());
+    data.insert(
+        "config".into(),
+        put_object(project, config.canonical().as_bytes())?.into(),
+    );
+    data.insert("files".into(), files.into());
+    data.insert("tasks".into(), tasks.into());
+    data.insert("requirements".into(), requirements.into());
+    data.insert(
+        "protected".into(),
+        put_object(project, Value::Object(protected).to_string().as_bytes())?.into(),
+    );
+    Ok(data)
+}
+
+/// The living hash of each requirement that a CHANGE, DEPRECATE, MOVE or
+/// REMOVE names: the base that `archive` expects to find.
+pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
+    let living_hash: HashMap<String, String> = living
+        .iter()
+        .flat_map(|(_, s)| s.requirements.iter())
+        .map(|r| (r.id.to_string(), requirement_hash(r)))
+        .collect();
+    let mut out = Map::new();
+    for (_, file) in &loaded.deltas {
+        for d in file.deltas.iter().filter(|d| d.op != DeltaOp::Add) {
+            let id = d.req.id.to_string();
+            if let Some(h) = living_hash.get(&id) {
+                out.insert(id, h.clone().into());
+            }
+        }
+    }
+    out
+}
+
+/// Mints real ids, stores the vowed content and records the vow.
+pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
+    let Prepared {
+        change,
+        loaded,
+        living,
+        top,
+        branch,
+        base_commit,
+        config,
+        baseline,
+    } = prepared;
+    let lock = project.lock()?;
+
+    let minted = mint_placeholders(project, &lock, &change, &loaded)?;
     let loaded = change::load(&change.path, &living)?;
     if let Some(f) = loaded.errors().next() {
         return Err(Error::new(
@@ -376,43 +513,7 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
         ));
     }
 
-    let mut files = Map::new();
-    for (rel, text) in &loaded.texts {
-        files.insert(rel.clone(), put_object(project, text.as_bytes())?.into());
-    }
-    let config_hash = put_object(project, config.canonical().as_bytes())?;
-    let mut protected = Map::new();
-    for (rel, path) in protected_files(&top, &config)? {
-        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
-        protected.insert(rel, put_object(project, &bytes)?.into());
-    }
-    let protected_root = put_object(project, Value::Object(protected).to_string().as_bytes())?;
-
-    let tasks: Map<String, Value> = loaded
-        .tasks
-        .iter()
-        .map(|t| (t.id.to_string(), task_hash(t).into()))
-        .collect();
-    let mut requirements = Map::new();
-    let mut bases = Map::new();
-    let living_hash: HashMap<String, String> = living
-        .iter()
-        .flat_map(|(_, s)| s.requirements.iter())
-        .map(|r| (r.id.to_string(), requirement_hash(r)))
-        .collect();
-    for (_, file) in &loaded.deltas {
-        for d in &file.deltas {
-            let id = d.req.id.to_string();
-            if d.op.has_body() {
-                requirements.insert(id.clone(), requirement_hash(&d.req).into());
-            }
-            if d.op != DeltaOp::Add
-                && let Some(h) = living_hash.get(&id)
-            {
-                bases.insert(id, h.clone().into());
-            }
-        }
-    }
+    let mut data = snapshot(project, &top, &config, &loaded, &branch)?;
     let minted_names: HashMap<String, String> = minted
         .iter()
         .map(|(from, to)| (from.clone(), to.to_string()))
@@ -427,16 +528,9 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
         })
         .collect();
 
-    let mut data = Map::new();
     data.insert("change".into(), change.id.to_string().into());
-    data.insert("branch".into(), branch.into());
     data.insert("base_commit".into(), base_commit.into());
-    data.insert("config".into(), config_hash.into());
-    data.insert("files".into(), files.into());
-    data.insert("tasks".into(), tasks.into());
-    data.insert("requirements".into(), requirements.into());
-    data.insert("bases".into(), bases.into());
-    data.insert("protected".into(), protected_root.into());
+    data.insert("bases".into(), bases(&loaded, &living).into());
     data.insert("baseline".into(), baseline.into());
     let event = ledger::append(&change.path.join(LEDGER), &lock, Kind::Vow, data)?;
 
@@ -551,5 +645,33 @@ mod tests {
         .unwrap();
         let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
         assert_eq!(err.code, "clarification");
+    }
+
+    #[test]
+    fn ids_mints_for_active_changes_on_the_branch() {
+        let (_tmp, p, repo, _) = crate::proof::tests::accepted();
+        let dir = std::fs::read_dir(p.root.join("active"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let tasks = dir.join("tasks.md");
+        let mut text = std::fs::read_to_string(&tasks).unwrap();
+        text.push_str("- TSK-new1 More\n  verify: true\n  files: a\n");
+        std::fs::write(&tasks, text).unwrap();
+
+        let out = mint_active(&p, &repo, None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "TSK-new1");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        assert!(text.contains(&out[0].1.to_string()) && !text.contains("TSK-new1"));
+        assert!(mint_active(&p, &repo, None).unwrap().is_empty());
+
+        git(&repo, &["checkout", "-q", "-b", "other"]);
+        let backlog = change::new(&p, "Later", "other", true).unwrap();
+        let err = mint_active(&p, &repo, Some(&backlog.id.to_string())).unwrap_err();
+        assert_eq!(err.code, "stage");
+        assert!(err.fix.contains("accept mints them"));
     }
 }
