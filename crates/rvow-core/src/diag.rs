@@ -28,6 +28,8 @@ pub enum Rule {
     ScenarioTitle,
     DesignInSpec,
     Size,
+    Ledger,
+    LedgerTail,
 }
 
 impl Rule {
@@ -40,7 +42,8 @@ impl Rule {
             | Rule::Pronoun
             | Rule::ScenarioTitle
             | Rule::DesignInSpec
-            | Rule::Size => Severity::Warning,
+            | Rule::Size
+            | Rule::LedgerTail => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -66,6 +69,8 @@ impl Rule {
             Rule::ScenarioTitle => "scenario-title",
             Rule::DesignInSpec => "design-in-spec",
             Rule::Size => "size",
+            Rule::Ledger => "ledger",
+            Rule::LedgerTail => "ledger-tail",
         }
     }
 
@@ -92,6 +97,8 @@ impl Rule {
             Rule::ScenarioTitle => "split the scenario into one behavior each",
             Rule::DesignInSpec => "move paths and code names to design.md",
             Rule::Size => "split the requirement or the capability",
+            Rule::Ledger => "restore the ledger from git or a backup",
+            Rule::LedgerTail => "none needed, the next write removes the partial line",
         }
     }
 }

@@ -1,6 +1,11 @@
 pub mod diag;
+pub mod error;
+pub mod git;
 pub mod id;
+pub mod ledger;
 pub mod lint;
 pub mod proposal;
+pub mod registry;
 pub mod spec;
+pub mod store;
 pub mod tasks;
