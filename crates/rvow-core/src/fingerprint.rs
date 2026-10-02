@@ -26,8 +26,7 @@ pub fn globset(patterns: &[String]) -> Result<GlobSet> {
             .map_err(|e| Error::new("glob", format!("bad glob {p:?}: {e}"), "fix the glob"))?;
         b.add(glob);
     }
-    b.build()
-        .map_err(|e| Error::new("glob", e.to_string(), "fix the globs"))
+    b.build().map_err(|e| Error::new("glob", e.to_string(), "fix the globs"))
 }
 
 /// Tracked files plus untracked files that git does not ignore.
@@ -61,10 +60,7 @@ fn file_hash(top: &Path, rel: &str) -> Result<(String, bool)> {
             // A submodule: its commit and its uncommitted state.
             let head = git::run(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
             let dirty = git::run(&path, &["status", "--porcelain"]).unwrap_or_default();
-            Ok((
-                format!("sub:{}", sha256_hex(format!("{head}\n{dirty}").as_bytes())),
-                false,
-            ))
+            Ok((format!("sub:{}", sha256_hex(format!("{head}\n{dirty}").as_bytes())), false))
         }
         Ok(_) => {
             let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
@@ -79,10 +75,7 @@ pub fn inputs(top: &Path, globs: &[String]) -> Result<Inputs> {
     let mut list = String::new();
     let mut files = 0;
     let mut lfs_pointers = Vec::new();
-    for rel in candidate_files(top)?
-        .into_iter()
-        .filter(|f| set.is_match(f))
-    {
+    for rel in candidate_files(top)?.into_iter().filter(|f| set.is_match(f)) {
         let (hash, lfs) = file_hash(top, &rel)?;
         if lfs {
             lfs_pointers.push(rel.clone());
@@ -93,11 +86,7 @@ pub fn inputs(top: &Path, globs: &[String]) -> Result<Inputs> {
         list.push('\n');
         files += 1;
     }
-    Ok(Inputs {
-        hash: sha256_hex(list.as_bytes()),
-        files,
-        lfs_pointers,
-    })
+    Ok(Inputs { hash: sha256_hex(list.as_bytes()), files, lfs_pointers })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,24 +104,11 @@ pub fn env(top: &Path, config: &Config) -> Result<Env> {
     for cmd in &config.env {
         let out = runner::run(cmd, top, &[], ENV_TIMEOUT, &mut std::io::sink())?;
         let first = out.tail.first().cloned().unwrap_or_default();
-        let value = if out.passed() {
-            first
-        } else {
-            format!("failed: {first}")
-        };
+        let value = if out.passed() { first } else { format!("failed: {first}") };
         commands.insert(cmd.clone(), value);
     }
-    let vars = config
-        .env_vars
-        .iter()
-        .map(|k| (k.clone(), std::env::var(k).unwrap_or_default()))
-        .collect();
-    Ok(Env {
-        os: std::env::consts::OS.into(),
-        arch: std::env::consts::ARCH.into(),
-        commands,
-        vars,
-    })
+    let vars = config.env_vars.iter().map(|k| (k.clone(), std::env::var(k).unwrap_or_default())).collect();
+    Ok(Env { os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(), commands, vars })
 }
 
 impl Env {
@@ -163,11 +139,7 @@ mod tests {
         assert_eq!(before.files, 1, "ignored files never count");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "c"]);
-        assert_eq!(
-            inputs(&repo, &globs).unwrap(),
-            before,
-            "a commit changes nothing"
-        );
+        assert_eq!(inputs(&repo, &globs).unwrap(), before, "a commit changes nothing");
 
         std::fs::write(repo.join("src/a.rs"), "b").unwrap();
         assert_ne!(inputs(&repo, &globs).unwrap().hash, before.hash);
@@ -175,22 +147,14 @@ mod tests {
         assert_eq!(inputs(&repo, &globs).unwrap(), before);
 
         std::fs::write(repo.join("src/b.rs"), "new").unwrap();
-        assert_eq!(
-            inputs(&repo, &globs).unwrap().files,
-            2,
-            "untracked files count"
-        );
+        assert_eq!(inputs(&repo, &globs).unwrap().files, 2, "untracked files count");
     }
 
     #[test]
     fn lfs_pointers_are_reported() {
         let tmp = TempDir::new();
         let repo = repo_with_commit(&tmp.0, "r");
-        std::fs::write(
-            repo.join("big.bin"),
-            "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 3\n",
-        )
-        .unwrap();
+        std::fs::write(repo.join("big.bin"), "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 3\n").unwrap();
         let i = inputs(&repo, &["*.bin".to_string()]).unwrap();
         assert_eq!(i.lfs_pointers, ["big.bin"]);
     }

@@ -20,12 +20,7 @@ mod tests {
 
     #[test]
     fn every_guide_fits_the_word_budget() {
-        for (name, text) in [
-            ("proposal", PROPOSAL),
-            ("spec", SPEC),
-            ("tasks", TASKS),
-            ("design", DESIGN),
-        ] {
+        for (name, text) in [("proposal", PROPOSAL), ("spec", SPEC), ("tasks", TASKS), ("design", DESIGN)] {
             let n = text.split_whitespace().count();
             assert!(n <= MAX_WORDS, "{name} guide has {n} words");
             assert!(text.is_ascii(), "{name} guide is not ASCII");
@@ -36,12 +31,7 @@ mod tests {
     fn the_examples_make_one_change_that_validates() {
         let tmp = TempDir::new();
         std::fs::create_dir_all(tmp.0.join("specs")).unwrap();
-        for (file, guide) in [
-            ("proposal.md", PROPOSAL),
-            ("tasks.md", TASKS),
-            ("design.md", DESIGN),
-            ("specs/ledger.md", SPEC),
-        ] {
+        for (file, guide) in [("proposal.md", PROPOSAL), ("tasks.md", TASKS), ("design.md", DESIGN), ("specs/ledger.md", SPEC)] {
             std::fs::write(tmp.0.join(file), example(guide)).unwrap();
         }
         let loaded = change::load(&tmp.0, &[]).unwrap();

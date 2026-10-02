@@ -13,15 +13,7 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const IDS_FILE: &str = "ids.jsonl";
 pub const LOCK_FILE: &str = ".lock";
 pub const REPO_DIR: &str = "rvow";
-const DIRS: [&str; 7] = [
-    "specs",
-    "backlog",
-    "active",
-    "archive/done",
-    "archive/dropped",
-    "archive/superseded",
-    "objects",
-];
+const DIRS: [&str; 7] = ["specs", "backlog", "active", "archive/done", "archive/dropped", "archive/superseded", "objects"];
 const MAX_DEPTH: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,12 +50,7 @@ fn pointer_path(xdg_config: Option<&str>, home: Option<&str>) -> Option<PathBuf>
 /// Picks the rvow home: `RVOW_HOME`, else the path `rvow init` or
 /// `rvow install` recorded, else `$XDG_DATA_HOME/rvow`, else
 /// `~/.local/share/rvow`.
-fn resolve_home(
-    rvow_home: Option<&str>,
-    recorded: Option<&str>,
-    xdg_data: Option<&str>,
-    home: Option<&str>,
-) -> Option<PathBuf> {
+fn resolve_home(rvow_home: Option<&str>, recorded: Option<&str>, xdg_data: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     rvow_home
         .or(recorded)
         .map(PathBuf::from)
@@ -81,13 +68,8 @@ pub fn home_dir() -> Result<PathBuf> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    resolve_home(
-        env("RVOW_HOME").as_deref(),
-        recorded.as_deref(),
-        env("XDG_DATA_HOME").as_deref(),
-        env("HOME").as_deref(),
-    )
-    .ok_or_else(|| Error::new("no-home", "HOME is not set", "set RVOW_HOME"))
+    resolve_home(env("RVOW_HOME").as_deref(), recorded.as_deref(), env("XDG_DATA_HOME").as_deref(), env("HOME").as_deref())
+        .ok_or_else(|| Error::new("no-home", "HOME is not set", "set RVOW_HOME"))
 }
 
 /// Records `home` so processes without `RVOW_HOME` in their environment find
@@ -118,11 +100,7 @@ fn identity(top: &Path) -> Result<Vec<String>> {
     }
     let roots = git::root_commits(top)?;
     if roots.is_empty() {
-        return Err(Error::new(
-            "no-commit",
-            "the repository has no commit to identify it by",
-            "make a first commit",
-        ));
+        return Err(Error::new("no-commit", "the repository has no commit to identify it by", "make a first commit"));
     }
     Ok(roots)
 }
@@ -130,13 +108,8 @@ fn identity(top: &Path) -> Result<Vec<String>> {
 fn read_meta(root: &Path) -> Result<Meta> {
     let path = root.join(PROJECT_FILE);
     let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-    toml::from_str(&text).map_err(|e| {
-        Error::new(
-            "project-file",
-            format!("{}: {e}", path.display()),
-            "restore project.toml from backup or run rvow rebind",
-        )
-    })
+    toml::from_str(&text)
+        .map_err(|e| Error::new("project-file", format!("{}: {e}", path.display()), "restore project.toml from backup or run rvow rebind"))
 }
 
 /// Creates the rvow tree for the repository that contains `dir`.
@@ -147,31 +120,21 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
     let root = match mode {
         Mode::Repo => top.join(REPO_DIR),
         Mode::Home => {
-            let name = top
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("repo")
-                .to_lowercase();
+            let name = top.file_name().and_then(|n| n.to_str()).unwrap_or("repo").to_lowercase();
             home.join(remote.clone().unwrap_or_else(|| format!("local/{name}")))
         }
     };
     if let Some(found) = find(&top, home)? {
         return Err(Error::new(
             "exists",
-            format!(
-                "this repository already has an rvow tree at {}",
-                found.root.display()
-            ),
+            format!("this repository already has an rvow tree at {}", found.root.display()),
             "use the existing tree",
         ));
     }
     if root.join(PROJECT_FILE).exists() {
         return Err(Error::new(
             "name-taken",
-            format!(
-                "{} belongs to another repository with the same name",
-                root.display()
-            ),
+            format!("{} belongs to another repository with the same name", root.display()),
             "rename one of the folders, or give this one a remote",
         ));
     }
@@ -179,18 +142,9 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         let p = root.join(d);
         std::fs::create_dir_all(&p).map_err(|e| Error::io(&p, e))?;
     }
-    let meta = Meta {
-        roots,
-        remote,
-        mode,
-    };
-    let text = toml::to_string(&meta)
-        .map_err(|e| Error::internal(format!("project metadata does not serialize: {e}")))?;
-    for (name, body) in [
-        (PROJECT_FILE, text.as_str()),
-        (CONFIG_FILE, ""),
-        (IDS_FILE, ""),
-    ] {
+    let meta = Meta { roots, remote, mode };
+    let text = toml::to_string(&meta).map_err(|e| Error::internal(format!("project metadata does not serialize: {e}")))?;
+    for (name, body) in [(PROJECT_FILE, text.as_str()), (CONFIG_FILE, ""), (IDS_FILE, "")] {
         let p = root.join(name);
         std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
     }
@@ -205,10 +159,7 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
 }
 
 fn add_union_merge(top: &Path) -> Result<()> {
-    add_lines(
-        &top.join(".gitattributes"),
-        &[&format!("{REPO_DIR}/**/*.jsonl merge=union")],
-    )
+    add_lines(&top.join(".gitattributes"), &[&format!("{REPO_DIR}/**/*.jsonl merge=union")])
 }
 
 /// Appends each of `lines` to the file at `path` unless it is already there.
@@ -238,10 +189,7 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
     let repo_root = top.join(REPO_DIR);
     if repo_root.join(CONFIG_FILE).exists() {
         let meta = read_meta(&repo_root)?;
-        return Ok(Some(Project {
-            root: repo_root,
-            meta,
-        }));
+        return Ok(Some(Project { root: repo_root, meta }));
     }
     let roots = identity(&top)?;
     let remote = git::origin_url(&top).and_then(|u| git::remote_path(&u));
@@ -250,10 +198,7 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
         if let Ok(meta) = read_meta(root)
             && meta.roots.iter().any(|r| roots.contains(r))
         {
-            hits.push(Project {
-                root: root.to_path_buf(),
-                meta,
-            });
+            hits.push(Project { root: root.to_path_buf(), meta });
         }
     });
     if hits.len() > 1 {
@@ -266,10 +211,7 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
             "ambiguous-project",
             format!(
                 "several rvow projects match this repository: {}",
-                hits.iter()
-                    .map(|p| p.root.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                hits.iter().map(|p| p.root.display().to_string()).collect::<Vec<_>>().join(", ")
             ),
             "give each clone a distinct origin remote",
         )),
@@ -302,12 +244,7 @@ pub struct Lock {
 impl Project {
     pub fn lock(&self) -> Result<Lock> {
         let path = self.root.join(LOCK_FILE);
-        let file = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|e| Error::io(&path, e))?;
+        let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| Error::io(&path, e))?;
         file.lock().map_err(|e| Error::io(&path, e))?;
         Ok(Lock { _file: file })
     }
@@ -340,31 +277,13 @@ mod tests {
     #[test]
     fn home_order() {
         let r = |a, b, c, d| resolve_home(a, b, c, d).unwrap();
-        assert_eq!(
-            r(Some("/env"), Some("/rec"), Some("/x"), Some("/h")),
-            PathBuf::from("/env")
-        );
-        assert_eq!(
-            r(None, Some("/rec"), Some("/x"), Some("/h")),
-            PathBuf::from("/rec")
-        );
-        assert_eq!(
-            r(None, None, Some("/x"), Some("/h")),
-            PathBuf::from("/x/rvow")
-        );
-        assert_eq!(
-            r(None, None, None, Some("/h")),
-            PathBuf::from("/h/.local/share/rvow")
-        );
+        assert_eq!(r(Some("/env"), Some("/rec"), Some("/x"), Some("/h")), PathBuf::from("/env"));
+        assert_eq!(r(None, Some("/rec"), Some("/x"), Some("/h")), PathBuf::from("/rec"));
+        assert_eq!(r(None, None, Some("/x"), Some("/h")), PathBuf::from("/x/rvow"));
+        assert_eq!(r(None, None, None, Some("/h")), PathBuf::from("/h/.local/share/rvow"));
         assert_eq!(resolve_home(None, None, None, None), None);
-        assert_eq!(
-            pointer_path(Some("/cfg"), Some("/h")),
-            Some(PathBuf::from("/cfg/rvow/home"))
-        );
-        assert_eq!(
-            pointer_path(None, Some("/h")),
-            Some(PathBuf::from("/h/.config/rvow/home"))
-        );
+        assert_eq!(pointer_path(Some("/cfg"), Some("/h")), Some(PathBuf::from("/cfg/rvow/home")));
+        assert_eq!(pointer_path(None, Some("/h")), Some(PathBuf::from("/h/.config/rvow/home")));
     }
 
     #[test]
@@ -391,22 +310,13 @@ mod tests {
         let tmp = TempDir::new();
         let home = tmp.0.join("home");
         let up = repo_with_commit(&tmp.0, "up");
-        git(
-            &up,
-            &["remote", "add", "origin", "git@github.com:a/rvow.git"],
-        );
+        git(&up, &["remote", "add", "origin", "git@github.com:a/rvow.git"]);
         let p = init(&up, &home, Mode::Home).unwrap();
         assert_eq!(p.root, home.join("github.com/a/rvow"));
 
         let fork = tmp.0.join("fork");
-        git(
-            &tmp.0,
-            &["clone", "-q", up.to_str().unwrap(), fork.to_str().unwrap()],
-        );
-        git(
-            &fork,
-            &["remote", "set-url", "origin", "git@github.com:b/rvow.git"],
-        );
+        git(&tmp.0, &["clone", "-q", up.to_str().unwrap(), fork.to_str().unwrap()]);
+        git(&fork, &["remote", "set-url", "origin", "git@github.com:b/rvow.git"]);
         let f = init(&fork, &home, Mode::Home);
         assert_eq!(f.unwrap_err().code, "exists");
     }
@@ -448,10 +358,7 @@ mod tests {
         let empty = tmp.0.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
         git(&empty, &["init", "-q"]);
-        assert_eq!(
-            init(&empty, &home, Mode::Home).unwrap_err().code,
-            "no-commit"
-        );
+        assert_eq!(init(&empty, &home, Mode::Home).unwrap_err().code, "no-commit");
 
         let src = repo_with_commit(&tmp.0, "src");
         std::fs::write(src.join("b.txt"), "b").unwrap();
@@ -459,20 +366,7 @@ mod tests {
         git(&src, &["commit", "-q", "-m", "two"]);
         let url = format!("file://{}", src.display());
         let shallow = tmp.0.join("shallow");
-        git(
-            &tmp.0,
-            &[
-                "clone",
-                "-q",
-                "--depth",
-                "1",
-                &url,
-                shallow.to_str().unwrap(),
-            ],
-        );
-        assert_eq!(
-            init(&shallow, &home, Mode::Home).unwrap_err().code,
-            "shallow"
-        );
+        git(&tmp.0, &["clone", "-q", "--depth", "1", &url, shallow.to_str().unwrap()]);
+        assert_eq!(init(&shallow, &home, Mode::Home).unwrap_err().code, "shallow");
     }
 }

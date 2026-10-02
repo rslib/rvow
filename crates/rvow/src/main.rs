@@ -291,11 +291,7 @@ fn main() -> ExitCode {
     let Some(cmd) = cli.cmd else {
         return finish(read::home_view(), toon);
     };
-    let toon = toon
-        && !matches!(
-            cmd,
-            Cmd::Accept { .. } | Cmd::Confirm { .. } | Cmd::Answer { .. }
-        );
+    let toon = toon && !matches!(cmd, Cmd::Accept { .. } | Cmd::Confirm { .. } | Cmd::Answer { .. });
     dispatch(cmd, toon)
 }
 
@@ -319,9 +315,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Path { id } => read::path(&id),
         Cmd::Show { id, full } => read::show(&id, full),
         Cmd::Spec { cmd: SpecCmd::List } => read::spec_list(),
-        Cmd::Import {
-            cmd: ImportCmd::Openspec { from, dry_run },
-        } => plan::import_openspec(from, dry_run),
+        Cmd::Import { cmd: ImportCmd::Openspec { from, dry_run } } => plan::import_openspec(from, dry_run),
         Cmd::Guide { artifact } => Ok(read::guide(artifact)),
         Cmd::Ids { change } => plan::ids(change.as_deref()),
         Cmd::Brief => read::brief(),
@@ -330,24 +324,11 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Check { change } => plan::check(change.as_deref()),
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),
-        Cmd::Answer {
-            reference,
-            choice,
-            via,
-        } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
+        Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
         Cmd::Block { task, reason } => lifecycle::block(&task, &reason),
         Cmd::Note { kind, text } => lifecycle::note(kind, &text.join(" ")),
-        Cmd::Amend {
-            reason,
-            change,
-            unlock,
-        } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
-        Cmd::Confirm {
-            ids,
-            accept,
-            reject,
-            all,
-        } => lifecycle::confirm(&ids, accept, reject, all.as_deref()).map(Reply::done),
+        Cmd::Amend { reason, change, unlock } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
+        Cmd::Confirm { ids, accept, reject, all } => lifecycle::confirm(&ids, accept, reject, all.as_deref()).map(Reply::done),
         Cmd::Prove { task: Some(t), .. } => prove::prove(&t),
         Cmd::Prove { .. } => prove::prove_stale(),
         Cmd::Status { all, json } => read::status(all, json),
@@ -366,11 +347,7 @@ fn finish(result: Result<Reply>, toon: bool) -> ExitCode {
         Ok(r) => {
             let ok = r.ok;
             r.print(toon);
-            if ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
+            if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
         Err(e) => {
             if toon {
@@ -396,16 +373,8 @@ fn usage_error(e: clap::Error) -> ExitCode {
     let toon = has("--toon") || !has("--human") && !std::io::stdout().is_terminal();
     let (path, mut cmd) = failed_command(&args);
     let no_sub = e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand;
-    let wants_sub = no_sub
-        || matches!(
-            e.kind(),
-            ErrorKind::InvalidSubcommand | ErrorKind::MissingSubcommand
-        );
-    let valid = if wants_sub && cmd.has_subcommands() {
-        valid_subcommands(&path, &cmd)
-    } else {
-        valid_flags(&path, &cmd)
-    };
+    let wants_sub = no_sub || matches!(e.kind(), ErrorKind::InvalidSubcommand | ErrorKind::MissingSubcommand);
+    let valid = if wants_sub && cmd.has_subcommands() { valid_subcommands(&path, &cmd) } else { valid_flags(&path, &cmd) };
     let rendered = e.render().to_string();
     if toon {
         let message = usage_message(&rendered, &path, no_sub);
@@ -437,11 +406,7 @@ fn failed_command(args: &[String]) -> (String, clap::Command) {
 }
 
 fn valid_subcommands(path: &str, cmd: &clap::Command) -> String {
-    let subs: Vec<&str> = cmd
-        .get_subcommands()
-        .map(|c| c.get_name())
-        .filter(|n| *n != "help")
-        .collect();
+    let subs: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).filter(|n| *n != "help").collect();
     format!("valid subcommands for `{path}`: {}", subs.join(", "))
 }
 
@@ -452,11 +417,7 @@ fn valid_flags(path: &str, cmd: &clap::Command) -> String {
         .filter(|l| !matches!(*l, "help" | "version" | "toon" | "human"))
         .map(|l| format!("--{l}"))
         .collect();
-    let own = if flags.is_empty() {
-        "none".to_owned()
-    } else {
-        flags.join(", ")
-    };
+    let own = if flags.is_empty() { "none".to_owned() } else { flags.join(", ") };
     format!("valid flags for `{path}`: {own}; on every command: --toon, --human, --help")
 }
 
@@ -470,12 +431,7 @@ fn usage_message(rendered: &str, path: &str, no_sub: bool) -> String {
 }
 
 fn usage_tips(rendered: &str) -> Vec<String> {
-    rendered
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("tip: "))
-        .filter(|tip| !tip.starts_with("to pass "))
-        .map(str::to_owned)
-        .collect()
+    rendered.lines().filter_map(|l| l.trim().strip_prefix("tip: ")).filter(|tip| !tip.starts_with("to pass ")).map(str::to_owned).collect()
 }
 
 #[derive(Clone, Copy, ValueEnum)]

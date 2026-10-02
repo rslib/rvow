@@ -23,13 +23,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 5] = [
-        Stage::Backlog,
-        Stage::Active,
-        Stage::Done,
-        Stage::Dropped,
-        Stage::Superseded,
-    ];
+    pub const ALL: [Stage; 5] = [Stage::Backlog, Stage::Active, Stage::Done, Stage::Dropped, Stage::Superseded];
 
     pub fn dir(self) -> &'static str {
         match self {
@@ -74,13 +68,7 @@ fn parse_dir_name(name: &str) -> Option<(Id, String)> {
     let prefix = &name[..start];
     let dated = prefix.len() == 11
         && prefix.ends_with('-')
-        && prefix[..10].chars().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        });
+        && prefix[..10].chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
     if !prefix.is_empty() && !dated {
         return None;
     }
@@ -113,12 +101,7 @@ pub fn list(project: &Project) -> Result<(Vec<ChangeDir>, Vec<PathBuf>)> {
             }
             let name = e.file_name().to_string_lossy().into_owned();
             match parse_dir_name(&name) {
-                Some((id, slug)) => changes.push(ChangeDir {
-                    id,
-                    slug,
-                    stage,
-                    path,
-                }),
+                Some((id, slug)) => changes.push(ChangeDir { id, slug, stage, path }),
                 None => stray.push(path),
             }
         }
@@ -138,17 +121,8 @@ pub fn resolve(project: &Project, input: &str) -> Result<ChangeDir> {
     } else {
         format!("CHG-{input}")
     };
-    let id = id::resolve(&input, &ids).map_err(|e| {
-        Error::new(
-            "change",
-            format!("{input}: {e}"),
-            "run rvow ls to see the changes",
-        )
-    })?;
-    changes
-        .into_iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| Error::internal(format!("{id} resolved but is not listed")))
+    let id = id::resolve(&input, &ids).map_err(|e| Error::new("change", format!("{input}: {e}"), "run rvow ls to see the changes"))?;
+    changes.into_iter().find(|c| c.id == id).ok_or_else(|| Error::internal(format!("{id} resolved but is not listed")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,12 +139,7 @@ pub fn summaries(project: &Project) -> Result<Vec<Summary>> {
     let mut out = Vec::new();
     for c in changes {
         let (p, _) = parse_proposal(&read(&c.path.join(PROPOSAL))?);
-        out.push(Summary {
-            id: c.id,
-            stage: c.stage,
-            branch: p.branch,
-            title: p.title,
-        });
+        out.push(Summary { id: c.id, stage: c.stage, branch: p.branch, title: p.title });
     }
     Ok(out)
 }
@@ -190,64 +159,34 @@ pub struct Place {
 pub fn find(project: &Project, input: &str) -> Result<Place> {
     let (changes, _) = list(project)?;
     let (living, _) = load_living(project)?;
-    let mut places: Vec<Place> = changes
-        .iter()
-        .map(|c| Place {
-            id: c.id.clone(),
-            file: c.path.clone(),
-            line: None,
-        })
-        .collect();
+    let mut places: Vec<Place> = changes.iter().map(|c| Place { id: c.id.clone(), file: c.path.clone(), line: None }).collect();
     for (cap, spec) in &living {
         let file = project.root.join("specs").join(cap).join("spec.md");
         for r in &spec.requirements {
             if let Ref::Id(id) = &r.id {
-                places.push(Place {
-                    id: id.clone(),
-                    file: file.clone(),
-                    line: Some(r.line),
-                });
+                places.push(Place { id: id.clone(), file: file.clone(), line: Some(r.line) });
             }
         }
     }
-    for c in changes
-        .iter()
-        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
-    {
+    for c in changes.iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
         let loaded = load(&c.path, &living)?;
         for t in &loaded.tasks {
             if let Ref::Id(id) = &t.id {
-                places.push(Place {
-                    id: id.clone(),
-                    file: c.path.join(TASKS),
-                    line: Some(t.line),
-                });
+                places.push(Place { id: id.clone(), file: c.path.join(TASKS), line: Some(t.line) });
             }
         }
         for (cap, f) in &loaded.deltas {
             let file = c.path.join(DELTAS).join(format!("{cap}.md"));
             for d in f.deltas.iter().filter(|d| d.op == DeltaOp::Add) {
                 if let Ref::Id(id) = &d.req.id {
-                    places.push(Place {
-                        id: id.clone(),
-                        file: file.clone(),
-                        line: Some(d.req.line),
-                    });
+                    places.push(Place { id: id.clone(), file: file.clone(), line: Some(d.req.line) });
                 }
             }
         }
     }
-    let id = id::resolve(input, places.iter().map(|p| &p.id)).map_err(|e| {
-        Error::new(
-            "path",
-            format!("{input}: {e}"),
-            "give more characters of the id, or run rvow ls to see the changes",
-        )
-    })?;
-    places
-        .into_iter()
-        .find(|p| p.id == id)
-        .ok_or_else(|| Error::internal(format!("{id} resolved but is not listed")))
+    let id = id::resolve(input, places.iter().map(|p| &p.id))
+        .map_err(|e| Error::new("path", format!("{input}: {e}"), "give more characters of the id, or run rvow ls to see the changes"))?;
+    places.into_iter().find(|p| p.id == id).ok_or_else(|| Error::internal(format!("{id} resolved but is not listed")))
 }
 
 /// `find` as one printable location: a folder, or `file:line`.
@@ -277,27 +216,18 @@ pub fn slugify(title: &str) -> String {
 }
 
 fn proposal_template(branch: &str, title: &str) -> String {
-    format!(
-        "branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Out of scope\n\n## Assumptions\n"
-    )
+    format!("branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Out of scope\n\n## Assumptions\n")
 }
 
 /// Creates a change in `backlog/`. A small change has no `specs/` folder.
 pub fn new(project: &Project, title: &str, branch: &str, small: bool) -> Result<ChangeDir> {
     let slug = slugify(title);
     if slug.is_empty() {
-        return Err(Error::new(
-            "title",
-            "the title has no letters or digits",
-            "give the change a title in words",
-        ));
+        return Err(Error::new("title", "the title has no letters or digits", "give the change a title in words"));
     }
     let lock = project.lock()?;
     let id = registry::mint(project, &lock, Kind::Chg, None)?;
-    let path = project
-        .root
-        .join(Stage::Backlog.dir())
-        .join(format!("{id}-{slug}"));
+    let path = project.root.join(Stage::Backlog.dir()).join(format!("{id}-{slug}"));
     let mut dirs = vec![path.clone()];
     if !small {
         dirs.push(path.join(DELTAS));
@@ -305,19 +235,11 @@ pub fn new(project: &Project, title: &str, branch: &str, small: bool) -> Result<
     for d in &dirs {
         std::fs::create_dir_all(d).map_err(|e| Error::io(d, e))?;
     }
-    for (name, body) in [
-        (PROPOSAL, proposal_template(branch, title)),
-        (TASKS, "# Tasks\n".to_string()),
-    ] {
+    for (name, body) in [(PROPOSAL, proposal_template(branch, title)), (TASKS, "# Tasks\n".to_string())] {
         let p = path.join(name);
         std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
     }
-    Ok(ChangeDir {
-        id,
-        slug,
-        stage: Stage::Backlog,
-        path,
-    })
+    Ok(ChangeDir { id, slug, stage: Stage::Backlog, path })
 }
 
 fn read(path: &Path) -> Result<String> {
@@ -325,9 +247,7 @@ fn read(path: &Path) -> Result<String> {
 }
 
 pub(crate) fn file_name(path: &Path) -> Result<String> {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| Error::internal(format!("{} has no name", path.display())))
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| Error::internal(format!("{} has no name", path.display())))
 }
 
 fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -355,11 +275,7 @@ pub type CapSpec = (String, Spec);
 pub fn living_texts(project: &Project) -> Result<Vec<(String, String)>> {
     let dir = project.root.join("specs");
     let mut caps: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect(),
+        Ok(entries) => entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(Error::io(&dir, e)),
     };
@@ -400,10 +316,7 @@ pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {
 /// Marks each finding whose line lies in the block of a legacy requirement.
 fn mark_legacy(findings: &mut [Finding], specs: &[CapSpec], record: &Record) {
     for (path, d) in findings {
-        let Some((_, spec)) = specs
-            .iter()
-            .find(|(cap, _)| *path == format!("specs/{cap}/spec.md"))
-        else {
+        let Some((_, spec)) = specs.iter().find(|(cap, _)| *path == format!("specs/{cap}/spec.md")) else {
             continue;
         };
         let owner = spec.requirements.iter().rfind(|r| r.line <= d.line);
@@ -426,9 +339,7 @@ pub struct Loaded {
 
 impl Loaded {
     pub fn errors(&self) -> impl Iterator<Item = &Finding> {
-        self.findings
-            .iter()
-            .filter(|(_, d)| d.severity() == Severity::Error)
+        self.findings.iter().filter(|(_, d)| d.severity() == Severity::Error)
     }
 }
 
@@ -464,11 +375,8 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
     }
     let mut deltas = Vec::new();
     for path in md_files(&dir.join(DELTAS))? {
-        let cap = path
-            .file_stem()
-            .ok_or_else(|| Error::internal(format!("{} has no file name", path.display())))?
-            .to_string_lossy()
-            .into_owned();
+        let cap =
+            path.file_stem().ok_or_else(|| Error::internal(format!("{} has no file name", path.display())))?.to_string_lossy().into_owned();
         let text = read(&path)?;
         let (file, diags) = parse_deltas(&text);
         let rel = format!("{DELTAS}/{cap}.md");
@@ -476,21 +384,8 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
         texts.push((rel, text));
         deltas.push((cap, file));
     }
-    findings.extend(
-        lint::Change {
-            tasks: &tasks,
-            deltas: &deltas,
-            texts: &texts,
-        }
-        .lint(&Living { specs: living }),
-    );
-    Ok(Loaded {
-        proposal,
-        tasks,
-        deltas,
-        texts,
-        findings,
-    })
+    findings.extend(lint::Change { tasks: &tasks, deltas: &deltas, texts: &texts }.lint(&Living { specs: living }));
+    Ok(Loaded { proposal, tasks, deltas, texts, findings })
 }
 
 #[cfg(test)]
@@ -502,14 +397,8 @@ mod tests {
     #[test]
     fn dir_names() {
         let id: Id = "CHG-7k2mq8".parse().unwrap();
-        assert_eq!(
-            parse_dir_name("CHG-7k2mq8-output-tail"),
-            Some((id.clone(), "output-tail".into()))
-        );
-        assert_eq!(
-            parse_dir_name("2026-10-01-CHG-7k2mq8-x"),
-            Some((id.clone(), "x".into()))
-        );
+        assert_eq!(parse_dir_name("CHG-7k2mq8-output-tail"), Some((id.clone(), "output-tail".into())));
+        assert_eq!(parse_dir_name("2026-10-01-CHG-7k2mq8-x"), Some((id.clone(), "x".into())));
         assert_eq!(parse_dir_name("CHG-7k2mq8"), Some((id, String::new())));
         assert_eq!(parse_dir_name("notes"), None);
         assert_eq!(parse_dir_name("old-CHG-7k2mq8-x"), None);
@@ -548,10 +437,7 @@ mod tests {
         assert_eq!(loaded.proposal.title, "Output tail");
         let sums = summaries(&p).unwrap();
         assert_eq!(sums.len(), 2);
-        assert!(
-            sums.iter()
-                .any(|s| s.id == c.id && s.stage == Stage::Backlog && s.title == "Output tail")
-        );
+        assert!(sums.iter().any(|s| s.id == c.id && s.stage == Stage::Backlog && s.title == "Output tail"));
         assert_eq!(loaded.errors().count(), 0, "{:?}", loaded.findings);
     }
 
@@ -561,46 +447,17 @@ mod tests {
         let repo = repo_with_commit(&tmp.0, "r");
         let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
         let c = new(&p, "Out", "main", false).unwrap();
-        std::fs::write(
-            c.path.join(TASKS),
-            "# Tasks\n\n- TSK-x7k2q4 Write\n  covers: REQ-k3f9m2\n  verify: true\n  files: a\n",
-        )
-        .unwrap();
-        std::fs::write(
-            c.path.join("specs/out.md"),
-            "## ADD REQ-k3f9m2 Out\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n",
-        )
-        .unwrap();
+        std::fs::write(c.path.join(TASKS), "# Tasks\n\n- TSK-x7k2q4 Write\n  covers: REQ-k3f9m2\n  verify: true\n  files: a\n").unwrap();
+        std::fs::write(c.path.join("specs/out.md"), "## ADD REQ-k3f9m2 Out\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n").unwrap();
         let spec = p.root.join("specs/cap");
         std::fs::create_dir_all(&spec).unwrap();
-        std::fs::write(
-            spec.join("spec.md"),
-            "# Cap\n\n## REQ-q8w2c7 Old\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n",
-        )
-        .unwrap();
+        std::fs::write(spec.join("spec.md"), "# Cap\n\n## REQ-q8w2c7 Old\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n").unwrap();
 
-        assert_eq!(
-            locate(&p, &c.id.to_string()).unwrap(),
-            c.path.display().to_string()
-        );
-        assert_eq!(
-            locate(&p, "x7k").unwrap(),
-            format!("{}:3", c.path.join(TASKS).display())
-        );
-        assert_eq!(
-            locate(&p, "REQ-k3f").unwrap(),
-            format!("{}:1", c.path.join("specs/out.md").display())
-        );
-        assert_eq!(
-            locate(&p, "q8w").unwrap(),
-            format!("{}:3", spec.join("spec.md").display())
-        );
+        assert_eq!(locate(&p, &c.id.to_string()).unwrap(), c.path.display().to_string());
+        assert_eq!(locate(&p, "x7k").unwrap(), format!("{}:3", c.path.join(TASKS).display()));
+        assert_eq!(locate(&p, "REQ-k3f").unwrap(), format!("{}:1", c.path.join("specs/out.md").display()));
+        assert_eq!(locate(&p, "q8w").unwrap(), format!("{}:3", spec.join("spec.md").display()));
         assert_eq!(locate(&p, "zzz").unwrap_err().code, "path");
-        assert!(
-            locate(&p, "REQ-")
-                .unwrap_err()
-                .message
-                .contains("no id matches")
-        );
+        assert!(locate(&p, "REQ-").unwrap_err().message.contains("no id matches"));
     }
 }

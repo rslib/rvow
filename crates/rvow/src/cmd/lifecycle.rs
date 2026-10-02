@@ -18,10 +18,7 @@ use crate::toon::Node;
 /// The `next:` part of the brief, so the agent learns what to do as soon as the user decides.
 pub fn next_for_agent(p: &store::Project, home: &Path) -> String {
     let text = brief::brief(p, home, &cwd().unwrap_or_default()).unwrap_or_default();
-    text.find("next:")
-        .and_then(|i| text[i..].lines().next())
-        .unwrap_or("next: run rvow brief")
-        .to_string()
+    text.find("next:").and_then(|i| text[i..].lines().next()).unwrap_or("next: run rvow brief").to_string()
 }
 
 pub fn accept(target: &str) -> Result<bool> {
@@ -37,12 +34,7 @@ pub fn accept(target: &str) -> Result<bool> {
     let tasks = prepared.loaded.tasks.len();
     let base = prepared.base_commit[..12.min(prepared.base_commit.len())].to_string();
     let vowed = vow::commit(&p, prepared)?;
-    println!(
-        "accepted {} at {} (vow {}): {tasks} tasks, base {base}",
-        vowed.id,
-        vowed.path.display(),
-        vowed.event
-    );
+    println!("accepted {} at {} (vow {}): {tasks} tasks, base {base}", vowed.id, vowed.path.display(), vowed.event);
     println!("{}", next_for_agent(&p, &home));
     Ok(true)
 }
@@ -94,9 +86,7 @@ pub fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result
         let mut rows = Vec::new();
         for i in &a.items {
             r.line(format!("  {}: {}", i.class.name(), i.what));
-            rows.push(Node::Obj(
-                obj! { "class" => i.class.name(), "what" => i.what },
-            ));
+            rows.push(Node::Obj(obj! { "class" => i.class.name(), "what" => i.what }));
         }
         let mut item = obj! { "id" => a.id.to_string(), "change" => a.change.to_string() };
         item.push(("items".to_owned(), Node::List(rows)));
@@ -120,16 +110,9 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
     } else {
         ids.iter()
             .map(|id| {
-                pending
-                    .iter()
-                    .find(|a| a.id.to_string() == *id)
-                    .ok_or_else(|| {
-                        Error::new(
-                            "no-amendment",
-                            format!("{id} is not a pending amendment"),
-                            "run rvow confirm to list the pending ones",
-                        )
-                    })
+                pending.iter().find(|a| a.id.to_string() == *id).ok_or_else(|| {
+                    Error::new("no-amendment", format!("{id} is not a pending amendment"), "run rvow confirm to list the pending ones")
+                })
             })
             .collect::<Result<_>>()?
     };
@@ -139,19 +122,10 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
             let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
             let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
             println!("  {class}: {what}");
-            if let (Some(old), Some(new)) = (
-                i.get("before").and_then(|v| v.as_str()),
-                i.get("after").and_then(|v| v.as_str()),
-            ) {
-                let (old, new): (Vec<&str>, Vec<&str>) =
-                    (old.lines().collect(), new.lines().collect());
+            if let (Some(old), Some(new)) = (i.get("before").and_then(|v| v.as_str()), i.get("after").and_then(|v| v.as_str())) {
+                let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
                 let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-                let tail = old[head..]
-                    .iter()
-                    .rev()
-                    .zip(new[head..].iter().rev())
-                    .take_while(|(a, b)| a == b)
-                    .count();
+                let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
                 for line in &old[head..old.len() - tail] {
                     println!("    - {line}");
                 }
@@ -174,19 +148,11 @@ pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) ->
     let p = project(&home)?;
     if !accept && !reject {
         if all.is_some() {
-            return Err(Error::new(
-                "decision",
-                "say what to do with the amendments",
-                "add --accept or --reject",
-            ));
+            return Err(Error::new("decision", "say what to do with the amendments", "add --accept or --reject"));
         }
         return list_pending(&p, ids);
     }
-    let decision = if accept {
-        amend::Decision::Accept
-    } else {
-        amend::Decision::Reject
-    };
+    let decision = if accept { amend::Decision::Accept } else { amend::Decision::Reject };
     let decided = amend::confirm(&p, ids, decision, all).inspect_err(|e| {
         if e.code == "digest" {
             let _ = list_pending(&p, &[]);
@@ -233,10 +199,7 @@ pub fn note(kind: NoteArg, text: &str) -> Result<Reply> {
     r.set("noted", kind.name());
     r.set("change", change.to_string());
     if cut {
-        let w = format!(
-            "the handoff kept only its first {} lines",
-            notes::HANDOFF_LINES
-        );
+        let w = format!("the handoff kept only its first {} lines", notes::HANDOFF_LINES);
         r.line(format!("warning: {w}"));
         r.set("warning", w);
     }

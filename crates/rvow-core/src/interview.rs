@@ -30,11 +30,7 @@ fn header(q: &str) -> String {
         }
         out.push_str(w);
     }
-    if out.is_empty() {
-        q.chars().take(HEADER_LEN).collect()
-    } else {
-        out
-    }
+    if out.is_empty() { q.chars().take(HEADER_LEN).collect() } else { out }
 }
 
 fn question_json(change: &str, q: &Question) -> Value {
@@ -116,19 +112,12 @@ pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Res
         )
     };
     let mut parts = reference.rsplitn(3, ':');
-    let line: usize = parts
-        .next()
-        .and_then(|l| l.parse().ok())
-        .ok_or_else(bad_ref)?;
+    let line: usize = parts.next().and_then(|l| l.parse().ok()).ok_or_else(bad_ref)?;
     let file = parts.next().ok_or_else(bad_ref)?;
     let change_id = parts.next().ok_or_else(bad_ref)?;
     let choice = choice.trim();
     if choice.is_empty() {
-        return Err(Error::new(
-            "answer",
-            "the answer is empty",
-            "pass the user's choice",
-        ));
+        return Err(Error::new("answer", "the answer is empty", "pass the user's choice"));
     }
     let c = change::resolve(project, change_id)?;
     if c.stage != Stage::Backlog {
@@ -144,13 +133,7 @@ pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Res
     let found = questions(&[(file.to_string(), text.clone())])
         .into_iter()
         .find(|q| q.line == line)
-        .ok_or_else(|| {
-            Error::new(
-                "no-question",
-                format!("{reference} holds no open question"),
-                "run rvow clarify for the current refs",
-            )
-        })?;
+        .ok_or_else(|| Error::new("no-question", format!("{reference} holds no open question"), "run rvow clarify for the current refs"))?;
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     let target = &mut lines[line - 1];
     *target = target.replacen(&found.marker, "", 1).trim_end().to_string();
@@ -162,31 +145,13 @@ pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Res
 
     let stripped = choice.trim_end_matches("(Recommended)").trim();
     let (answer, recommended) = if stripped == DECIDE_LATER {
-        (
-            found
-                .recommended
-                .clone()
-                .unwrap_or_else(|| "not decided".into()),
-            true,
-        )
+        (found.recommended.clone().unwrap_or_else(|| "not decided".into()), true)
     } else {
-        let rec = found
-            .recommended
-            .as_deref()
-            .is_some_and(|r| r.eq_ignore_ascii_case(stripped));
+        let rec = found.recommended.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(stripped));
         (stripped.to_string(), rec)
     };
-    let how = if recommended {
-        "recommended"
-    } else {
-        "overridden"
-    };
-    let entry = format!(
-        "- Q: {} -> A: {answer} ({how}, {}, {})",
-        found.question,
-        via.name(),
-        crate::archive::today()
-    );
+    let how = if recommended { "recommended" } else { "overridden" };
+    let entry = format!("- Q: {} -> A: {answer} ({how}, {}, {})", found.question, via.name(), crate::archive::today());
     let proposal = c.path.join(PROPOSAL);
     let mut prop = std::fs::read_to_string(&proposal).map_err(|e| Error::io(&proposal, e))?;
     if !prop.ends_with('\n') {
@@ -197,17 +162,10 @@ pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Res
     }
     // The section is last, so appending at the end of the file places the
     // entry inside it.
-    let last_is_clarifications = prop
-        .lines()
-        .rev()
-        .find(|l| l.starts_with("## "))
-        .map(str::trim)
-        == Some("## Clarifications");
+    let last_is_clarifications = prop.lines().rev().find(|l| l.starts_with("## ")).map(str::trim) == Some("## Clarifications");
     match prop.find("## Clarifications") {
         Some(at) if !last_is_clarifications => {
-            let end = prop[at + 3..]
-                .find("\n## ")
-                .map_or(prop.len(), |i| at + 3 + i + 1);
+            let end = prop[at + 3..].find("\n## ").map_or(prop.len(), |i| at + 3 + i + 1);
             prop.insert_str(end, &format!("{entry}\n"));
         }
         _ => {
@@ -216,12 +174,7 @@ pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Res
         }
     }
     std::fs::write(&proposal, prop).map_err(|e| Error::io(&proposal, e))?;
-    Ok(Answered {
-        change: c.id.to_string(),
-        question: found.question,
-        answer,
-        recommended,
-    })
+    Ok(Answered { change: c.id.to_string(), question: found.question, answer, recommended })
 }
 
 #[cfg(test)]
@@ -244,13 +197,8 @@ mod tests {
         let c = change::new(&p, "T", "main", true).unwrap();
         let prop = c.path.join(PROPOSAL);
         let text = std::fs::read_to_string(&prop).unwrap();
-        let marks = (1..=5)
-            .map(|n| {
-                format!(
-                    "[NEEDS CLARIFICATION: Q{n}? | recommended: a{n} | options: b{n} | why: w{n}]\n"
-                )
-            })
-            .collect::<String>();
+        let marks =
+            (1..=5).map(|n| format!("[NEEDS CLARIFICATION: Q{n}? | recommended: a{n} | options: b{n} | why: w{n}]\n")).collect::<String>();
         std::fs::write(&prop, text.replace("## Why\n", &format!("## Why\n{marks}"))).unwrap();
 
         let r = round(&p, &repo, None).unwrap();
@@ -267,32 +215,13 @@ mod tests {
         assert!(a.recommended);
         let b = answer(&p, &second, "my own", Via::Chat).unwrap();
         assert!(!b.recommended);
-        assert_eq!(
-            answer(&p, &first, "x", Via::Chat).unwrap_err().code,
-            "no-question"
-        );
+        assert_eq!(answer(&p, &first, "x", Via::Chat).unwrap_err().code, "no-question");
 
         let text = std::fs::read_to_string(&prop).unwrap();
-        assert!(
-            text.contains("- Q: Q1? -> A: a1 (recommended, dialog,")
-                && !text.contains("[NEEDS CLARIFICATION: Q1?"),
-            "{text}"
-        );
-        assert!(
-            text.contains("- Q: Q2? -> A: my own (overridden, chat,"),
-            "{text}"
-        );
-        assert_eq!(
-            round(&p, &repo, None).unwrap()["questions"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
-        assert!(
-            crate::proposal::parse_proposal(&text).1.is_empty(),
-            "{text}"
-        );
+        assert!(text.contains("- Q: Q1? -> A: a1 (recommended, dialog,") && !text.contains("[NEEDS CLARIFICATION: Q1?"), "{text}");
+        assert!(text.contains("- Q: Q2? -> A: my own (overridden, chat,"), "{text}");
+        assert_eq!(round(&p, &repo, None).unwrap()["questions"].as_array().unwrap().len(), 3);
+        assert!(crate::proposal::parse_proposal(&text).1.is_empty(), "{text}");
     }
 
     #[test]
@@ -303,11 +232,7 @@ mod tests {
         let c = change::new(&p, "T", "main", true).unwrap();
         let prop = c.path.join(PROPOSAL);
         let text = std::fs::read_to_string(&prop).unwrap();
-        std::fs::write(
-            &prop,
-            text + "[NEEDS CLARIFICATION: Size? | recommended: 20 lines]\n",
-        )
-        .unwrap();
+        std::fs::write(&prop, text + "[NEEDS CLARIFICATION: Size? | recommended: 20 lines]\n").unwrap();
         let r = round(&p, &repo, None).unwrap();
         assert_eq!(r["questions"][0]["options"][1]["label"], DECIDE_LATER);
         let reference = r["questions"][0]["ref"].as_str().unwrap().to_string();

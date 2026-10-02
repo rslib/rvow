@@ -18,20 +18,10 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
     } else if o.passed() {
         "failed: the command passed but ran 0 tests".to_string()
     } else {
-        format!(
-            "failed: exit {}",
-            o.exit.map_or("signal".into(), |e| e.to_string())
-        )
+        format!("failed: exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
     };
-    r.line(format!(
-        "{} {verdict} ({tests} tests, {} ms, event {})",
-        p.task, o.duration_ms, p.event
-    ));
-    let mut warnings: Vec<String> = p
-        .lfs_pointers
-        .iter()
-        .map(|f| format!("{f} is a Git LFS pointer, run git lfs pull"))
-        .collect();
+    r.line(format!("{} {verdict} ({tests} tests, {} ms, event {})", p.task, o.duration_ms, p.event));
+    let mut warnings: Vec<String> = p.lfs_pointers.iter().map(|f| format!("{f} is a Git LFS pointer, run git lfs pull")).collect();
     for w in &warnings {
         r.line(format!("warning: {w}"));
     }
@@ -88,10 +78,7 @@ pub fn prove_stale() -> Result<Reply> {
     let mut r = Reply::new();
     if stale.is_empty() {
         r.line("no stale tasks");
-        r.set(
-            "proofs",
-            format!("0 stale tasks on branch {}", branch_label()),
-        );
+        r.set("proofs", format!("0 stale tasks on branch {}", branch_label()));
         return Ok(r);
     }
     let mut rows = Vec::new();
@@ -129,10 +116,7 @@ pub fn gate(opts: Options) -> Result<Reply> {
     }
     r.ok = g.passed();
     if r.ok {
-        r.line(format!(
-            "gate passed ({} active changes on this branch)",
-            g.changes
-        ));
+        r.line(format!("gate passed ({} active changes on this branch)", g.changes));
     } else {
         r.line(format!("gate failed: {} problems", g.failures.len()));
         r.help("Run `rvow status` to see each task's state");

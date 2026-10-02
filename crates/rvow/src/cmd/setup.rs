@@ -22,10 +22,7 @@ pub fn init(in_repo: bool) -> Result<Reply> {
     r.set("created", p.root.display().to_string());
     r.help("Run `rvow new \"<title>\"` to plan a change");
     if mode == Mode::Home && git::toplevel(&home).is_err() {
-        r.help(format!(
-            "Run `git -C {} init` to version your plans; init wrote its .gitignore",
-            home.display()
-        ));
+        r.help(format!("Run `git -C {} init` to version your plans; init wrote its .gitignore", home.display()));
     }
     Ok(r)
 }
@@ -41,24 +38,16 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     let input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
     let run = || -> Result<Option<serde_json::Value>> {
         let home = store::home_dir()?;
-        let cwd = input
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .map_or_else(cwd, Ok)?;
+        let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
         let Ok(Some(p)) = store::find(&cwd, &home) else {
             return Ok(None);
         };
         match (harness, event) {
             (Harness::Claude, HookEvent::PreToolUse) => hooks::claude_pre_tool_use(&p, &input),
-            (Harness::Claude, HookEvent::SessionStart) => {
-                hooks::claude_session_start(&p, &home, &input)
-            }
+            (Harness::Claude, HookEvent::SessionStart) => hooks::claude_session_start(&p, &home, &input),
             (Harness::Claude, HookEvent::Stop) => hooks::claude_stop(&p, &home, &input),
             (Harness::Claude, HookEvent::View) => view::view(&p, &home, &cwd),
-            (Harness::Claude, HookEvent::Status) => Ok(
-                hooks::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s }))
-            ),
+            (Harness::Claude, HookEvent::Status) => Ok(hooks::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s }))),
         }
     };
     match run() {
@@ -73,38 +62,25 @@ fn report(r: &mut Reply, what: &str, o: install::Outcome) {
     r.line(match o {
         install::Outcome::Written(p) => format!("{what}: wrote {}", p.display()),
         install::Outcome::Unchanged(p) => format!("{what}: up to date at {}", p.display()),
-        install::Outcome::KeptEdit(p) => format!(
-            "{what}: kept your edits in {}; delete it to get the new version",
-            p.display()
-        ),
-        install::Outcome::AddLine { path, line } => format!(
-            "{what}: another hook manager owns {}; add this line to it:\n  {line}",
-            path.display()
-        ),
+        install::Outcome::KeptEdit(p) => format!("{what}: kept your edits in {}; delete it to get the new version", p.display()),
+        install::Outcome::AddLine { path, line } => {
+            format!("{what}: another hook manager owns {}; add this line to it:\n  {line}", path.display())
+        }
     });
 }
 
 fn env_dir(k: &str) -> Option<PathBuf> {
-    std::env::var_os(k)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
 pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
     let mut r = Reply::new();
     let rvow_home = store::home_dir()?;
     if let Some(pointer) = store::record_home(&rvow_home)? {
-        r.line(format!(
-            "rvow home: {} (recorded in {}, so hooks find it without RVOW_HOME)",
-            rvow_home.display(),
-            pointer.display()
-        ));
+        r.line(format!("rvow home: {} (recorded in {}, so hooks find it without RVOW_HOME)", rvow_home.display(), pointer.display()));
     }
-    let rvow = std::env::current_exe()
-        .and_then(|p| p.canonicalize())
-        .map_err(|e| Error::io(Path::new("rvow"), e))?;
-    let home =
-        env_dir("HOME").ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
+    let rvow = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Error::io(Path::new("rvow"), e))?;
+    let home = env_dir("HOME").ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let settings = match scope {
         Scope::User => claude.join("settings.json"),
@@ -113,16 +89,8 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
     match mode {
         ClaudeMode::Mod => install_mod(&mut r, &settings, &rvow)?,
         ClaudeMode::Settings => {
-            report(
-                &mut r,
-                "skill",
-                install::skill(&claude, &crate::skill::render()?)?,
-            );
-            report(
-                &mut r,
-                "Claude Code hooks",
-                install::claude_settings(&settings, &rvow)?,
-            );
+            report(&mut r, "skill", install::skill(&claude, &crate::skill::render()?)?);
+            report(&mut r, "Claude Code hooks", install::claude_settings(&settings, &rvow)?);
         }
     }
     install_pi(&mut r, &home)?;
@@ -133,16 +101,8 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
 
 fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
     let dir = store::home_dir()?.join(install::MARKETPLACE_DIR);
-    report(
-        r,
-        "Claude Code mod",
-        install::claude_mod(&dir, rvow, &crate::skill::render()?)?,
-    );
-    report(
-        r,
-        "old settings hooks",
-        install::remove_claude_settings(settings)?,
-    );
+    report(r, "Claude Code mod", install::claude_mod(&dir, rvow, &crate::skill::render()?)?);
+    report(r, "old settings hooks", install::remove_claude_settings(settings)?);
     match which("claude") {
         Some(claude) => match install::register_claude_mod(&claude, &dir) {
             Ok(done) => {
@@ -169,24 +129,15 @@ fn install_pi(r: &mut Reply, home: &Path) -> Result<()> {
     if pi.is_dir() {
         report(r, "pi extension", install::pi_extension(&pi)?);
     } else {
-        r.line(format!(
-            "pi extension: skipped, {} does not exist",
-            pi.display()
-        ));
+        r.line(format!("pi extension: skipped, {} does not exist", pi.display()));
     }
     Ok(())
 }
 
 fn install_pre_push(r: &mut Reply, rvow: &Path) -> Result<()> {
     match store::find(&cwd()?, &store::home_dir()?) {
-        Ok(Some(_)) => report(
-            r,
-            "pre-push gate",
-            install::pre_push(&git::toplevel(&cwd()?)?, rvow)?,
-        ),
-        _ => {
-            r.line("pre-push gate: skipped, run rvow install inside a repository with an rvow tree")
-        }
+        Ok(Some(_)) => report(r, "pre-push gate", install::pre_push(&git::toplevel(&cwd()?)?, rvow)?),
+        _ => r.line("pre-push gate: skipped, run rvow install inside a repository with an rvow tree"),
     }
     Ok(())
 }

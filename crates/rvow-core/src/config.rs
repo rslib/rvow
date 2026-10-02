@@ -58,13 +58,7 @@ fn read_file(path: &Path) -> Result<File> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(File::default()),
         Err(e) => return Err(Error::io(path, e)),
     };
-    toml::from_str(&text).map_err(|e| {
-        Error::new(
-            "config",
-            format!("{}: {e}", path.display()),
-            "fix the key or value named above",
-        )
-    })
+    toml::from_str(&text).map_err(|e| Error::new("config", format!("{}: {e}", path.display()), "fix the key or value named above"))
 }
 
 /// Merges the global and the project config. The project value wins, and a
@@ -92,27 +86,14 @@ pub fn load(project: &Project, home: &Path) -> Result<Config> {
     }
     let timeout = pick!(timeout).unwrap_or_else(|| "10m".into());
     let timeout_secs = parse_duration(&timeout)
-        .ok_or_else(|| {
-            Error::new(
-                "config",
-                format!("timeout {timeout:?} is not a duration"),
-                "write a value such as 90s, 20m or 1h",
-            )
-        })?
+        .ok_or_else(|| Error::new("config", format!("timeout {timeout:?} is not a duration"), "write a value such as 90s, 20m or 1h"))?
         .as_secs();
     Ok(Config {
         base: pick!(base).unwrap_or_else(|| "main".into()),
         timeout_secs,
         inputs: pick!(inputs).unwrap_or_default(),
-        test_globs: pick!(test_globs).unwrap_or_else(|| {
-            strings(&[
-                "tests/**",
-                "**/*_test.*",
-                "**/test_*.py",
-                "**/*.test.*",
-                "**/*.spec.*",
-            ])
-        }),
+        test_globs: pick!(test_globs)
+            .unwrap_or_else(|| strings(&["tests/**", "**/*_test.*", "**/test_*.py", "**/*.test.*", "**/*.spec.*"])),
         protect_infra: pick!(protect_infra).unwrap_or_else(|| {
             strings(&[
                 "**/__snapshots__/**",
@@ -143,8 +124,7 @@ impl Config {
 
     /// The canonical form that the vow hashes.
     pub fn canonical(&self) -> Result<String> {
-        serde_json::to_string(self)
-            .map_err(|e| Error::internal(format!("config does not serialize: {e}")))
+        serde_json::to_string(self).map_err(|e| Error::internal(format!("config does not serialize: {e}")))
     }
 }
 
@@ -160,16 +140,8 @@ mod tests {
         let home = tmp.0.join("home");
         let repo = repo_with_commit(&tmp.0, "r");
         let p = init(&repo, &home, Mode::Home).unwrap();
-        std::fs::write(
-            home.join(CONFIG_FILE),
-            "base = \"trunk\"\ninputs = [\"a\", \"b\"]\nmachine = \"laptop\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            p.root.join(CONFIG_FILE),
-            "inputs = [\"c\"]\ntimeout = \"90s\"\n",
-        )
-        .unwrap();
+        std::fs::write(home.join(CONFIG_FILE), "base = \"trunk\"\ninputs = [\"a\", \"b\"]\nmachine = \"laptop\"\n").unwrap();
+        std::fs::write(p.root.join(CONFIG_FILE), "inputs = [\"c\"]\ntimeout = \"90s\"\n").unwrap();
         let c = load(&p, &home).unwrap();
         assert_eq!(c.base, "trunk");
         assert_eq!(c.inputs, ["c"]);
@@ -183,11 +155,7 @@ mod tests {
         let tmp = TempDir::new();
         let home = tmp.0.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(CONFIG_FILE),
-            "base = \"trunk\"\nmachine = \"m\"\n",
-        )
-        .unwrap();
+        std::fs::write(home.join(CONFIG_FILE), "base = \"trunk\"\nmachine = \"m\"\n").unwrap();
         let repo = repo_with_commit(&tmp.0, "r");
         let p = init(&repo, &home, Mode::Repo).unwrap();
         let c = load(&p, &home).unwrap();

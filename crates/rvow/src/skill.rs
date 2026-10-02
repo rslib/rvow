@@ -28,8 +28,7 @@ pub fn problem(line: &str) -> Option<String> {
             positional = true;
         } else if let Some(flag) = word.strip_prefix("--") {
             let flag = flag.split('=').next().unwrap_or_default();
-            let known = cmd.get_arguments().any(|a| a.get_long() == Some(flag))
-                || ["toon", "human", "help"].contains(&flag);
+            let known = cmd.get_arguments().any(|a| a.get_long() == Some(flag)) || ["toon", "human", "help"].contains(&flag);
             if !known {
                 return Some(format!("`{line}`: `{}` has no --{flag}", cmd.get_name()));
             }
@@ -38,10 +37,7 @@ pub fn problem(line: &str) -> Option<String> {
         } else if !positional && let Some(sub) = cmd.find_subcommand(word).cloned() {
             cmd = sub;
         } else if !positional && cmd.has_subcommands() {
-            return Some(format!(
-                "`{line}`: `{}` has no subcommand {word}",
-                cmd.get_name()
-            ));
+            return Some(format!("`{line}`: `{}` has no subcommand {word}", cmd.get_name()));
         } else {
             positional = true;
         }
@@ -55,20 +51,13 @@ fn render_text(template: &str) -> Result<String> {
     while let Some(start) = rest.find("{{") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        let end = after
-            .find("}}")
-            .ok_or_else(|| Error::internal("the skill template has an unclosed {{"))?;
+        let end = after.find("}}").ok_or_else(|| Error::internal("the skill template has an unclosed {{"))?;
         let Some(args) = after[..end].strip_prefix("cmd:") else {
-            return Err(Error::internal(format!(
-                "the skill template has an unknown placeholder {{{{{}}}}}",
-                &after[..end]
-            )));
+            return Err(Error::internal(format!("the skill template has an unknown placeholder {{{{{}}}}}", &after[..end])));
         };
         let line = format!("rvow {args}");
         if let Some(why) = problem(&line) {
-            return Err(Error::internal(format!(
-                "the skill template names a missing command: {why}"
-            )));
+            return Err(Error::internal(format!("the skill template names a missing command: {why}")));
         }
         out.push_str(&format!("`{line}`"));
         rest = &after[end + 2..];
@@ -100,10 +89,7 @@ mod tests {
         assert!(render_text("{{cmd:prove --nope}}").is_err());
         assert!(render_text("{{what:prove}}").is_err());
         assert!(render_text("{{cmd:prove").is_err());
-        assert_eq!(
-            render_text("a {{cmd:prove <task>}} b").unwrap(),
-            "a `rvow prove <task>` b"
-        );
+        assert_eq!(render_text("a {{cmd:prove <task>}} b").unwrap(), "a `rvow prove <task>` b");
     }
 
     #[test]

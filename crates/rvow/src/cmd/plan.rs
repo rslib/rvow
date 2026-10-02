@@ -33,29 +33,21 @@ pub fn new(title: &str, small: bool) -> Result<Reply> {
     let p = project(&home)?;
     let branch = current_branch()?;
     let (changes, _) = change::list(&p)?;
-    let busy = changes
-        .iter()
-        .filter(|c| c.stage == Stage::Active)
-        .any(|c| {
-            std::fs::read_to_string(c.path.join(change::PROPOSAL))
-                .is_ok_and(|t| t.lines().any(|l| l.trim() == format!("branch: {branch}")))
-        });
+    let busy = changes.iter().filter(|c| c.stage == Stage::Active).any(|c| {
+        std::fs::read_to_string(c.path.join(change::PROPOSAL)).is_ok_and(|t| t.lines().any(|l| l.trim() == format!("branch: {branch}")))
+    });
     let c = change::new(&p, title, &branch, small)?;
     let mut r = Reply::new();
     r.line(format!("created {} at {}", c.id, c.path.display()));
     r.set("created", c.id.to_string());
     r.set("path", c.path.display().to_string());
     if busy {
-        let hint =
-            format!("{branch} already has an active change; one change per branch is the standard");
+        let hint = format!("{branch} already has an active change; one change per branch is the standard");
         r.line(format!("hint: {hint}"));
         r.set("warning", hint);
     }
     r.help("Run `rvow guide proposal` for how to write the proposal");
-    r.help(format!(
-        "Run `rvow check {}` when the plan is written",
-        c.id
-    ));
+    r.help(format!("Run `rvow check {}` when the plan is written", c.id));
     Ok(r)
 }
 
@@ -71,10 +63,7 @@ struct Problem {
 
 impl Problem {
     fn add(&self, r: &mut Reply, indent: &str) {
-        r.line(format!(
-            "{indent}{}: {}[{}]: {}",
-            self.at, self.level, self.code, self.message
-        ));
+        r.line(format!("{indent}{}: {}[{}]: {}", self.at, self.level, self.code, self.message));
         if !self.fix.is_empty() {
             r.line(format!("{indent}  fix: {}", self.fix));
         }
@@ -115,11 +104,7 @@ pub fn validate() -> Result<Reply> {
     let (changes, stray) = change::list(&p)?;
     for path in stray {
         all.push(Problem {
-            at: path
-                .strip_prefix(&p.root)
-                .unwrap_or(&path)
-                .display()
-                .to_string(),
+            at: path.strip_prefix(&p.root).unwrap_or(&path).display().to_string(),
             level: "error",
             code: "stray",
             message: "not a change folder name, expected CHG-xxxxxx-<slug>".to_owned(),
@@ -127,16 +112,10 @@ pub fn validate() -> Result<Reply> {
         });
     }
     let mut count = 0usize;
-    for c in changes
-        .iter()
-        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
-    {
+    for c in changes.iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
         count += 1;
         let loaded = change::load(&c.path, &living)?;
-        let prefix = format!(
-            "{}/",
-            c.path.strip_prefix(&p.root).unwrap_or(&c.path).display()
-        );
+        let prefix = format!("{}/", c.path.strip_prefix(&p.root).unwrap_or(&c.path).display());
         all.extend(problems(&prefix, &loaded.findings));
     }
     let errors = all.iter().filter(|f| f.level == "error").count();
@@ -144,18 +123,11 @@ pub fn validate() -> Result<Reply> {
     for f in &all {
         f.add(&mut r, "");
     }
-    r.line(format!(
-        "checked {} specs and {count} open changes: {errors} errors",
-        living.len()
-    ));
+    r.line(format!("checked {} specs and {count} open changes: {errors} errors", living.len()));
     r.set("specs", living.len());
     r.set("changes", count);
     r.set("errors", errors);
-    r.table(
-        "findings",
-        all.iter().map(Problem::row).collect(),
-        "0 in the specs and open changes",
-    );
+    r.table("findings", all.iter().map(Problem::row).collect(), "0 in the specs and open changes");
     r.ok = errors == 0;
     Ok(r)
 }
@@ -179,11 +151,7 @@ pub fn ids(target: Option<&str>) -> Result<Reply> {
     if minted.is_empty() {
         r.line("no placeholders");
     }
-    r.table(
-        "minted",
-        rows,
-        format!("0 placeholders on branch {}", branch_label()),
-    );
+    r.table("minted", rows, format!("0 placeholders on branch {}", branch_label()));
     Ok(r)
 }
 
@@ -223,10 +191,7 @@ pub fn check(target: Option<&str>) -> Result<Reply> {
         }
         let mut questions = Vec::new();
         for q in &c.questions {
-            r.line(format!(
-                "  {}:{}: open question: {}",
-                q.path, q.line, q.question
-            ));
+            r.line(format!("  {}:{}: open question: {}", q.path, q.line, q.question));
             questions.push(Node::Obj(obj! {
                 "at" => format!("{}:{}", q.path, q.line),
                 "question" => q.question,
@@ -244,18 +209,12 @@ pub fn check(target: Option<&str>) -> Result<Reply> {
         }
         if !questions.is_empty() {
             item.push(("questions".to_owned(), Node::List(questions)));
-            r.help(format!(
-                "Run `rvow clarify {id}` for the questions with recommended answers"
-            ));
+            r.help(format!("Run `rvow clarify {id}` for the questions with recommended answers"));
         }
         items.push(Node::Obj(item));
         if ready {
-            r.line(format!(
-                "  ready to accept: ask the user to run /rvow-accept {id} (or ! rvow accept {id})"
-            ));
-            r.help(format!(
-                "Ask the user to run /rvow-accept {id} (or ! rvow accept {id})"
-            ));
+            r.line(format!("  ready to accept: ask the user to run /rvow-accept {id} (or ! rvow accept {id})"));
+            r.help(format!("Ask the user to run /rvow-accept {id} (or ! rvow accept {id})"));
         } else {
             r.ok = false;
             r.line("  not ready to accept");
@@ -278,10 +237,7 @@ pub fn clarify(target: Option<&str>, json: bool) -> Result<Reply> {
     for c in plan::check(&p, &cwd()?, target)? {
         for q in &c.questions {
             let rec = q.recommended.as_deref().unwrap_or("none given");
-            r.line(format!(
-                "{}:{}:{}: {} (recommended: {rec})",
-                c.change.id, q.path, q.line, q.question
-            ));
+            r.line(format!("{}:{}:{}: {} (recommended: {rec})", c.change.id, q.path, q.line, q.question));
             rows.push(obj! {
                 "ref" => format!("{}:{}:{}", c.change.id, q.path, q.line),
                 "question" => q.question,
@@ -297,11 +253,7 @@ pub fn clarify(target: Option<&str>, json: bool) -> Result<Reply> {
         r.set("count", rows.len());
         r.help(ask);
     }
-    r.table(
-        "questions",
-        rows,
-        format!("0 open on branch {}", branch_label()),
-    );
+    r.table("questions", rows, format!("0 open on branch {}", branch_label()));
     Ok(r)
 }
 
@@ -313,18 +265,9 @@ pub fn answer(reference: &str, choice: &str, via: ViaArg) -> Result<bool> {
         ViaArg::Chat => interview::Via::Chat,
     };
     let a = interview::answer(&p, reference, choice, via)?;
-    let how = if a.recommended {
-        "the recommended answer"
-    } else {
-        "an answer other than the recommended one"
-    };
-    println!(
-        "Recorded for {}: {} -> {} ({how}).",
-        a.change, a.question, a.answer
-    );
-    println!(
-        "Now update the requirement or task this answer affects, and remove any text it contradicts."
-    );
+    let how = if a.recommended { "the recommended answer" } else { "an answer other than the recommended one" };
+    println!("Recorded for {}: {} -> {} ({how}).", a.change, a.question, a.answer);
+    println!("Now update the requirement or task this answer affects, and remove any text it contradicts.");
     Ok(true)
 }
 
@@ -338,8 +281,6 @@ pub fn claim(target: &str) -> Result<Reply> {
     r.set("claimed", target.to_string());
     r.set("from", from);
     r.set("to", branch);
-    r.help(format!(
-        "Run `rvow check {target}` to see if the plan is ready"
-    ));
+    r.help(format!("Run `rvow check {target}` to see if the plan is ready"));
     Ok(r)
 }

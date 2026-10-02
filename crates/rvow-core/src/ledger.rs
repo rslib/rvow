@@ -58,9 +58,7 @@ pub fn short_hash(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// Reads a ledger in event order. A missing file is an empty ledger.
@@ -85,11 +83,7 @@ pub fn read(path: &Path) -> Result<(Vec<Event>, Vec<Diagnostic>)> {
             continue;
         }
         if i + 1 == lines.len() && !complete {
-            diags.push(Diagnostic::new(
-                Rule::LedgerTail,
-                n,
-                "the last line has no newline, a write did not finish, skipped",
-            ));
+            diags.push(Diagnostic::new(Rule::LedgerTail, n, "the last line has no newline, a write did not finish, skipped"));
             continue;
         }
         let hash = short_hash(line.as_bytes());
@@ -102,32 +96,20 @@ pub fn read(path: &Path) -> Result<(Vec<Event>, Vec<Diagnostic>)> {
                 ev.line = n;
                 events.push(ev);
             }
-            Err(e) => diags.push(Diagnostic::new(
-                Rule::Ledger,
-                n,
-                format!("not a ledger event: {e}"),
-            )),
+            Err(e) => diags.push(Diagnostic::new(Rule::Ledger, n, format!("not a ledger event: {e}"))),
         }
     }
     let known: HashSet<&str> = events.iter().map(|e| e.hash.as_str()).collect();
     for ev in &events {
         for p in ev.parents.iter().filter(|p| !known.contains(p.as_str())) {
-            diags.push(Diagnostic::new(
-                Rule::Ledger,
-                ev.line,
-                format!("parent {p} names no line, an event was edited or removed"),
-            ));
+            diags.push(Diagnostic::new(Rule::Ledger, ev.line, format!("parent {p} names no line, an event was edited or removed")));
         }
     }
     Ok((order(events), diags))
 }
 
 fn order(events: Vec<Event>) -> Vec<Event> {
-    let index: HashMap<String, usize> = events
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.hash.clone(), i))
-        .collect();
+    let index: HashMap<String, usize> = events.iter().enumerate().map(|(i, e)| (e.hash.clone(), i)).collect();
     let mut waiting = vec![0usize; events.len()];
     let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, ev) in events.iter().enumerate() {
@@ -139,10 +121,7 @@ fn order(events: Vec<Event>) -> Vec<Event> {
         }
     }
     let key = |i: usize| Reverse((events[i].time, events[i].hash.clone(), i));
-    let mut ready: BinaryHeap<_> = (0..events.len())
-        .filter(|&i| waiting[i] == 0)
-        .map(key)
-        .collect();
+    let mut ready: BinaryHeap<_> = (0..events.len()).filter(|&i| waiting[i] == 0).map(key).collect();
     let mut out = Vec::with_capacity(events.len());
     while let Some(Reverse((_, _, i))) = ready.pop() {
         out.push(i);
@@ -161,11 +140,7 @@ fn order(events: Vec<Event>) -> Vec<Event> {
 /// crashed write is removed first; the caller's lock means no writer is still
 /// working on it.
 pub(crate) fn append_line(path: &Path, line: &str) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| Error::io(path, e))?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| Error::io(path, e))?;
     let old = std::fs::read(path).map_err(|e| Error::io(path, e))?;
     if !old.is_empty() && !old.ends_with(b"\n") {
         let keep = old.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
@@ -179,15 +154,8 @@ pub(crate) fn append_line(path: &Path, line: &str) -> Result<()> {
 
 /// The events no other event names as a parent.
 fn heads(events: &[Event]) -> Vec<String> {
-    let named: HashSet<&str> = events
-        .iter()
-        .flat_map(|e| e.parents.iter().map(String::as_str))
-        .collect();
-    let mut heads: Vec<String> = events
-        .iter()
-        .filter(|e| !named.contains(e.hash.as_str()))
-        .map(|e| e.hash.clone())
-        .collect();
+    let named: HashSet<&str> = events.iter().flat_map(|e| e.parents.iter().map(String::as_str)).collect();
+    let mut heads: Vec<String> = events.iter().filter(|e| !named.contains(e.hash.as_str())).map(|e| e.hash.clone()).collect();
     heads.sort();
     heads
 }
@@ -196,16 +164,8 @@ fn heads(events: &[Event]) -> Vec<String> {
 /// The lock proves the caller holds the project's write lock.
 pub fn append(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Value>) -> Result<Event> {
     let (events, _) = read(path)?;
-    let mut ev = Event {
-        kind,
-        time: now_ms(),
-        parents: heads(&events),
-        data,
-        hash: String::new(),
-        line: 0,
-    };
-    let line = serde_json::to_string(&ev)
-        .map_err(|e| Error::internal(format!("ledger event does not serialize: {e}")))?;
+    let mut ev = Event { kind, time: now_ms(), parents: heads(&events), data, hash: String::new(), line: 0 };
+    let line = serde_json::to_string(&ev).map_err(|e| Error::internal(format!("ledger event does not serialize: {e}")))?;
     append_line(path, &line)?;
     ev.hash = short_hash(line.as_bytes());
     Ok(ev)
@@ -218,14 +178,7 @@ mod tests {
     use crate::store::{Meta, Mode, Project};
 
     fn project(dir: &Path) -> Project {
-        Project {
-            root: dir.to_path_buf(),
-            meta: Meta {
-                roots: vec![],
-                remote: None,
-                mode: Mode::Home,
-            },
-        }
+        Project { root: dir.to_path_buf(), meta: Meta { roots: vec![], remote: None, mode: Mode::Home } }
     }
 
     fn data(note: &str) -> Map<String, Value> {
@@ -264,8 +217,7 @@ mod tests {
 
         // A branch appended after "root" too; a union merge put its line first.
         let root_hash = short_hash(lines[0].as_bytes());
-        let branch =
-            format!(r#"{{"kind":"note","time":1,"parents":["{root_hash}"],"text":"branch"}}"#);
+        let branch = format!(r#"{{"kind":"note","time":1,"parents":["{root_hash}"],"text":"branch"}}"#);
         std::fs::write(&path, format!("{branch}\n{}\n{}\n", lines[1], lines[0])).unwrap();
         let (events, diags) = read(&path).unwrap();
         assert!(diags.is_empty(), "{diags:?}");
@@ -290,10 +242,7 @@ mod tests {
         let path = tmp.0.join("ledger.jsonl");
         let lock = p.lock().unwrap();
         append(&path, &lock, Kind::Note, data("ok")).unwrap();
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(br#"{"kind":"note","ti"#).unwrap();
         let (events, diags) = read(&path).unwrap();
         assert_eq!(events.len(), 1);

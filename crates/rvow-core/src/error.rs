@@ -13,28 +13,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn new(code: &'static str, message: impl Into<String>, fix: impl Into<String>) -> Error {
-        Error {
-            code,
-            message: message.into(),
-            fix: fix.into(),
-        }
+        Error { code, message: message.into(), fix: fix.into() }
     }
 
     pub fn io(path: &std::path::Path, err: std::io::Error) -> Error {
-        Error::new(
-            "io",
-            format!("{}: {err}", path.display()),
-            "check that the path exists and is writable",
-        )
+        Error::new("io", format!("{}: {err}", path.display()), "check that the path exists and is writable")
     }
 
     /// A state that the code ruled out, reported instead of a panic.
     pub fn internal(what: impl std::fmt::Display) -> Error {
-        Error::new(
-            "internal",
-            what.to_string(),
-            "run the command again; if it fails again, report it to the rvow maintainers",
-        )
+        Error::new("internal", what.to_string(), "run the command again; if it fails again, report it to the rvow maintainers")
     }
 
     pub fn random<const N: usize>() -> Result<[u8; N]> {

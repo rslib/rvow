@@ -46,16 +46,9 @@ impl Repo {
 
     /// Runs rvow with stdout on a pipe, as an agent does: stdout and exit code.
     fn rvow(&self, args: &[&str]) -> (String, i32) {
-        let out = self
-            .cmd(env!("CARGO_BIN_EXE_rvow"))
-            .args(args)
-            .output()
-            .unwrap();
+        let out = self.cmd(env!("CARGO_BIN_EXE_rvow")).args(args).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stderr), "", "rvow {args:?}");
-        (
-            String::from_utf8(out.stdout).unwrap(),
-            out.status.code().unwrap(),
-        )
+        (String::from_utf8(out.stdout).unwrap(), out.status.code().unwrap())
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -66,9 +59,7 @@ impl Repo {
 }
 
 fn field<'a>(out: &'a str, key: &str) -> &'a str {
-    out.lines()
-        .find_map(|l| l.strip_prefix(&format!("{key}: ")))
-        .unwrap_or_else(|| panic!("no {key} in {out}"))
+    out.lines().find_map(|l| l.strip_prefix(&format!("{key}: "))).unwrap_or_else(|| panic!("no {key} in {out}"))
 }
 
 /// An initialized project with an accepted change of one task.
@@ -88,11 +79,7 @@ fn accepted(name: &str) -> (Repo, PathBuf, String) {
         "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
     )
     .unwrap();
-    let accept = r
-        .cmd(env!("CARGO_BIN_EXE_rvow"))
-        .args(["accept", &id, "--yes"])
-        .output()
-        .unwrap();
+    let accept = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap();
     let text = String::from_utf8(accept.stdout).unwrap();
     assert!(accept.status.success(), "{text}");
     assert!(text.contains(&format!("accepted {id} at ")), "{text}");
@@ -117,11 +104,7 @@ fn accept_yes_prints_no_checklist() {
         "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
     )
     .unwrap();
-    let accept = r
-        .cmd(env!("CARGO_BIN_EXE_rvow"))
-        .args(["accept", &id, "--yes"])
-        .output()
-        .unwrap();
+    let accept = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap();
     let out = String::from_utf8(accept.stdout).unwrap();
     assert!(accept.status.success(), "{out}");
     assert!(out.contains(&format!("accepted {id} at ")), "{out}");
@@ -131,21 +114,15 @@ fn accept_yes_prints_no_checklist() {
 #[test]
 fn confirm_ids_list_only_those() {
     let (r, root, id) = accepted("confirmids");
-    let dir = std::fs::read_dir(root.join("active"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.to_string_lossy().contains(&id))
-        .unwrap();
+    let dir =
+        std::fs::read_dir(root.join("active")).unwrap().map(|e| e.unwrap().path()).find(|p| p.to_string_lossy().contains(&id)).unwrap();
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     for (i, title) in ["Write one", "Write two"].iter().enumerate() {
         std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", title)).unwrap();
         r.ok(&["amend", "--reason", &format!("edit {i}")]);
     }
     let all = r.ok(&["confirm"]);
-    let ids: Vec<&str> = all
-        .lines()
-        .filter_map(|l| l.split(" for ").next().filter(|s| s.starts_with("AMD-")))
-        .collect();
+    let ids: Vec<&str> = all.lines().filter_map(|l| l.split(" for ").next().filter(|s| s.starts_with("AMD-"))).collect();
     assert_eq!(ids.len(), 2, "{all}");
     let one = r.ok(&["confirm", ids[0]]);
     assert!(one.contains(ids[0]), "{one}");
@@ -157,17 +134,10 @@ fn confirm_ids_list_only_those() {
 #[test]
 fn confirm_shows_changed_lines_only() {
     let (r, root, id) = accepted("confirmlines");
-    let dir = std::fs::read_dir(root.join("active"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.to_string_lossy().contains(&id))
-        .unwrap();
+    let dir =
+        std::fs::read_dir(root.join("active")).unwrap().map(|e| e.unwrap().path()).find(|p| p.to_string_lossy().contains(&id)).unwrap();
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
-    std::fs::write(
-        dir.join("tasks.md"),
-        tasks.replace("echo 'test", "echo 'tests"),
-    )
-    .unwrap();
+    std::fs::write(dir.join("tasks.md"), tasks.replace("echo 'test", "echo 'tests")).unwrap();
     r.ok(&["amend", "--reason", "edit"]);
     let out = r.ok(&["confirm"]);
     assert!(out.contains("\n    - "), "{out}");
@@ -196,15 +166,8 @@ fn accept_records_and_review_runs_nothing() {
     let review = r.ok(&["review", &id]);
     assert!(review.contains("before you accept, check:"), "{review}");
     assert!(review.contains("Write ok"), "{review}");
-    assert!(
-        !r.repo().join("ran.txt").exists(),
-        "review ran a verify command"
-    );
-    let out = r
-        .cmd(env!("CARGO_BIN_EXE_rvow"))
-        .args(["accept", &id])
-        .output()
-        .unwrap();
+    assert!(!r.repo().join("ran.txt").exists(), "review ran a verify command");
+    let out = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id]).output().unwrap();
     let accept = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "{accept}");
     assert!(accept.contains(&format!("accepted {id} at ")), "{accept}");
@@ -223,11 +186,7 @@ fn accept_output_is_short() {
         "- TSK-new1 One\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n\n- TSK-new2 Two\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
     )
     .unwrap();
-    let accept = r
-        .cmd(env!("CARGO_BIN_EXE_rvow"))
-        .args(["accept", &id2])
-        .output()
-        .unwrap();
+    let accept = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id2]).output().unwrap();
     let text = String::from_utf8(accept.stdout).unwrap();
     assert!(accept.status.success(), "{text}");
     assert_eq!(text.lines().count(), 2, "{text}");
@@ -241,16 +200,12 @@ fn decisions_end_with_next() {
     let (r, root, id) = accepted("nextline");
     let brief = r.ok(&["brief"]);
     assert!(brief.contains("next: TSK-"), "{brief}");
-    let dir = std::fs::read_dir(root.join("active"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.to_string_lossy().contains(&id))
-        .unwrap();
+    let dir =
+        std::fs::read_dir(root.join("active")).unwrap().map(|e| e.unwrap().path()).find(|p| p.to_string_lossy().contains(&id)).unwrap();
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
-    for (title, flag, want) in [
-        ("Write one", "--accept", "next: the plan edit stands"),
-        ("Write two", "--reject", "next: undo the rejected plan edit"),
-    ] {
+    for (title, flag, want) in
+        [("Write one", "--accept", "next: the plan edit stands"), ("Write two", "--reject", "next: undo the rejected plan edit")]
+    {
         std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", title)).unwrap();
         let amended = r.ok(&["amend", "--reason", "edit"]);
         let amd = amended
@@ -264,17 +219,9 @@ fn decisions_end_with_next() {
     }
     std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", "Write one")).unwrap();
     std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
-    let task = brief
-        .lines()
-        .find_map(|l| l.trim_start().strip_prefix("next: "))
-        .and_then(|l| l.split_whitespace().next())
-        .unwrap()
-        .to_owned();
-    let proved = r
-        .cmd(env!("CARGO_BIN_EXE_rvow"))
-        .args(["prove", &task])
-        .output()
-        .unwrap();
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    let proved = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap();
     assert!(proved.status.success());
     let out = r.ok(&["archive", &id]);
     assert!(out.contains("next: pick the next plan"), "{out}");
@@ -283,20 +230,13 @@ fn decisions_end_with_next() {
 #[test]
 fn stale_digest_prints_the_list() {
     let (r, root, id) = accepted("staledigest");
-    let dir = std::fs::read_dir(root.join("active"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.to_string_lossy().contains(&id))
-        .unwrap();
+    let dir =
+        std::fs::read_dir(root.join("active")).unwrap().map(|e| e.unwrap().path()).find(|p| p.to_string_lossy().contains(&id)).unwrap();
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", "Write one")).unwrap();
     r.ok(&["amend", "--reason", "one"]);
     let listed = r.ok(&["confirm"]);
-    let digest = listed
-        .lines()
-        .find_map(|l| l.strip_prefix("digest "))
-        .unwrap()
-        .to_owned();
+    let digest = listed.lines().find_map(|l| l.strip_prefix("digest ")).unwrap().to_owned();
     std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", "Write two")).unwrap();
     r.ok(&["amend", "--reason", "two"]);
     let (out, code) = r.rvow(&["confirm", "--accept", "--all", &digest]);
@@ -310,18 +250,10 @@ fn stale_digest_prints_the_list() {
 fn archive_prints_next_last() {
     let (r, _root, id) = accepted("archivelast");
     let brief = r.ok(&["brief"]);
-    let task = brief
-        .lines()
-        .find_map(|l| l.trim_start().strip_prefix("next: "))
-        .and_then(|l| l.split_whitespace().next())
-        .unwrap()
-        .to_owned();
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
     std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
-    let proved = r
-        .cmd(env!("CARGO_BIN_EXE_rvow"))
-        .args(["prove", &task])
-        .output()
-        .unwrap();
+    let proved = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap();
     assert!(proved.status.success());
     let out = r.ok(&["archive", &id]);
     let at = |key: &str| out.find(key).unwrap_or_else(|| panic!("no {key} in {out}"));
@@ -334,10 +266,7 @@ fn init_hints_git_init_for_an_untracked_home() {
     let r = Repo::new("inithint");
     let out = r.ok(&["init"]);
     let home = r.0.join("home");
-    assert!(
-        out.contains(&format!("git -C {} init", home.display())),
-        "{out}"
-    );
+    assert!(out.contains(&format!("git -C {} init", home.display())), "{out}");
     assert!(home.join(".gitignore").exists());
 
     let q = Repo::new("inithintrepo");
@@ -371,18 +300,9 @@ fn empty_states_name_the_zero() {
     let r = Repo::new("empty");
     r.ok(&["init"]);
     assert!(r.ok(&["ls"]).starts_with("changes: 0 in this project\n"));
-    assert!(
-        r.ok(&["status"])
-            .starts_with("changes: 0 active on branch main\n")
-    );
-    assert!(
-        r.ok(&["spec", "list"])
-            .starts_with("requirements: 0 in the living specs\n")
-    );
-    assert!(
-        r.ok(&[])
-            .contains("\nchanges: 0 active or waiting on branch main\n")
-    );
+    assert!(r.ok(&["status"]).starts_with("changes: 0 active on branch main\n"));
+    assert!(r.ok(&["spec", "list"]).starts_with("requirements: 0 in the living specs\n"));
+    assert!(r.ok(&[]).contains("\nchanges: 0 active or waiting on branch main\n"));
     assert_eq!(r.ok(&["--human", "ls"]), "no changes\n");
 }
 
@@ -390,27 +310,14 @@ fn empty_states_name_the_zero() {
 fn lists_and_views_print_toon() {
     let (r, root, id) = accepted("lists");
     let out = r.ok(&["ls"]);
-    assert!(
-        out.starts_with(&format!(
-            "count: 1\nchanges[1]{{id,stage,branch,title}}:\n  {id},active,main,Out\nhelp[2]:\n"
-        )),
-        "{out}"
-    );
+    assert!(out.starts_with(&format!("count: 1\nchanges[1]{{id,stage,branch,title}}:\n  {id},active,main,Out\nhelp[2]:\n")), "{out}");
     let out = r.ok(&["status"]);
-    assert!(
-        out.contains(&format!(
-            "changes[1]:\n  - id: {id}\n    branch: main\n    tasks[1]{{id,state,title}}:\n"
-        )),
-        "{out}"
-    );
+    assert!(out.contains(&format!("changes[1]:\n  - id: {id}\n    branch: main\n    tasks[1]{{id,state,title}}:\n")), "{out}");
     assert!(out.contains(",missing,Write ok\n"), "{out}");
     let out = r.ok(&[]);
     assert!(out.contains("\nnext:\n  task: TSK-"), "{out}");
     assert!(out.contains("\nneeds_you:\n  amendments: 0\n"), "{out}");
-    assert!(
-        out.contains(&format!("{id},Out,active,0/1 proved")),
-        "{out}"
-    );
+    assert!(out.contains(&format!("{id},Out,active,0/1 proved")), "{out}");
 
     std::fs::create_dir_all(root.join("specs/ledger")).unwrap();
     std::fs::write(
@@ -420,7 +327,9 @@ fn lists_and_views_print_toon() {
     .unwrap();
     let out = r.ok(&["spec", "list"]);
     assert!(
-        out.starts_with("count: 1 requirements in 1 capabilities\nrequirements[1]{id,capability,title}:\n  REQ-k3f9m2,ledger,Record a proof run\n"),
+        out.starts_with(
+            "count: 1 requirements in 1 capabilities\nrequirements[1]{id,capability,title}:\n  REQ-k3f9m2,ledger,Record a proof run\n"
+        ),
         "{out}"
     );
     assert_eq!(r.ok(&["confirm"]), "no pending amendments\n");
@@ -431,35 +340,20 @@ fn errors_are_records_on_stdout() {
     let r = Repo::new("errors");
     let (out, code) = r.rvow(&["ls"]);
     assert_eq!(code, 1);
-    assert_eq!(
-        out,
-        "error: this repository has no rvow tree\nhelp: \"run rvow init; it writes to the rvow home, not the repository\"\n"
-    );
+    assert_eq!(out, "error: this repository has no rvow tree\nhelp: \"run rvow init; it writes to the rvow home, not the repository\"\n");
     let (out, code) = r.rvow(&["--human", "ls"]);
     assert_eq!(code, 1);
     assert!(out.starts_with("error[no-project]: "), "{out}");
 
     let (out, code) = r.rvow(&["status", "--bogus"]);
     assert_eq!(code, 2);
-    assert!(
-        out.starts_with("error: unexpected argument '--bogus' found\nhelp[2]:\n"),
-        "{out}"
-    );
-    assert!(
-        out.contains("valid flags for `rvow status`: --all, --json;"),
-        "{out}"
-    );
+    assert!(out.starts_with("error: unexpected argument '--bogus' found\nhelp[2]:\n"), "{out}");
+    assert!(out.contains("valid flags for `rvow status`: --all, --json;"), "{out}");
     let (out, code) = r.rvow(&["--human", "accept"]);
     assert_eq!(code, 2);
-    assert!(
-        out.contains("valid flags for `rvow accept`: --yes;"),
-        "{out}"
-    );
+    assert!(out.contains("valid flags for `rvow accept`: --yes;"), "{out}");
     let (out, code) = r.rvow(&["spec"]);
     assert_eq!(code, 2);
-    assert!(
-        out.contains("valid subcommands for `rvow spec`: list\n"),
-        "{out}"
-    );
+    assert!(out.contains("valid subcommands for `rvow spec`: list\n"), "{out}");
     assert!(r.ok(&["ls", "--help"]).contains("Usage: rvow ls"));
 }

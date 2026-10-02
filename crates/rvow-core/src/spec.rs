@@ -106,19 +106,9 @@ pub fn parse_spec(src: &str) -> (Spec, Vec<Diagnostic>) {
     let (title, blocks, mut diags) = parse_blocks(src, false);
     let requirements = blocks.into_iter().map(|(_, r)| r).collect();
     if title.is_empty() {
-        diags.push(Diagnostic::new(
-            Rule::Structure,
-            1,
-            "spec needs a `# <capability>` title",
-        ));
+        diags.push(Diagnostic::new(Rule::Structure, 1, "spec needs a `# <capability>` title"));
     }
-    (
-        Spec {
-            title,
-            requirements,
-        },
-        diags,
-    )
+    (Spec { title, requirements }, diags)
 }
 
 pub fn parse_deltas(src: &str) -> (DeltaFile, Vec<Diagnostic>) {
@@ -128,19 +118,13 @@ pub fn parse_deltas(src: &str) -> (DeltaFile, Vec<Diagnostic>) {
         let Some(op) = op else { continue };
         let has_text = !req.text.is_empty() || !req.scenarios.is_empty();
         match (op.has_body(), &req.id) {
-            (_, Ref::Placeholder { .. }) if op != DeltaOp::Add => diags.push(Diagnostic::new(
-                Rule::IdForm,
-                req.line,
-                "only ADD takes a placeholder id",
-            )),
+            (_, Ref::Placeholder { .. }) if op != DeltaOp::Add => {
+                diags.push(Diagnostic::new(Rule::IdForm, req.line, "only ADD takes a placeholder id"))
+            }
             _ => {}
         }
         if op.has_body() && req.title.is_empty() {
-            diags.push(Diagnostic::new(
-                Rule::Structure,
-                req.line,
-                "ADD and CHANGE need a title after the id",
-            ));
+            diags.push(Diagnostic::new(Rule::Structure, req.line, "ADD and CHANGE need a title after the id"));
         }
         if !op.has_body() && has_text {
             diags.push(Diagnostic::new(
@@ -176,11 +160,7 @@ fn parse_blocks(src: &str, delta: bool) -> (String, Vec<Block>, Vec<Diagnostic>)
             if title.is_empty() && blocks.is_empty() {
                 title = rest.trim().to_string();
             } else {
-                diags.push(Diagnostic::new(
-                    Rule::Structure,
-                    n,
-                    "only one `#` title, at the top",
-                ));
+                diags.push(Diagnostic::new(Rule::Structure, n, "only one `#` title, at the top"));
             }
             continue;
         }
@@ -191,36 +171,20 @@ fn parse_blocks(src: &str, delta: bool) -> (String, Vec<Block>, Vec<Diagnostic>)
             continue;
         }
         let Some((_, req)) = blocks.last_mut() else {
-            diags.push(Diagnostic::new(
-                Rule::Structure,
-                n,
-                "text before the first `##` requirement",
-            ));
+            diags.push(Diagnostic::new(Rule::Structure, n, "text before the first `##` requirement"));
             continue;
         };
         if let Some(rest) = line.strip_prefix("### ") {
             match rest.strip_prefix("Scenario:") {
-                Some(t) => req.scenarios.push(Scenario {
-                    title: t.trim().to_string(),
-                    steps: Vec::new(),
-                    line: n,
-                }),
-                None => diags.push(Diagnostic::new(
-                    Rule::Structure,
-                    n,
-                    "a `###` heading must be `### Scenario: <title>`",
-                )),
+                Some(t) => req.scenarios.push(Scenario { title: t.trim().to_string(), steps: Vec::new(), line: n }),
+                None => diags.push(Diagnostic::new(Rule::Structure, n, "a `###` heading must be `### Scenario: <title>`")),
             }
             continue;
         }
         if let Some(scenario) = req.scenarios.last_mut() {
             match parse_step(line, n) {
                 Some(step) => scenario.steps.push(step),
-                None => diags.push(Diagnostic::new(
-                    Rule::Structure,
-                    n,
-                    "a scenario line must be `- GIVEN|WHEN|THEN|AND <text>`",
-                )),
+                None => diags.push(Diagnostic::new(Rule::Structure, n, "a scenario line must be `- GIVEN|WHEN|THEN|AND <text>`")),
             }
             continue;
         }
@@ -251,9 +215,7 @@ fn parse_heading(rest: &str, n: usize, delta: bool, diags: &mut Vec<Diagnostic>)
                 diags.push(Diagnostic::new(
                     Rule::Structure,
                     n,
-                    format!(
-                        "unknown delta {word:?}, expected ADD, CHANGE, DEPRECATE, MOVE or REMOVE"
-                    ),
+                    format!("unknown delta {word:?}, expected ADD, CHANGE, DEPRECATE, MOVE or REMOVE"),
                 ));
                 return None;
             }
@@ -270,19 +232,11 @@ fn parse_heading(rest: &str, n: usize, delta: bool, diags: &mut Vec<Diagnostic>)
         }
     };
     if id.kind() != Kind::Req {
-        diags.push(Diagnostic::new(
-            Rule::IdForm,
-            n,
-            "a requirement id starts with REQ-",
-        ));
+        diags.push(Diagnostic::new(Rule::IdForm, n, "a requirement id starts with REQ-"));
         return None;
     }
     if !delta && title.trim().is_empty() {
-        diags.push(Diagnostic::new(
-            Rule::Structure,
-            n,
-            "a requirement heading needs a title after the id",
-        ));
+        diags.push(Diagnostic::new(Rule::Structure, n, "a requirement heading needs a title after the id"));
     }
     Some((
         op,
@@ -308,11 +262,7 @@ fn parse_step(line: &str, n: usize) -> Option<Step> {
         "AND" => StepKind::And,
         _ => return None,
     };
-    Some(Step {
-        kind,
-        text: text.trim().to_string(),
-        line: n,
-    })
+    Some(Step { kind, text: text.trim().to_string(), line: n })
 }
 
 #[cfg(test)]
@@ -344,43 +294,22 @@ rvow SHALL append one proof event.
         assert_eq!(req.id, "REQ-k3f9m2".parse().unwrap());
         assert_eq!(req.title, "Record a proof run");
         assert!(req.deprecated);
-        assert_eq!(
-            req.text,
-            "WHEN the user runs `rvow prove` on a task, rvow SHALL append one proof event."
-        );
+        assert_eq!(req.text, "WHEN the user runs `rvow prove` on a task, rvow SHALL append one proof event.");
         assert_eq!(req.text_line, 6);
         let steps: Vec<StepKind> = req.scenarios[0].steps.iter().map(|s| s.kind).collect();
-        assert_eq!(
-            steps,
-            [
-                StepKind::Given,
-                StepKind::When,
-                StepKind::Then,
-                StepKind::And
-            ]
-        );
+        assert_eq!(steps, [StepKind::Given, StepKind::When, StepKind::Then, StepKind::And]);
     }
 
     #[test]
     fn reports_structure_errors_with_lines() {
-        let (_, diags) =
-            parse_spec("stray\n# T\n## REQ-k3f9m2\n### Notes\n### Scenario: s\nplain\n");
+        let (_, diags) = parse_spec("stray\n# T\n## REQ-k3f9m2\n### Notes\n### Scenario: s\nplain\n");
         let lines: Vec<(Rule, usize)> = diags.iter().map(|d| (d.rule, d.line)).collect();
-        assert_eq!(
-            lines,
-            [
-                (Rule::Structure, 1),
-                (Rule::Structure, 3),
-                (Rule::Structure, 4),
-                (Rule::Structure, 6)
-            ]
-        );
+        assert_eq!(lines, [(Rule::Structure, 1), (Rule::Structure, 3), (Rule::Structure, 4), (Rule::Structure, 6)]);
     }
 
     #[test]
     fn fenced_code_is_not_structure() {
-        let src =
-            "# T\n## REQ-k3f9m2 R\nrvow SHALL run.\n```\n# not a title\n## not a heading\n```\n";
+        let src = "# T\n## REQ-k3f9m2 R\nrvow SHALL run.\n```\n# not a title\n## not a heading\n```\n";
         let (spec, diags) = parse_spec(src);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(spec.requirements[0].text, "rvow SHALL run.");
@@ -403,16 +332,7 @@ rvow SHALL append one proof event.
         let (file, diags) = parse_deltas(src);
         assert!(diags.is_empty(), "{diags:?}");
         let ops: Vec<DeltaOp> = file.deltas.iter().map(|d| d.op).collect();
-        assert_eq!(
-            ops,
-            [
-                DeltaOp::Add,
-                DeltaOp::Change,
-                DeltaOp::Deprecate,
-                DeltaOp::Move,
-                DeltaOp::Remove
-            ]
-        );
+        assert_eq!(ops, [DeltaOp::Add, DeltaOp::Change, DeltaOp::Deprecate, DeltaOp::Move, DeltaOp::Remove]);
     }
 
     #[test]
@@ -426,13 +346,6 @@ rvow SHALL not have text here.
 ";
         let (_, diags) = parse_deltas(src);
         let got: Vec<(Rule, usize)> = diags.iter().map(|d| (d.rule, d.line)).collect();
-        assert_eq!(
-            got,
-            [
-                (Rule::Structure, 5),
-                (Rule::IdForm, 2),
-                (Rule::Structure, 3)
-            ]
-        );
+        assert_eq!(got, [(Rule::Structure, 5), (Rule::IdForm, 2), (Rule::Structure, 3)]);
     }
 }

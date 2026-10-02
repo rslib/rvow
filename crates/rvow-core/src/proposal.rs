@@ -25,20 +25,11 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
         }
         if let Some(b) = line.strip_prefix("branch:") {
             if !sections.is_empty() || !branch.is_empty() {
-                diags.push(Diagnostic::new(
-                    Rule::Structure,
-                    i + 1,
-                    "branch: goes once, above the first section",
-                ));
+                diags.push(Diagnostic::new(Rule::Structure, i + 1, "branch: goes once, above the first section"));
             }
             branch = b.trim().to_string();
         } else if let Some(a) = line.strip_prefix("after:") {
-            after.extend(
-                a.split(',')
-                    .map(str::trim)
-                    .filter(|x| !x.is_empty())
-                    .map(String::from),
-            );
+            after.extend(a.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from));
         } else if let Some(t) = line.strip_prefix("# ") {
             if title.is_empty() {
                 title = t.trim().to_string();
@@ -48,39 +39,21 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
         }
     }
     if branch.is_empty() {
-        diags.push(Diagnostic::new(
-            Rule::Structure,
-            1,
-            "proposal needs a `branch: <name>` line",
-        ));
+        diags.push(Diagnostic::new(Rule::Structure, 1, "proposal needs a `branch: <name>` line"));
     }
     if words > MAX_WORDS {
         diags.push(Diagnostic::new(
             Rule::Size,
             1,
-            format!(
-                "the proposal has {words} words, more than {MAX_WORDS}; say why and what, not how"
-            ),
+            format!("the proposal has {words} words, more than {MAX_WORDS}; say why and what, not how"),
         ));
     }
     for name in REQUIRED {
         if !sections.iter().any(|s| s == name) {
-            diags.push(Diagnostic::new(
-                Rule::Structure,
-                1,
-                format!("proposal needs a `## {name}` section"),
-            ));
+            diags.push(Diagnostic::new(Rule::Structure, 1, format!("proposal needs a `## {name}` section")));
         }
     }
-    (
-        Proposal {
-            branch,
-            title,
-            sections,
-            after,
-        },
-        diags,
-    )
+    (Proposal { branch, title, sections, after }, diags)
 }
 
 #[cfg(test)]
@@ -89,16 +62,11 @@ mod tests {
 
     #[test]
     fn parses_branch_and_sections() {
-        let (p, diags) = parse_proposal(
-            "branch: feat/x\n\n## Why\nbecause\n## What changes\n## Out of scope\n## Assumptions\n",
-        );
+        let (p, diags) = parse_proposal("branch: feat/x\n\n## Why\nbecause\n## What changes\n## Out of scope\n## Assumptions\n");
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(p.branch, "feat/x");
         assert!(p.after.is_empty());
-        assert_eq!(
-            p.sections,
-            ["Why", "What changes", "Out of scope", "Assumptions"]
-        );
+        assert_eq!(p.sections, ["Why", "What changes", "Out of scope", "Assumptions"]);
     }
 
     #[test]

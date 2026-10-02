@@ -24,11 +24,7 @@ pub struct Task {
 impl Task {
     pub fn verify_command(&self) -> Result<&str> {
         self.verify.as_deref().ok_or_else(|| {
-            Error::new(
-                "no-verify",
-                format!("{} has no verify command", self.id),
-                "add a `verify:` line to the task in tasks.md",
-            )
+            Error::new("no-verify", format!("{} has no verify command", self.id), "add a `verify:` line to the task in tasks.md")
         })
     }
 }
@@ -54,11 +50,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
             match id.parse::<Ref>() {
                 Ok(id) if id.kind() == Kind::Tsk => {
                     if title.trim().is_empty() {
-                        diags.push(Diagnostic::new(
-                            Rule::Structure,
-                            n,
-                            "a task needs a title after its id",
-                        ));
+                        diags.push(Diagnostic::new(Rule::Structure, n, "a task needs a title after its id"));
                     }
                     tasks.push(Task {
                         id,
@@ -73,38 +65,20 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                     });
                     seen_fields.clear();
                 }
-                Ok(_) => diags.push(Diagnostic::new(
-                    Rule::IdForm,
-                    n,
-                    "a task id starts with TSK-",
-                )),
-                Err(e) => diags.push(Diagnostic::new(
-                    Rule::IdForm,
-                    n,
-                    format!("{id:?}: {e}, a task line is `- TSK-xxxxxx <title>`"),
-                )),
+                Ok(_) => diags.push(Diagnostic::new(Rule::IdForm, n, "a task id starts with TSK-")),
+                Err(e) => diags.push(Diagnostic::new(Rule::IdForm, n, format!("{id:?}: {e}, a task line is `- TSK-xxxxxx <title>`"))),
             }
             continue;
         }
-        let field = line
-            .strip_prefix(char::is_whitespace)
-            .and_then(|l| l.trim().split_once(':'));
+        let field = line.strip_prefix(char::is_whitespace).and_then(|l| l.trim().split_once(':'));
         let (Some(task), Some((key, value))) = (tasks.last_mut(), field) else {
-            diags.push(Diagnostic::new(
-                Rule::Structure,
-                n,
-                "not a heading, a `- TSK-...` task line or an indented `key: value` field",
-            ));
+            diags.push(Diagnostic::new(Rule::Structure, n, "not a heading, a `- TSK-...` task line or an indented `key: value` field"));
             continue;
         };
         let key = key.trim();
         let value = value.trim();
         if seen_fields.contains(&key) {
-            diags.push(Diagnostic::new(
-                Rule::TaskField,
-                n,
-                format!("{key}: appears twice"),
-            ));
+            diags.push(Diagnostic::new(Rule::TaskField, n, format!("{key}: appears twice")));
             continue;
         }
         match key {
@@ -112,11 +86,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                 for item in split_list(value) {
                     match item.parse::<Ref>() {
                         Ok(r) if r.kind() == Kind::Req => task.covers.push(r),
-                        _ => diags.push(Diagnostic::new(
-                            Rule::IdForm,
-                            n,
-                            format!("covers: {item:?} is not a requirement id"),
-                        )),
+                        _ => diags.push(Diagnostic::new(Rule::IdForm, n, format!("covers: {item:?} is not a requirement id"))),
                     }
                 }
             }
@@ -125,24 +95,16 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
             "baseline" if value == "pass" => task.baseline_pass = true,
             "timeout" => match parse_duration(value) {
                 Some(d) => task.timeout = Some(d),
-                None => diags.push(Diagnostic::new(
-                    Rule::TaskField,
-                    n,
-                    format!("timeout: {value:?} is not a duration such as 90s, 20m or 1h"),
-                )),
+                None => {
+                    diags.push(Diagnostic::new(Rule::TaskField, n, format!("timeout: {value:?} is not a duration such as 90s, 20m or 1h")))
+                }
             },
-            "baseline" => diags.push(Diagnostic::new(
-                Rule::TaskField,
-                n,
-                "baseline: takes only the value pass",
-            )),
+            "baseline" => diags.push(Diagnostic::new(Rule::TaskField, n, "baseline: takes only the value pass")),
             _ => {
                 diags.push(Diagnostic::new(
                     Rule::TaskField,
                     n,
-                    format!(
-                        "unknown or empty field {key}:, expected covers, verify, files, baseline or timeout"
-                    ),
+                    format!("unknown or empty field {key}:, expected covers, verify, files, baseline or timeout"),
                 ));
                 continue;
             }
@@ -152,20 +114,13 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
 
     for task in &tasks {
         if task.verify.is_none() {
-            diags.push(Diagnostic::new(
-                Rule::TaskField,
-                task.line,
-                format!("{} has no verify: command", task.id),
-            ));
+            diags.push(Diagnostic::new(Rule::TaskField, task.line, format!("{} has no verify: command", task.id)));
         }
         if task.files.is_empty() {
             diags.push(Diagnostic::new(
                 Rule::TaskField,
                 task.line,
-                format!(
-                    "{} has no files: scope, write files: ** for the whole tree",
-                    task.id
-                ),
+                format!("{} has no files: scope, write files: ** for the whole tree", task.id),
             ));
         }
     }
@@ -220,10 +175,7 @@ mod tests {
         let t = &tasks[0];
         assert_eq!(t.group.as_deref(), Some("Ledger"));
         assert_eq!(t.covers.len(), 2);
-        assert_eq!(
-            t.verify.as_deref(),
-            Some("cargo test -p rvow-core output_tail")
-        );
+        assert_eq!(t.verify.as_deref(), Some("cargo test -p rvow-core output_tail"));
         assert_eq!(t.files, ["crates/rvow-core/**", "Cargo.toml"]);
         assert!(t.baseline_pass);
         assert!(!tasks[1].baseline_pass);

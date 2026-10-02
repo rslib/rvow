@@ -86,9 +86,7 @@ impl Rule {
             Rule::UnknownId => "name an id that exists, or ADD it in this change",
             Rule::Keyword => "write exactly one uppercase SHALL or MUST",
             Rule::WeakKeyword => "use SHALL or MUST unless the behavior is truly optional",
-            Rule::Ears => {
-                "write one sentence: [WHEN|WHILE|IF|WHERE <condition>,] <system> SHALL <response>"
-            }
+            Rule::Ears => "write one sentence: [WHEN|WHILE|IF|WHERE <condition>,] <system> SHALL <response>",
             Rule::Scenario => "write an optional GIVEN, one WHEN and at least one THEN, in order",
             Rule::Uncovered => "add a task with covers: for this requirement",
             Rule::Clarification => "answer the question and move the answer into the text",
@@ -119,12 +117,7 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn new(rule: Rule, line: usize, message: impl Into<String>) -> Diagnostic {
-        Diagnostic {
-            rule,
-            line,
-            message: message.into(),
-            legacy: false,
-        }
+        Diagnostic { rule, line, message: message.into(), legacy: false }
     }
 
     pub fn severity(&self) -> Severity {
@@ -141,13 +134,6 @@ impl fmt::Display for Diagnostic {
             Severity::Error => "error",
             Severity::Warning => "warning",
         };
-        write!(
-            f,
-            "{}: {}: line {}: {}",
-            level,
-            self.rule.code(),
-            self.line,
-            self.message
-        )
+        write!(f, "{}: {}: line {}: {}", level, self.rule.code(), self.line, self.message)
     }
 }

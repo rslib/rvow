@@ -33,16 +33,13 @@ pub fn load(project: &Project) -> Result<HashSet<Id>> {
         if line.trim().is_empty() || (i + 1 == lines.len() && !complete) {
             continue;
         }
-        let id = serde_json::from_str::<Entry>(line)
-            .ok()
-            .and_then(|e| e.id.parse::<Id>().ok())
-            .ok_or_else(|| {
-                Error::new(
-                    "ids-file",
-                    format!("{}: line {} is not an id entry", path.display(), i + 1),
-                    "restore ids.jsonl from git or a backup",
-                )
-            })?;
+        let id = serde_json::from_str::<Entry>(line).ok().and_then(|e| e.id.parse::<Id>().ok()).ok_or_else(|| {
+            Error::new(
+                "ids-file",
+                format!("{}: line {} is not an id entry", path.display(), i + 1),
+                "restore ids.jsonl from git or a backup",
+            )
+        })?;
         ids.insert(id);
     }
     Ok(ids)
@@ -52,13 +49,8 @@ pub fn load(project: &Project) -> Result<HashSet<Id>> {
 pub fn mint(project: &Project, _lock: &Lock, kind: Kind, change: Option<&Id>) -> Result<Id> {
     let taken = load(project)?;
     let id = Id::mint(kind, &taken)?;
-    let entry = Entry {
-        id: id.to_string(),
-        change: change.map(Id::to_string),
-        time: now_ms(),
-    };
-    let line = serde_json::to_string(&entry)
-        .map_err(|e| Error::internal(format!("ids entry does not serialize: {e}")))?;
+    let entry = Entry { id: id.to_string(), change: change.map(Id::to_string), time: now_ms() };
+    let line = serde_json::to_string(&entry).map_err(|e| Error::internal(format!("ids entry does not serialize: {e}")))?;
     append_line(&project.root.join(IDS_FILE), &line)?;
     Ok(id)
 }

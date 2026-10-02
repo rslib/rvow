@@ -3,16 +3,10 @@
 use crate::skill::problem;
 
 const DOCS: [(&str, &str); 6] = [
-    (
-        "guides/proposal.md",
-        include_str!("../../../guides/proposal.md"),
-    ),
+    ("guides/proposal.md", include_str!("../../../guides/proposal.md")),
     ("guides/spec.md", include_str!("../../../guides/spec.md")),
     ("guides/tasks.md", include_str!("../../../guides/tasks.md")),
-    (
-        "guides/design.md",
-        include_str!("../../../guides/design.md"),
-    ),
+    ("guides/design.md", include_str!("../../../guides/design.md")),
     ("README.md", include_str!("../../../README.md")),
     ("AGENTS.md", include_str!("../../../AGENTS.md")),
 ];
@@ -26,16 +20,7 @@ fn code(text: &str) -> impl Iterator<Item = &str> {
 fn the_docs_show_only_real_commands() {
     let bad: Vec<String> = DOCS
         .iter()
-        .flat_map(|(name, text)| {
-            code(text)
-                .flat_map(|c| c.lines())
-                .filter_map(problem)
-                .map(move |p| format!("{name}: {p}"))
-        })
+        .flat_map(|(name, text)| code(text).flat_map(|c| c.lines()).filter_map(problem).map(move |p| format!("{name}: {p}")))
         .collect();
-    assert!(
-        bad.is_empty(),
-        "docs show commands the CLI does not have:\n{}",
-        bad.join("\n")
-    );
+    assert!(bad.is_empty(), "docs show commands the CLI does not have:\n{}", bad.join("\n"));
 }

@@ -148,12 +148,7 @@ fn write_array(out: &mut Vec<String>, key: &str, items: &[Node], depth: usize, l
             let Node::Obj(fields) = item else { continue };
             let cells: Vec<String> = columns
                 .iter()
-                .map(|c| {
-                    fields
-                        .iter()
-                        .find(|(k, _)| k == c)
-                        .map_or_else(|| "null".to_owned(), |(_, v)| primitive(v))
-                })
+                .map(|c| fields.iter().find(|(k, _)| k == c).map_or_else(|| "null".to_owned(), |(_, v)| primitive(v)))
                 .collect();
             out.push(format!("{}{}", pad(depth + 1), cells.join(",")));
         }
@@ -176,12 +171,7 @@ fn tabular_columns(items: &[Node]) -> Option<Vec<String>> {
     }
     let columns: Vec<String> = first.iter().map(|(k, _)| k.clone()).collect();
     let uniform = items.iter().all(|item| match item {
-        Node::Obj(fields) => {
-            fields.len() == columns.len()
-                && fields
-                    .iter()
-                    .all(|(k, v)| v.is_primitive() && columns.contains(k))
-        }
+        Node::Obj(fields) => fields.len() == columns.len() && fields.iter().all(|(k, v)| v.is_primitive() && columns.contains(k)),
         _ => false,
     });
     uniform.then_some(columns)
@@ -193,22 +183,12 @@ fn write_list_item(out: &mut Vec<String>, item: &Node, depth: usize) {
         Node::Obj(fields) if fields.is_empty() => out.push(format!("{indent}-")),
         Node::Obj(fields) => {
             let (first_key, first_value) = &fields[0];
-            write_field(
-                out,
-                &key(first_key),
-                first_value,
-                depth + 1,
-                &format!("{indent}- "),
-            );
+            write_field(out, &key(first_key), first_value, depth + 1, &format!("{indent}- "));
             write_fields(out, &fields[1..], depth + 1);
         }
         Node::List(inner) if inner.iter().all(Node::is_primitive) => {
             let cells: Vec<String> = inner.iter().map(primitive).collect();
-            let values = if cells.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", cells.join(","))
-            };
+            let values = if cells.is_empty() { String::new() } else { format!(" {}", cells.join(",")) };
             out.push(format!("{indent}- [{}]:{values}", inner.len()));
         }
         Node::List(inner) => {
@@ -248,9 +228,7 @@ fn number(f: f64) -> String {
 
 fn key(k: &str) -> String {
     let mut chars = k.chars();
-    let valid = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
     if valid { k.to_owned() } else { quote(k) }
 }
@@ -263,18 +241,14 @@ fn needs_quotes(s: &str) -> bool {
         || numeric_like(s)
         || s.starts_with('-')
         || s.starts_with('#')
-        || s.chars()
-            .any(|c| matches!(c, ':' | '"' | '\\' | '[' | ']' | '{' | '}' | ',') || c.is_control())
+        || s.chars().any(|c| matches!(c, ':' | '"' | '\\' | '[' | ']' | '{' | '}' | ',') || c.is_control())
 }
 
 /// A plain list item on its own line: unquoted unless quotes keep it intact.
 fn list_value(v: &Node) -> String {
     match v {
         Node::Str(s)
-            if s.trim().is_empty()
-                || s.ends_with(char::is_whitespace)
-                || s.starts_with("- ")
-                || s.chars().any(char::is_control) =>
+            if s.trim().is_empty() || s.ends_with(char::is_whitespace) || s.starts_with("- ") || s.chars().any(char::is_control) =>
         {
             quote(s)
         }
@@ -286,9 +260,7 @@ fn list_value(v: &Node) -> String {
 fn numeric_like(s: &str) -> bool {
     let digits = s.strip_prefix('-').unwrap_or(s);
     digits.starts_with(|c: char| c.is_ascii_digit())
-        && digits
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+        && digits.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
 }
 
 fn quote(s: &str) -> String {
@@ -323,27 +295,15 @@ mod tests {
             "empty" => Vec::<Node>::new(),
             "tags" => vec!["a", "b,c"],
         };
-        assert_eq!(
-            encode(&root),
-            "zeta: plain text\nalpha: a-b\nlead: \"-x\"\nnum: \"42\"\nempty: []\ntags[2]:\n  a\n  b,c"
-        );
+        assert_eq!(encode(&root), "zeta: plain text\nalpha: a-b\nlead: \"-x\"\nnum: \"42\"\nempty: []\ntags[2]:\n  a\n  b,c");
     }
 
     #[test]
     fn encodes_tables_and_lists() {
-        let rows = vec![
-            Node::Obj(obj! { "id" => "b1", "n" => 2usize }),
-            Node::Obj(obj! { "id" => "a2", "n" => 1usize }),
-        ];
-        let mixed = vec![
-            Node::from("x"),
-            Node::Obj(obj! { "k" => "v", "m" => 1usize }),
-        ];
+        let rows = vec![Node::Obj(obj! { "id" => "b1", "n" => 2usize }), Node::Obj(obj! { "id" => "a2", "n" => 1usize })];
+        let mixed = vec![Node::from("x"), Node::Obj(obj! { "k" => "v", "m" => 1usize })];
         let root = obj! { "rows" => rows, "mixed" => mixed };
-        assert_eq!(
-            encode(&root),
-            "rows[2]{id,n}:\n  b1,2\n  a2,1\nmixed[2]:\n  - x\n  - k: v\n    m: 1"
-        );
+        assert_eq!(encode(&root), "rows[2]{id,n}:\n  b1,2\n  a2,1\nmixed[2]:\n  - x\n  - k: v\n    m: 1");
     }
 
     #[test]
@@ -357,10 +317,7 @@ mod tests {
     #[test]
     fn plain_lists_keep_leading_space_and_quote_only_to_stay_intact() {
         let root = obj! { "lines" => vec!["[main b1a7ca6] fix", " 5 files changed", "", "x ", "- y", "a\nb"] };
-        assert_eq!(
-            encode(&root),
-            "lines[6]:\n  [main b1a7ca6] fix\n   5 files changed\n  \"\"\n  \"x \"\n  \"- y\"\n  \"a\\nb\""
-        );
+        assert_eq!(encode(&root), "lines[6]:\n  [main b1a7ca6] fix\n   5 files changed\n  \"\"\n  \"x \"\n  \"- y\"\n  \"a\\nb\"");
     }
 
     #[test]
