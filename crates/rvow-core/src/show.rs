@@ -154,6 +154,55 @@ fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> Strin
             }
         }
     }
+    out.push_str(&proof_history(&dir.path, id));
+    out
+}
+
+const HISTORY_RUNS: usize = 10;
+
+/// The newest proof runs of a task from the change's ledger, with the total.
+fn proof_history(change: &std::path::Path, id: &Id) -> String {
+    let (events, _) = ledger::read(&change.join(change::LEDGER)).unwrap_or_default();
+    let id = id.to_string();
+    let runs: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.kind == ledger::Kind::Prove
+                && e.data.get("task").and_then(|v| v.as_str()) == Some(&id)
+        })
+        .collect();
+    if runs.is_empty() {
+        return "proof runs: none yet\n".to_string();
+    }
+    let mut out = format!(
+        "proof runs: {} in total, newest {} first\n",
+        runs.len(),
+        runs.len().min(HISTORY_RUNS)
+    );
+    for e in runs.iter().rev().take(HISTORY_RUNS) {
+        let verdict = if e.data.get("proved").and_then(|v| v.as_bool()) == Some(true) {
+            "proved"
+        } else {
+            "failed"
+        };
+        let tests = e
+            .data
+            .get("tests_run")
+            .and_then(|v| v.as_u64())
+            .map_or("unknown tests".to_string(), |n| format!("{n} tests"));
+        let ms = e
+            .data
+            .get("duration_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let machine = e
+            .data
+            .get("run")
+            .and_then(|r| r.get("machine"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let _ = writeln!(out, "  {verdict}, {tests}, {ms} ms, {machine}");
+    }
     out
 }
 
@@ -290,7 +339,7 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "- TSK-x7k2q4 Write tail\n  covers: REQ-k3f9m2, REQ-zzzzzz\n  verify: cargo test tail\n  files: crates/**, Cargo.toml\n  baseline: pass\n  timeout: 90s\nchange: {}\nREQ-k3f9m2 Record a proof run\nREQ-zzzzzz not found\n",
+                "- TSK-x7k2q4 Write tail\n  covers: REQ-k3f9m2, REQ-zzzzzz\n  verify: cargo test tail\n  files: crates/**, Cargo.toml\n  baseline: pass\n  timeout: 90s\nchange: {}\nREQ-k3f9m2 Record a proof run\nREQ-zzzzzz not found\nproof runs: none yet\n",
                 c.id
             )
         );
@@ -303,10 +352,38 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\nchange: {}\n",
+                "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\nchange: {}\nproof runs: none yet\n",
                 c.id
             )
         );
+    }
+
+    #[test]
+    fn task_proof_history() {
+        let (_t, p, c) = fixture();
+        let none = show(&p, "TSK-x7k2q4").unwrap();
+        assert!(none.ends_with("proof runs: none yet\n"), "{none}");
+
+        let lock = p.lock().unwrap();
+        for i in 0..12u64 {
+            let mut data = serde_json::Map::new();
+            data.insert("task".into(), "TSK-x7k2q4".into());
+            data.insert("proved".into(), (i != 0).into());
+            data.insert("tests_run".into(), 3.into());
+            data.insert("duration_ms".into(), (100 + i).into());
+            data.insert("run".into(), serde_json::json!({"machine": "laptop"}));
+            ledger::append(&c.path.join(change::LEDGER), &lock, Ev::Prove, data).unwrap();
+        }
+        drop(lock);
+        let out = show(&p, "TSK-x7k2q4").unwrap();
+        assert!(
+            out.contains("proof runs: 12 in total, newest 10 first\n"),
+            "{out}"
+        );
+        let lines: Vec<_> = out.lines().filter(|l| l.starts_with("  proved")).collect();
+        assert_eq!(lines.len(), 10, "{out}");
+        assert_eq!(lines[0], "  proved, 3 tests, 111 ms, laptop", "{out}");
+        assert!(!out.contains("failed"), "{out}");
     }
 
     #[test]
