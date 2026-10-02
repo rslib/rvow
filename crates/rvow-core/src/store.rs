@@ -184,7 +184,8 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         remote,
         mode,
     };
-    let text = toml::to_string(&meta).expect("Meta serializes");
+    let text = toml::to_string(&meta)
+        .map_err(|e| Error::internal(format!("project metadata does not serialize: {e}")))?;
     for (name, body) in [
         (PROJECT_FILE, text.as_str()),
         (CONFIG_FILE, ""),

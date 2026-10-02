@@ -204,7 +204,8 @@ pub fn append(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Value>) -
         hash: String::new(),
         line: 0,
     };
-    let line = serde_json::to_string(&ev).expect("Event serializes");
+    let line = serde_json::to_string(&ev)
+        .map_err(|e| Error::internal(format!("ledger event does not serialize: {e}")))?;
     append_line(path, &line)?;
     ev.hash = short_hash(line.as_bytes());
     Ok(ev)

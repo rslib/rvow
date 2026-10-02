@@ -61,12 +61,24 @@ pub(crate) fn today() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+fn lines_of<'a>(
+    caps: &'a mut BTreeMap<String, Vec<String>>,
+    texts: &[(String, String)],
+    cap: &str,
+) -> &'a mut Vec<String> {
+    caps.entry(cap.to_string())
+        .or_insert_with(|| match texts.iter().find(|(c, _)| c == cap) {
+            Some((_, t)) => split(t),
+            None => vec![format!("# {cap}")],
+        })
+}
+
 /// Moves a change into `stage` under a date prefix.
 fn retire(project: &Project, dir: &ChangeDir, stage: Stage) -> Result<PathBuf> {
     let parent = project.root.join(stage.dir());
     std::fs::create_dir_all(&parent).map_err(|e| Error::io(&parent, e))?;
-    let name = dir.path.file_name().expect("change dir has a name");
-    let dest = parent.join(format!("{}-{}", today(), name.to_string_lossy()));
+    let name = change::file_name(&dir.path)?;
+    let dest = parent.join(format!("{}-{name}", today()));
     std::fs::rename(&dir.path, &dest).map_err(|e| Error::io(&dest, e))?;
     Ok(dest)
 }
@@ -200,15 +212,6 @@ fn merge(
         .map(|(id, cap)| (id.to_string(), cap.to_string()))
         .collect();
     let mut caps: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let lines_of = |caps: &mut BTreeMap<String, Vec<String>>, cap: &str| {
-        if !caps.contains_key(cap) {
-            let lines = match texts.iter().find(|(c, _)| c == cap) {
-                Some((_, t)) => split(t),
-                None => vec![format!("# {cap}")],
-            };
-            caps.insert(cap.to_string(), lines);
-        }
-    };
     let mut merged = Vec::new();
     for (cap, file) in &loaded.deltas {
         let path = change.path.join(DELTAS).join(format!("{cap}.md"));
@@ -230,8 +233,7 @@ fn merge(
                     "run rvow validate and fix the delta",
                 )
             };
-            lines_of(&mut caps, home);
-            let lines = caps.get_mut(home).expect("loaded above");
+            let lines = lines_of(&mut caps, texts, home);
             match d.op {
                 DeltaOp::Add => append_block(lines, body()),
                 DeltaOp::Change => {
@@ -253,8 +255,7 @@ fn merge(
                     let range = find_block(lines, &id).ok_or_else(missing)?;
                     let mut block: Vec<String> = lines.drain(range).collect();
                     trim_blank_tail(&mut block);
-                    lines_of(&mut caps, cap);
-                    append_block(caps.get_mut(cap.as_str()).expect("loaded above"), block);
+                    append_block(lines_of(&mut caps, texts, cap), block);
                 }
                 DeltaOp::Remove => {
                     let range = find_block(lines, &id).ok_or_else(missing)?;
@@ -303,7 +304,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     let c = changes
         .iter()
         .find(|a| a.dir.id == dir.id)
-        .expect("active change is listed");
+        .ok_or_else(|| Error::internal(format!("{} is not listed as active", dir.id)))?;
 
     let (all, _) = change::list(project)?;
     let waiting: Vec<&str> = c
@@ -399,12 +400,9 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
 
     let mut by_op: Map<String, Value> = Map::new();
     for (op, id) in &merged {
-        by_op
-            .entry(op.word())
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("op entry is an array")
-            .push(id.clone().into());
+        if let Value::Array(ids) = by_op.entry(op.word()).or_insert_with(|| json!([])) {
+            ids.push(id.clone().into());
+        }
     }
     let mut data = Map::new();
     data.insert("merged".into(), by_op.into());

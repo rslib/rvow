@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::time::Duration;
 
 use crate::change::{self, CapSpec, ChangeDir, Loaded, Stage};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::{Id, Kind, Ref};
 use crate::ledger;
 use crate::proof::find_requirement;
@@ -40,7 +40,7 @@ pub fn show(project: &Project, input: &str) -> Result<String> {
         let dir = dirs
             .iter()
             .find(|c| c.id == id)
-            .expect("found id is listed");
+            .ok_or_else(|| not_listed(&id))?;
         return show_change(dir, &living);
     }
     let mut open = Vec::new();
@@ -51,11 +51,15 @@ pub fn show(project: &Project, input: &str) -> Result<String> {
         let loaded = change::load(&dir.path, &living)?;
         open.push((dir, loaded));
     }
-    Ok(if id.kind() == Kind::Req {
+    if id.kind() == Kind::Req {
         show_requirement(project, &id, &living, &open)
     } else {
         show_task(&id, &living, &open)
-    })
+    }
+}
+
+fn not_listed(id: &Id) -> Error {
+    Error::internal(format!("{id} resolved but is not in the project"))
 }
 
 fn render_requirement(req: &Requirement) -> String {
@@ -78,7 +82,7 @@ fn show_requirement(
     id: &Id,
     living: &[CapSpec],
     open: &[(ChangeDir, Loaded)],
-) -> String {
+) -> Result<String> {
     let want = Ref::Id(id.clone());
     let rel = |p: &std::path::Path| {
         p.strip_prefix(&project.root)
@@ -102,13 +106,13 @@ fn show_requirement(
             }
         }
     }
-    let (req, file) = found.expect("found id is in a spec or an ADD");
+    let (req, file) = found.ok_or_else(|| not_listed(id))?;
     let mut out = render_requirement(req);
     let _ = writeln!(out, "\nin: {file}");
     if !touched.is_empty() {
         let _ = writeln!(out, "touched by:\n{}", touched.join("\n"));
     }
-    out
+    Ok(out)
 }
 
 fn duration(d: Duration) -> String {
@@ -136,12 +140,12 @@ fn render_task(task: &Task) -> String {
     out
 }
 
-fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> String {
+fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> Result<String> {
     let want = Ref::Id(id.clone());
     let (dir, loaded, task) = open
         .iter()
         .find_map(|(d, l)| Some((d, l, l.tasks.iter().find(|t| t.id == want)?)))
-        .expect("found id is a task of an open change");
+        .ok_or_else(|| not_listed(id))?;
     let mut out = render_task(task);
     let _ = writeln!(out, "change: {}", dir.id);
     for r in &task.covers {
@@ -155,7 +159,7 @@ fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> Strin
         }
     }
     out.push_str(&proof_history(&dir.path, id));
-    out
+    Ok(out)
 }
 
 const HISTORY_RUNS: usize = 10;

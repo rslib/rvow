@@ -44,7 +44,9 @@ pub fn load(project: &Project) -> Result<Record> {
 pub fn save(project: &Project, _lock: &Lock, record: &Record) -> Result<()> {
     let path = project.root.join(RECORD_FILE);
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(record).expect("record serializes") + "\n";
+    let text = serde_json::to_string_pretty(record)
+        .map_err(|e| Error::internal(format!("record does not serialize: {e}")))?
+        + "\n";
     std::fs::write(&tmp, text).map_err(|e| Error::io(&tmp, e))?;
     std::fs::rename(&tmp, &path).map_err(|e| Error::io(&path, e))
 }

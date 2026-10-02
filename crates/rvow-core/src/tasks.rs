@@ -3,6 +3,7 @@
 //! instead of a task that silently goes missing.
 
 use crate::diag::{Diagnostic, Rule};
+use crate::error::{Error, Result};
 use std::time::Duration;
 
 use crate::id::{Kind, Ref};
@@ -18,6 +19,18 @@ pub struct Task {
     pub baseline_pass: bool,
     pub timeout: Option<Duration>,
     pub line: usize,
+}
+
+impl Task {
+    pub fn verify_command(&self) -> Result<&str> {
+        self.verify.as_deref().ok_or_else(|| {
+            Error::new(
+                "no-verify",
+                format!("{} has no verify command", self.id),
+                "add a `verify:` line to the task in tasks.md",
+            )
+        })
+    }
 }
 
 pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
@@ -179,6 +192,12 @@ fn split_list(value: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_task_without_verify_is_an_error() {
+        let (tasks, _) = parse_tasks("- TSK-x7k2q4 Bare\n  files: **\n");
+        assert_eq!(tasks[0].verify_command().unwrap_err().code, "no-verify");
+    }
 
     #[test]
     fn parses_tasks_with_fields() {

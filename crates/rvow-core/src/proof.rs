@@ -311,10 +311,9 @@ fn hostname() -> String {
     String::new()
 }
 
-fn invocation_id() -> String {
-    let mut b = [0u8; 8];
-    getrandom::fill(&mut b).expect("operating system random source");
-    b.iter().map(|x| format!("{x:02x}")).collect()
+fn invocation_id() -> Result<String> {
+    let b = Error::random::<8>()?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// The machine as recorded: a short hash of the hostname and the user's name
@@ -394,7 +393,7 @@ pub fn prove(
         living: &living,
     };
     let inputs = now.inputs(task)?;
-    let cmd = task.verify.as_deref().expect("validated tasks have verify");
+    let cmd = task.verify_command()?;
     let started = ledger::now_ms();
     let outcome = runner::run(
         cmd,
@@ -439,7 +438,7 @@ pub fn prove(
     data.insert(
         "run".into(),
         json!({
-            "invocation": invocation_id(),
+            "invocation": invocation_id()?,
             "rvow": env!("CARGO_PKG_VERSION"),
             "machine": machine(&config),
             "agent": std::env::var("RVOW_AGENT").unwrap_or_else(|_| "unknown".into()),

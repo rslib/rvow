@@ -265,7 +265,7 @@ pub fn prepare(
     let mut baseline = Vec::new();
     let mut refused = Vec::new();
     for task in &loaded.tasks {
-        let cmd = task.verify.as_deref().expect("validated tasks have verify");
+        let cmd = task.verify_command()?;
         let _ = writeln!(echo, "baseline {}: {cmd}", task.id);
         let timeout = task.timeout.unwrap_or(config.timeout());
         let outcome = runner::run(cmd, &top, &[], timeout, echo)?;
@@ -457,7 +457,7 @@ pub fn snapshot(
     data.insert("branch".into(), branch.into());
     data.insert(
         "config".into(),
-        put_object(project, config.canonical().as_bytes())?.into(),
+        put_object(project, config.canonical()?.as_bytes())?.into(),
     );
     data.insert("files".into(), files.into());
     data.insert("tasks".into(), tasks.into());
@@ -537,7 +537,7 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     let dest = project
         .root
         .join(Stage::Active.dir())
-        .join(change.path.file_name().expect("change dir has a name"));
+        .join(change::file_name(&change.path)?);
     std::fs::rename(&change.path, &dest).map_err(|e| Error::io(&dest, e))?;
     Ok(Vowed {
         id: change.id,

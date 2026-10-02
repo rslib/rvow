@@ -11,7 +11,7 @@ use crate::change::{self, CapSpec, LEDGER, Stage};
 use crate::config;
 use crate::diag::Severity;
 use crate::drift;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::fingerprint::{self, globset};
 use crate::git;
 use crate::ledger::{self, Kind};
@@ -53,8 +53,7 @@ struct Worktree {
 
 impl Worktree {
     fn add(repo: &Path) -> Result<Worktree> {
-        let mut b = [0u8; 6];
-        getrandom::fill(&mut b).expect("operating system random source");
+        let b = Error::random::<6>()?;
         let name: String = b.iter().map(|x| format!("{x:02x}")).collect();
         let path = std::env::temp_dir().join(format!("rvow-rerun-{name}"));
         let p = path.to_string_lossy().into_owned();
