@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::amend;
 use crate::change::{self, LEDGER, Stage};
 use crate::config;
 use crate::diag::Severity;
+use crate::drift;
 use crate::error::Result;
 use crate::fingerprint::{self, globset};
 use crate::git;
@@ -169,7 +171,7 @@ pub fn gate(
         living: &living,
     };
     for c in &queue {
-        check_change(c, &now, opts, &mut r)?;
+        check_change(project, c, &now, opts, &mut r)?;
     }
     check_scope(project, &top, &config.base, &queue, &mut r)?;
 
@@ -229,7 +231,13 @@ pub fn gate(
     Ok(r)
 }
 
-fn check_change(c: &Active, now: &Now, opts: Options, r: &mut Report) -> Result<()> {
+fn check_change(
+    project: &Project,
+    c: &Active,
+    now: &Now,
+    opts: Options,
+    r: &mut Report,
+) -> Result<()> {
     let id = &c.dir.id;
     for (path, d) in c.loaded.errors() {
         r.failures
@@ -242,12 +250,20 @@ fn check_change(c: &Active, now: &Now, opts: Options, r: &mut Report) -> Result<
             Severity::Warning => r.warnings.push(line),
         }
     }
-    if let Some(vowed) = c.branch()
-        && vowed != c.loaded.proposal.branch
+    for item in drift::drift(project, now.top, now.config, c)?
+        .into_iter()
+        .filter(|i| i.class.blocks())
     {
         r.failures.push(format!(
-            "{id}: branch: is {:?} but the vow says {vowed:?}; a branch change needs the user's confirmation",
-            c.loaded.proposal.branch
+            "{id}: {} drift: {}; record it with rvow amend --reason and ask the user to confirm",
+            item.class.name(),
+            item.what
+        ));
+    }
+    for p in amend::pending(std::slice::from_ref(c)) {
+        r.failures.push(format!(
+            "{id}: amendment {} waits for the user's confirmation",
+            p.id
         ));
     }
     if opts.rerun {
@@ -407,6 +423,58 @@ mod tests {
         std::fs::rename(&dir, &back).unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(r.failures[0].contains("sits in backlog"), "{r:?}");
+    }
+
+    #[test]
+    fn drift_blocks_until_the_user_confirms() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let dir = std::fs::read_dir(p.root.join("active"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let tasks = dir.join("tasks.md");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        std::fs::write(&tasks, text.replace("grep -q ok out.txt", "true")).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            r.failures.iter().any(|f| f.contains("weaken drift")),
+            "{r:?}"
+        );
+
+        crate::amend::amend(&p, &home, &repo, None, "simpler check").unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            r.failures.iter().any(|f| f.contains("waits for the user")),
+            "{r:?}"
+        );
+
+        crate::amend::confirm(
+            &p,
+            &[],
+            crate::amend::Decision::Accept,
+            Some(&{
+                let (living, _) = change::load_living(&p).unwrap();
+                crate::amend::digest(&crate::amend::pending(&proof::active(&p, &living).unwrap()))
+            }),
+        )
+        .unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            r.failures
+                .iter()
+                .all(|f| !f.contains("drift") && !f.contains("waits")),
+            "{r:?}"
+        );
+        assert!(
+            r.failures.iter().any(|f| f.contains("is stale"))
+                || r.warnings.iter().any(|w| w.contains("stale")),
+            "{r:?}"
+        );
     }
 
     #[test]

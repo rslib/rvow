@@ -37,8 +37,30 @@ impl Active {
         self.events.iter().find(|e| e.kind == Kind::Vow)
     }
 
+    /// The snapshot that drift is measured against: the snapshot of the latest
+    /// accepted amendment, else the vow.
+    pub fn baseline(&self) -> Option<&Map<String, Value>> {
+        let mut base = self.vow().map(|e| &e.data);
+        for e in self.events.iter().filter(|e| e.kind == Kind::Confirm) {
+            if e.data.get("decision").and_then(Value::as_str) != Some("accept") {
+                continue;
+            }
+            let id = e.data.get("amendment");
+            let snapshot = self
+                .events
+                .iter()
+                .find(|a| a.kind == Kind::Amend && a.data.get("amendment") == id)
+                .and_then(|a| a.data.get("snapshot"))
+                .and_then(Value::as_object);
+            if snapshot.is_some() {
+                base = snapshot;
+            }
+        }
+        base
+    }
+
     pub fn branch(&self) -> Option<&str> {
-        self.vow()?.data.get("branch")?.as_str()
+        self.baseline()?.get("branch")?.as_str()
     }
 
     fn vow_time(&self) -> u64 {
@@ -443,6 +465,8 @@ pub struct ChangeStatus {
     pub branch: String,
     pub tasks: Vec<TaskLine>,
     pub problems: Vec<String>,
+    pub drift: Vec<crate::drift::Item>,
+    pub pending: Vec<crate::amend::Pending>,
 }
 
 /// The state of every task in the active changes of the current branch, or of
@@ -491,6 +515,8 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
             branch: c.branch().unwrap_or("").to_string(),
             tasks,
             problems,
+            drift: crate::drift::drift(project, &top, &config, c)?,
+            pending: crate::amend::pending(std::slice::from_ref(c)),
         });
     }
     Ok(out)

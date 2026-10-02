@@ -1,7 +1,9 @@
+pub mod amend;
 pub mod brief;
 pub mod change;
 pub mod config;
 pub mod diag;
+pub mod drift;
 pub mod error;
 pub mod fingerprint;
 pub mod gate;

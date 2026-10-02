@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{ArgGroup, Parser, Subcommand};
+use rvow_core::amend;
 use rvow_core::brief;
 use rvow_core::change::{self, Stage};
 use rvow_core::diag::Severity;
@@ -63,6 +64,30 @@ enum Cmd {
     },
     /// Print the short generated brief for this branch.
     Brief,
+    /// Record the current plan edits as an amendment for the user to confirm.
+    Amend {
+        /// Why the plan changed.
+        #[arg(long)]
+        reason: String,
+        /// The change id; default: every active change on this branch.
+        #[arg(long)]
+        change: Option<String>,
+    },
+    /// List pending amendments, or accept or reject them (user only).
+    #[command(group(ArgGroup::new("decision").args(["accept", "reject"])))]
+    Confirm {
+        /// Amendment ids or unique prefixes.
+        ids: Vec<String>,
+        /// Accept the named amendments.
+        #[arg(long)]
+        accept: bool,
+        /// Reject the named amendments.
+        #[arg(long)]
+        reject: bool,
+        /// Decide every pending amendment; pass the digest that the list printed.
+        #[arg(long, value_name = "DIGEST", conflicts_with = "ids")]
+        all: Option<String>,
+    },
     /// Run a task's stored verify command and record the proof.
     #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
     Prove {
@@ -106,6 +131,13 @@ fn main() -> ExitCode {
         Cmd::Path { id } => path(&id),
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
+        Cmd::Amend { reason, change } => amend(&reason, change.as_deref()),
+        Cmd::Confirm {
+            ids,
+            accept,
+            reject,
+            all,
+        } => confirm(&ids, accept, reject, all.as_deref()),
         Cmd::Prove { task: Some(t), .. } => prove(&t),
         Cmd::Prove { .. } => prove_stale(),
         Cmd::Status { all } => status(all),
@@ -227,7 +259,7 @@ fn validate() -> Result<bool> {
     Ok(errors == 0)
 }
 
-fn confirm(question: &str) -> Result<bool> {
+fn ask_yes(question: &str) -> Result<bool> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         return Err(Error::new(
@@ -269,7 +301,7 @@ fn accept(target: &str, yes: bool) -> Result<bool> {
             .map_or("signal".to_string(), |n| n.to_string());
         println!("  {}: baseline exit {exit}, {tests} tests", b.task);
     }
-    if !yes && !confirm("record the vow?")? {
+    if !yes && !ask_yes("record the vow?")? {
         println!("not accepted");
         return Ok(false);
     }
@@ -402,6 +434,12 @@ fn status(all: bool) -> Result<bool> {
         for problem in &c.problems {
             println!("  error: {problem}");
         }
+        for d in &c.drift {
+            println!("  drift {}: {}", d.class.name(), d.what);
+        }
+        for a in &c.pending {
+            println!("  pending {}: {}", a.id, a.reason);
+        }
     }
     Ok(true)
 }
@@ -425,4 +463,65 @@ fn gate(opts: Options) -> Result<bool> {
         println!("gate failed: {} problems", r.failures.len());
     }
     Ok(r.passed())
+}
+
+fn amend(reason: &str, target: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    for a in amend::amend(&p, &home, &cwd()?, target, reason)? {
+        println!("{} for {}:", a.id, a.change);
+        for i in &a.items {
+            println!("  {}: {}", i.class.name(), i.what);
+        }
+    }
+    println!("ask the user to run: ! rvow confirm");
+    Ok(true)
+}
+
+fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    if !accept && !reject {
+        if !ids.is_empty() || all.is_some() {
+            return Err(Error::new(
+                "decision",
+                "say what to do with the amendments",
+                "add --accept or --reject",
+            ));
+        }
+        let (living, _) = change::load_living(&p)?;
+        let pending = amend::pending(&proof::active(&p, &living)?);
+        if pending.is_empty() {
+            println!("no pending amendments");
+            return Ok(true);
+        }
+        for a in &pending {
+            println!("{} for {}", a.id, a.change);
+            for i in &a.items {
+                let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
+                println!("  {class}: {what}");
+                for (label, key) in [("before", "before"), ("after", "after")] {
+                    if let Some(v) = i.get(key).and_then(|v| v.as_str()) {
+                        for line in v.lines() {
+                            println!("    {label}: {line}");
+                        }
+                    }
+                }
+            }
+            println!("  reason (from the agent): {}", a.reason);
+        }
+        println!("digest {}", amend::digest(&pending));
+        println!("decide with: rvow confirm <id>... --accept|--reject, or --accept --all <digest>");
+        return Ok(true);
+    }
+    let decision = if accept {
+        amend::Decision::Accept
+    } else {
+        amend::Decision::Reject
+    };
+    for id in amend::confirm(&p, ids, decision, all)? {
+        println!("{id}: {}", if accept { "accepted" } else { "rejected" });
+    }
+    Ok(true)
 }

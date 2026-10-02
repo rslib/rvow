@@ -306,7 +306,7 @@ pub struct Vowed {
     pub event: String,
 }
 
-fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
+pub fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
     let patterns: Vec<String> = config
         .test_globs
         .iter()
@@ -408,6 +408,53 @@ pub fn mint_active(
     Ok(out)
 }
 
+/// Stores the content of a change and returns the snapshot that a vow or an
+/// amendment records: branch, effective config, every Markdown file, the hash
+/// of each task and delta requirement, and the protected files.
+pub fn snapshot(
+    project: &Project,
+    top: &Path,
+    config: &Config,
+    loaded: &Loaded,
+    branch: &str,
+) -> Result<Map<String, Value>> {
+    let mut files = Map::new();
+    for (rel, text) in &loaded.texts {
+        files.insert(rel.clone(), put_object(project, text.as_bytes())?.into());
+    }
+    let mut protected = Map::new();
+    for (rel, path) in protected_files(top, config)? {
+        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
+        protected.insert(rel, put_object(project, &bytes)?.into());
+    }
+    let tasks: Map<String, Value> = loaded
+        .tasks
+        .iter()
+        .map(|t| (t.id.to_string(), task_hash(t).into()))
+        .collect();
+    let requirements: Map<String, Value> = loaded
+        .deltas
+        .iter()
+        .flat_map(|(_, f)| f.deltas.iter())
+        .filter(|d| d.op.has_body())
+        .map(|d| (d.req.id.to_string(), requirement_hash(&d.req).into()))
+        .collect();
+    let mut data = Map::new();
+    data.insert("branch".into(), branch.into());
+    data.insert(
+        "config".into(),
+        put_object(project, config.canonical().as_bytes())?.into(),
+    );
+    data.insert("files".into(), files.into());
+    data.insert("tasks".into(), tasks.into());
+    data.insert("requirements".into(), requirements.into());
+    data.insert(
+        "protected".into(),
+        put_object(project, Value::Object(protected).to_string().as_bytes())?.into(),
+    );
+    Ok(data)
+}
+
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     let Prepared {
@@ -432,24 +479,7 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
         ));
     }
 
-    let mut files = Map::new();
-    for (rel, text) in &loaded.texts {
-        files.insert(rel.clone(), put_object(project, text.as_bytes())?.into());
-    }
-    let config_hash = put_object(project, config.canonical().as_bytes())?;
-    let mut protected = Map::new();
-    for (rel, path) in protected_files(&top, &config)? {
-        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
-        protected.insert(rel, put_object(project, &bytes)?.into());
-    }
-    let protected_root = put_object(project, Value::Object(protected).to_string().as_bytes())?;
-
-    let tasks: Map<String, Value> = loaded
-        .tasks
-        .iter()
-        .map(|t| (t.id.to_string(), task_hash(t).into()))
-        .collect();
-    let mut requirements = Map::new();
+    let mut data = snapshot(project, &top, &config, &loaded, &branch)?;
     let mut bases = Map::new();
     let living_hash: HashMap<String, String> = living
         .iter()
@@ -457,14 +487,9 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
         .map(|r| (r.id.to_string(), requirement_hash(r)))
         .collect();
     for (_, file) in &loaded.deltas {
-        for d in &file.deltas {
+        for d in file.deltas.iter().filter(|d| d.op != DeltaOp::Add) {
             let id = d.req.id.to_string();
-            if d.op.has_body() {
-                requirements.insert(id.clone(), requirement_hash(&d.req).into());
-            }
-            if d.op != DeltaOp::Add
-                && let Some(h) = living_hash.get(&id)
-            {
+            if let Some(h) = living_hash.get(&id) {
                 bases.insert(id, h.clone().into());
             }
         }
@@ -483,16 +508,9 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
         })
         .collect();
 
-    let mut data = Map::new();
     data.insert("change".into(), change.id.to_string().into());
-    data.insert("branch".into(), branch.into());
     data.insert("base_commit".into(), base_commit.into());
-    data.insert("config".into(), config_hash.into());
-    data.insert("files".into(), files.into());
-    data.insert("tasks".into(), tasks.into());
-    data.insert("requirements".into(), requirements.into());
     data.insert("bases".into(), bases.into());
-    data.insert("protected".into(), protected_root.into());
     data.insert("baseline".into(), baseline.into());
     let event = ledger::append(&change.path.join(LEDGER), &lock, Kind::Vow, data)?;
 
