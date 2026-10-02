@@ -108,8 +108,9 @@ fn identity(top: &Path) -> Result<Vec<String>> {
 fn read_meta(root: &Path) -> Result<Meta> {
     let path = root.join(PROJECT_FILE);
     let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-    toml::from_str(&text)
-        .map_err(|e| Error::new("project-file", format!("{}: {e}", path.display()), "restore project.toml from backup or run rvow rebind"))
+    toml::from_str(&text).map_err(|e| {
+        Error::new("project-file", format!("{}: {e}", path.display()), "run rvow rebind to write it again from this repository")
+    })
 }
 
 /// Creates the rvow tree for the repository that contains `dir`.
@@ -156,6 +157,61 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         Mode::Home => add_lines(&home.join(".gitignore"), &[".lock", "claude-plugin/"])?,
     }
     Ok(Project { root, meta })
+}
+
+/// What `rebind` did to the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rebind {
+    Unchanged(PathBuf),
+    Updated(PathBuf),
+    Moved { from: PathBuf, to: PathBuf },
+}
+
+fn write_meta(root: &Path, meta: &Meta) -> Result<bool> {
+    let text = toml::to_string(meta).map_err(|e| Error::internal(format!("project metadata does not serialize: {e}")))?;
+    let path = root.join(PROJECT_FILE);
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
+        return Ok(false);
+    }
+    std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+    Ok(true)
+}
+
+/// Makes the tree of the repository that contains `dir` match the repository again: it records the
+/// current root commits and origin remote in `project.toml`, and moves a home tree to the path its
+/// remote implies. Running it twice changes nothing.
+pub fn rebind(dir: &Path, home: &Path) -> Result<Rebind> {
+    let top = git::toplevel(dir)?;
+    let roots = identity(&top)?;
+    let remote = git::origin_url(&top).and_then(|u| git::remote_path(&u));
+    let repo_root = top.join(REPO_DIR);
+    if repo_root.join(CONFIG_FILE).exists() {
+        let changed = write_meta(&repo_root, &Meta { roots, remote, mode: Mode::Repo })?;
+        return Ok(if changed { Rebind::Updated(repo_root) } else { Rebind::Unchanged(repo_root) });
+    }
+    let Some(found) = find(&top, home)? else {
+        return Err(Error::new("no-project", "no rvow tree matches this repository", "run rvow init"));
+    };
+    let _lock = found.lock()?;
+    let meta = Meta { remote: remote.clone().or(found.meta.remote.clone()), ..found.meta.clone() };
+    let want = remote.map(|r| home.join(r)).unwrap_or_else(|| found.root.clone());
+    if want == found.root {
+        let changed = write_meta(&found.root, &meta)?;
+        return Ok(if changed { Rebind::Updated(found.root) } else { Rebind::Unchanged(found.root) });
+    }
+    if want.join(PROJECT_FILE).exists() {
+        return Err(Error::new(
+            "name-taken",
+            format!("{} already holds another rvow tree", want.display()),
+            format!("move or remove {}, then run rvow rebind again", want.display()),
+        ));
+    }
+    if let Some(parent) = want.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+    std::fs::rename(&found.root, &want).map_err(|e| Error::io(&found.root, e))?;
+    write_meta(&want, &meta)?;
+    Ok(Rebind::Moved { from: found.root, to: want })
 }
 
 fn add_union_merge(top: &Path) -> Result<()> {
@@ -368,5 +424,53 @@ mod tests {
         let shallow = tmp.0.join("shallow");
         git(&tmp.0, &["clone", "-q", "--depth", "1", &url, shallow.to_str().unwrap()]);
         assert_eq!(init(&shallow, &home, Mode::Home).unwrap_err().code, "shallow");
+    }
+
+    #[test]
+    fn rebind_moves_a_home_tree_to_its_remote_path() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        assert_eq!(rebind(&repo, &home).unwrap(), Rebind::Unchanged(p.root.clone()));
+
+        git(&repo, &["remote", "add", "origin", "git@github.com:a/r.git"]);
+        let to = home.join("github.com/a/r");
+        assert_eq!(rebind(&repo, &home).unwrap(), Rebind::Moved { from: p.root.clone(), to: to.clone() });
+        assert!(!p.root.exists());
+        let found = find(&repo, &home).unwrap().unwrap();
+        assert_eq!((found.root, found.meta.remote.as_deref()), (to.clone(), Some("github.com/a/r")));
+        assert_eq!(rebind(&repo, &home).unwrap(), Rebind::Unchanged(to));
+    }
+
+    #[test]
+    fn rebind_refuses_to_overwrite_another_tree() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let a = repo_with_commit(&tmp.0, "a");
+        init(&a, &home, Mode::Home).unwrap();
+        git(&a, &["remote", "add", "origin", "git@github.com:x/a.git"]);
+        let other = home.join("github.com/x/a");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(PROJECT_FILE), "").unwrap();
+        assert_eq!(rebind(&a, &home).unwrap_err().code, "name-taken");
+    }
+
+    #[test]
+    fn rebind_rewrites_a_broken_repo_project_file() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Repo).unwrap();
+        std::fs::write(p.root.join(PROJECT_FILE), "not toml [").unwrap();
+        assert_eq!(find(&repo, &tmp.0.join("home")).unwrap_err().code, "project-file");
+        assert_eq!(rebind(&repo, &tmp.0.join("home")).unwrap(), Rebind::Updated(p.root.clone()));
+        assert_eq!(find(&repo, &tmp.0.join("home")).unwrap(), Some(p));
+    }
+
+    #[test]
+    fn rebind_without_a_tree_says_to_init() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        assert_eq!(rebind(&repo, &tmp.0.join("home")).unwrap_err().code, "no-project");
     }
 }

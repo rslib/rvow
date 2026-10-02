@@ -5,11 +5,12 @@ use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::hook as hooks;
 use rvow_core::install;
-use rvow_core::store::{self, Mode};
+use rvow_core::store::{self, Mode, Rebind};
 use rvow_core::view;
 
 use super::{cwd, which};
 use crate::output::Reply;
+use crate::toon::Node;
 use crate::{ClaudeMode, Harness, HookEvent, Scope};
 
 pub fn init(in_repo: bool) -> Result<Reply> {
@@ -23,6 +24,26 @@ pub fn init(in_repo: bool) -> Result<Reply> {
     r.help("Run `rvow new \"<title>\"` to plan a change");
     if mode == Mode::Home && git::toplevel(&home).is_err() {
         r.help(format!("Run `git -C {} init` to version your plans; init wrote its .gitignore", home.display()));
+    }
+    Ok(r)
+}
+
+pub fn rebind() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let mut r = Reply::new();
+    match store::rebind(&cwd()?, &home)? {
+        Rebind::Unchanged(root) => {
+            r.line(format!("up to date at {}", root.display()));
+            r.set("unchanged", root.display().to_string());
+        }
+        Rebind::Updated(root) => {
+            r.line(format!("wrote project.toml at {}", root.display()));
+            r.set("updated", root.display().to_string());
+        }
+        Rebind::Moved { from, to } => {
+            r.line(format!("moved {} to {}", from.display(), to.display()));
+            r.set("moved", Node::Obj(obj! { "from" => from.display().to_string(), "to" => to.display().to_string() }));
+        }
     }
     Ok(r)
 }

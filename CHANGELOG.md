@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Add `rvow archive`, `rvow drop` and `rvow supersede` to close a change, and `rvow trace` to list the changes that touched a requirement.
 - Add `rvow ls`, `rvow show`, `rvow path`, `rvow spec` and `rvow guide` to read plans, specs and the writing guides.
 - Add `rvow import openspec` to convert an OpenSpec tree into specs and backlog changes.
+- Add `rvow rebind` to record a repository's roots and remote in its rvow tree, and to move a home tree to the path its remote implies.
 - Add `rvow install` to set up the skill, the Claude Code mod, the pi extension and the pre-push gate.
 - Add a Claude Code mod with a plan pane, a needs-you band, `/rvow-status` and `/rvow-review`, and a pi extension with a widget.
 - Print TOON for agents when stdout is not a terminal, with help lines and explicit empty states.

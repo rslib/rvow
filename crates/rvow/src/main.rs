@@ -43,6 +43,8 @@ enum Cmd {
         #[arg(long)]
         in_repo: bool,
     },
+    /// Repair this repository's rvow tree: record its roots and remote, and move a home tree to its remote path.
+    Rebind,
     /// Create a change in backlog/.
     New {
         /// The change title.
@@ -307,6 +309,7 @@ fn reset_sigpipe() {
 fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
     let result = match cmd {
         Cmd::Init { in_repo } => setup::init(in_repo),
+        Cmd::Rebind => setup::rebind(),
         Cmd::New { title, spec } => plan::new(&title.join(" "), !spec),
         Cmd::Validate => plan::validate(),
         Cmd::Accept { change, .. } => lifecycle::accept(&change).map(Reply::done),
