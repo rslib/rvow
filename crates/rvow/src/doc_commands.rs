@@ -2,11 +2,12 @@
 
 use crate::skill::problem;
 
-const DOCS: [(&str, &str); 6] = [
+const DOCS: [(&str, &str); 7] = [
     ("guides/proposal.md", include_str!("../../../guides/proposal.md")),
     ("guides/spec.md", include_str!("../../../guides/spec.md")),
     ("guides/tasks.md", include_str!("../../../guides/tasks.md")),
     ("guides/design.md", include_str!("../../../guides/design.md")),
+    ("CHANGELOG.md", include_str!("../../../CHANGELOG.md")),
     ("README.md", include_str!("../../../README.md")),
     ("AGENTS.md", include_str!("../../../AGENTS.md")),
 ];
