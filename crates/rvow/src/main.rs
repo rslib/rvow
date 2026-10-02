@@ -482,8 +482,8 @@ fn home_view() -> Result<Reply> {
     let cwd = cwd()?;
     let Ok(Some(p)) = store::find(&cwd, &home) else {
         r.set("state", "no rvow project in this repository");
-        r.line("no rvow project in this repository; run rvow init");
-        r.help("Run `rvow init` to create the rvow tree for this repository");
+        r.line("no rvow project in this repository; run rvow init (it writes to the rvow home, not the repository)");
+        r.help("Run `rvow init` to create this repository's rvow tree in the rvow home; the repository stays untouched");
         r.help("Run `rvow new \"<title>\"` after init to plan a change");
         return Ok(r);
     };
@@ -574,7 +574,7 @@ fn project(home: &Path) -> Result<Project> {
         Error::new(
             "no-project",
             "this repository has no rvow tree",
-            "run rvow init",
+            "run rvow init; it writes to the rvow home, not the repository",
         )
     })
 }

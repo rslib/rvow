@@ -187,7 +187,7 @@ fn errors_are_records_on_stdout() {
     assert_eq!(code, 1);
     assert_eq!(
         out,
-        "error: this repository has no rvow tree\nhelp: run rvow init\n"
+        "error: this repository has no rvow tree\nhelp: \"run rvow init; it writes to the rvow home, not the repository\"\n"
     );
     let (out, code) = r.rvow(&["--human", "ls"]);
     assert_eq!(code, 1);
