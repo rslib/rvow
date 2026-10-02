@@ -417,9 +417,18 @@ export const register: Register = (on) => {
   })
 
   on('command.run', { command: 'rvow-review' }, async ($, e) => {
-    const id = e.args.trim().split(/\s+/)[0]
-    if (!id) return { text: 'usage: /rvow-review <CHG-id>' }
-    return { text: (await rvow($, ['review', id])).text }
+    const typed = e.args.trim().split(/\s+/)[0]
+    if (!typed) return { text: 'usage: /rvow-review <CHG-id>' }
+    await refresh($)
+    const p = (await read($, viewAtom))?.backlog.find((x) => x.here && x.id.startsWith(typed))
+    if (!p) return { text: `${typed} is not a backlog plan on this branch; see /rvow-status` }
+    await update($, detailsAtom, () => [])
+    await update($, tabAtom, () => 'backlog')
+    await $.store.set('tab', 'backlog').catch(() => {})
+    await openDetail($, { kind: 'plan', id: p.id, title: p.title })
+    await update($, reviewAtom, (m) => ({ ...m, [p.id]: true }))
+    await $.ui.open({ ...OPEN, focus: true, closeOnEscape: true })
+    return {}
   })
 
   on('command.run', { command: 'rvow-archive' }, async ($, e) => {
@@ -836,6 +845,13 @@ export const register: Register = (on) => {
           </Box>
         )
       }
+      // An open review shows its Accept and Cancel before the text, so no scrolling.
+      const actions = plan && (
+        <Box flexDirection="column" marginTop={1}>
+          {planBody(plan, true)}
+        </Box>
+      )
+      const reviewing = plan && review[plan.id]
       return (
         <Box flexDirection="column">
           {button('back', 'Back', hot('b'), () => update($, detailsAtom, (s) => s.slice(0, -1)))}
@@ -851,6 +867,7 @@ export const register: Register = (on) => {
           <Box marginBottom={1}>
             <Text dimColor>{RULE.repeat(cols)}</Text>
           </Box>
+          {reviewing && actions}
           {d.text === null ? (
             <Text color="yellow" wrap="truncate-end">
               … loading rvow show {d.id}
@@ -870,11 +887,7 @@ export const register: Register = (on) => {
               </Text>
             </Box>
           )}
-          {plan && (
-            <Box flexDirection="column" marginTop={1}>
-              {planBody(plan, true)}
-            </Box>
-          )}
+          {!reviewing && actions}
         </Box>
       )
     }
