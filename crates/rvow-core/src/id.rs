@@ -50,6 +50,24 @@ pub enum Ref {
     Placeholder { kind: Kind, n: u32 },
 }
 
+impl Ref {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Ref::Id(id) => id.kind,
+            Ref::Placeholder { kind, .. } => *kind,
+        }
+    }
+}
+
+impl fmt::Display for Ref {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ref::Id(id) => id.fmt(f),
+            Ref::Placeholder { kind, n } => write!(f, "{}-new{n}", kind.prefix()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     MissingKind,
