@@ -177,9 +177,48 @@ async function settle($: EngineInterface, r: RvowNotice) {
   await refresh($)
 }
 
+/** Writes `a`, then saves the open stack (no fetched text) and the expanded reviews for the next restart. */
+async function save($: EngineInterface) {
+  try {
+    const details = (await read($, detailsAtom)).map(({ kind, id, title }) => ({ kind, id, title }))
+    const flags = await read($, reviewAtom)
+    const review = Object.keys(flags).filter((id) => flags[id])
+    await $.store.set('pane', { details, review })
+  } catch {}
+}
+
+const setDetails = ($: EngineInterface, fn: (s: RvowDetail[]) => RvowDetail[]): Promise<void> =>
+  update($, detailsAtom, fn).then(() => save($))
+const putReview = (
+  $: EngineInterface,
+  fn: (m: Record<string, boolean>) => Record<string, boolean>,
+): Promise<void> => update($, reviewAtom, fn).then(() => save($))
+
+/** Reopens the saved stack and expanded reviews that still exist in the view; the rest is dropped. */
+async function restore($: EngineInterface) {
+  try {
+    const saved: any = await $.store.get('pane')
+    const view = await read($, viewAtom)
+    if (!view || !saved) return
+    const alive = (d: any) =>
+      d.kind === 'plan'
+        ? view.backlog.some((p) => p.id === d.id)
+        : d.kind === 'change'
+          ? view.changes.some((c) => c.id === d.id)
+          : d.kind === 'archive'
+            ? view.archive.some((a) => a.id === d.id)
+            : view.changes.some((c) => c.tasks.some((t) => t.id === d.id))
+    const open = (saved.review as string[]).filter((id) => view.backlog.some((p) => p.id === id))
+    await update($, reviewAtom, () => Object.fromEntries(open.map((id) => [id, true])))
+    for (const d of saved.details as RvowDetail[]) {
+      if (alive(d)) await openDetail($, { kind: d.kind, id: d.id, title: String(d.title) })
+    }
+  } catch {}
+}
+
 /** Pushes a detail view and fills it with `rvow show <id> --human`; a task also gets its covered requirements. */
 async function openDetail($: EngineInterface, d: Omit<RvowDetail, 'text'>) {
-  await update($, detailsAtom, (s) => [...s, { ...d, text: null }])
+  await setDetails($, (s) => [...s, { ...d, text: null }])
   let text = (await rvow($, ['show', d.id, '--human'])).text
   if (d.kind === 'task') {
     const covers = /^\s*covers:\s*(.+)$/m.exec(text)?.[1]?.match(ID) ?? []
@@ -444,11 +483,11 @@ export const register: Register = (on) => {
     await refresh($)
     const p = (await read($, viewAtom))?.backlog.find((x) => x.here && x.id.startsWith(typed))
     if (!p) return { text: `${typed} is not a backlog plan on this branch; see /rvow-status` }
-    await update($, detailsAtom, () => [])
+    await setDetails($, () => [])
     await update($, tabAtom, () => 'backlog')
     await $.store.set('tab', 'backlog').catch(() => {})
     await openDetail($, { kind: 'plan', id: p.id, title: p.title })
-    await update($, reviewAtom, (m) => ({ ...m, [p.id]: true }))
+    await putReview($, (m) => ({ ...m, [p.id]: true }))
     await $.ui.open({ ...OPEN, focus: true, closeOnEscape: true })
     return {}
   })
@@ -460,11 +499,18 @@ export const register: Register = (on) => {
   })
 
   on('command.run', { command: 'rvow-status' }, async ($) => {
-    await refresh($)
     const saved = await $.store.get('tab').catch(() => undefined)
     await update($, tabAtom, () => (TABS.includes(saved as RvowTab) ? (saved as RvowTab) : null))
     await update($, detailsAtom, () => [])
     await $.ui.open(OPEN)
+    await refresh($)
+    if (await read($, viewAtom)) await restore($)
+    else {
+      await update($, noticeAtom, () => ({
+        tone: 'fail',
+        text: 'rvow did not answer; run /rvow-status again',
+      }))
+    }
     return {}
   })
 
@@ -503,8 +549,7 @@ export const register: Register = (on) => {
         onPress={() => void onPress()}
       />
     )
-    const setReview = (id: string, open: boolean) =>
-      update($, reviewAtom, (m) => ({ ...m, [id]: open }))
+    const setReview = (id: string, open: boolean) => putReview($, (m) => ({ ...m, [id]: open }))
 
     const TONE = { ok: ['✓', 'green'], fail: ['✗', 'red'], busy: ['…', 'yellow'] } as const
     const noticeBox = notice && (
@@ -530,6 +575,7 @@ export const register: Register = (on) => {
       </Text>
     )
 
+    if (!view && !notice) return <Text dimColor>loading rvow...</Text>
     if (!view) {
       return (
         <Box flexDirection="column">
@@ -876,7 +922,7 @@ export const register: Register = (on) => {
       const reviewing = plan && review[plan.id]
       return (
         <Box flexDirection="column">
-          {button('back', 'Back', hot('b'), () => update($, detailsAtom, (s) => s.slice(0, -1)))}
+          {button('back', 'Back', hot('b'), () => setDetails($, (s) => s.slice(0, -1)))}
           <Box justifyContent="space-between" gap={1} marginTop={1}>
             <Text wrap="truncate-end">
               <Text inverse bold color={color}>
@@ -936,7 +982,7 @@ export const register: Register = (on) => {
                 hotkey={String(n + 1)}
                 variant={id === tab ? 'primary' : undefined}
                 onPress={async () => {
-                  await update($, detailsAtom, () => [])
+                  await setDetails($, () => [])
                   await update($, tabAtom, () => id)
                   await $.store.set('tab', id).catch(() => {})
                 }}
