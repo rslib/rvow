@@ -125,7 +125,7 @@ pub fn parse_deltas(src: &str) -> (DeltaFile, Vec<Diagnostic>) {
     let (_, blocks, mut diags) = parse_blocks(src, true);
     let mut deltas = Vec::new();
     for (op, req) in blocks {
-        let op = op.expect("delta mode yields an op");
+        let Some(op) = op else { continue };
         let has_text = !req.text.is_empty() || !req.scenarios.is_empty();
         match (op.has_body(), &req.id) {
             (_, Ref::Placeholder { .. }) if op != DeltaOp::Add => diags.push(Diagnostic::new(

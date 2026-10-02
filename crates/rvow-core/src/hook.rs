@@ -35,9 +35,56 @@ fn base_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
+/// `cmd` without heredoc bodies and quoted text, which a shell does not run.
+/// A double-quoted span that holds `$(` or a backtick stays, since it runs.
+fn unquoted(cmd: &str) -> String {
+    let mut kept = String::new();
+    let mut end: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(e) = &end {
+            if line.trim() == e {
+                end = None;
+            }
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+        if let Some(i) = line.find("<<") {
+            let tag = line[i + 2..].trim_start_matches('-').trim_start();
+            let tag: String = tag
+                .trim_start_matches(['\'', '"'])
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !tag.is_empty() {
+                end = Some(tag);
+            }
+        }
+    }
+    let mut out = String::new();
+    let mut rest = kept.as_str();
+    while let Some(i) = rest.find(['\'', '"']) {
+        out.push_str(&rest[..i]);
+        let q = &rest[i..=i];
+        let tail = &rest[i + 1..];
+        let Some(j) = tail.find(q) else {
+            out.push_str(&rest[i..]);
+            return out;
+        };
+        let span = &tail[..j];
+        if q == "\"" && (span.contains("$(") || span.contains('`')) {
+            out.push_str(span);
+        }
+        out.push(' ');
+        rest = &tail[j + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Why a Bash command must not run, or `None`.
 pub fn bash_denial(cmd: &str) -> Option<String> {
-    let w = words(cmd);
+    let w = words(&unquoted(cmd));
     let lower = cmd.to_lowercase();
     for (i, word) in w.iter().enumerate() {
         let rvow_call = base_name(word) == "rvow"
@@ -52,6 +99,14 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
                 "rvow {sub} is for the user only; ask the user to run `! rvow {sub}`"
             ));
         }
+    }
+    let rvow_answer = w.iter().any(|x| base_name(x) == "rvow") && w.iter().any(|x| x == "answer");
+    let via_dialog = w.windows(2).any(|p| p[0] == "--via" && p[1] == "dialog")
+        || w.iter().any(|x| x == "--via=dialog");
+    if rvow_answer && via_dialog {
+        return Some(
+            "only the rvow_ask tool records an answer as given in a dialog; record a chat answer with rvow answer <ref> \"<choice>\"".into(),
+        );
     }
     let git = w.iter().any(|x| base_name(x) == "git");
     if git && w.iter().any(|x| x == "--no-verify") {
@@ -243,7 +298,33 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
             "{rel} is a protected test or test setup file; to change it, run rvow amend --unlock {rel} --reason \"...\" and ask the user to confirm"
         )));
     }
+    if !target.starts_with(&format!("{root}/"))
+        && let Some(files) = active_scope(project, top)?
+        && !files.is_match(rel)
+        && git::run(top, &["check-ignore", "-q", "--", rel]).is_err()
+    {
+        return Ok(Some(format!(
+            "{rel} is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm"
+        )));
+    }
     Ok(None)
+}
+
+/// The `files:` globs of every task of the active changes on this branch, or
+/// `None` when the branch has no active change.
+fn active_scope(project: &Project, top: &Path) -> Result<Option<globset::GlobSet>> {
+    let (living, _) = change::load_living(project)?;
+    let branch = git::branch(top)?.unwrap_or_default();
+    let active = proof::active(project, &living)?;
+    let mine = proof::on_branch(&active, &branch);
+    if mine.is_empty() {
+        return Ok(None);
+    }
+    let globs: Vec<String> = mine
+        .iter()
+        .flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.clone()))
+        .collect();
+    fingerprint::globset(&globs).map(Some)
 }
 
 /// The path of `file` relative to the repository top, in the form the
@@ -434,17 +515,50 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
         env: fingerprint::env(&top, &config)?,
         living: &living,
     };
-    Ok(proof::next(&queue, &now)?.map(|(_, t, s)| {
-        let id = t.id.to_string();
-        match s {
-            State::Stale(_) | State::Flaky => {
-                format!("{id} is {}: run rvow prove --stale", s.name())
+    for c in &queue {
+        let changed = changed_since_vow(&top, c);
+        for t in &c.loaded.tasks {
+            let s = proof::state(c, t, &now)?;
+            if !s.open() {
+                continue;
             }
-            _ => format!(
-                "{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written"
-            ),
+            // A task nobody started is no reason to hold the agent back from a plain answer.
+            if s == State::Missing
+                && let Some(files) = &changed
+                && !t.files.iter().any(|g| {
+                    fingerprint::globset(std::slice::from_ref(g))
+                        .is_ok_and(|set| files.iter().any(|f| set.is_match(f)))
+                })
+            {
+                continue;
+            }
+            let id = t.id.to_string();
+            return Ok(Some(match s {
+                State::Stale(_) | State::Flaky => {
+                    format!("{id} is {}: run rvow prove --stale", s.name())
+                }
+                _ => format!(
+                    "{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written"
+                ),
+            }));
         }
-    }))
+    }
+    Ok(None)
+}
+
+/// The files that differ from the vow's base commit, committed or not, or
+/// `None` when the base is unknown.
+fn changed_since_vow(top: &Path, c: &proof::Active) -> Option<Vec<String>> {
+    let base = c.vow()?.data.get("base_commit")?.as_str()?;
+    let tracked = git::run(top, &["diff", "--name-only", base]).ok()?;
+    let new = git::run(top, &["ls-files", "-o", "--exclude-standard"]).ok()?;
+    Some(
+        tracked
+            .lines()
+            .chain(new.lines())
+            .map(String::from)
+            .collect(),
+    )
 }
 
 /// One line for a status bar: proved tasks, drift and pending amendments of
@@ -458,7 +572,16 @@ pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     let changes = proof::active(project, &living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        return Ok(None);
+        let plans: Vec<String> = crate::plan::check(project, cwd, None)?
+            .into_iter()
+            .filter(|r| r.change.stage == change::Stage::Backlog)
+            .map(|r| r.change.id.to_string())
+            .collect();
+        return Ok(match plans.as_slice() {
+            [] => None,
+            [one] => Some(format!("rvow {one}: plan waits for accept")),
+            many => Some(format!("rvow: {} plans wait for accept", many.len())),
+        });
     }
     let config = config::load(project, home)?;
     let now = Now {
@@ -521,6 +644,8 @@ mod tests {
             "echo '{}' >> ~/.local/share/rvow/x/active/c/ledger.jsonl",
             "cat ids.jsonl",
             "rm .git/hooks/pre-push",
+            "rvow answer CHG-x:proposal.md:3 yes --via dialog",
+            "rvow answer CHG-x:proposal.md:3 yes --via=dialog",
         ];
         for cmd in denied {
             assert!(bash_denial(cmd).is_some(), "{cmd}");
@@ -528,6 +653,7 @@ mod tests {
         let allowed = [
             "rvow prove x7k",
             "rvow status",
+            "rvow answer CHG-x:proposal.md:3 yes",
             "rvow amend --reason 'accept the new name'",
             "cargo test confirm_flow",
             "git commit -m 'confirm accept'",
@@ -537,6 +663,29 @@ mod tests {
         ];
         for cmd in allowed {
             assert_eq!(bash_denial(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn quoted_accept_is_not_denied() {
+        let allowed = [
+            "cat > f <<'EOF'\nThe accept command with rvow accept --yes\nEOF",
+            "cat <<-EOF\n\trvow confirm x\n\tEOF\necho done",
+            "echo \"run rvow accept X\"",
+            "echo 'run rvow confirm X'",
+        ];
+        for cmd in allowed {
+            assert_eq!(bash_denial(cmd), None, "{cmd}");
+        }
+        let denied = [
+            "cat <<EOF\nx\nEOF\nrvow accept X",
+            "echo 'hi' && rvow accept X --yes",
+            "echo \"$(rvow accept X)\"",
+            "env FOO=1 rvow accept",
+            "x; rvow confirm",
+        ];
+        for cmd in denied {
+            assert!(bash_denial(cmd).is_some(), "{cmd}");
         }
     }
 
@@ -566,6 +715,20 @@ mod tests {
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         crate::vow::commit(&p, prepared).unwrap();
         assert_eq!(edit(&p, &repo, "src/lib.rs"), None);
+    }
+
+    #[test]
+    fn status_line_names_a_waiting_plan() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        assert_eq!(status_line(&p, &home, &repo).unwrap(), None);
+        let c = change::new(&p, "T", "main", true).unwrap();
+        assert_eq!(
+            status_line(&p, &home, &repo).unwrap(),
+            Some(format!("rvow {}: plan waits for accept", c.id))
+        );
     }
 
     #[test]
@@ -624,7 +787,7 @@ mod tests {
         let c = change::new(&p, "T", "main", true).unwrap();
         std::fs::write(
             c.path.join("tasks.md"),
-            "- TSK-new1 T\n  verify: false\n  files: src/**\n",
+            "- TSK-new1 T\n  verify: false\n  files: src/**, tests/**\n",
         )
         .unwrap();
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
@@ -650,6 +813,34 @@ mod tests {
         let bash = json!({"cwd": repo.to_str().unwrap(), "tool_name": "Bash", "tool_input": {"command": "rvow accept x"}});
         let out = claude_pre_tool_use(&p, &bash).unwrap().unwrap();
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn edit_outside_active_scope_is_denied() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 T\n  verify: false\n  files: src/**\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(&p, prepared).unwrap();
+
+        assert_eq!(edit(&p, &repo, "src/lib.rs"), None);
+        assert_eq!(edit(&p, &repo, "target/debug/x"), None);
+        let out = edit(&p, &repo, "docs/readme.md").unwrap();
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            out["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rvow amend")
+        );
     }
 
     #[test]
@@ -721,14 +912,29 @@ mod tests {
     }
 
     #[test]
+    fn stop_ignores_untouched_tasks() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let input = json!({"cwd": repo.to_str().unwrap()});
+        assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
+
+        std::fs::write(repo.join("other.txt"), "x").unwrap();
+        assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
+
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        let out = claude_stop(&p, &home, &input).unwrap().unwrap();
+        assert!(out["reason"].as_str().unwrap().contains(&task), "{out}");
+    }
+
+    #[test]
     fn stop_blocks_on_open_tasks_and_drift_but_not_on_pending() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
         let input = json!({"cwd": repo.to_str().unwrap()});
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
         let out = claude_stop(&p, &home, &input).unwrap().unwrap();
         assert!(out["reason"].as_str().unwrap().contains(&task), "{out}");
 
-        std::fs::write(repo.join("out.txt"), "ok").unwrap();
         proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
         assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
 

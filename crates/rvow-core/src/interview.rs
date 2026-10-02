@@ -197,21 +197,23 @@ pub fn answer(project: &Project, reference: &str, choice: &str, via: Via) -> Res
     }
     // The section is last, so appending at the end of the file places the
     // entry inside it.
-    if prop
+    let last_is_clarifications = prop
         .lines()
         .rev()
         .find(|l| l.starts_with("## "))
         .map(str::trim)
-        == Some("## Clarifications")
-    {
-        prop.push_str(&entry);
-        prop.push('\n');
-    } else {
-        let at = prop.find("## Clarifications").expect("section exists");
-        let end = prop[at + 3..]
-            .find("\n## ")
-            .map_or(prop.len(), |i| at + 3 + i + 1);
-        prop.insert_str(end, &format!("{entry}\n"));
+        == Some("## Clarifications");
+    match prop.find("## Clarifications") {
+        Some(at) if !last_is_clarifications => {
+            let end = prop[at + 3..]
+                .find("\n## ")
+                .map_or(prop.len(), |i| at + 3 + i + 1);
+            prop.insert_str(end, &format!("{entry}\n"));
+        }
+        _ => {
+            prop.push_str(&entry);
+            prop.push('\n');
+        }
     }
     std::fs::write(&proposal, prop).map_err(|e| Error::io(&proposal, e))?;
     Ok(Answered {

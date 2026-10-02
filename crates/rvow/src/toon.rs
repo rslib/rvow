@@ -1,0 +1,371 @@
+// Copied from rgit (crates/rgit-cli/src/toon.rs, MIT license, same author) and
+// trimmed to what rvow uses.
+
+//! An ordered value tree and its TOON encoding (https://toonformat.dev), for
+//! the agent output modes. Keys keep insertion order, so a schema prints in the
+//! order it is declared. A list of plain values is laid out one item per
+//! line, the AXI convention.
+
+pub type Obj = Vec<(String, Node)>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Node {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    List(Vec<Node>),
+    Obj(Obj),
+}
+
+/// Build an ordered object: `obj!{ "id" => x, "name" => y }`.
+#[macro_export]
+macro_rules! obj {
+    ($($key:literal => $value:expr),* $(,)?) => {
+        vec![$(($key.to_owned(), $crate::toon::Node::from(&($value)))),*]
+    };
+}
+
+impl Node {
+    fn is_primitive(&self) -> bool {
+        !matches!(self, Node::List(_) | Node::Obj(_))
+    }
+}
+
+impl From<serde_json::Value> for Node {
+    fn from(v: serde_json::Value) -> Self {
+        use serde_json::Value;
+        match v {
+            Value::Null => Node::Null,
+            Value::Bool(b) => Node::Bool(b),
+            Value::Number(n) => match n.as_i64() {
+                Some(i) => Node::Int(i),
+                None => Node::Float(n.as_f64().unwrap_or(0.0)),
+            },
+            Value::String(s) => Node::Str(s),
+            Value::Array(items) => Node::List(items.into_iter().map(Node::from).collect()),
+            Value::Object(map) => Node::Obj(map.into_iter().map(|(k, v)| (k, v.into())).collect()),
+        }
+    }
+}
+
+impl From<&str> for Node {
+    fn from(s: &str) -> Self {
+        Node::Str(s.to_owned())
+    }
+}
+
+impl From<String> for Node {
+    fn from(s: String) -> Self {
+        Node::Str(s)
+    }
+}
+
+impl From<bool> for Node {
+    fn from(b: bool) -> Self {
+        Node::Bool(b)
+    }
+}
+
+impl From<usize> for Node {
+    fn from(n: usize) -> Self {
+        Node::Int(n as i64)
+    }
+}
+
+impl From<u64> for Node {
+    fn from(n: u64) -> Self {
+        Node::Int(n as i64)
+    }
+}
+
+impl<T: Clone + Into<Node>> From<&T> for Node {
+    fn from(v: &T) -> Self {
+        v.clone().into()
+    }
+}
+
+impl<T: Into<Node>> From<Option<T>> for Node {
+    fn from(v: Option<T>) -> Self {
+        v.map_or(Node::Null, Into::into)
+    }
+}
+
+impl<T: Into<Node>> From<Vec<T>> for Node {
+    fn from(items: Vec<T>) -> Self {
+        Node::List(items.into_iter().map(Into::into).collect())
+    }
+}
+
+/// Encode a root object as TOON with 2-space indentation and `,` delimiter.
+pub fn encode(root: &[(String, Node)]) -> String {
+    let mut out = Vec::new();
+    write_fields(&mut out, root, 0);
+    out.join("\n")
+}
+
+fn pad(depth: usize) -> String {
+    "  ".repeat(depth)
+}
+
+fn write_fields(out: &mut Vec<String>, fields: &[(String, Node)], depth: usize) {
+    for (k, v) in fields {
+        write_field(out, &key(k), v, depth, &pad(depth));
+    }
+}
+
+/// One `key: value` field. `lead` is the text before the key: indentation, or
+/// indentation plus `- ` for the first field of a list-item object.
+fn write_field(out: &mut Vec<String>, key: &str, v: &Node, depth: usize, lead: &str) {
+    match v {
+        Node::List(items) => write_array(out, key, items, depth, lead),
+        Node::Obj(fields) => {
+            out.push(format!("{lead}{key}:"));
+            write_fields(out, fields, depth + 1);
+        }
+        prim => out.push(format!("{lead}{key}: {}", primitive(prim))),
+    }
+}
+
+fn write_array(out: &mut Vec<String>, key: &str, items: &[Node], depth: usize, lead: &str) {
+    if items.is_empty() {
+        out.push(format!("{lead}{key}: []"));
+        return;
+    }
+    let n = items.len();
+    if items.iter().all(Node::is_primitive) {
+        out.push(format!("{lead}{key}[{n}]:"));
+        for item in items {
+            out.push(format!("{}{}", pad(depth + 1), list_value(item)));
+        }
+        return;
+    }
+    if let Some(columns) = tabular_columns(items) {
+        let header: Vec<String> = columns.iter().map(|c| self::key(c)).collect();
+        out.push(format!("{lead}{key}[{n}]{{{}}}:", header.join(",")));
+        for item in items {
+            let Node::Obj(fields) = item else { continue };
+            let cells: Vec<String> = columns
+                .iter()
+                .map(|c| {
+                    fields
+                        .iter()
+                        .find(|(k, _)| k == c)
+                        .map_or_else(|| "null".to_owned(), |(_, v)| primitive(v))
+                })
+                .collect();
+            out.push(format!("{}{}", pad(depth + 1), cells.join(",")));
+        }
+        return;
+    }
+    out.push(format!("{lead}{key}[{n}]:"));
+    for item in items {
+        write_list_item(out, item, depth + 1);
+    }
+}
+
+/// The shared column order when every item is a non-empty object with the same
+/// keys and only primitive values; `None` otherwise.
+fn tabular_columns(items: &[Node]) -> Option<Vec<String>> {
+    let Node::Obj(first) = &items[0] else {
+        return None;
+    };
+    if first.is_empty() {
+        return None;
+    }
+    let columns: Vec<String> = first.iter().map(|(k, _)| k.clone()).collect();
+    let uniform = items.iter().all(|item| match item {
+        Node::Obj(fields) => {
+            fields.len() == columns.len()
+                && fields
+                    .iter()
+                    .all(|(k, v)| v.is_primitive() && columns.contains(k))
+        }
+        _ => false,
+    });
+    uniform.then_some(columns)
+}
+
+fn write_list_item(out: &mut Vec<String>, item: &Node, depth: usize) {
+    let indent = pad(depth);
+    match item {
+        Node::Obj(fields) if fields.is_empty() => out.push(format!("{indent}-")),
+        Node::Obj(fields) => {
+            let (first_key, first_value) = &fields[0];
+            write_field(
+                out,
+                &key(first_key),
+                first_value,
+                depth + 1,
+                &format!("{indent}- "),
+            );
+            write_fields(out, &fields[1..], depth + 1);
+        }
+        Node::List(inner) if inner.iter().all(Node::is_primitive) => {
+            let cells: Vec<String> = inner.iter().map(primitive).collect();
+            let values = if cells.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", cells.join(","))
+            };
+            out.push(format!("{indent}- [{}]:{values}", inner.len()));
+        }
+        Node::List(inner) => {
+            out.push(format!("{indent}- [{}]:", inner.len()));
+            for nested in inner {
+                write_list_item(out, nested, depth + 1);
+            }
+        }
+        prim => out.push(format!("{indent}- {}", primitive(prim))),
+    }
+}
+
+fn primitive(v: &Node) -> String {
+    match v {
+        Node::Null => "null".to_owned(),
+        Node::Bool(b) => b.to_string(),
+        Node::Int(i) => i.to_string(),
+        Node::Float(f) => number(*f),
+        Node::Str(s) if needs_quotes(s) => quote(s),
+        Node::Str(s) => s.clone(),
+        Node::List(_) | Node::Obj(_) => unreachable!("not a primitive"),
+    }
+}
+
+fn number(f: f64) -> String {
+    if !f.is_finite() {
+        return "null".to_owned();
+    }
+    if f == 0.0 {
+        return "0".to_owned();
+    }
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        return format!("{}", f as i64);
+    }
+    format!("{f}")
+}
+
+fn key(k: &str) -> String {
+    let mut chars = k.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    if valid { k.to_owned() } else { quote(k) }
+}
+
+fn needs_quotes(s: &str) -> bool {
+    s.is_empty()
+        || s.starts_with(char::is_whitespace)
+        || s.ends_with(char::is_whitespace)
+        || matches!(s, "true" | "false" | "null")
+        || numeric_like(s)
+        || s.starts_with('-')
+        || s.starts_with('#')
+        || s.chars()
+            .any(|c| matches!(c, ':' | '"' | '\\' | '[' | ']' | '{' | '}' | ',') || c.is_control())
+}
+
+/// A plain list item on its own line: unquoted unless quotes keep it intact.
+fn list_value(v: &Node) -> String {
+    match v {
+        Node::Str(s)
+            if s.trim().is_empty()
+                || s.ends_with(char::is_whitespace)
+                || s.starts_with("- ")
+                || s.chars().any(char::is_control) =>
+        {
+            quote(s)
+        }
+        Node::Str(s) => s.clone(),
+        other => primitive(other),
+    }
+}
+
+fn numeric_like(s: &str) -> bool {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    digits.starts_with(|c: char| c.is_ascii_digit())
+        && digits
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+}
+
+fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_insertion_order_and_quotes_per_spec() {
+        let root = obj! {
+            "zeta" => "plain text",
+            "alpha" => "a-b",
+            "lead" => "-x",
+            "num" => "42",
+            "empty" => Vec::<Node>::new(),
+            "tags" => vec!["a", "b,c"],
+        };
+        assert_eq!(
+            encode(&root),
+            "zeta: plain text\nalpha: a-b\nlead: \"-x\"\nnum: \"42\"\nempty: []\ntags[2]:\n  a\n  b,c"
+        );
+    }
+
+    #[test]
+    fn encodes_tables_and_lists() {
+        let rows = vec![
+            Node::Obj(obj! { "id" => "b1", "n" => 2usize }),
+            Node::Obj(obj! { "id" => "a2", "n" => 1usize }),
+        ];
+        let mixed = vec![
+            Node::from("x"),
+            Node::Obj(obj! { "k" => "v", "m" => 1usize }),
+        ];
+        let root = obj! { "rows" => rows, "mixed" => mixed };
+        assert_eq!(
+            encode(&root),
+            "rows[2]{id,n}:\n  b1,2\n  a2,1\nmixed[2]:\n  - x\n  - k: v\n    m: 1"
+        );
+    }
+
+    #[test]
+    fn help_is_one_hint_per_line() {
+        let one = obj! { "help" => vec!["Run `x --full` to see it"] };
+        assert_eq!(encode(&one), "help[1]:\n  Run `x --full` to see it");
+        let two = obj! { "help" => vec!["Run `a`, then `b`", "Run `c`"] };
+        assert_eq!(encode(&two), "help[2]:\n  Run `a`, then `b`\n  Run `c`");
+    }
+
+    #[test]
+    fn plain_lists_keep_leading_space_and_quote_only_to_stay_intact() {
+        let root = obj! { "lines" => vec!["[main b1a7ca6] fix", " 5 files changed", "", "x ", "- y", "a\nb"] };
+        assert_eq!(
+            encode(&root),
+            "lines[6]:\n  [main b1a7ca6] fix\n   5 files changed\n  \"\"\n  \"x \"\n  \"- y\"\n  \"a\\nb\""
+        );
+    }
+
+    #[test]
+    fn escapes_controls() {
+        let root = obj! { "s" => "a\nb\u{1}" };
+        assert_eq!(encode(&root), "s: \"a\\nb\\u0001\"");
+    }
+}

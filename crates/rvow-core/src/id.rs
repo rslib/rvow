@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::error::Error;
+
 pub const BODY_LEN: usize = 6;
 
 const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
@@ -124,18 +126,17 @@ impl Id {
 
     /// Draws a fresh id of `kind` that is not in `taken`.
     ///
-    /// Panics only when the operating system has no random source.
-    pub fn mint(kind: Kind, taken: &HashSet<Id>) -> Id {
+    /// Fails only when the operating system has no random source.
+    pub fn mint(kind: Kind, taken: &HashSet<Id>) -> crate::error::Result<Id> {
         loop {
-            let mut bytes = [0u8; BODY_LEN];
-            getrandom::fill(&mut bytes).expect("operating system random source");
+            let bytes = Error::random::<BODY_LEN>()?;
             let body = bytes
                 .iter()
                 .map(|b| ALPHABET[(b & 31) as usize] as char)
                 .collect();
             let id = Id { kind, body };
             if !taken.contains(&id) {
-                return id;
+                return Ok(id);
             }
         }
     }
@@ -283,7 +284,7 @@ mod tests {
     fn mint_has_the_right_form_and_avoids_taken_ids() {
         let mut taken = HashSet::new();
         for _ in 0..2000 {
-            let new = Id::mint(Kind::Chg, &taken);
+            let new = Id::mint(Kind::Chg, &taken).unwrap();
             assert_eq!(new.to_string().parse::<Id>().unwrap(), new);
             assert!(taken.insert(new));
         }

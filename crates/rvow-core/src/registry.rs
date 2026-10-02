@@ -51,13 +51,14 @@ pub fn load(project: &Project) -> Result<HashSet<Id>> {
 /// Mints an id that the project never used and records it.
 pub fn mint(project: &Project, _lock: &Lock, kind: Kind, change: Option<&Id>) -> Result<Id> {
     let taken = load(project)?;
-    let id = Id::mint(kind, &taken);
+    let id = Id::mint(kind, &taken)?;
     let entry = Entry {
         id: id.to_string(),
         change: change.map(Id::to_string),
         time: now_ms(),
     };
-    let line = serde_json::to_string(&entry).expect("Entry serializes");
+    let line = serde_json::to_string(&entry)
+        .map_err(|e| Error::internal(format!("ids entry does not serialize: {e}")))?;
     append_line(&project.root.join(IDS_FILE), &line)?;
     Ok(id)
 }

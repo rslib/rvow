@@ -27,6 +27,27 @@ impl Error {
             "check that the path exists and is writable",
         )
     }
+
+    /// A state that the code ruled out, reported instead of a panic.
+    pub fn internal(what: impl std::fmt::Display) -> Error {
+        Error::new(
+            "internal",
+            what.to_string(),
+            "run the command again; if it fails again, report it to the rvow maintainers",
+        )
+    }
+
+    pub fn random<const N: usize>() -> Result<[u8; N]> {
+        let mut bytes = [0u8; N];
+        getrandom::fill(&mut bytes).map_err(|e| {
+            Error::new(
+                "random",
+                format!("the operating system has no random source: {e}"),
+                "check that the system random device is readable, then run the command again",
+            )
+        })?;
+        Ok(bytes)
+    }
 }
 
 impl fmt::Display for Error {

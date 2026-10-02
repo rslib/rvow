@@ -145,10 +145,10 @@ pub fn resolve(project: &Project, input: &str) -> Result<ChangeDir> {
             "run rvow ls to see the changes",
         )
     })?;
-    Ok(changes
+    changes
         .into_iter()
         .find(|c| c.id == id)
-        .expect("resolved id is listed"))
+        .ok_or_else(|| Error::internal(format!("{id} resolved but is not listed")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,10 +244,10 @@ pub fn find(project: &Project, input: &str) -> Result<Place> {
             "give more characters of the id, or run rvow ls to see the changes",
         )
     })?;
-    Ok(places
+    places
         .into_iter()
         .find(|p| p.id == id)
-        .expect("resolved id is listed"))
+        .ok_or_else(|| Error::internal(format!("{id} resolved but is not listed")))
 }
 
 /// `find` as one printable location: a folder, or `file:line`.
@@ -324,6 +324,12 @@ fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).map_err(|e| Error::io(path, e))
 }
 
+pub(crate) fn file_name(path: &Path) -> Result<String> {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| Error::internal(format!("{} has no name", path.display())))
+}
+
 fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     match std::fs::read_dir(dir) {
@@ -360,7 +366,7 @@ pub fn living_texts(project: &Project) -> Result<Vec<(String, String)>> {
     caps.sort();
     let mut out = Vec::new();
     for cap_dir in caps {
-        let cap = cap_dir.file_name().unwrap().to_string_lossy().into_owned();
+        let cap = file_name(&cap_dir)?;
         let path = cap_dir.join("spec.md");
         if path.is_file() {
             out.push((cap, read(&path)?));
@@ -458,7 +464,11 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
     }
     let mut deltas = Vec::new();
     for path in md_files(&dir.join(DELTAS))? {
-        let cap = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let cap = path
+            .file_stem()
+            .ok_or_else(|| Error::internal(format!("{} has no file name", path.display())))?
+            .to_string_lossy()
+            .into_owned();
         let text = read(&path)?;
         let (file, diags) = parse_deltas(&text);
         let rel = format!("{DELTAS}/{cap}.md");

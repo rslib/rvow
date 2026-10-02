@@ -282,7 +282,8 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
         out.push(item(Class::Confirm, what));
     }
 
-    let config_now = sha256_hex(config.canonical().as_bytes());
+    let canonical = config.canonical()?;
+    let config_now = sha256_hex(canonical.as_bytes());
     let config_then = base.get("config").and_then(Value::as_str).unwrap_or("");
     if config_now != config_then {
         let before = object(project, config_then).unwrap_or_default();
@@ -290,7 +291,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
             Class::Weaken,
             "config changed",
             &before,
-            &config.canonical(),
+            &canonical,
         ));
     }
 

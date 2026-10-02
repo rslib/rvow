@@ -250,7 +250,11 @@ pub fn confirm(
                         "run rvow confirm to list the pending amendments",
                     )
                 })?;
-                chosen.push(pending.iter().find(|p| p.id == id).expect("resolved"));
+                let found = pending
+                    .iter()
+                    .find(|p| p.id == id)
+                    .ok_or_else(|| Error::internal(format!("{id} resolved but is not pending")))?;
+                chosen.push(found);
             }
             chosen
         }

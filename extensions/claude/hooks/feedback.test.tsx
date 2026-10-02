@@ -1,0 +1,61 @@
+import { expect, mock, test } from 'claude-code/testing'
+
+const COMPOSER = { kind: 'composer' }
+let clock: { advance: (ms: number) => Promise<void> }
+
+function fake(on: any, exitCode: number, stdout: string) {
+  clock = mock.clock(on)
+  const prompts: string[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }) as any)
+  on('ui.status', async () => ({ value: undefined }) as any)
+  on('process.run', async () => ({ value: { exitCode, stdout, stderr: '' } }) as any)
+  on('prompt.submit', async (_$: any, e: any) => {
+    prompts.push(e.text)
+    return { text: e.text } as any
+  })
+  return prompts
+}
+
+async function run($: any, command: string, args: string) {
+  await $.command.run({ command, args, origin: COMPOSER } as any)
+  await clock.advance(0)
+}
+
+test('accept queues the next task for the agent', async ($, on) => {
+  const prompts = fake(on, 0, 'accepted CHG-1\nnext: TSK-1 Do it\n')
+  await run($, 'rvow-accept', 'CHG-1')
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]).toContain('CHG-1')
+  expect(prompts[0]).toContain('next: TSK-1 Do it')
+})
+
+test('confirm accept and reject name the amendments', async ($, on) => {
+  const prompts = fake(on, 0, 'AMD-b: done\n')
+  await run($, 'rvow-confirm', 'accept AMD-a')
+  await run($, 'rvow-confirm', 'reject --all abc123')
+  expect(prompts).toHaveLength(2)
+  expect(prompts[0]).toContain('accepted the plan edit AMD-a, AMD-b')
+  expect(prompts[1]).toContain('rejected the plan edit AMD-b')
+})
+
+test('archive queues the closed change', async ($, on) => {
+  const prompts = fake(on, 0, 'archived\n')
+  await run($, 'rvow-archive', 'CHG-1')
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]).toContain('CHG-1')
+})
+
+test('a plain listing queues nothing', async ($, on) => {
+  const prompts = fake(on, 0, 'AMD-a pending\n')
+  await run($, 'rvow-confirm', '')
+  expect(prompts).toEqual([])
+})
+
+test('a failed run queues nothing', async ($, on) => {
+  const prompts = fake(on, 1, 'error: refused\n')
+  on('ui.toast', async () => ({ value: undefined }) as any)
+  await run($, 'rvow-accept', 'CHG-1')
+  await run($, 'rvow-confirm', 'accept AMD-a')
+  await run($, 'rvow-archive', 'CHG-1')
+  expect(prompts).toEqual([])
+})

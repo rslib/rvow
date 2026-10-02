@@ -45,18 +45,66 @@ pub struct Project {
     pub meta: Meta,
 }
 
-/// `RVOW_HOME`, else `$XDG_DATA_HOME/rvow`, else `~/.local/share/rvow`.
+/// The file that remembers the rvow home for processes that do not inherit the
+/// user's shell environment, such as an editor plugin started from a GUI.
+fn pointer_path(xdg_config: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    match (xdg_config, home) {
+        (Some(x), _) => Some(PathBuf::from(x).join("rvow/home")),
+        (None, Some(h)) => Some(PathBuf::from(h).join(".config/rvow/home")),
+        (None, None) => None,
+    }
+}
+
+/// Picks the rvow home: `RVOW_HOME`, else the path `rvow init` or
+/// `rvow install` recorded, else `$XDG_DATA_HOME/rvow`, else
+/// `~/.local/share/rvow`.
+fn resolve_home(
+    rvow_home: Option<&str>,
+    recorded: Option<&str>,
+    xdg_data: Option<&str>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
+    rvow_home
+        .or(recorded)
+        .map(PathBuf::from)
+        .or_else(|| xdg_data.map(|x| PathBuf::from(x).join("rvow")))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".local/share/rvow")))
+}
+
+fn env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// The rvow home for this process. See `resolve_home` for the order.
 pub fn home_dir() -> Result<PathBuf> {
-    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
-    if let Some(h) = var("RVOW_HOME") {
-        return Ok(PathBuf::from(h));
+    let recorded = pointer_path(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    resolve_home(
+        env("RVOW_HOME").as_deref(),
+        recorded.as_deref(),
+        env("XDG_DATA_HOME").as_deref(),
+        env("HOME").as_deref(),
+    )
+    .ok_or_else(|| Error::new("no-home", "HOME is not set", "set RVOW_HOME"))
+}
+
+/// Records `home` so processes without `RVOW_HOME` in their environment find
+/// the same store. Returns the pointer file, or `None` without a home folder.
+pub fn record_home(home: &Path) -> Result<Option<PathBuf>> {
+    let Some(path) = pointer_path(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref()) else {
+        return Ok(None);
+    };
+    let text = format!("{}\n", home.display());
+    if std::fs::read_to_string(&path).is_ok_and(|t| t == text) {
+        return Ok(Some(path));
     }
-    if let Some(x) = var("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(x).join("rvow"));
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
     }
-    var("HOME")
-        .map(|h| PathBuf::from(h).join(".local/share/rvow"))
-        .ok_or_else(|| Error::new("no-home", "HOME is not set", "set RVOW_HOME"))
+    std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+    Ok(Some(path))
 }
 
 /// Refuses a repository whose identity git cannot report, and returns its roots.
@@ -136,7 +184,8 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         remote,
         mode,
     };
-    let text = toml::to_string(&meta).expect("Meta serializes");
+    let text = toml::to_string(&meta)
+        .map_err(|e| Error::internal(format!("project metadata does not serialize: {e}")))?;
     for (name, body) in [
         (PROJECT_FILE, text.as_str()),
         (CONFIG_FILE, ""),
@@ -145,25 +194,41 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         let p = root.join(name);
         std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
     }
-    if mode == Mode::Repo {
-        add_union_merge(&top)?;
+    match mode {
+        Mode::Repo => {
+            add_union_merge(&top)?;
+            add_lines(&top.join(".gitignore"), &[&format!("{REPO_DIR}/.lock")])?;
+        }
+        Mode::Home => add_lines(&home.join(".gitignore"), &[".lock", "claude-plugin/"])?,
     }
     Ok(Project { root, meta })
 }
 
 fn add_union_merge(top: &Path) -> Result<()> {
-    let line = format!("{REPO_DIR}/**/*.jsonl merge=union");
-    let path = top.join(".gitattributes");
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
-    if old.lines().any(|l| l.trim() == line) {
+    add_lines(
+        &top.join(".gitattributes"),
+        &[&format!("{REPO_DIR}/**/*.jsonl merge=union")],
+    )
+}
+
+/// Appends each of `lines` to the file at `path` unless it is already there.
+fn add_lines(path: &Path, lines: &[&str]) -> Result<()> {
+    let mut text = std::fs::read_to_string(path).unwrap_or_default();
+    let before = text.len();
+    for line in lines {
+        if text.lines().any(|l| l.trim() == *line) {
+            continue;
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    if text.len() == before {
         return Ok(());
     }
-    let sep = if old.is_empty() || old.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    std::fs::write(&path, format!("{old}{sep}{line}\n")).map_err(|e| Error::io(&path, e))
+    std::fs::write(path, text).map_err(|e| Error::io(path, e))
 }
 
 /// Finds the rvow tree of the repository that contains `dir`: repo mode when
@@ -252,6 +317,55 @@ impl Project {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
+
+    #[test]
+    fn init_writes_the_ignore_lines() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let home = tmp.0.join("home");
+        init(&repo, &home, Mode::Home).unwrap();
+        let text = std::fs::read_to_string(home.join(".gitignore")).unwrap();
+        assert_eq!(text, ".lock\nclaude-plugin/\n");
+
+        let other = repo_with_commit(&tmp.0, "o");
+        std::fs::write(other.join(".gitignore"), "target/").unwrap();
+        init(&other, &tmp.0.join("home2"), Mode::Repo).unwrap();
+        let text = std::fs::read_to_string(other.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\nrvow/.lock\n");
+        add_lines(&other.join(".gitignore"), &["rvow/.lock", "x"]).unwrap();
+        let text = std::fs::read_to_string(other.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\nrvow/.lock\nx\n");
+    }
+
+    #[test]
+    fn home_order() {
+        let r = |a, b, c, d| resolve_home(a, b, c, d).unwrap();
+        assert_eq!(
+            r(Some("/env"), Some("/rec"), Some("/x"), Some("/h")),
+            PathBuf::from("/env")
+        );
+        assert_eq!(
+            r(None, Some("/rec"), Some("/x"), Some("/h")),
+            PathBuf::from("/rec")
+        );
+        assert_eq!(
+            r(None, None, Some("/x"), Some("/h")),
+            PathBuf::from("/x/rvow")
+        );
+        assert_eq!(
+            r(None, None, None, Some("/h")),
+            PathBuf::from("/h/.local/share/rvow")
+        );
+        assert_eq!(resolve_home(None, None, None, None), None);
+        assert_eq!(
+            pointer_path(Some("/cfg"), Some("/h")),
+            Some(PathBuf::from("/cfg/rvow/home"))
+        );
+        assert_eq!(
+            pointer_path(None, Some("/h")),
+            Some(PathBuf::from("/h/.config/rvow/home"))
+        );
+    }
 
     #[test]
     fn init_and_find_in_home_mode() {

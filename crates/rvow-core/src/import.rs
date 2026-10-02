@@ -240,10 +240,6 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name().unwrap().to_string_lossy().into_owned()
-}
-
 fn is_placeholder_purpose(purpose: &str) -> bool {
     purpose.starts_with("TBD")
 }
@@ -264,7 +260,7 @@ fn living(
         if !path.is_file() {
             continue;
         }
-        let name = file_name(&dir);
+        let name = change::file_name(&dir)?;
         let os = parse_openspec(&read(&path)?);
         let mut md = format!("# {name}\n");
         let mut reqs = Vec::new();
@@ -516,7 +512,7 @@ fn change(
     mint: &mut Mint,
     files: &mut Vec<(PathBuf, String)>,
 ) -> Result<ChangeReport> {
-    let name = file_name(dir);
+    let name = change::file_name(dir)?;
     let proposal_src = std::fs::read_to_string(dir.join("proposal.md")).unwrap_or_default();
     let (title, proposal_md) = proposal(&proposal_src, &name, branch);
     let id = mint(Kind::Chg, None)?;
@@ -539,7 +535,7 @@ fn change(
     }
     let mut next = 0;
     for cap_dir in sorted_dirs(&dir.join("specs"))? {
-        let cap_name = file_name(&cap_dir);
+        let cap_name = change::file_name(&cap_dir)?;
         let path = cap_dir.join("spec.md");
         if !path.is_file() {
             continue;
@@ -579,7 +575,7 @@ pub fn openspec(project: &Project, from: &Path, branch: &str, dry_run: bool) -> 
     let mut mint = |kind: Kind, change: Option<&Id>| match &lock {
         Some(lock) => registry::mint(project, lock, kind, change),
         None => {
-            let id = Id::mint(kind, &taken);
+            let id = Id::mint(kind, &taken)?;
             taken.insert(id.clone());
             Ok(id)
         }
@@ -592,7 +588,7 @@ pub fn openspec(project: &Project, from: &Path, branch: &str, dry_run: bool) -> 
     let (caps, mut rec) = living(from, &project.root, &mut mint, &mut report, &mut files)?;
     let changes = from.join("changes");
     for dir in sorted_dirs(&changes)? {
-        if file_name(&dir) == "archive" {
+        if change::file_name(&dir)? == "archive" {
             report.archived = sorted_dirs(&dir)?.len();
         } else {
             let c = change(&dir, &caps, branch, &project.root, &mut mint, &mut files)?;
@@ -601,8 +597,9 @@ pub fn openspec(project: &Project, from: &Path, branch: &str, dry_run: bool) -> 
     }
     if let Some(lock) = &lock {
         for (path, text) in &files {
-            let parent = path.parent().unwrap();
-            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+            }
             std::fs::write(path, text).map_err(|e| Error::io(path, e))?;
         }
         let mut all = record::load(project)?;

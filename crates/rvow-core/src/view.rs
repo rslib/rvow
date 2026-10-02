@@ -8,7 +8,9 @@
 //!                  "reasons": [..] } ],
 //!                  "drift": [ { "class", "what" } ],
 //!                  "pending": [ { "id", "reason" } ] } ],
-//!   "plans": [ { "id", "title" } ],
+//!   "plans": [ { "id", "title", "tasks", "questions", "issues", "ready", "path" } ],
+//!   "backlog": [ { ...plan fields, "branch", "here" } ],  (every plan, this branch first)
+//!   "archive": [ { "id", "title", "outcome", "date" } ],  (newest first, at most 10)
 //!   "questions": [ { "change", "question", "recommended" } ],
 //!   "next": { "change", "task", "title", "verify", "state" } | null,
 //!   "needs_you": { "amendments", "questions", "blocked", "plans" } }
@@ -28,6 +30,9 @@ use crate::git;
 use crate::lint::questions;
 use crate::proof::{self, Now, State};
 use crate::store::Project;
+
+/// How many archived changes the view lists.
+pub const ARCHIVE_SHOWN: usize = 10;
 
 fn state_json(s: &State) -> (String, Vec<&'static str>) {
     match s {
@@ -50,22 +55,71 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
 
     let (all, _) = change::list(project)?;
     let mut plans = Vec::new();
+    let mut backlog = Vec::new();
     let mut open_questions = Vec::new();
     for c in all.iter().filter(|c| c.stage == Stage::Backlog) {
         let loaded = change::load(&c.path, &living)?;
-        if Some(&loaded.proposal.branch) != branch.as_ref() {
-            continue;
+        let here = Some(&loaded.proposal.branch) == branch.as_ref();
+        let asked = questions(&loaded.texts);
+        if here {
+            for q in &asked {
+                open_questions.push(json!({
+                    "change": c.id.to_string(),
+                    "question": q.question,
+                    "recommended": q.recommended,
+                }));
+            }
         }
-        for q in questions(&loaded.texts) {
-            open_questions.push(json!({
-                "change": c.id.to_string(),
-                "question": q.question,
-                "recommended": q.recommended,
-            }));
+        let missing = crate::plan::missing_programs(&top, &loaded.tasks).len();
+        let errors = loaded.errors().count();
+        let entry = json!({
+            "id": c.id.to_string(),
+            "title": loaded.proposal.title,
+            "branch": loaded.proposal.branch,
+            "here": here,
+            "tasks": loaded.tasks.len(),
+            "questions": asked.len(),
+            "issues": errors + missing,
+            "ready": asked.is_empty() && errors + missing == 0 && !loaded.tasks.is_empty(),
+            "path": c.path.display().to_string(),
+        });
+        if here {
+            plans.push(entry.clone());
         }
-        plans.push(json!({"id": c.id.to_string(), "title": loaded.proposal.title}));
+        backlog.push((!here, entry));
     }
-    if queue.is_empty() && plans.is_empty() {
+    backlog.sort_by_key(|(other, _)| *other);
+    let backlog: Vec<Value> = backlog.into_iter().map(|(_, v)| v).collect();
+    let mut archive: Vec<(String, Value)> = Vec::new();
+    for c in all
+        .iter()
+        .filter(|c| matches!(c.stage, Stage::Done | Stage::Dropped | Stage::Superseded))
+    {
+        let name = c
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let date = name
+            .get(..10)
+            .filter(|d| d.as_bytes().get(4) == Some(&b'-'))
+            .unwrap_or("")
+            .to_string();
+        let title = std::fs::read_to_string(c.path.join(change::PROPOSAL))
+            .map(|t| crate::proposal::parse_proposal(&t).0.title)
+            .unwrap_or_default();
+        archive.push((
+            format!("{date} {}", c.id),
+            json!({"id": c.id.to_string(), "title": title, "outcome": c.stage.name(), "date": date}),
+        ));
+    }
+    archive.sort_by(|a, b| b.0.cmp(&a.0));
+    let archive: Vec<Value> = archive
+        .into_iter()
+        .take(ARCHIVE_SHOWN)
+        .map(|(_, v)| v)
+        .collect();
+    if queue.is_empty() && backlog.is_empty() && archive.is_empty() {
         return Ok(None);
     }
 
@@ -125,6 +179,8 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
         "branch": branch,
         "changes": changes,
         "plans": plans,
+        "backlog": backlog,
+        "archive": archive,
         "questions": open_questions,
         "next": next,
         "needs_you": {
@@ -161,10 +217,23 @@ mod tests {
         .unwrap();
         let v = view(&p, &home, &repo).unwrap().unwrap();
         assert_eq!(v["plans"][0]["id"], plan.id.to_string().as_str());
+        assert_eq!(v["plans"][0]["questions"], 1);
+        assert_eq!(v["plans"][0]["tasks"], 0);
+        assert_eq!(v["plans"][0]["ready"], false);
+        assert!(v["plans"][0]["path"].as_str().unwrap().ends_with("-later"));
+        assert_eq!(v["archive"].as_array().unwrap().len(), 0);
         assert_eq!(v["questions"][0]["recommended"], "this");
         assert_eq!(v["needs_you"]["questions"], 1);
 
         crate::git::testrepo::git(&repo, &["checkout", "-q", "-b", "other"]);
-        assert_eq!(view(&p, &home, &repo).unwrap(), None);
+        let v = view(&p, &home, &repo).unwrap().unwrap();
+        assert_eq!(v["plans"].as_array().unwrap().len(), 0);
+        assert_eq!(v["backlog"][0]["branch"], "main");
+        assert_eq!(v["backlog"][0]["here"], false);
+
+        crate::archive::drop_change(&p, &plan.id.to_string(), "not needed").unwrap();
+        let v = view(&p, &home, &repo).unwrap().unwrap();
+        assert_eq!(v["archive"][0]["outcome"], "dropped");
+        assert_eq!(v["archive"][0]["title"], "Later");
     }
 }

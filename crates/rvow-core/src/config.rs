@@ -142,8 +142,9 @@ impl Config {
     }
 
     /// The canonical form that the vow hashes.
-    pub fn canonical(&self) -> String {
-        serde_json::to_string(self).expect("Config serializes")
+    pub fn canonical(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| Error::internal(format!("config does not serialize: {e}")))
     }
 }
 
@@ -174,7 +175,7 @@ mod tests {
         assert_eq!(c.inputs, ["c"]);
         assert_eq!(c.timeout_secs, 90);
         assert_eq!(c.machine.as_deref(), Some("laptop"));
-        assert!(!c.canonical().contains("laptop"));
+        assert!(!c.canonical().unwrap().contains("laptop"));
     }
 
     #[test]

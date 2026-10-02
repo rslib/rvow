@@ -149,6 +149,58 @@ function detail(v: any, p: Paint, width: number): string[] {
   return out;
 }
 
+type Option = { label: string; description?: string };
+type Ask = { ref: string; question: string; header?: string; options: Option[] };
+
+const OTHER = "Other (type your own answer)";
+const EDIT_HINT = "Edit the text each answer changes.";
+
+function asked(a: Ask): string {
+  const opts = a.options.map((o) => `  - ${o.label}${o.description ? `: ${o.description}` : ""}`);
+  return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${a.question}`, ...opts].join("\n");
+}
+
+async function ask(ctx: ExtensionContext): Promise<string> {
+  const r = await run(["clarify", "--json"], ctx.cwd, "", SLOW_MS);
+  if (!r || r.code !== 0) return `cannot read the open questions from '${BIN}'`;
+  let round: { questions?: Ask[]; remaining?: number };
+  try {
+    round = JSON.parse(r.out);
+  } catch {
+    return "cannot read the open questions: rvow printed no JSON";
+  }
+  const qs = round.questions ?? [];
+  if (qs.length === 0) return "no open questions";
+  if (!ctx.hasUI) {
+    return [
+      "No dialog here. Ask the user these in chat, then record each answer with",
+      '`rvow answer <ref> "<choice>" --via chat`.',
+      "",
+      ...qs.map(asked),
+      "",
+      `${round.remaining ?? 0} more after this round. ${EDIT_HINT}`,
+    ].join("\n");
+  }
+  const done: string[] = [];
+  const open = (from: number) => qs.slice(from).map((q) => q.ref);
+  for (const [i, q] of qs.entries()) {
+    const shown = new Map(
+      q.options.map((o) => [o.description ? `${o.label} - ${o.description}` : o.label, o.label]),
+    );
+    const title = `${q.header ? `${q.header}: ` : ""}${q.question}`;
+    let choice = await ctx.ui.select(title, [...shown.keys(), OTHER]);
+    if (choice === OTHER) choice = await ctx.ui.input(title, "your answer");
+    else if (choice !== undefined) choice = shown.get(choice);
+    if (!choice?.trim())
+      return [...done, `cancelled; still open: ${open(i).join(", ")}`].join("\n");
+    const a = await run(["answer", q.ref, choice, "--via", "dialog"], ctx.cwd, "", SLOW_MS);
+    if (!a || a.code !== 0)
+      return [...done, `cannot record ${q.ref}; still open: ${open(i).join(", ")}`].join("\n");
+    done.push(`${q.ref} ${q.question} -> ${choice}`);
+  }
+  return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
   let resend = false;
   let continues = 0;
@@ -234,7 +286,7 @@ export default function (pi: ExtensionAPI) {
     return { entries: [...event.entries, entry], continue: true };
   });
 
-  pi.registerCommand("rvow", {
+  pi.registerCommand("rvow-status", {
     description: "Show the rvow view of this branch",
     handler: async (_args, ctx) => {
       await refresh(ctx);
@@ -290,6 +342,17 @@ export default function (pi: ExtensionAPI) {
           r?.code === 0 ? "info" : "error",
         );
       }
+    },
+  });
+
+  pi.registerTool({
+    name: "rvow_ask",
+    label: "rvow ask",
+    description:
+      "Ask the user the open questions of the rvow plan on this branch, one round of at most 4, and record the answers. Use it instead of asking in chat.",
+    parameters: { type: "object", properties: {} } as any,
+    async execute(_id, _params, _signal, _update, ctx) {
+      return { content: [{ type: "text", text: await ask(ctx) }], details: {} };
     },
   });
 }

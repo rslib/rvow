@@ -179,6 +179,88 @@ pub fn remove_claude_settings(path: &Path) -> Result<Outcome> {
     Ok(Outcome::Written(path.to_path_buf()))
 }
 
+/// Runs `claude` with `args` and returns its stdout, or an error that names
+/// the command, so a failed step tells the user what to run by hand.
+fn run_claude(claude: &Path, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new(claude)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            Error::new(
+                "claude",
+                format!("cannot run claude: {e}"),
+                "install Claude Code or put claude on PATH",
+            )
+        })?;
+    if !out.status.success() {
+        return Err(Error::new(
+            "claude",
+            format!(
+                "claude {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            format!("run it by hand: claude {}", args.join(" ")),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn names(json: &str, key: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<Value>>(json)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.get(key).and_then(Value::as_str).map(String::from))
+        .collect()
+}
+
+/// Registers the marketplace in `dir` with Claude Code and installs or updates
+/// the rvow plugin from it. Each step is skipped or turned into an update when
+/// it already holds, so a repeated install is safe. Returns what it did.
+pub fn register_claude_mod(claude: &Path, dir: &Path) -> Result<Vec<String>> {
+    let mut done = Vec::new();
+    let dir_s = dir.display().to_string();
+    let markets = run_claude(claude, &["plugin", "marketplace", "list", "--json"])?;
+    let registered: Option<String> = serde_json::from_str::<Vec<Value>>(&markets)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| m.get("name").and_then(Value::as_str) == Some("rvow"))
+        .map(|m| {
+            m.get("path")
+                .or_else(|| m.get("installLocation"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        });
+    match registered {
+        Some(path) if Path::new(&path) == dir => {
+            run_claude(claude, &["plugin", "marketplace", "update", "rvow"])?;
+            done.push("updated the rvow marketplace".into());
+        }
+        Some(path) => {
+            // The rvow home moved (RVOW_HOME changed), so the old registration
+            // would keep serving the old copy.
+            run_claude(claude, &["plugin", "marketplace", "remove", "rvow"])?;
+            run_claude(claude, &["plugin", "marketplace", "add", &dir_s])?;
+            done.push(format!("moved the rvow marketplace from {path} to {dir_s}"));
+        }
+        None => {
+            run_claude(claude, &["plugin", "marketplace", "add", &dir_s])?;
+            done.push(format!("added the rvow marketplace from {dir_s}"));
+        }
+    }
+    let plugins = run_claude(claude, &["plugin", "list", "--json"])?;
+    if names(&plugins, "id").iter().any(|n| n == "rvow@rvow") {
+        run_claude(claude, &["plugin", "update", "rvow@rvow"])?;
+        done.push("updated the rvow plugin; restart Claude Code to load it".into());
+    } else {
+        run_claude(claude, &["plugin", "install", "rvow@rvow"])?;
+        done.push("installed the rvow plugin; restart Claude Code to load it".into());
+    }
+    Ok(done)
+}
+
 pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
     write_managed(&pi_dir.join("extensions/rvow.ts"), PI_EXTENSION, "//")
 }
@@ -441,6 +523,71 @@ mod tests {
             remove_claude_settings(&path).unwrap(),
             Outcome::Unchanged(_)
         ));
+    }
+
+    #[test]
+    fn registers_then_updates_through_the_claude_cli() {
+        let tmp = TempDir::new();
+        let log = tmp.0.join("log");
+        let state = tmp.0.join("installed");
+        let fake = tmp.0.join("claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {log}\ncase \"$*\" in\n  'plugin marketplace list --json') if [ -f {state} ]; then echo \"[{{\\\"name\\\":\\\"rvow\\\",\\\"path\\\":\\\"$(cat {state})\\\"}}]\"; else echo '[]'; fi ;;\n  'plugin list --json') if [ -f {state} ]; then echo '[{{\"id\":\"rvow@rvow\"}}]'; else echo '[]'; fi ;;\n  'plugin marketplace add '*) echo \"${{4}}\" > {state}.path ;;\n  'plugin install rvow@rvow') cat {state}.path > {state} ;;\nesac\n",
+                log = log.display(),
+                state = state.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let dir = tmp.0.join("market");
+        let first = register_claude_mod(&fake, &dir).unwrap();
+        assert!(
+            first[0].starts_with("added") && first[1].starts_with("installed"),
+            "{first:?}"
+        );
+        let second = register_claude_mod(&fake, &dir).unwrap();
+        assert!(
+            second[0].starts_with("updated") && second[1].starts_with("updated"),
+            "{second:?}"
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!("plugin marketplace add {}", dir.display())),
+            "{calls}"
+        );
+        assert!(calls.contains("plugin update rvow@rvow"), "{calls}");
+
+        let moved = tmp.0.join("new-home-market");
+        let third = register_claude_mod(&fake, &moved).unwrap();
+        assert!(
+            third[0].starts_with("moved the rvow marketplace"),
+            "{third:?}"
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.contains("plugin marketplace remove rvow"), "{calls}");
+        assert!(
+            calls.contains(&format!("plugin marketplace add {}", moved.display())),
+            "{calls}"
+        );
+
+        let failing = tmp.0.join("bad");
+        std::fs::write(&failing, "#!/bin/sh\necho boom >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&failing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let err = register_claude_mod(&failing, &dir).unwrap_err();
+        assert!(
+            err.fix.starts_with("run it by hand: claude plugin"),
+            "{err:?}"
+        );
     }
 
     #[test]
