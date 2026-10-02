@@ -79,6 +79,19 @@ const cut = (text: string, width: number) => {
 }
 
 let blocks = 0
+let warned = false
+const STDERR_LINES = 20
+const FOLD_LINES = 8
+/** The last brief sent to the model; a prompt carries the brief only when it changed. */
+let sentBrief = ''
+const BRIEF_WAIT_MS = 5_000
+
+/** Runs `work` after the current event returns, so the session never waits for rvow. */
+function later($: EngineInterface, work: () => Promise<unknown>) {
+  $.clock.after(0, () => {
+    void work().catch(() => undefined)
+  })
+}
 
 /** Runs `rvow hook claude <event>`. Any failure allows, so a broken rvow never locks the session. */
 async function hook($: EngineInterface, event: Event, input: object): Promise<any> {
@@ -91,7 +104,13 @@ async function hook($: EngineInterface, event: Event, input: object): Promise<an
     })
     const out = r.stdout.trim()
     return out ? JSON.parse(out) : undefined
-  } catch {
+  } catch (err) {
+    if (!warned) {
+      warned = true
+      $.ui.toast(
+        `rvow could not run, so its checks are off: ${cut(String((err as Error)?.message ?? err), 80)}`,
+      )
+    }
     return undefined
   }
 }
@@ -124,10 +143,9 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
       cwd: await $.session.cwd(),
       timeoutMs: 600_000,
     })
-    return {
-      tone: r.exitCode === 0 ? 'ok' : 'fail',
-      text: (r.stdout + r.stderr).trim() || 'no output',
-    }
+    // stderr holds the live output of check runs; it shows only when there is no result.
+    const text = r.stdout.trim() || r.stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
+    return { tone: r.exitCode === 0 ? 'ok' : 'fail', text: text || 'no output' }
   } catch (err) {
     return { tone: 'fail', text: `cannot run ${BIN}: ${String(err)}` }
   }
@@ -136,7 +154,11 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
 /** A pane press: runs rvow, keeps the outcome's short form as the notice, then refreshes. */
 async function act($: EngineInterface, argv: string[]) {
   await update($, noticeAtom, () => ({ tone: 'busy', text: `running rvow ${argv.join(' ')}` }))
-  const r = await rvow($, argv)
+  await settle($, await rvow($, argv))
+}
+
+/** Keeps the short form of an outcome as the notice, then refreshes. */
+async function settle($: EngineInterface, r: RvowNotice) {
   const lines = r.text.split('\n').filter((l) => l.trim())
   const text = r.tone === 'ok' ? (lines.at(-1) ?? '') : lines.slice(0, 3).join('\n')
   await update($, noticeAtom, () => ({ ...r, text }))
@@ -174,7 +196,18 @@ async function decide($: EngineInterface, listing: string, verb: 'accept' | 'rej
     }))
     return
   }
-  await act($, ['confirm', `--${verb}`, '--all', digest])
+  await update($, noticeAtom, () => ({ tone: 'busy', text: `running rvow confirm --${verb}` }))
+  const r = await rvow($, ['confirm', `--${verb}`, '--all', digest])
+  // A stale digest makes rvow print the current list: show it so the person reads it again.
+  if (r.tone === 'fail' && /^digest \S+$/m.test(r.text)) {
+    await update($, amendmentsAtom, () => r.text)
+    await update($, noticeAtom, () => ({
+      tone: 'fail',
+      text: 'the pending amendments changed; read the new list',
+    }))
+    return
+  }
+  await settle($, r)
 }
 
 async function userOnly(
@@ -266,13 +299,20 @@ export const register: Register = (on) => {
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
-      description:
-        'Show the rvow plan summary and review checklist: <CHG-id>; record the vow: <CHG-id> yes',
+      description: 'Run the baseline and record the vow for a plan: <CHG-id>',
+    })
+    await $.command.register({
+      name: 'rvow-review',
+      description: 'Show an rvow plan and the accept checklist, without running anything: <CHG-id>',
     })
     await $.command.register({
       name: 'rvow-confirm',
       description:
         'List pending rvow amendments, or: accept|reject <AMD-id>..., accept --all <digest>',
+    })
+    await $.command.register({
+      name: 'rvow-archive',
+      description: 'Archive an rvow change whose tasks are all proved: <CHG-id>',
     })
     await $.command.register({
       name: 'rvow-status',
@@ -283,7 +323,7 @@ export const register: Register = (on) => {
       description:
         'Ask the user the open questions of the rvow plan on this branch, one round of at most 4, and record the answers. Use it instead of asking in chat.',
     })
-    await refresh($)
+    later($, () => refresh($))
     return started
   })
 
@@ -306,10 +346,14 @@ export const register: Register = (on) => {
     return ran
   })
 
-  on('classic.SessionStart', async ($, e, next) => {
+  // The brief goes with each prompt whose brief changed, not with session start: startup never waits
+  // for rvow, and the model learns of an accept, a confirm or an archive the user ran.
+  on('classic.UserPromptSubmit', async ($, e, next) => {
     const result = await next(e)
-    const text = (await hook($, 'session-start', {}))?.hookSpecificOutput?.additionalContext
-    if (typeof text !== 'string' || !text) return result
+    const out = await Promise.race([hook($, 'session-start', {}), $.clock.sleep(BRIEF_WAIT_MS)])
+    const text = (out as any)?.hookSpecificOutput?.additionalContext
+    if (typeof text !== 'string' || !text || text === sentBrief) return result
+    sentBrief = text
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
   })
 
@@ -335,15 +379,29 @@ export const register: Register = (on) => {
   on('command.run', { command: 'rvow-confirm' }, async ($, e) => {
     const [verb, ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
     const argv =
-      verb === 'accept' || verb === 'reject' ? ['confirm', `--${verb}`, ...rest] : ['confirm']
+      verb === 'accept' || verb === 'reject'
+        ? ['confirm', `--${verb}`, ...rest]
+        : ['confirm', ...(verb ? [verb, ...rest] : [])]
     return userOnly($, e.origin, 'rvow-confirm', argv)
   })
 
   on('command.run', { command: 'rvow-accept' }, async ($, e) => {
-    const [id, answer] = e.args.trim().split(/\s+/).filter(Boolean)
-    if (!id) return { text: 'usage: /rvow-accept <CHG-id>, then /rvow-accept <CHG-id> yes' }
-    const argv = answer === 'yes' ? ['accept', id, '--yes'] : ['accept', id]
-    return userOnly($, e.origin, 'rvow-accept', argv)
+    const id = e.args.trim().split(/\s+/)[0]
+    if (!id)
+      return { text: 'usage: /rvow-accept <CHG-id>; read it first with /rvow-review <CHG-id>' }
+    return userOnly($, e.origin, 'rvow-accept', ['accept', id])
+  })
+
+  on('command.run', { command: 'rvow-review' }, async ($, e) => {
+    const id = e.args.trim().split(/\s+/)[0]
+    if (!id) return { text: 'usage: /rvow-review <CHG-id>' }
+    return { text: (await rvow($, ['review', id])).text }
+  })
+
+  on('command.run', { command: 'rvow-archive' }, async ($, e) => {
+    const id = e.args.trim()
+    if (!id) return { text: 'usage: /rvow-archive <CHG-id>' }
+    return userOnly($, e.origin, 'rvow-archive', ['archive', id])
   })
 
   on('command.run', { command: 'rvow-status' }, async ($) => {
@@ -687,6 +745,19 @@ export const register: Register = (on) => {
             </Box>
           )}
           {row(
+            ...(c.tasks.length > 0 &&
+            c.tasks.every((t) => t.state === 'proved') &&
+            c.pending.length === 0
+              ? [
+                  button(
+                    `archive:${c.id}`,
+                    'Archive',
+                    hot('x'),
+                    () => act($, ['archive', c.id]),
+                    true,
+                  ),
+                ]
+              : []),
             button(`details:${c.id}`, 'Details', hot('d'), () =>
               openDetail($, { kind: 'change', id: c.id, title: c.title }),
             ),
@@ -880,12 +951,31 @@ export const register: Register = (on) => {
     )
   })
 
+  // The row shows the head of a long rvow output; the model reads the stored text in full.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    const lines = e.props.text.split('\n')
+    if (!e.props.command.startsWith('rvow-') || lines.length <= FOLD_LINES) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text>{lines.slice(0, FOLD_LINES).join('\n')}</Text>
+        <Text
+          dimColor
+        >{`... ${lines.length - FOLD_LINES} more lines; the model has them all`}</Text>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const n = (await read($, viewAtom))?.needs_you
+    const view = await read($, viewAtom)
+    const n = view?.needs_you
+    const ready = view?.backlog.find((p) => p.here === true && p.ready === true)
     const parts = n
       ? [
-          n.plans > 0 && `${n.plans} plan${n.plans === 1 ? '' : 's'} to accept`,
-          n.amendments > 0 && `${n.amendments} amendment${n.amendments === 1 ? '' : 's'}`,
+          n.plans > 0 &&
+            `${n.plans} plan${n.plans === 1 ? '' : 's'} to accept${ready ? `: /rvow-accept ${ready.id}` : ''}`,
+          n.amendments > 0 &&
+            `${n.amendments} amendment${n.amendments === 1 ? '' : 's'}: /rvow-confirm`,
           n.questions > 0 && `${n.questions} question${n.questions === 1 ? '' : 's'}`,
         ].filter(Boolean)
       : []

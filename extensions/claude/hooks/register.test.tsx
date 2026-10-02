@@ -231,7 +231,8 @@ function sketch(n: El, width: number): string[] {
 }
 async function show(name: string, ui: any, width = 80) {
   const lines = sketch((await ui.drawn()) as El, width).map((l) => l.trimEnd())
-  ;(globalThis as any).console?.log(`--- ${name} (${width} columns) ---\n${lines.join('\n')}`)
+  if ((globalThis as any).process?.env?.RVOW_SHOW === '1')
+    (globalThis as any).console?.log(`--- ${name} (${width} columns) ---\n${lines.join('\n')}`)
   const wide = lines.filter((l) => l.length > width)
   expect(wide).toEqual([])
   return lines.join('\n')
