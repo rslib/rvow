@@ -152,6 +152,17 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
   }
 }
 
+async function waiting($: EngineInterface) {
+  await refresh($)
+  return (await read($, viewAtom))?.backlog.filter((x) => x.here && x.ready) ?? []
+}
+
+function list(ps: { id: string; title: string }[]) {
+  return ps.length
+    ? [`${ps.length} plans wait; name one:`, ...ps.map((p) => `${p.id} ${p.title}`)].join('\n')
+    : 'no plan waits on this branch; see /rvow-status'
+}
+
 /** A pane press: runs rvow, keeps the outcome's short form as the notice, then refreshes. */
 async function act($: EngineInterface, argv: string[]) {
   await update($, noticeAtom, () => ({ tone: 'busy', text: `running rvow ${argv.join(' ')}` }))
@@ -411,14 +422,25 @@ export const register: Register = (on) => {
 
   on('command.run', { command: 'rvow-accept' }, async ($, e) => {
     const id = e.args.trim().split(/\s+/)[0]
-    if (!id)
-      return { text: 'usage: /rvow-accept <CHG-id>; read it first with /rvow-review <CHG-id>' }
+    if (!id) {
+      const ps = await waiting($)
+      const [p] = ps
+      if (!p || ps.length > 1) return { text: list(ps) }
+      return {
+        text: `one plan waits: ${p.id} ${p.title}; read it with /rvow-review, then run /rvow-accept ${p.id}`,
+      }
+    }
     return userOnly($, e.origin, 'rvow-accept', ['accept', id])
   })
 
   on('command.run', { command: 'rvow-review' }, async ($, e) => {
-    const typed = e.args.trim().split(/\s+/)[0]
-    if (!typed) return { text: 'usage: /rvow-review <CHG-id>' }
+    let typed = e.args.trim().split(/\s+/)[0]
+    if (!typed) {
+      const ps = await waiting($)
+      const [p] = ps
+      if (!p || ps.length > 1) return { text: list(ps) }
+      typed = p.id
+    }
     await refresh($)
     const p = (await read($, viewAtom))?.backlog.find((x) => x.here && x.id.startsWith(typed))
     if (!p) return { text: `${typed} is not a backlog plan on this branch; see /rvow-status` }
