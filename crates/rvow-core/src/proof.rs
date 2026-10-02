@@ -496,6 +496,31 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
     Ok(out)
 }
 
+/// The ids of the tasks on the current branch whose proof is stale, in queue
+/// order.
+pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> {
+    let top = git::toplevel(cwd)?;
+    let (living, _) = change::load_living(project)?;
+    let changes = active(project, &living)?;
+    let config = config::load(project, home)?;
+    let now = Now {
+        top: &top,
+        config: &config,
+        env: fingerprint::env(&top, &config)?,
+        living: &living,
+    };
+    let branch = git::branch(&top)?.unwrap_or_default();
+    let mut out = Vec::new();
+    for c in on_branch(&changes, &branch) {
+        for t in &c.loaded.tasks {
+            if matches!(state(c, t, &now)?, State::Stale(_)) {
+                out.push(t.id.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -560,7 +585,10 @@ pub(crate) mod tests {
         let s = status(&p, &home, &repo, false).unwrap();
         assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed"]));
 
+        assert_eq!(stale_tasks(&p, &home, &repo).unwrap(), [task]);
+
         git(&repo, &["checkout", "-q", "-b", "other"]);
+        assert!(stale_tasks(&p, &home, &repo).unwrap().is_empty());
         assert!(status(&p, &home, &repo, false).unwrap().is_empty());
         assert_eq!(status(&p, &home, &repo, true).unwrap().len(), 1);
     }

@@ -17,10 +17,11 @@ use crate::git;
 use crate::id::{Id, Ref};
 use crate::ledger::{self, Kind};
 use crate::lint::{Finding, clarifications};
+use crate::proof;
 use crate::registry;
 use crate::runner::{self, Outcome};
 use crate::spec::{DeltaOp, Requirement, Spec, StepKind};
-use crate::store::Project;
+use crate::store::{Lock, Project};
 use crate::tasks::Task;
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -321,20 +322,14 @@ fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathB
         .collect())
 }
 
-/// Mints real ids, stores the vowed content and records the vow.
-pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
-    let Prepared {
-        change,
-        loaded,
-        living,
-        top,
-        branch,
-        base_commit,
-        config,
-        baseline,
-    } = prepared;
-    let lock = project.lock()?;
-
+/// Mints a real id for every placeholder of a change, rewrites each Markdown
+/// file of the change and returns the mapping in mint order.
+pub fn mint_placeholders(
+    project: &Project,
+    lock: &Lock,
+    change: &ChangeDir,
+    loaded: &Loaded,
+) -> Result<Vec<(String, Id)>> {
     let mut placeholders: Vec<Ref> = Vec::new();
     let mut seen = HashSet::new();
     let all_refs = loaded
@@ -354,7 +349,7 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     }
     let mut minted = Vec::new();
     for p in &placeholders {
-        let id = registry::mint(project, &lock, p.kind(), Some(&change.id))?;
+        let id = registry::mint(project, lock, p.kind(), Some(&change.id))?;
         minted.push((p.to_string(), id));
     }
     for (rel, text) in &loaded.texts {
@@ -367,6 +362,67 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
             std::fs::write(&path, new).map_err(|e| Error::io(&path, e))?;
         }
     }
+    Ok(minted)
+}
+
+/// `rvow ids`: mints ids for the placeholders of `target`, or of every active
+/// change on the current branch, and returns the mapping in mint order.
+pub fn mint_active(
+    project: &Project,
+    cwd: &Path,
+    target: Option<&str>,
+) -> Result<Vec<(String, Id)>> {
+    let lock = project.lock()?;
+    let (living, _) = change::load_living(project)?;
+    let dirs = match target {
+        Some(t) => {
+            let c = change::resolve(project, t)?;
+            if c.stage != Stage::Active {
+                let fix = if c.stage == Stage::Backlog {
+                    "placeholders stay valid in backlog; accept mints them"
+                } else {
+                    "only an active change has placeholders to mint"
+                };
+                return Err(Error::new(
+                    "stage",
+                    format!("{} is in {}, not in active", c.id, c.stage.name()),
+                    fix,
+                ));
+            }
+            vec![c]
+        }
+        None => {
+            let branch = git::branch(cwd)?;
+            proof::active(project, &living)?
+                .into_iter()
+                .filter(|a| a.branch() == branch.as_deref())
+                .map(|a| a.dir)
+                .collect()
+        }
+    };
+    let mut out = Vec::new();
+    for dir in dirs {
+        let loaded = change::load(&dir.path, &living)?;
+        out.extend(mint_placeholders(project, &lock, &dir, &loaded)?);
+    }
+    Ok(out)
+}
+
+/// Mints real ids, stores the vowed content and records the vow.
+pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
+    let Prepared {
+        change,
+        loaded,
+        living,
+        top,
+        branch,
+        base_commit,
+        config,
+        baseline,
+    } = prepared;
+    let lock = project.lock()?;
+
+    let minted = mint_placeholders(project, &lock, &change, &loaded)?;
     let loaded = change::load(&change.path, &living)?;
     if let Some(f) = loaded.errors().next() {
         return Err(Error::new(
@@ -551,5 +607,33 @@ mod tests {
         .unwrap();
         let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
         assert_eq!(err.code, "clarification");
+    }
+
+    #[test]
+    fn ids_mints_for_active_changes_on_the_branch() {
+        let (_tmp, p, repo, _) = crate::proof::tests::accepted();
+        let dir = std::fs::read_dir(p.root.join("active"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let tasks = dir.join("tasks.md");
+        let mut text = std::fs::read_to_string(&tasks).unwrap();
+        text.push_str("- TSK-new1 More\n  verify: true\n  files: a\n");
+        std::fs::write(&tasks, text).unwrap();
+
+        let out = mint_active(&p, &repo, None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "TSK-new1");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        assert!(text.contains(&out[0].1.to_string()) && !text.contains("TSK-new1"));
+        assert!(mint_active(&p, &repo, None).unwrap().is_empty());
+
+        git(&repo, &["checkout", "-q", "-b", "other"]);
+        let backlog = change::new(&p, "Later", "other", true).unwrap();
+        let err = mint_active(&p, &repo, Some(&backlog.id.to_string())).unwrap_err();
+        assert_eq!(err.code, "stage");
+        assert!(err.fix.contains("accept mints them"));
     }
 }

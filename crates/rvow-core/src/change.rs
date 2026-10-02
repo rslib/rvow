@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use crate::diag::{Diagnostic, Severity};
 use crate::error::{Error, Result};
-use crate::id::{self, Id, Kind};
+use crate::id::{self, Id, Kind, Ref};
 use crate::lint::{self, Finding, Living};
 use crate::proposal::{Proposal, parse_proposal};
 use crate::registry;
-use crate::spec::{DeltaFile, Spec, parse_deltas, parse_spec};
+use crate::spec::{DeltaFile, DeltaOp, Spec, parse_deltas, parse_spec};
 use crate::store::Project;
 use crate::tasks::{Task, parse_tasks};
 
@@ -147,6 +147,82 @@ pub fn resolve(project: &Project, input: &str) -> Result<ChangeDir> {
         .into_iter()
         .find(|c| c.id == id)
         .expect("resolved id is listed"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub id: Id,
+    pub stage: Stage,
+    pub branch: String,
+    pub title: String,
+}
+
+/// One line of data per change in every stage.
+pub fn summaries(project: &Project) -> Result<Vec<Summary>> {
+    let (changes, _) = list(project)?;
+    let mut out = Vec::new();
+    for c in changes {
+        let (p, _) = parse_proposal(&read(&c.path.join(PROPOSAL))?);
+        out.push(Summary {
+            id: c.id,
+            stage: c.stage,
+            branch: p.branch,
+            title: p.title,
+        });
+    }
+    Ok(out)
+}
+
+/// Where a change, task or requirement lives: a folder for a change, else
+/// `file:line`. Tasks come from open changes, requirements from the living
+/// specs or from an open change that adds them.
+pub fn locate(project: &Project, input: &str) -> Result<String> {
+    let (changes, _) = list(project)?;
+    let (living, _) = load_living(project)?;
+    let mut places: Vec<(Id, String)> = changes
+        .iter()
+        .map(|c| (c.id.clone(), c.path.display().to_string()))
+        .collect();
+    for (cap, spec) in &living {
+        let file = project.root.join("specs").join(cap).join("spec.md");
+        for r in &spec.requirements {
+            if let Ref::Id(id) = &r.id {
+                places.push((id.clone(), format!("{}:{}", file.display(), r.line)));
+            }
+        }
+    }
+    for c in changes
+        .iter()
+        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
+    {
+        let loaded = load(&c.path, &living)?;
+        for t in &loaded.tasks {
+            if let Ref::Id(id) = &t.id {
+                let file = c.path.join(TASKS);
+                places.push((id.clone(), format!("{}:{}", file.display(), t.line)));
+            }
+        }
+        for (cap, f) in &loaded.deltas {
+            let file = c.path.join(DELTAS).join(format!("{cap}.md"));
+            for d in f.deltas.iter().filter(|d| d.op == DeltaOp::Add) {
+                if let Ref::Id(id) = &d.req.id {
+                    places.push((id.clone(), format!("{}:{}", file.display(), d.req.line)));
+                }
+            }
+        }
+    }
+    let id = id::resolve(input, places.iter().map(|(id, _)| id)).map_err(|e| {
+        Error::new(
+            "path",
+            format!("{input}: {e}"),
+            "give more characters of the id, or run rvow ls to see the changes",
+        )
+    })?;
+    Ok(places
+        .into_iter()
+        .find(|(i, _)| *i == id)
+        .expect("resolved id is listed")
+        .1)
 }
 
 /// A lowercase ASCII slug of at most 40 characters.
@@ -381,6 +457,62 @@ mod tests {
 
         let loaded = load(&c.path, &[]).unwrap();
         assert_eq!(loaded.proposal.branch, "main");
+        assert_eq!(loaded.proposal.title, "Output tail");
+        let sums = summaries(&p).unwrap();
+        assert_eq!(sums.len(), 2);
+        assert!(
+            sums.iter()
+                .any(|s| s.id == c.id && s.stage == Stage::Backlog && s.title == "Output tail")
+        );
         assert_eq!(loaded.errors().count(), 0, "{:?}", loaded.findings);
+    }
+
+    #[test]
+    fn locate_finds_changes_tasks_and_requirements() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = new(&p, "Out", "main", false).unwrap();
+        std::fs::write(
+            c.path.join(TASKS),
+            "# Tasks\n\n- TSK-x7k2q4 Write\n  covers: REQ-k3f9m2\n  verify: true\n  files: a\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c.path.join("specs/out.md"),
+            "## ADD REQ-k3f9m2 Out\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n",
+        )
+        .unwrap();
+        let spec = p.root.join("specs/cap");
+        std::fs::create_dir_all(&spec).unwrap();
+        std::fs::write(
+            spec.join("spec.md"),
+            "# Cap\n\n## REQ-q8w2c7 Old\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            locate(&p, &c.id.to_string()).unwrap(),
+            c.path.display().to_string()
+        );
+        assert_eq!(
+            locate(&p, "x7k").unwrap(),
+            format!("{}:3", c.path.join(TASKS).display())
+        );
+        assert_eq!(
+            locate(&p, "REQ-k3f").unwrap(),
+            format!("{}:1", c.path.join("specs/out.md").display())
+        );
+        assert_eq!(
+            locate(&p, "q8w").unwrap(),
+            format!("{}:3", spec.join("spec.md").display())
+        );
+        assert_eq!(locate(&p, "zzz").unwrap_err().code, "path");
+        assert!(
+            locate(&p, "REQ-")
+                .unwrap_err()
+                .message
+                .contains("no id matches")
+        );
     }
 }

@@ -2,7 +2,8 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
+use rvow_core::brief;
 use rvow_core::change::{self, Stage};
 use rvow_core::diag::Severity;
 use rvow_core::error::{Error, Result};
@@ -48,10 +49,28 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// List every change with its stage, branch and title.
+    Ls,
+    /// Print where a change, task or requirement lives.
+    Path {
+        /// A CHG, TSK or REQ id or a unique prefix of it.
+        id: String,
+    },
+    /// Mint real ids for the placeholders of an active change.
+    Ids {
+        /// The change id or a unique prefix of it, default every active change on this branch.
+        change: Option<String>,
+    },
+    /// Print the short generated brief for this branch.
+    Brief,
     /// Run a task's stored verify command and record the proof.
+    #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
     Prove {
         /// The task id or a unique prefix of it.
-        task: String,
+        task: Option<String>,
+        /// Prove every stale task on this branch.
+        #[arg(long)]
+        stale: bool,
     },
     /// Show the state of each task on this branch.
     Status {
@@ -83,7 +102,12 @@ fn main() -> ExitCode {
         Cmd::New { title, small } => new(&title.join(" "), small),
         Cmd::Validate => validate(),
         Cmd::Accept { change, yes } => accept(&change, yes),
-        Cmd::Prove { task } => prove(&task),
+        Cmd::Ls => ls(),
+        Cmd::Path { id } => path(&id),
+        Cmd::Ids { change } => ids(change.as_deref()),
+        Cmd::Brief => brief(),
+        Cmd::Prove { task: Some(t), .. } => prove(&t),
+        Cmd::Prove { .. } => prove_stale(),
         Cmd::Status { all } => status(all),
         Cmd::Gate { strict, rerun } => gate(Options { strict, rerun }),
     };
@@ -262,10 +286,7 @@ fn accept(target: &str, yes: bool) -> Result<bool> {
     Ok(true)
 }
 
-fn prove(task: &str) -> Result<bool> {
-    let home = store::home_dir()?;
-    let p = project(&home)?;
-    let r = proof::prove(&p, &home, &cwd()?, task, &mut std::io::stderr())?;
+fn print_result(r: &proof::Proved) {
     let o = &r.outcome;
     let tests = o.tests_run.map_or("unknown".to_string(), |n| n.to_string());
     let verdict = if r.proved {
@@ -294,11 +315,71 @@ fn prove(task: &str) -> Result<bool> {
             r.task
         );
     }
+}
+
+fn prove(task: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let r = proof::prove(&p, &home, &cwd()?, task, &mut std::io::stderr())?;
+    print_result(&r);
     match &r.next {
         Some(next) => print!("next: {next}"),
         None => println!("next: every task on this branch is proved or blocked"),
     }
     Ok(r.proved)
+}
+
+fn prove_stale() -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let cwd = cwd()?;
+    let stale = proof::stale_tasks(&p, &home, &cwd)?;
+    if stale.is_empty() {
+        println!("no stale tasks");
+        return Ok(true);
+    }
+    let mut all = true;
+    for task in &stale {
+        let r = proof::prove(&p, &home, &cwd, task, &mut std::io::stderr())?;
+        print_result(&r);
+        all &= r.proved;
+    }
+    Ok(all)
+}
+
+fn ls() -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    for s in change::summaries(&p)? {
+        println!("{} {:<10} {} {}", s.id, s.stage.name(), s.branch, s.title);
+    }
+    Ok(true)
+}
+
+fn path(id: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    println!("{}", change::locate(&project(&home)?, id)?);
+    Ok(true)
+}
+
+fn ids(target: Option<&str>) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let minted = vow::mint_active(&p, &cwd()?, target)?;
+    for (from, to) in &minted {
+        println!("{from} -> {to}");
+    }
+    if minted.is_empty() {
+        println!("no placeholders");
+    }
+    Ok(true)
+}
+
+fn brief() -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    print!("{}", brief::brief(&p, &home, &cwd()?)?);
+    Ok(true)
 }
 
 fn status(all: bool) -> Result<bool> {

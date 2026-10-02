@@ -3,6 +3,7 @@ use crate::diag::{Diagnostic, Rule};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     pub branch: String,
+    pub title: String,
     pub sections: Vec<String>,
 }
 
@@ -11,6 +12,7 @@ const REQUIRED: [&str; 2] = ["Why", "What changes"];
 pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
     let mut diags = Vec::new();
     let mut branch = String::new();
+    let mut title = String::new();
     let mut sections = Vec::new();
     for (i, line) in src.lines().enumerate() {
         if let Some(b) = line.strip_prefix("branch:") {
@@ -22,6 +24,10 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
                 ));
             }
             branch = b.trim().to_string();
+        } else if let Some(t) = line.strip_prefix("# ") {
+            if title.is_empty() {
+                title = t.trim().to_string();
+            }
         } else if let Some(s) = line.strip_prefix("## ") {
             sections.push(s.trim().to_string());
         }
@@ -42,7 +48,14 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
             ));
         }
     }
-    (Proposal { branch, sections }, diags)
+    (
+        Proposal {
+            branch,
+            title,
+            sections,
+        },
+        diags,
+    )
 }
 
 #[cfg(test)]
@@ -56,6 +69,14 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(p.branch, "feat/x");
         assert_eq!(p.sections, ["Why", "What changes", "Assumptions"]);
+    }
+
+    #[test]
+    fn title_is_the_first_h1() {
+        let (p, _) = parse_proposal("branch: b\n\n# Output tail\n## Why\n# Later\n");
+        assert_eq!(p.title, "Output tail");
+        let (p, _) = parse_proposal("branch: b\n## Why\n");
+        assert_eq!(p.title, "");
     }
 
     #[test]

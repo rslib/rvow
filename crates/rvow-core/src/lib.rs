@@ -1,3 +1,4 @@
+pub mod brief;
 pub mod change;
 pub mod config;
 pub mod diag;
