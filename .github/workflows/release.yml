@@ -85,7 +85,7 @@ jobs:
           tar -czf "$archive" -C pkg rvow
           shasum -a 256 "$archive" > "$archive.sha256"
           cat "$archive.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rvow-${{ matrix.name }}
           path: rvow-${{ matrix.name }}-v*.tar.gz*
