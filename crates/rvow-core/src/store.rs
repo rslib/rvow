@@ -193,25 +193,41 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         let p = root.join(name);
         std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
     }
-    if mode == Mode::Repo {
-        add_union_merge(&top)?;
+    match mode {
+        Mode::Repo => {
+            add_union_merge(&top)?;
+            add_lines(&top.join(".gitignore"), &[&format!("{REPO_DIR}/.lock")])?;
+        }
+        Mode::Home => add_lines(&home.join(".gitignore"), &[".lock", "claude-plugin/"])?,
     }
     Ok(Project { root, meta })
 }
 
 fn add_union_merge(top: &Path) -> Result<()> {
-    let line = format!("{REPO_DIR}/**/*.jsonl merge=union");
-    let path = top.join(".gitattributes");
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
-    if old.lines().any(|l| l.trim() == line) {
+    add_lines(
+        &top.join(".gitattributes"),
+        &[&format!("{REPO_DIR}/**/*.jsonl merge=union")],
+    )
+}
+
+/// Appends each of `lines` to the file at `path` unless it is already there.
+fn add_lines(path: &Path, lines: &[&str]) -> Result<()> {
+    let mut text = std::fs::read_to_string(path).unwrap_or_default();
+    let before = text.len();
+    for line in lines {
+        if text.lines().any(|l| l.trim() == *line) {
+            continue;
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    if text.len() == before {
         return Ok(());
     }
-    let sep = if old.is_empty() || old.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    std::fs::write(&path, format!("{old}{sep}{line}\n")).map_err(|e| Error::io(&path, e))
+    std::fs::write(path, text).map_err(|e| Error::io(path, e))
 }
 
 /// Finds the rvow tree of the repository that contains `dir`: repo mode when
@@ -300,6 +316,25 @@ impl Project {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
+
+    #[test]
+    fn init_writes_the_ignore_lines() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let home = tmp.0.join("home");
+        init(&repo, &home, Mode::Home).unwrap();
+        let text = std::fs::read_to_string(home.join(".gitignore")).unwrap();
+        assert_eq!(text, ".lock\nclaude-plugin/\n");
+
+        let other = repo_with_commit(&tmp.0, "o");
+        std::fs::write(other.join(".gitignore"), "target/").unwrap();
+        init(&other, &tmp.0.join("home2"), Mode::Repo).unwrap();
+        let text = std::fs::read_to_string(other.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\nrvow/.lock\n");
+        add_lines(&other.join(".gitignore"), &["rvow/.lock", "x"]).unwrap();
+        let text = std::fs::read_to_string(other.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\nrvow/.lock\nx\n");
+    }
 
     #[test]
     fn home_order() {

@@ -600,6 +600,12 @@ fn init(in_repo: bool) -> Result<Reply> {
     r.line(format!("created {}", p.root.display()));
     r.set("created", p.root.display().to_string());
     r.help("Run `rvow new \"<title>\"` to plan a change");
+    if mode == Mode::Home && git::toplevel(&home).is_err() {
+        r.help(format!(
+            "Run `git -C {} init` to version your plans; init wrote its .gitignore",
+            home.display()
+        ));
+    }
     Ok(r)
 }
 

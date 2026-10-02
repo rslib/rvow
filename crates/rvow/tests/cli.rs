@@ -330,6 +330,24 @@ fn archive_prints_next_last() {
 }
 
 #[test]
+fn init_hints_git_init_for_an_untracked_home() {
+    let r = Repo::new("inithint");
+    let out = r.ok(&["init"]);
+    let home = r.0.join("home");
+    assert!(
+        out.contains(&format!("git -C {} init", home.display())),
+        "{out}"
+    );
+    assert!(home.join(".gitignore").exists());
+
+    let q = Repo::new("inithintrepo");
+    let out = q.ok(&["init", "--in-repo"]);
+    assert!(!out.contains("git -C"), "{out}");
+    let ignore = std::fs::read_to_string(q.repo().join(".gitignore")).unwrap();
+    assert!(ignore.lines().any(|l| l == "rvow/.lock"), "{ignore}");
+}
+
+#[test]
 fn version_is_bare() {
     let r = Repo::new("version");
     for flag in ["--version", "-V", "-v"] {
