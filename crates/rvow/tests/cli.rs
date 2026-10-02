@@ -95,10 +95,215 @@ fn accepted(name: &str) -> (Repo, PathBuf, String) {
         .unwrap();
     let text = String::from_utf8(accept.stdout).unwrap();
     assert!(accept.status.success(), "{text}");
-    assert!(text.contains("before you accept, check:"), "{text}");
     assert!(text.contains(&format!("accepted {id} at ")), "{text}");
     assert!(!text.contains("help["), "{text}");
     (r, root, id)
+}
+
+#[test]
+fn accept_yes_prints_no_checklist() {
+    let r = Repo::new("yeschecklist");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("specs/out.md"),
+        "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+    )
+    .unwrap();
+    let accept = r
+        .cmd(env!("CARGO_BIN_EXE_rvow"))
+        .args(["accept", &id, "--yes"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8(accept.stdout).unwrap();
+    assert!(accept.status.success(), "{out}");
+    assert!(out.contains(&format!("accepted {id} at ")), "{out}");
+    assert!(!out.contains("before you accept, check:"), "{out}");
+}
+
+#[test]
+fn confirm_ids_list_only_those() {
+    let (r, root, id) = accepted("confirmids");
+    let dir = std::fs::read_dir(root.join("active"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains(&id))
+        .unwrap();
+    let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    for (i, title) in ["Write one", "Write two"].iter().enumerate() {
+        std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", title)).unwrap();
+        r.ok(&["amend", "--reason", &format!("edit {i}")]);
+    }
+    let all = r.ok(&["confirm"]);
+    let ids: Vec<&str> = all
+        .lines()
+        .filter_map(|l| l.split(" for ").next().filter(|s| s.starts_with("AMD-")))
+        .collect();
+    assert_eq!(ids.len(), 2, "{all}");
+    let one = r.ok(&["confirm", ids[0]]);
+    assert!(one.contains(ids[0]), "{one}");
+    assert!(!one.contains(ids[1]), "{one}");
+    let (out, code) = r.rvow(&["confirm", "AMD-nope"]);
+    assert_eq!(code, 1, "{out}");
+}
+
+#[test]
+fn confirm_shows_changed_lines_only() {
+    let (r, root, id) = accepted("confirmlines");
+    let dir = std::fs::read_dir(root.join("active"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains(&id))
+        .unwrap();
+    let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    std::fs::write(
+        dir.join("tasks.md"),
+        tasks.replace("echo 'test", "echo 'tests"),
+    )
+    .unwrap();
+    r.ok(&["amend", "--reason", "edit"]);
+    let out = r.ok(&["confirm"]);
+    assert!(out.contains("\n    - "), "{out}");
+    assert!(out.contains("\n    + "), "{out}");
+    assert!(!out.contains("before:") && !out.contains("after:"), "{out}");
+    assert!(!out.contains("    - - TSK-new1 Write ok"), "{out}");
+}
+
+#[test]
+fn accept_records_and_review_runs_nothing() {
+    let r = Repo::new("reviewaccept");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: touch ran.txt && grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("specs/out.md"),
+        "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+    )
+    .unwrap();
+    let review = r.ok(&["review", &id]);
+    assert!(review.contains("before you accept, check:"), "{review}");
+    assert!(review.contains("Write ok"), "{review}");
+    assert!(
+        !r.repo().join("ran.txt").exists(),
+        "review ran a verify command"
+    );
+    let out = r
+        .cmd(env!("CARGO_BIN_EXE_rvow"))
+        .args(["accept", &id])
+        .output()
+        .unwrap();
+    let accept = String::from_utf8(out.stdout).unwrap();
+    assert!(out.status.success(), "{accept}");
+    assert!(accept.contains(&format!("accepted {id} at ")), "{accept}");
+    assert!(!accept.contains("before you accept, check:"), "{accept}");
+}
+
+#[test]
+fn accept_output_is_short() {
+    let r = Repo::new("shortaccept");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "Small"]);
+    let id2 = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 One\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n\n- TSK-new2 Two\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
+    )
+    .unwrap();
+    let accept = r
+        .cmd(env!("CARGO_BIN_EXE_rvow"))
+        .args(["accept", &id2])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(accept.stdout).unwrap();
+    assert!(accept.status.success(), "{text}");
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(text.contains("\nnext: TSK-"), "{text}");
+    assert!(text.contains(&format!("accepted {id2} at ")), "{text}");
+    assert!(text.contains(": 2 tasks, base "), "{text}");
+}
+
+#[test]
+fn decisions_end_with_next() {
+    let (r, root, id) = accepted("nextline");
+    let brief = r.ok(&["brief"]);
+    assert!(brief.contains("next: TSK-"), "{brief}");
+    let dir = std::fs::read_dir(root.join("active"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains(&id))
+        .unwrap();
+    let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    for (title, flag, want) in [
+        ("Write one", "--accept", "next: the plan edit stands"),
+        ("Write two", "--reject", "next: undo the rejected plan edit"),
+    ] {
+        std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", title)).unwrap();
+        let amended = r.ok(&["amend", "--reason", "edit"]);
+        let amd = amended
+            .split_whitespace()
+            .find(|w| w.starts_with("AMD-"))
+            .unwrap()
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+            .to_owned();
+        let out = r.ok(&["confirm", &amd, flag]);
+        assert!(out.contains(want), "{out}");
+    }
+    std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", "Write one")).unwrap();
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    let task = brief
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("next: "))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap()
+        .to_owned();
+    let proved = r
+        .cmd(env!("CARGO_BIN_EXE_rvow"))
+        .args(["prove", &task])
+        .output()
+        .unwrap();
+    assert!(proved.status.success());
+    let out = r.ok(&["archive", &id]);
+    assert!(out.contains("next: pick the next plan"), "{out}");
+}
+
+#[test]
+fn stale_digest_prints_the_list() {
+    let (r, root, id) = accepted("staledigest");
+    let dir = std::fs::read_dir(root.join("active"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains(&id))
+        .unwrap();
+    let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", "Write one")).unwrap();
+    r.ok(&["amend", "--reason", "one"]);
+    let listed = r.ok(&["confirm"]);
+    let digest = listed
+        .lines()
+        .find_map(|l| l.strip_prefix("digest "))
+        .unwrap()
+        .to_owned();
+    std::fs::write(dir.join("tasks.md"), tasks.replace("Write ok", "Write two")).unwrap();
+    r.ok(&["amend", "--reason", "two"]);
+    let (out, code) = r.rvow(&["confirm", "--accept", "--all", &digest]);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(out.matches(" for CHG-").count(), 2, "{out}");
+    assert!(out.contains("digest "), "{out}");
+    assert!(out.contains("changed since it was listed"), "{out}");
 }
 
 #[test]

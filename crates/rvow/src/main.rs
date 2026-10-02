@@ -1,4 +1,4 @@
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -73,9 +73,14 @@ enum Cmd {
     Accept {
         /// The change id or a unique prefix of it.
         change: String,
-        /// Record the vow without asking.
-        #[arg(long)]
+        /// Kept for old callers; accept never asks.
+        #[arg(long, hide = true)]
         yes: bool,
+    },
+    /// Print a plan and the accept checklist; runs no verify command.
+    Review {
+        /// The change id or a unique prefix of it.
+        change: String,
     },
     /// List every change with its stage, branch and title.
     Ls,
@@ -315,7 +320,8 @@ fn main() -> ExitCode {
         Cmd::Init { in_repo } => init(in_repo),
         Cmd::New { title, spec } => new(&title.join(" "), !spec),
         Cmd::Validate => validate(),
-        Cmd::Accept { change, yes } => accept(&change, yes).map(Reply::done),
+        Cmd::Accept { change, .. } => accept(&change).map(Reply::done),
+        Cmd::Review { change } => review(&change),
         Cmd::Ls => ls(),
         Cmd::Path { id } => path(&id),
         Cmd::Show { id, full } => show(&id, full),
@@ -750,63 +756,41 @@ fn validate() -> Result<Reply> {
     Ok(r)
 }
 
-fn ask_yes(question: &str) -> Result<bool> {
-    let stdin = std::io::stdin();
-    if !stdin.is_terminal() {
-        return Err(Error::new(
-            "no-tty",
-            "accept needs a confirmation and stdin is not a terminal",
-            "run it again with --yes after reading the summary",
-        ));
-    }
-    print!("{question} [y/N] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| Error::io(Path::new("stdin"), e))?;
-    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+/// The `next:` part of the brief, so the agent learns what to do as soon as the user decides.
+fn next_for_agent(p: &store::Project, home: &Path) -> String {
+    let text = brief::brief(p, home, &cwd().unwrap_or_default()).unwrap_or_default();
+    text.find("next:")
+        .and_then(|i| text[i..].lines().next())
+        .unwrap_or("next: run rvow brief")
+        .to_string()
 }
 
-fn accept(target: &str, yes: bool) -> Result<bool> {
+fn review(target: &str) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let text = show::show(&project(&home)?, target)?;
+    Ok(Reply::lines(format!("{text}\n\n{REVIEW}")))
+}
+
+fn accept(target: &str) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     let c = change::resolve(&p, target)?;
     let prepared = vow::prepare(&p, &home, c, &cwd()?, &mut std::io::stderr())?;
-    println!(
-        "{} on {}: {} tasks, base {}",
-        prepared.change.id,
-        prepared.branch,
-        prepared.loaded.tasks.len(),
-        &prepared.base_commit[..12.min(prepared.base_commit.len())]
-    );
     for b in &prepared.baseline {
-        let tests = b
-            .outcome
-            .tests_run
-            .map_or("unknown".to_string(), |n| n.to_string());
-        let exit = b
-            .outcome
-            .exit
-            .map_or("signal".to_string(), |n| n.to_string());
-        println!("  {}: baseline exit {exit}, {tests} tests", b.task);
+        if b.outcome.exit.is_none() {
+            println!("warning: {} baseline ended by a signal or timeout", b.task);
+        }
     }
-    println!("{REVIEW}");
-    if !yes && !ask_yes("record the vow?")? {
-        println!("not accepted");
-        return Ok(false);
-    }
+    let tasks = prepared.loaded.tasks.len();
+    let base = prepared.base_commit[..12.min(prepared.base_commit.len())].to_string();
     let vowed = vow::commit(&p, prepared)?;
-    for (from, to) in &vowed.minted {
-        println!("  {from} -> {to}");
-    }
     println!(
-        "accepted {} at {} (vow {})",
+        "accepted {} at {} (vow {}): {tasks} tasks, base {base}",
         vowed.id,
         vowed.path.display(),
         vowed.event
     );
+    println!("{}", next_for_agent(&p, &home));
     Ok(true)
 }
 
@@ -1172,6 +1156,8 @@ fn archive(target: &str) -> Result<Reply> {
         rows.push(obj! { "op" => op.word(), "id" => id });
     }
     r.line(format!("archived {} to {}", a.id, a.path.display()));
+    r.line("next: pick the next plan with rvow ls");
+    r.set("next", "pick the next plan with rvow ls");
     r.set("archived", a.id.to_string());
     r.set("path", a.path.display().to_string());
     r.table("merged", rows, "0 spec deltas");
@@ -1253,51 +1239,101 @@ fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result<Rep
     Ok(r)
 }
 
+fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
+    let (living, _) = change::load_living(p)?;
+    let pending = amend::pending(&proof::active(p, &living)?);
+    if pending.is_empty() {
+        println!("no pending amendments");
+        return Ok(true);
+    }
+    let shown: Vec<&amend::Pending> = if ids.is_empty() {
+        pending.iter().collect()
+    } else {
+        ids.iter()
+            .map(|id| {
+                pending
+                    .iter()
+                    .find(|a| a.id.to_string() == *id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            "no-amendment",
+                            format!("{id} is not a pending amendment"),
+                            "run rvow confirm to list the pending ones",
+                        )
+                    })
+            })
+            .collect::<Result<_>>()?
+    };
+    for a in shown {
+        println!("{} for {}", a.id, a.change);
+        for i in &a.items {
+            let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
+            let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
+            println!("  {class}: {what}");
+            if let (Some(old), Some(new)) = (
+                i.get("before").and_then(|v| v.as_str()),
+                i.get("after").and_then(|v| v.as_str()),
+            ) {
+                let (old, new): (Vec<&str>, Vec<&str>) =
+                    (old.lines().collect(), new.lines().collect());
+                let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+                let tail = old[head..]
+                    .iter()
+                    .rev()
+                    .zip(new[head..].iter().rev())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                for line in &old[head..old.len() - tail] {
+                    println!("    - {line}");
+                }
+                for line in &new[head..new.len() - tail] {
+                    println!("    + {line}");
+                }
+            }
+        }
+        println!("  reason (from the agent): {}", a.reason);
+    }
+    if ids.is_empty() {
+        println!("digest {}", amend::digest(&pending));
+    }
+    println!("decide with: rvow confirm <id>... --accept|--reject, or --accept --all <digest>");
+    Ok(true)
+}
+
 fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     if !accept && !reject {
-        if !ids.is_empty() || all.is_some() {
+        if all.is_some() {
             return Err(Error::new(
                 "decision",
                 "say what to do with the amendments",
                 "add --accept or --reject",
             ));
         }
-        let (living, _) = change::load_living(&p)?;
-        let pending = amend::pending(&proof::active(&p, &living)?);
-        if pending.is_empty() {
-            println!("no pending amendments");
-            return Ok(true);
-        }
-        for a in &pending {
-            println!("{} for {}", a.id, a.change);
-            for i in &a.items {
-                let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
-                let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
-                println!("  {class}: {what}");
-                for (label, key) in [("before", "before"), ("after", "after")] {
-                    if let Some(v) = i.get(key).and_then(|v| v.as_str()) {
-                        for line in v.lines() {
-                            println!("    {label}: {line}");
-                        }
-                    }
-                }
-            }
-            println!("  reason (from the agent): {}", a.reason);
-        }
-        println!("digest {}", amend::digest(&pending));
-        println!("decide with: rvow confirm <id>... --accept|--reject, or --accept --all <digest>");
-        return Ok(true);
+        return list_pending(&p, ids);
     }
     let decision = if accept {
         amend::Decision::Accept
     } else {
         amend::Decision::Reject
     };
-    for id in amend::confirm(&p, ids, decision, all)? {
+    let decided = amend::confirm(&p, ids, decision, all).inspect_err(|e| {
+        if e.code == "digest" {
+            let _ = list_pending(&p, &[]);
+        }
+    })?;
+    for id in decided {
         println!("{id}: {}", if accept { "accepted" } else { "rejected" });
     }
+    println!(
+        "{}",
+        if accept {
+            "next: the plan edit stands; continue the tasks"
+        } else {
+            "next: undo the rejected plan edit, or amend it again with a different change"
+        }
+    );
     Ok(true)
 }
 
