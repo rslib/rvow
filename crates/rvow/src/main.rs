@@ -2,7 +2,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use rvow_core::amend;
 use rvow_core::brief;
 use rvow_core::change::{self, Stage};
@@ -11,6 +11,7 @@ use rvow_core::error::{Error, Result};
 use rvow_core::gate::{self, Options};
 use rvow_core::git;
 use rvow_core::lint::Finding;
+use rvow_core::notes;
 use rvow_core::proof::{self, State};
 use rvow_core::store::{self, Mode, Project};
 use rvow_core::vow;
@@ -64,6 +65,22 @@ enum Cmd {
     },
     /// Print the short generated brief for this branch.
     Brief,
+    /// Record that a task cannot be finished as written.
+    Block {
+        /// The task id or a unique prefix of it.
+        task: String,
+        /// What stops the task.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Append a decision, surprise or handoff note to this branch's change.
+    Note {
+        #[arg(value_enum)]
+        kind: NoteArg,
+        /// The note text.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+    },
     /// Record the current plan edits as an amendment for the user to confirm.
     Amend {
         /// Why the plan changed.
@@ -131,6 +148,8 @@ fn main() -> ExitCode {
         Cmd::Path { id } => path(&id),
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
+        Cmd::Block { task, reason } => block(&task, &reason),
+        Cmd::Note { kind, text } => note(kind, &text.join(" ")),
         Cmd::Amend { reason, change } => amend(&reason, change.as_deref()),
         Cmd::Confirm {
             ids,
@@ -522,6 +541,41 @@ fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) -> Res
     };
     for id in amend::confirm(&p, ids, decision, all)? {
         println!("{id}: {}", if accept { "accepted" } else { "rejected" });
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum NoteArg {
+    Decision,
+    Surprise,
+    Handoff,
+}
+
+fn block(task: &str, reason: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let (change, task) = notes::block(&p, task, reason)?;
+    println!("{task} blocked in {change}");
+    println!("the gate refuses it until the user confirms an amendment that changes or drops it");
+    Ok(true)
+}
+
+fn note(kind: NoteArg, text: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let kind = match kind {
+        NoteArg::Decision => notes::NoteKind::Decision,
+        NoteArg::Surprise => notes::NoteKind::Surprise,
+        NoteArg::Handoff => notes::NoteKind::Handoff,
+    };
+    let (change, cut) = notes::note(&p, &cwd()?, kind, text)?;
+    println!("{} noted in {change}", kind.name());
+    if cut {
+        println!(
+            "warning: the handoff kept only its first {} lines",
+            notes::HANDOFF_LINES
+        );
     }
     Ok(true)
 }

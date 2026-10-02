@@ -11,6 +11,7 @@ pub mod git;
 pub mod id;
 pub mod ledger;
 pub mod lint;
+pub mod notes;
 pub mod proof;
 pub mod proposal;
 pub mod registry;

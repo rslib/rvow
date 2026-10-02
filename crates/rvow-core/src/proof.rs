@@ -190,7 +190,12 @@ pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
         return Ok(State::Missing);
     };
     if last.kind == Kind::Block {
-        return Ok(State::Blocked);
+        // A confirmed amendment that changed the task ends the block.
+        return Ok(if str_of(last, "task_hash") == task_hash(task) {
+            State::Blocked
+        } else {
+            State::Missing
+        });
     }
     if !is_proved(last) {
         return Ok(State::Failed);
@@ -308,7 +313,7 @@ pub struct Proved {
 }
 
 /// Finds a task id among the active changes by a unique prefix.
-fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, &'a Task)> {
+pub fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, &'a Task)> {
     let ids: Vec<Id> = changes
         .iter()
         .flat_map(|c| c.loaded.tasks.iter())
