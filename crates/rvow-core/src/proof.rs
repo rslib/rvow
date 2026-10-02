@@ -260,8 +260,7 @@ pub fn render_task(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> String {
                 for sc in &req.scenarios {
                     out.push_str(&format!("    scenario: {}\n", sc.title));
                     for st in &sc.steps {
-                        let k = format!("{:?}", st.kind).to_uppercase();
-                        out.push_str(&format!("      {k} {}\n", st.text));
+                        out.push_str(&format!("      {} {}\n", st.kind.word(), st.text));
                     }
                 }
             }

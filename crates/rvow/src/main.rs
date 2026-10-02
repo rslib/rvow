@@ -10,12 +10,14 @@ use rvow_core::diag::Severity;
 use rvow_core::error::{Error, Result};
 use rvow_core::gate::{self, Options};
 use rvow_core::git;
+use rvow_core::guide;
 use rvow_core::hook;
 use rvow_core::install;
 use rvow_core::lint::Finding;
 use rvow_core::notes;
 use rvow_core::plan;
 use rvow_core::proof::{self, State};
+use rvow_core::show;
 use rvow_core::store::{self, Mode, Project};
 use rvow_core::vow;
 
@@ -60,6 +62,21 @@ enum Cmd {
     Path {
         /// A CHG, TSK or REQ id or a unique prefix of it.
         id: String,
+    },
+    /// Print one requirement, task or change in full.
+    Show {
+        /// A REQ, TSK or CHG id or a unique prefix of it.
+        id: String,
+    },
+    /// Read the living specs.
+    Spec {
+        #[command(subcommand)]
+        cmd: SpecCmd,
+    },
+    /// Print the short guide for writing one plan artifact.
+    Guide {
+        #[arg(value_enum)]
+        artifact: Artifact,
     },
     /// Mint real ids for the placeholders of an active change.
     Ids {
@@ -163,6 +180,20 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SpecCmd {
+    /// List each capability with its requirement ids and titles.
+    List,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Artifact {
+    Proposal,
+    Spec,
+    Tasks,
+    Design,
+}
+
 fn main() -> ExitCode {
     #[cfg(unix)]
     // SAFETY: restores the default SIGPIPE action before any thread starts, so
@@ -178,6 +209,9 @@ fn main() -> ExitCode {
         Cmd::Accept { change, yes } => accept(&change, yes),
         Cmd::Ls => ls(),
         Cmd::Path { id } => path(&id),
+        Cmd::Show { id } => show(&id),
+        Cmd::Spec { cmd: SpecCmd::List } => spec_list(),
+        Cmd::Guide { artifact } => guide(artifact),
         Cmd::Ids { change } => ids(change.as_deref()),
         Cmd::Brief => brief(),
         Cmd::Hook { harness, event } => return hook(harness, event),
@@ -451,6 +485,37 @@ fn ls() -> Result<bool> {
 fn path(id: &str) -> Result<bool> {
     let home = store::home_dir()?;
     println!("{}", change::locate(&project(&home)?, id)?);
+    Ok(true)
+}
+
+fn show(id: &str) -> Result<bool> {
+    let home = store::home_dir()?;
+    print!("{}", show::show(&project(&home)?, id)?);
+    Ok(true)
+}
+
+fn spec_list() -> Result<bool> {
+    let home = store::home_dir()?;
+    let (living, _) = change::load_living(&project(&home)?)?;
+    for (cap, lines) in show::overview(&living) {
+        println!("{cap}");
+        for line in lines {
+            println!("  {line}");
+        }
+    }
+    Ok(true)
+}
+
+fn guide(artifact: Artifact) -> Result<bool> {
+    print!(
+        "{}",
+        match artifact {
+            Artifact::Proposal => guide::PROPOSAL,
+            Artifact::Spec => guide::SPEC,
+            Artifact::Tasks => guide::TASKS,
+            Artifact::Design => guide::DESIGN,
+        }
+    );
     Ok(true)
 }
 

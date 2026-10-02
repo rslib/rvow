@@ -174,21 +174,38 @@ pub fn summaries(project: &Project) -> Result<Vec<Summary>> {
     Ok(out)
 }
 
-/// Where a change, task or requirement lives: a folder for a change, else
-/// `file:line`. Tasks come from open changes, requirements from the living
-/// specs or from an open change that adds them.
-pub fn locate(project: &Project, input: &str) -> Result<String> {
+/// Where a change, task or requirement lives: a folder for a change, else a
+/// file and a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub id: Id,
+    pub file: PathBuf,
+    pub line: Option<usize>,
+}
+
+/// Finds a change, task or requirement by a unique prefix of its id. Tasks
+/// come from open changes, requirements from the living specs or from an open
+/// change that adds them.
+pub fn find(project: &Project, input: &str) -> Result<Place> {
     let (changes, _) = list(project)?;
     let (living, _) = load_living(project)?;
-    let mut places: Vec<(Id, String)> = changes
+    let mut places: Vec<Place> = changes
         .iter()
-        .map(|c| (c.id.clone(), c.path.display().to_string()))
+        .map(|c| Place {
+            id: c.id.clone(),
+            file: c.path.clone(),
+            line: None,
+        })
         .collect();
     for (cap, spec) in &living {
         let file = project.root.join("specs").join(cap).join("spec.md");
         for r in &spec.requirements {
             if let Ref::Id(id) = &r.id {
-                places.push((id.clone(), format!("{}:{}", file.display(), r.line)));
+                places.push(Place {
+                    id: id.clone(),
+                    file: file.clone(),
+                    line: Some(r.line),
+                });
             }
         }
     }
@@ -199,20 +216,27 @@ pub fn locate(project: &Project, input: &str) -> Result<String> {
         let loaded = load(&c.path, &living)?;
         for t in &loaded.tasks {
             if let Ref::Id(id) = &t.id {
-                let file = c.path.join(TASKS);
-                places.push((id.clone(), format!("{}:{}", file.display(), t.line)));
+                places.push(Place {
+                    id: id.clone(),
+                    file: c.path.join(TASKS),
+                    line: Some(t.line),
+                });
             }
         }
         for (cap, f) in &loaded.deltas {
             let file = c.path.join(DELTAS).join(format!("{cap}.md"));
             for d in f.deltas.iter().filter(|d| d.op == DeltaOp::Add) {
                 if let Ref::Id(id) = &d.req.id {
-                    places.push((id.clone(), format!("{}:{}", file.display(), d.req.line)));
+                    places.push(Place {
+                        id: id.clone(),
+                        file: file.clone(),
+                        line: Some(d.req.line),
+                    });
                 }
             }
         }
     }
-    let id = id::resolve(input, places.iter().map(|(id, _)| id)).map_err(|e| {
+    let id = id::resolve(input, places.iter().map(|p| &p.id)).map_err(|e| {
         Error::new(
             "path",
             format!("{input}: {e}"),
@@ -221,9 +245,17 @@ pub fn locate(project: &Project, input: &str) -> Result<String> {
     })?;
     Ok(places
         .into_iter()
-        .find(|(i, _)| *i == id)
-        .expect("resolved id is listed")
-        .1)
+        .find(|p| p.id == id)
+        .expect("resolved id is listed"))
+}
+
+/// `find` as one printable location: a folder, or `file:line`.
+pub fn locate(project: &Project, input: &str) -> Result<String> {
+    let place = find(project, input)?;
+    Ok(match place.line {
+        Some(line) => format!("{}:{line}", place.file.display()),
+        None => place.file.display().to_string(),
+    })
 }
 
 /// A lowercase ASCII slug of at most 40 characters.
