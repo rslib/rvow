@@ -45,18 +45,66 @@ pub struct Project {
     pub meta: Meta,
 }
 
-/// `RVOW_HOME`, else `$XDG_DATA_HOME/rvow`, else `~/.local/share/rvow`.
+/// The file that remembers the rvow home for processes that do not inherit the
+/// user's shell environment, such as an editor plugin started from a GUI.
+fn pointer_path(xdg_config: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    match (xdg_config, home) {
+        (Some(x), _) => Some(PathBuf::from(x).join("rvow/home")),
+        (None, Some(h)) => Some(PathBuf::from(h).join(".config/rvow/home")),
+        (None, None) => None,
+    }
+}
+
+/// Picks the rvow home: `RVOW_HOME`, else the path `rvow init` or
+/// `rvow install` recorded, else `$XDG_DATA_HOME/rvow`, else
+/// `~/.local/share/rvow`.
+fn resolve_home(
+    rvow_home: Option<&str>,
+    recorded: Option<&str>,
+    xdg_data: Option<&str>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
+    rvow_home
+        .or(recorded)
+        .map(PathBuf::from)
+        .or_else(|| xdg_data.map(|x| PathBuf::from(x).join("rvow")))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".local/share/rvow")))
+}
+
+fn env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// The rvow home for this process. See `resolve_home` for the order.
 pub fn home_dir() -> Result<PathBuf> {
-    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
-    if let Some(h) = var("RVOW_HOME") {
-        return Ok(PathBuf::from(h));
+    let recorded = pointer_path(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    resolve_home(
+        env("RVOW_HOME").as_deref(),
+        recorded.as_deref(),
+        env("XDG_DATA_HOME").as_deref(),
+        env("HOME").as_deref(),
+    )
+    .ok_or_else(|| Error::new("no-home", "HOME is not set", "set RVOW_HOME"))
+}
+
+/// Records `home` so processes without `RVOW_HOME` in their environment find
+/// the same store. Returns the pointer file, or `None` without a home folder.
+pub fn record_home(home: &Path) -> Result<Option<PathBuf>> {
+    let Some(path) = pointer_path(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref()) else {
+        return Ok(None);
+    };
+    let text = format!("{}\n", home.display());
+    if std::fs::read_to_string(&path).is_ok_and(|t| t == text) {
+        return Ok(Some(path));
     }
-    if let Some(x) = var("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(x).join("rvow"));
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
     }
-    var("HOME")
-        .map(|h| PathBuf::from(h).join(".local/share/rvow"))
-        .ok_or_else(|| Error::new("no-home", "HOME is not set", "set RVOW_HOME"))
+    std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+    Ok(Some(path))
 }
 
 /// Refuses a repository whose identity git cannot report, and returns its roots.
@@ -252,6 +300,36 @@ impl Project {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
+
+    #[test]
+    fn home_order() {
+        let r = |a, b, c, d| resolve_home(a, b, c, d).unwrap();
+        assert_eq!(
+            r(Some("/env"), Some("/rec"), Some("/x"), Some("/h")),
+            PathBuf::from("/env")
+        );
+        assert_eq!(
+            r(None, Some("/rec"), Some("/x"), Some("/h")),
+            PathBuf::from("/rec")
+        );
+        assert_eq!(
+            r(None, None, Some("/x"), Some("/h")),
+            PathBuf::from("/x/rvow")
+        );
+        assert_eq!(
+            r(None, None, None, Some("/h")),
+            PathBuf::from("/h/.local/share/rvow")
+        );
+        assert_eq!(resolve_home(None, None, None, None), None);
+        assert_eq!(
+            pointer_path(Some("/cfg"), Some("/h")),
+            Some(PathBuf::from("/cfg/rvow/home"))
+        );
+        assert_eq!(
+            pointer_path(None, Some("/h")),
+            Some(PathBuf::from("/h/.config/rvow/home"))
+        );
+    }
 
     #[test]
     fn init_and_find_in_home_mode() {

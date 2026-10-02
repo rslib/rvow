@@ -587,7 +587,9 @@ fn project(home: &Path) -> Result<Project> {
 
 fn init(in_repo: bool) -> Result<Reply> {
     let mode = if in_repo { Mode::Repo } else { Mode::Home };
-    let p = store::init(&cwd()?, &store::home_dir()?, mode)?;
+    let home = store::home_dir()?;
+    let p = store::init(&cwd()?, &home, mode)?;
+    store::record_home(&home)?;
     let mut r = Reply::new();
     r.line(format!("created {}", p.root.display()));
     r.set("created", p.root.display().to_string());
@@ -1425,6 +1427,14 @@ enum ClaudeMode {
 
 fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
     let mut r = Reply::new();
+    let rvow_home = store::home_dir()?;
+    if let Some(pointer) = store::record_home(&rvow_home)? {
+        r.line(format!(
+            "rvow home: {} (recorded in {}, so hooks find it without RVOW_HOME)",
+            rvow_home.display(),
+            pointer.display()
+        ));
+    }
     let rvow = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| Error::io(Path::new("rvow"), e))?;
