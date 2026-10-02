@@ -148,6 +148,18 @@ pub fn gate(
         }
     }
 
+    if let Ok(dir) = git::run(&top, &["config", "--get", "core.hooksPath"])
+        && !dir.is_empty()
+    {
+        let hook = top.join(&dir).join("pre-push");
+        let runs_gate =
+            std::fs::read_to_string(&hook).is_ok_and(|t| t.contains("rvow") && t.contains("gate"));
+        if !runs_gate {
+            r.failures.push(format!(
+                "core.hooksPath points to {dir}, whose pre-push hook does not run rvow gate; run rvow install or add the line it prints"
+            ));
+        }
+    }
     let Some(branch) = git::branch(&top)? else {
         if !changes.is_empty() {
             r.failures.push(format!(
@@ -475,6 +487,33 @@ mod tests {
                 || r.warnings.iter().any(|w| w.contains("stale")),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn hooks_path_must_run_the_gate() {
+        let (tmp, p, repo, _) = accepted();
+        let home = tmp.0.join("home");
+        git(&repo, &["config", "core.hooksPath", ".husky"]);
+        let hooks_path_failure =
+            |r: &Report| r.failures.iter().any(|f| f.contains("core.hooksPath"));
+        assert!(hooks_path_failure(&run_gate(
+            &p,
+            &home,
+            &repo,
+            Options::default()
+        )));
+        std::fs::create_dir_all(repo.join(".husky")).unwrap();
+        std::fs::write(
+            repo.join(".husky/pre-push"),
+            "npx lint\n'/opt/rvow' gate --strict --rerun\n",
+        )
+        .unwrap();
+        assert!(!hooks_path_failure(&run_gate(
+            &p,
+            &home,
+            &repo,
+            Options::default()
+        )));
     }
 
     #[test]

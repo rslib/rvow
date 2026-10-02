@@ -308,6 +308,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
             }
         }
     }
+    out.extend(crate::guard::drift(project, top, change));
     out.sort_by_key(|i| i.class);
     Ok(out)
 }

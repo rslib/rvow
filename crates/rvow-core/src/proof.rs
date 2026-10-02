@@ -403,6 +403,12 @@ pub fn prove(
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
+    if proved {
+        data.insert(
+            "tests".into(),
+            Value::Object(crate::guard::capture(project, &top, &config, task)?),
+        );
+    }
     data.insert(
         "run".into(),
         json!({

@@ -321,6 +321,12 @@ pub(crate) fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String
         .iter()
         .filter(|c| c.branch() == Some(branch.as_str()))
     {
+        out.extend(
+            crate::guard::guarded(c)
+                .into_keys()
+                .filter(|k| !k.ends_with(crate::guard::RUST_TESTS))
+                .map(|k| key(Path::new(&k))),
+        );
         let Some(hash) = c
             .baseline()
             .and_then(|b| b.get("protected"))
