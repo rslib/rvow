@@ -129,7 +129,9 @@ pub fn list(project: &Project) -> Result<(Vec<ChangeDir>, Vec<PathBuf>)> {
 pub fn resolve(project: &Project, input: &str) -> Result<ChangeDir> {
     let (changes, _) = list(project)?;
     let ids: Vec<Id> = changes.iter().map(|c| c.id.clone()).collect();
-    let input = if input.contains('-') {
+    let input = if let Some((id, _)) = parse_dir_name(input) {
+        id.to_string()
+    } else if input.contains('-') {
         input.to_string()
     } else {
         format!("CHG-{input}")
@@ -374,6 +376,8 @@ mod tests {
         assert_eq!(stray, [p.root.join("backlog/notes")]);
         assert_eq!(resolve(&p, &c.id.body()[..5]).unwrap(), c);
         assert_eq!(resolve(&p, &c.id.to_string()).unwrap(), c);
+        let folder = c.path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(resolve(&p, folder).unwrap(), c);
 
         let loaded = load(&c.path, &[]).unwrap();
         assert_eq!(loaded.proposal.branch, "main");
