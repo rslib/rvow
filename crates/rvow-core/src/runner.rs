@@ -174,14 +174,25 @@ fn signal_group(pid: u32, sig: i32) {
     }
 }
 
-/// Runs `cmd` and streams its output to `echo` while it runs.
-pub fn run(cmd: &str, cwd: &Path, timeout: Duration, echo: &mut dyn Write) -> Result<Outcome> {
+/// Runs `cmd` with the extra variables `env` and streams its output to `echo`
+/// while it runs.
+pub fn run(
+    cmd: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    timeout: Duration,
+    echo: &mut dyn Write,
+) -> Result<Outcome> {
     let (reader, writer) = std::io::pipe().map_err(|e| Error::io(cwd, e))?;
     let mut command = Command::new("sh");
     command
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stdout(writer.try_clone().map_err(|e| Error::io(cwd, e))?)
         .stderr(writer);
@@ -276,7 +287,7 @@ mod tests {
 
     fn quiet(cmd: &str, timeout: Duration) -> Outcome {
         let dir = std::env::temp_dir();
-        run(cmd, &dir, timeout, &mut std::io::sink()).unwrap()
+        run(cmd, &dir, &[], timeout, &mut std::io::sink()).unwrap()
     }
 
     #[test]

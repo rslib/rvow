@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -13,6 +12,7 @@ use crate::change::{self, ChangeDir, LEDGER, Loaded, Stage};
 use crate::config::{self, Config, ENFORCEMENT};
 use crate::diag::Severity;
 use crate::error::{Error, Result};
+use crate::fingerprint;
 use crate::git;
 use crate::id::{Id, Ref};
 use crate::ledger::{self, Kind};
@@ -253,7 +253,7 @@ pub fn prepare(
         let cmd = task.verify.as_deref().expect("validated tasks have verify");
         let _ = writeln!(echo, "baseline {}: {cmd}", task.id);
         let timeout = task.timeout.unwrap_or(config.timeout());
-        let outcome = runner::run(cmd, &top, timeout, echo)?;
+        let outcome = runner::run(cmd, &top, &[], timeout, echo)?;
         let ran_tests = outcome.tests_run != Some(0);
         if outcome.passed() && ran_tests && !task.baseline_pass {
             refused.push(format!(
@@ -306,32 +306,18 @@ pub struct Vowed {
 }
 
 fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
-    let mut b = GlobSetBuilder::new();
-    let patterns = config
+    let patterns: Vec<String> = config
         .test_globs
         .iter()
         .chain(&config.protect_infra)
-        .map(String::as_str)
-        .chain(ENFORCEMENT.iter().copied());
-    for p in patterns {
-        let glob = GlobBuilder::new(p)
-            .literal_separator(true)
-            .build()
-            .map_err(|e| {
-                Error::new(
-                    "config",
-                    format!("bad glob {p:?}: {e}"),
-                    "fix the glob in config.toml",
-                )
-            })?;
-        b.add(glob);
-    }
-    let set: GlobSet = b.build().expect("globs built");
-    let list = git::run(top, &["ls-files", "-co", "--exclude-standard"])?;
-    Ok(list
-        .lines()
+        .cloned()
+        .chain(ENFORCEMENT.iter().map(|s| s.to_string()))
+        .collect();
+    let set = fingerprint::globset(&patterns)?;
+    Ok(fingerprint::candidate_files(top)?
+        .into_iter()
         .filter(|f| set.is_match(f))
-        .map(|f| (f.to_string(), top.join(f)))
+        .map(|f| (f.clone(), top.join(f)))
         .collect())
 }
 

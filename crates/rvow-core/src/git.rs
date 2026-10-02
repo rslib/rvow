@@ -10,6 +10,11 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
         .arg("-C")
         .arg(dir)
         .args(args)
+        // A git hook sets these for its own repository, and they would
+        // override `-C`.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
     if !out.status.success() {
