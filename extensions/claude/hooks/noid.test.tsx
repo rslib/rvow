@@ -1,4 +1,7 @@
+import type { On, PaneOpenArgs } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, PLACED, procResult } from './testkit'
 
 const ID = 'CHG-2q8jsb'
 const VIEW = {
@@ -23,21 +26,13 @@ const VIEW = {
   next: null,
   needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 1 },
 }
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
-
-async function seed($: any, on: any, view: any = VIEW) {
-  const opens: any[] = []
+async function seed(on: On, view: object = VIEW) {
+  const opens: PaneOpenArgs[] = []
   const argvs: string[][] = []
   mock.env(on, { HOME: '/home/me' })
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('process.run', async (_$: any, e: any) => {
-    const argv: string[] = e.argv ?? e.command
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
     argvs.push(argv)
     const rest = argv.slice(1).join(' ')
     const stdout =
@@ -46,31 +41,30 @@ async function seed($: any, on: any, view: any = VIEW) {
         : rest === `show ${ID} --human`
           ? `${ID}\nstage: backlog\ntitle: Try rvow\ntasks:\n  TSK-new1 Print the greeting`
           : ''
-    return { value: { exitCode: 0, stdout, stderr: '' } } as any
+    return { value: procResult(0, stdout) }
   })
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('ui.open', async (_$: any, e: any) => {
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async (_$, e) => {
     opens.push(e)
-    return { value: undefined } as any
+    return PLACED
   })
   return { opens, argvs }
 }
-const run = ($: any, command: string) =>
-  $.command.run({ command, args: '', origin: { kind: 'composer' } })
+const run = ($: Engine, command: string) => $.command.run(cmd(command))
 const two = {
   ...VIEW,
   backlog: [VIEW.backlog[0], { ...VIEW.backlog[0], id: 'CHG-other1', title: 'Second' }],
 }
 
 test('/rvow-review with one ready plan opens the pane', async ($, on) => {
-  const { opens } = await seed($, on)
+  const { opens } = await seed(on)
   const r = await run($, 'rvow-review')
   expect(r.text).toBeUndefined()
   expect(opens).toHaveLength(1)
 })
 
 test('/rvow-review with two ready plans lists both', async ($, on) => {
-  const { opens } = await seed($, on, two)
+  const { opens } = await seed(on, two)
   const r = await run($, 'rvow-review')
   expect(r.text).toContain('2 plans wait')
   expect(r.text).toContain(ID)
@@ -79,12 +73,12 @@ test('/rvow-review with two ready plans lists both', async ($, on) => {
 })
 
 test('/rvow-review with no ready plan says so', async ($, on) => {
-  await seed($, on, { ...VIEW, backlog: [] })
+  await seed(on, { ...VIEW, backlog: [] })
   expect((await run($, 'rvow-review')).text).toContain('no plan waits')
 })
 
 test('/rvow-accept with no id and one plan does not accept', async ($, on) => {
-  const { argvs } = await seed($, on)
+  const { argvs } = await seed(on)
   const r = await run($, 'rvow-accept')
   expect(r.text).toBe(
     `one plan waits: ${ID} Try rvow; read it with /rvow-review, then run /rvow-accept ${ID}`,

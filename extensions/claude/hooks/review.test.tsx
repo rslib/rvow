@@ -1,4 +1,7 @@
+import type { On, PaneOpenArgs } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult } from './testkit'
 
 const ID = 'CHG-2q8jsb'
 const VIEW = {
@@ -23,20 +26,14 @@ const VIEW = {
   next: null,
   needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 1 },
 }
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
+const PANE = pane()
 
-async function seed($: any, on: any) {
-  const opens: any[] = []
+async function seed(on: On) {
+  const opens: PaneOpenArgs[] = []
   mock.env(on, { HOME: '/home/me' })
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('process.run', async (_$: any, e: any) => {
-    const argv: string[] = e.argv ?? e.command
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
     const rest = argv.slice(1).join(' ')
     const stdout =
       rest === 'hook claude view'
@@ -44,33 +41,32 @@ async function seed($: any, on: any) {
         : rest === `show ${ID} --human`
           ? `${ID}\nstage: backlog\ntitle: Try rvow\ntasks:\n  TSK-new1 Print the greeting`
           : ''
-    return { value: { exitCode: 0, stdout, stderr: '' } } as any
+    return { value: procResult(0, stdout) }
   })
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('ui.open', async (_$: any, e: any) => {
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async (_$, e) => {
     opens.push(e)
-    return { value: undefined } as any
+    return PLACED
   })
   return opens
 }
-const run = ($: any, args: string) =>
-  $.command.run({ command: 'rvow-review', args, origin: { kind: 'composer' } })
+const run = ($: Engine, args: string) => $.command.run(cmd('rvow-review', args))
 
 test('/rvow-review opens the pane on the plan with its review expanded', async ($, on) => {
-  const opens = await seed($, on)
+  const opens = await seed(on)
   const r = await run($, ID.slice(0, 7))
   expect(r.text).toBeUndefined()
   expect(opens).toHaveLength(1)
-  expect(opens[0].focus).toBe(true)
-  expect(opens[0].closeOnEscape).toBe(true)
+  expect(opens[0]?.focus).toBe(true)
+  expect(opens[0]?.closeOnEscape).toBe(true)
   const pane = await $.ui.mount(PANE)
-  const texts = (await pane.findAll({ type: 'Text' })).map((t: any) => t.text)
+  const texts = (await pane.findAll({ type: 'Text' })).map((t) => t.text)
   expect(texts).toContain('before you accept, check:')
   expect(await pane.find({ key: `yes:${ID}` })).toBeTruthy()
 })
 
 test('/rvow-review names an unknown id', async ($, on) => {
-  const opens = await seed($, on)
+  const opens = await seed(on)
   expect((await run($, 'CHG-nope')).text).toContain('not a backlog plan')
   expect(opens).toHaveLength(0)
 })

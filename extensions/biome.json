@@ -4,7 +4,7 @@
     "includes": ["**", "!**/node_modules", "!**/.claude-plugin/types", "!**/types/*.d.ts"]
   },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
-  "linter": { "rules": { "recommended": true } },
+  "linter": { "rules": { "preset": "recommended", "suspicious": { "noExplicitAny": "error" } } },
   "overrides": [
     {
       "includes": ["claude/**"],

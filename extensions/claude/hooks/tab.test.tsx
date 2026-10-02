@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult } from './testkit'
 
 const PLAN = {
   id: 'CHG-1',
@@ -21,29 +22,22 @@ const VIEW = {
   next: null,
   needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
 }
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
+const PANE = pane()
 
 test('the pane reopens on the tab chosen last time', async ($, on) => {
   mock.env(on, { HOME: '/home/me' })
   mock.store(on)
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('ui.open', async () => ({ value: undefined }) as any)
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async () => PLACED)
   on('process.run', async () => {
-    return { value: { exitCode: 0, stdout: JSON.stringify(VIEW), stderr: '' } } as any
+    return { value: procResult(0, JSON.stringify(VIEW)) }
   })
-  on('ui.render', { component: 'AbovePrompt' }, async ($: any, e: any) => {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>fallthrough</Text>
   })
-  const status = () =>
-    $.command.run({ command: 'rvow-status', args: '', origin: { kind: 'composer' } } as any)
+  const status = () => $.command.run(cmd('rvow-status', ''))
   await status()
   const pane = await $.ui.mount(PANE)
   expect((await pane.find({ key: 'tab:backlog' }))?.props.variant).toBe('primary')

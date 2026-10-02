@@ -1,21 +1,21 @@
+import type { MountTarget } from 'claude-code/testing'
 import { expect, test } from 'claude-code/testing'
 
-const row = (command: string, text: string) =>
-  ({
-    plugin: 'rvow',
-    surface: 'terminal',
-    component: 'CommandOutput',
-    props: { command, args: '', text, isErrored: false },
-  }) as any
+const row = (command: string, text: string): MountTarget<'terminal', 'CommandOutput'> => ({
+  plugin: 'rvow',
+  surface: 'terminal',
+  component: 'CommandOutput',
+  props: { command, args: '', text, isErrored: false },
+})
 const LONG = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n')
 
 test('a long rvow command output shows 8 lines and a count of the rest', async ($, on) => {
-  on('ui.render', { component: 'CommandOutput' }, async (_$: any, e: any) => {
+  on('ui.render', { component: 'CommandOutput' }, async (_$, e) => {
     const { Text } = _$.ui.resolve(e)
     return <Text>engine</Text>
   })
   const long = await $.ui.mount(row('rvow-accept', LONG))
-  const text = (await long.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
+  const text = (await long.findAll({ type: 'Text' })).map((t) => t.text).join('\n')
   expect(text).toContain('line 7')
   expect(text).not.toContain('line 8')
   expect(text).toContain('32 more lines')

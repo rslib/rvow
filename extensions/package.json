@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "format": "biome format --write .",
-    "lint": "biome check .",
+    "lint": "biome check --error-on-warnings .",
     "typecheck:pi": "tsc --noEmit -p pi",
     "typecheck:claude": "node scripts/claude.mjs tsc",
     "validate:claude": "node scripts/claude.mjs validate",

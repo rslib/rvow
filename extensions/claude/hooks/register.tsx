@@ -57,8 +57,38 @@ function later($: EngineInterface, work: () => Promise<unknown>) {
   })
 }
 
+/** What `rvow hook claude <event>` prints; each event fills only some fields. */
+type HookOutput = {
+  status?: unknown
+  reason?: unknown
+  hookSpecificOutput?: {
+    permissionDecision?: unknown
+    permissionDecisionReason?: unknown
+    additionalContext?: unknown
+  }
+  changes?: unknown
+  plans?: RvowPlan[]
+  backlog?: RvowPlan[]
+  archive?: RvowView['archive']
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+function isDetail(v: unknown): v is RvowDetail {
+  return (
+    isRecord(v) &&
+    (v.kind === 'plan' || v.kind === 'change' || v.kind === 'task' || v.kind === 'archive') &&
+    typeof v.id === 'string'
+  )
+}
+
 /** Runs `rvow hook claude <event>`. Any failure allows, so a broken rvow never locks the session. */
-async function hook($: EngineInterface, event: Event, input: object): Promise<any> {
+async function hook(
+  $: EngineInterface,
+  event: Event,
+  input: object,
+): Promise<HookOutput | undefined> {
   const cwd = await $.session.cwd()
   try {
     const r = await $.process.run([BIN, 'hook', 'claude', event], {
@@ -67,7 +97,8 @@ async function hook($: EngineInterface, event: Event, input: object): Promise<an
       timeoutMs: event === 'pre-tool-use' ? 10_000 : 60_000,
     })
     const out = r.stdout.trim()
-    return out ? JSON.parse(out) : undefined
+    const parsed: unknown = out ? JSON.parse(out) : undefined
+    return isRecord(parsed) ? parsed : undefined
   } catch (err) {
     if (!warned) {
       warned = true
@@ -169,10 +200,10 @@ const putReview = (
 /** Reopens the saved stack and expanded reviews that still exist in the view; the rest is dropped. */
 async function restore($: EngineInterface) {
   try {
-    const saved: any = await $.store.get('pane')
+    const saved = await $.store.get('pane')
     const view = await read($, viewAtom)
-    if (!view || !saved) return
-    const alive = (d: any) =>
+    if (!view || !isRecord(saved)) return
+    const alive = (d: RvowDetail) =>
       d.kind === 'plan'
         ? view.backlog.some((p) => p.id === d.id)
         : d.kind === 'change'
@@ -184,7 +215,7 @@ async function restore($: EngineInterface) {
       view.backlog.some((p) => p.id === id),
     )
     await update($, reviewAtom, () => Object.fromEntries(open.map((id) => [id, true])))
-    for (const d of Array.isArray(saved.details) ? (saved.details as RvowDetail[]) : []) {
+    for (const d of Array.isArray(saved.details) ? saved.details.filter(isDetail) : []) {
       if (alive(d)) await openDetail($, { kind: d.kind, id: d.id, title: String(d.title) })
     }
   } catch {}
@@ -302,7 +333,7 @@ async function ask($: EngineInterface): Promise<string> {
       return [...done, stay()].join('\n')
     }
     const r = await run(['answer', q.ref, choice, '--via', 'dialog']).catch(() => undefined)
-    if (!r || r.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
+    if (r?.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
     done.push(`${q.ref} ${q.question} -> ${choice}`)
   }
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join('\n')
@@ -365,7 +396,7 @@ export const register: Register = (on) => {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const result = await next(e)
     const out = await Promise.race([hook($, 'session-start', {}), $.clock.sleep(BRIEF_WAIT_MS)])
-    const text = (out as any)?.hookSpecificOutput?.additionalContext
+    const text = out?.hookSpecificOutput?.additionalContext
     if (typeof text !== 'string' || !text || text === sentBrief) return result
     sentBrief = text
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }

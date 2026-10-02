@@ -1,4 +1,7 @@
+import type { On } from 'claude-code'
+import type { Engine, Mounted } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { band, cmd, PLACED, pane, procResult } from './testkit'
 
 const CHANGE = {
   id: 'CHG-1',
@@ -83,28 +86,17 @@ const TRY_DONE = JSON.parse(
   '{"branch":"feat/greet","changes":[],"plans":[],"backlog":[],"archive":[{"id":"CHG-2q8jsb","title":"Try rvow","outcome":"done","date":"2026-10-02"}],"questions":[],"next":null,"needs_you":{"amendments":0,"questions":0,"blocked":0,"plans":0}}',
 )
 
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
-const BAND = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80 } as any,
-} as const
+const PANE = pane()
+const BAND = band()
 
 /** Fakes rvow: the view for `hook claude view`, the listing for `confirm`, `shows[id]` for
  * `show <id> --human`; records every argv and each `ui.open`. */
-async function seed($: any, on: any, view: object | null, shows: Record<string, string> = {}) {
+async function seed($: Engine, on: On, view: object | null, shows: Record<string, string> = {}) {
   const calls: string[][] = []
   mock.env(on, { HOME: '/home/me' })
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('process.run', async (_$: any, e: any) => {
-    const argv: string[] = e.argv ?? e.command
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
     calls.push(argv)
     const rest = argv.slice(1).join(' ')
     const stdout =
@@ -117,29 +109,53 @@ async function seed($: any, on: any, view: object | null, shows: Record<string, 
           : argv[1] === 'show'
             ? (shows[argv[2] ?? ''] ?? '')
             : ''
-    return { value: { exitCode: 0, stdout, stderr: '' } } as any
+    return { value: procResult(0, stdout) }
   })
-  on('prompt.submit', async (_$: any, e: any) => {
-    calls.push(['@prompt', e.text, e.origin?.asUser || e.asUser ? 'asUser' : 'plugin'])
-    return { text: e.text } as any
+  on('prompt.submit', async (_$, e) => {
+    calls.push([
+      '@prompt',
+      e.text,
+      e.origin.kind === 'plugin' && e.origin.asUser ? 'asUser' : 'plugin',
+    ])
+    return { text: e.text }
   })
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('ui.open', async (_$: any, e: any) => {
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async (_$, e) => {
     calls.push(['@open', JSON.stringify(e)])
-    return { value: undefined } as any
+    return PLACED
   })
-  on('ui.render', { component: 'AbovePrompt' }, async ($: any, e: any) => {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>fallthrough</Text>
   })
-  await $.command.run({ command: 'rvow-status', args: '', origin: { kind: 'composer' } })
+  await $.command.run(cmd('rvow-status'))
   return calls
 }
 
 // A rough text sketch of a drawn tree, for eyeballing the layout: borders,
 // paddings, gaps, wrapping rows and space-between rows; no colors. It does not
 // clip: a row too wide for its box shows as a line longer than the width.
-type El = { type: string; props: Record<string, any>; children?: unknown[] }
+type ElProps = {
+  key?: string
+  label?: string
+  hotkey?: string
+  plain?: boolean
+  wrap?: string
+  gap?: number
+  columnGap?: number
+  rowGap?: number
+  flexWrap?: string
+  flexDirection?: string
+  justifyContent?: string
+  padding?: number
+  paddingX?: number
+  paddingLeft?: number
+  marginTop?: number
+  marginBottom?: number
+  borderStyle?: unknown
+  [other: string]: unknown
+}
+type El = { type: string; props?: ElProps; children?: unknown[] }
 const elems = (n: El): El[] =>
   ((n.children ?? []) as unknown[]).flat(9).filter((c): c is El => !!c && typeof c === 'object')
 const textOf = (n: unknown): string =>
@@ -165,7 +181,7 @@ const wrap = (t: string, width: number) => {
 function natural(n: El): string {
   if (n.type === 'Button') {
     const { plain, hotkey, label } = n.props ?? {}
-    return plain ? (hotkey ? `${hotkey}: ${label}` : label) : `[ ${label} ]`
+    return plain ? (hotkey ? `${hotkey}: ${label}` : String(label)) : `[ ${label} ]`
   }
   if (n.type === 'Text') return textOf(n)
   return elems(n)
@@ -229,15 +245,19 @@ function sketch(n: El, width: number): string[] {
   if (!p.borderStyle) return lines
   return [`╭${'─'.repeat(width - 2)}╮`, ...lines.map((l) => `│${l}│`), `╰${'─'.repeat(width - 2)}╯`]
 }
-async function show(name: string, ui: any, width = 80) {
-  const lines = sketch((await ui.drawn()) as El, width).map((l) => l.trimEnd())
-  if ((globalThis as any).process?.env?.RVOW_SHOW === '1')
-    (globalThis as any).console?.log(`--- ${name} (${width} columns) ---\n${lines.join('\n')}`)
+const host: {
+  process?: { env?: Record<string, string | undefined> }
+  console?: { log: (text: string) => void }
+} = { process: Reflect.get(globalThis, 'process'), console: Reflect.get(globalThis, 'console') }
+async function show(name: string, ui: Mounted<'terminal', 'Pane'>, width = 80) {
+  const lines = sketch(await ui.drawn(), width).map((l) => l.trimEnd())
+  if (host.process?.env?.RVOW_SHOW === '1')
+    host.console?.log(`--- ${name} (${width} columns) ---\n${lines.join('\n')}`)
   const wide = lines.filter((l) => l.length > width)
   expect(wide).toEqual([])
   return lines.join('\n')
 }
-const mount = ($: any, width = 80) =>
+const mount = ($: Engine, width = 80) =>
   $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: width } })
 
 test('a plan with open questions asks for the answers first', async ($, on) => {
@@ -463,17 +483,17 @@ test('rvow_ask asks each question and records the answer', async ($, on) => {
     ],
     remaining: 3,
   }
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('process.run', async (_$: any, e: any) => {
-    calls.push(e.argv ?? e.command)
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('process.run', async (_$, e) => {
+    calls.push([...e.argv])
     const out = String(calls.at(-1)).includes('clarify') ? JSON.stringify(round) : ''
-    return { value: { exitCode: 0, stdout: out, stderr: '' } } as any
+    return { value: procResult(0, out) }
   })
-  on('tool.call', { tool: 'AskUserQuestion' }, async (_$: any, e: any) => ({
-    result: { questions: e.questions, answers: { [e.questions[0].question]: 'json' } },
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => ({
+    result: { questions: e.questions, answers: { [e.questions[0]?.question ?? '']: 'json' } },
   }))
-  on('ui.status', async () => ({ value: undefined }) as any)
-  const out = await $.tool.call({ tool: 'mcp__rvow__rvow_ask' } as any)
+  on('ui.status', async () => ({ value: undefined }))
+  const out = await $.tool.call({ tool: 'mcp__rvow__rvow_ask' })
   const text = JSON.stringify(out)
   expect(text).toContain('CHG-1:proposal.md:12 Which store? -> json')
   expect(text).toContain('3 questions remain')
@@ -541,7 +561,7 @@ test('d opens the plan detail with its actions; b returns to the Backlog tab', a
   expect(text).not.toContain('d: Details')
   expect(text).not.toContain('files:')
   const exact = async (text: string) =>
-    (await pane.findAll({ type: 'Text' })).find((t: any) => t.text === text)?.props
+    (await pane.findAll({ type: 'Text' })).find((t) => t.text === text)?.props
   expect((await exact('tasks:'))?.bold).toBe(true)
   expect((await exact('TSK-new1'))?.dimColor).toBe(true)
   expect(shown(calls)).toHaveLength(1)

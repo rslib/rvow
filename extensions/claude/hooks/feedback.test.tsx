@@ -1,23 +1,25 @@
+import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, procResult } from './testkit'
 
-const COMPOSER = { kind: 'composer' }
 let clock: { advance: (ms: number) => Promise<void> }
 
-function fake(on: any, exitCode: number, stdout: string) {
+function fake(on: On, exitCode: number, stdout: string) {
   clock = mock.clock(on)
   const prompts: string[] = []
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('process.run', async () => ({ value: { exitCode, stdout, stderr: '' } }) as any)
-  on('prompt.submit', async (_$: any, e: any) => {
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('process.run', async () => ({ value: procResult(exitCode, stdout) }))
+  on('prompt.submit', async (_$, e) => {
     prompts.push(e.text)
-    return { text: e.text } as any
+    return { text: e.text }
   })
   return prompts
 }
 
-async function run($: any, command: string, args: string) {
-  await $.command.run({ command, args, origin: COMPOSER } as any)
+async function run($: Engine, command: string, args: string) {
+  await $.command.run(cmd(command, args))
   await clock.advance(0)
 }
 
@@ -53,7 +55,7 @@ test('a plain listing queues nothing', async ($, on) => {
 
 test('a failed run queues nothing', async ($, on) => {
   const prompts = fake(on, 1, 'error: refused\n')
-  on('ui.toast', async () => ({ value: undefined }) as any)
+  on('ui.toast', async () => ({ value: undefined }))
   await run($, 'rvow-accept', 'CHG-1')
   await run($, 'rvow-confirm', 'accept AMD-a')
   await run($, 'rvow-archive', 'CHG-1')

@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ThemeColor,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
 const BIN = process.env.RVOW_BIN || "rvow";
@@ -51,11 +56,45 @@ function run(
   });
 }
 
-async function hook(event: string, cwd: string, extra: object, timeoutMs: number): Promise<any> {
+type Task = { id: string; title: string; state: string; reasons?: string[] };
+type Change = {
+  id: string;
+  title: string;
+  tasks?: Task[];
+  drift?: { class: string; what: string }[];
+  pending?: { id: string; reason: string }[];
+};
+type Question = { change: string; question: string; recommended?: string | null };
+type View = {
+  branch?: string | null;
+  changes?: Change[];
+  plans?: { id: string; title: string }[];
+  questions?: Question[];
+  needs_you?: { amendments?: number; questions?: number; plans?: number };
+  next?: { task: string; title: string; verify?: string };
+};
+type HookOutput = View & {
+  reason?: unknown;
+  hookSpecificOutput?: {
+    permissionDecision?: unknown;
+    permissionDecisionReason?: unknown;
+    additionalContext?: unknown;
+  };
+};
+
+async function hook(
+  event: string,
+  cwd: string,
+  extra: object,
+  timeoutMs: number,
+): Promise<HookOutput | undefined> {
   const r = await run(["hook", "claude", event], cwd, JSON.stringify({ cwd, ...extra }), timeoutMs);
-  if (!r || r.code !== 0 || !r.out.trim()) return undefined;
+  if (r?.code !== 0 || !r.out.trim()) return undefined;
   try {
-    return JSON.parse(r.out);
+    const parsed: unknown = JSON.parse(r.out);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed
+      : undefined;
   } catch {
     return undefined;
   }
@@ -69,10 +108,10 @@ async function brief(cwd: string): Promise<string | undefined> {
   return typeof text === "string" && text ? text : undefined;
 }
 
-type Paint = { fg: (color: any, text: string) => string; bold: (text: string) => string };
+type Paint = { fg: (color: ThemeColor, text: string) => string; bold: (text: string) => string };
 const PLAIN: Paint = { fg: (_c, t) => t, bold: (t) => t };
 
-const MARKS: Record<string, [string, string]> = {
+const MARKS: Record<string, [string, ThemeColor]> = {
   proved: ["✓", "success"],
   failed: ["✗", "error"],
   stale: ["~", "warning"],
@@ -80,26 +119,26 @@ const MARKS: Record<string, [string, string]> = {
   blocked: ["⊘", "accent"],
   missing: ["·", "dim"],
 };
-const DRIFT_COLOR: Record<string, string> = { weaken: "error", confirm: "warning" };
+const DRIFT_COLOR: Record<string, ThemeColor> = { weaken: "error", confirm: "warning" };
 
-function plural(n: number, one: string, many = one + "s"): string {
+function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function needsYou(v: any): string {
+function needsYou(v: View): string {
   const n = v?.needs_you ?? {};
   const parts = [
-    n.amendments > 0 && plural(n.amendments, "amendment"),
-    n.questions > 0 && plural(n.questions, "question"),
-    n.plans > 0 && plural(n.plans, "plan"),
+    (n.amendments ?? 0) > 0 && plural(n.amendments ?? 0, "amendment"),
+    (n.questions ?? 0) > 0 && plural(n.questions ?? 0, "question"),
+    (n.plans ?? 0) > 0 && plural(n.plans ?? 0, "plan"),
   ].filter(Boolean);
   return parts.join(" · ");
 }
 
-function summary(v: any, p: Paint): string[] {
+function summary(v: View, p: Paint): string[] {
   const lines: string[] = [];
   for (const c of v.changes ?? []) {
-    const tasks: any[] = c.tasks ?? [];
+    const tasks = c.tasks ?? [];
     const proved = tasks.filter((t) => t.state === "proved").length;
     lines.push(`rvow ${c.id}: ${proved}/${tasks.length} proved`);
   }
@@ -108,7 +147,7 @@ function summary(v: any, p: Paint): string[] {
   return lines;
 }
 
-function detail(v: any, p: Paint, width: number): string[] {
+function detail(v: View, p: Paint, width: number): string[] {
   const out: string[] = [];
   const add = (s = "") => out.push(truncateToWidth(s, width));
   for (const c of v.changes ?? []) {
@@ -135,7 +174,7 @@ function detail(v: any, p: Paint, width: number): string[] {
     add(p.bold("Plans waiting for accept"));
     for (const pl of v.plans) {
       add(`  ${p.fg("dim", pl.id)} ${pl.title}`);
-      for (const q of (v.questions ?? []).filter((x: any) => x.change === pl.id)) {
+      for (const q of (v.questions ?? []).filter((x) => x.change === pl.id)) {
         add(`    ${p.fg("warning", "?")} ${q.question}`);
         if (q.recommended) add(p.fg("dim", `      recommended: ${q.recommended}`));
       }
@@ -162,7 +201,7 @@ function asked(a: Ask): string {
 
 async function ask(ctx: ExtensionContext): Promise<string> {
   const r = await run(["clarify", "--json"], ctx.cwd, "", SLOW_MS);
-  if (!r || r.code !== 0) return `cannot read the open questions from '${BIN}'`;
+  if (r?.code !== 0) return `cannot read the open questions from '${BIN}'`;
   let round: { questions?: Ask[]; remaining?: number };
   try {
     round = JSON.parse(r.out);
@@ -194,7 +233,7 @@ async function ask(ctx: ExtensionContext): Promise<string> {
     if (!choice?.trim())
       return [...done, `cancelled; still open: ${open(i).join(", ")}`].join("\n");
     const a = await run(["answer", q.ref, choice, "--via", "dialog"], ctx.cwd, "", SLOW_MS);
-    if (!a || a.code !== 0)
+    if (a?.code !== 0)
       return [...done, `cannot record ${q.ref}; still open: ${open(i).join(", ")}`].join("\n");
     done.push(`${q.ref} ${q.question} -> ${choice}`);
   }
@@ -204,7 +243,7 @@ async function ask(ctx: ExtensionContext): Promise<string> {
 export default function (pi: ExtensionAPI) {
   let resend = false;
   let continues = 0;
-  let cached: any;
+  let cached: View | undefined;
 
   async function refresh(ctx: ExtensionContext) {
     cached = await hook("view", ctx.cwd, {}, SLOW_MS);
@@ -350,7 +389,7 @@ export default function (pi: ExtensionAPI) {
     label: "rvow ask",
     description:
       "Ask the user the open questions of the rvow plan on this branch, one round of at most 4, and record the answers. Use it instead of asking in chat.",
-    parameters: { type: "object", properties: {} } as any,
+    parameters: { type: "object", properties: {} } as ToolDefinition["parameters"],
     async execute(_id, _params, _signal, _update, ctx) {
       return { content: [{ type: "text", text: await ask(ctx) }], details: {} };
     },
