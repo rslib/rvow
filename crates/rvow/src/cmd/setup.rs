@@ -113,7 +113,11 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
     match mode {
         ClaudeMode::Mod => install_mod(&mut r, &settings, &rvow)?,
         ClaudeMode::Settings => {
-            report(&mut r, "skill", install::skill(&claude)?);
+            report(
+                &mut r,
+                "skill",
+                install::skill(&claude, &crate::skill::render()?)?,
+            );
             report(
                 &mut r,
                 "Claude Code hooks",
@@ -129,7 +133,11 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
 
 fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
     let dir = store::home_dir()?.join(install::MARKETPLACE_DIR);
-    report(r, "Claude Code mod", install::claude_mod(&dir, rvow)?);
+    report(
+        r,
+        "Claude Code mod",
+        install::claude_mod(&dir, rvow, &crate::skill::render()?)?,
+    );
     report(
         r,
         "old settings hooks",

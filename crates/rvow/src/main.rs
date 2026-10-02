@@ -9,7 +9,10 @@ use rvow_core::gate::Options;
 #[macro_use]
 mod toon;
 mod cmd;
+#[cfg(test)]
+mod doc_commands;
 mod output;
+mod skill;
 
 use cmd::{lifecycle, plan, prove, read, setup};
 use output::Reply;

@@ -9,7 +9,6 @@ use crate::error::{Error, Result};
 use crate::git;
 use crate::vow::sha256_hex;
 
-pub const SKILL: &str = include_str!("../../../skills/rvow/SKILL.md");
 pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow.ts");
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
@@ -65,9 +64,9 @@ fn write_managed(path: &Path, body: &str, comment: &str) -> Result<Outcome> {
 
 /// The skill goes to `<claude_dir>/skills/rvow/SKILL.md`. Its front matter must
 /// stay first, so the marker follows it as an HTML comment.
-pub fn skill(claude_dir: &Path) -> Result<Outcome> {
+pub fn skill(claude_dir: &Path, text: &str) -> Result<Outcome> {
     let path = claude_dir.join("skills/rvow/SKILL.md");
-    let (front, body) = split_front_matter(SKILL);
+    let (front, body) = split_front_matter(text);
     let marked_body = format!("<!-- {MARK}{} -->\n{body}", sha256_hex(body.as_bytes()));
     let full = format!("{front}{marked_body}");
     if let Ok(old) = std::fs::read_to_string(&path) {
@@ -108,9 +107,9 @@ fn split_front_matter(text: &str) -> (&str, &str) {
 }
 
 /// Writes the rvow Claude Code mod as a local marketplace in `dir`, with the
-/// binary path filled in and the skill inside. rvow owns this folder, so every
+/// binary path filled in and the rendered skill `skill` inside. rvow owns this folder, so every
 /// file is rewritten to match.
-pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
+pub fn claude_mod(dir: &Path, rvow: &Path, skill: &str) -> Result<Outcome> {
     let register = MOD_REGISTER.replace(
         "'__RVOW_BIN__'",
         &format!("{:?}", rvow.display().to_string()),
@@ -119,7 +118,7 @@ pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
     let version = format!(
         "{}+{}",
         env!("CARGO_PKG_VERSION"),
-        &sha256_hex(format!("{register}{modules}{SKILL}{MOD_HOOKS_JSON}{MOD_TYPES}").as_bytes())
+        &sha256_hex(format!("{register}{modules}{skill}{MOD_HOOKS_JSON}{MOD_TYPES}").as_bytes())
             [..12]
     );
     let mut plugin: Value = serde_json::from_str(MOD_PLUGIN_JSON)
@@ -155,7 +154,7 @@ pub fn claude_mod(dir: &Path, rvow: &Path) -> Result<Outcome> {
         ),
         (
             "plugins/rvow/skills/rvow/SKILL.md".to_string(),
-            SKILL.to_string(),
+            skill.to_string(),
         ),
     ];
     files.extend(
@@ -428,6 +427,8 @@ mod tests {
     use super::*;
     use crate::git::testrepo::*;
 
+    const TEST_SKILL: &str = "---\nname: rvow\ndescription: test\n---\n# rvow\n";
+
     #[test]
     fn managed_files_upgrade_unless_edited() {
         let tmp = TempDir::new();
@@ -455,12 +456,21 @@ mod tests {
     #[test]
     fn skill_keeps_front_matter_first() {
         let tmp = TempDir::new();
-        assert!(matches!(skill(&tmp.0).unwrap(), Outcome::Written(_)));
+        assert!(matches!(
+            skill(&tmp.0, TEST_SKILL).unwrap(),
+            Outcome::Written(_)
+        ));
         let text = std::fs::read_to_string(tmp.0.join("skills/rvow/SKILL.md")).unwrap();
         assert!(text.starts_with("---\nname: rvow\n"), "{text}");
-        assert!(matches!(skill(&tmp.0).unwrap(), Outcome::Unchanged(_)));
+        assert!(matches!(
+            skill(&tmp.0, TEST_SKILL).unwrap(),
+            Outcome::Unchanged(_)
+        ));
         std::fs::write(tmp.0.join("skills/rvow/SKILL.md"), text + "mine\n").unwrap();
-        assert!(matches!(skill(&tmp.0).unwrap(), Outcome::KeptEdit(_)));
+        assert!(matches!(
+            skill(&tmp.0, TEST_SKILL).unwrap(),
+            Outcome::KeptEdit(_)
+        ));
     }
 
     #[test]
@@ -508,11 +518,11 @@ mod tests {
         let dir = tmp.0.join("claude-plugin");
         let bin = Path::new("/opt/bin/rvow");
         assert!(matches!(
-            claude_mod(&dir, bin).unwrap(),
+            claude_mod(&dir, bin, TEST_SKILL).unwrap(),
             Outcome::Written(_)
         ));
         assert!(matches!(
-            claude_mod(&dir, bin).unwrap(),
+            claude_mod(&dir, bin, TEST_SKILL).unwrap(),
             Outcome::Unchanged(_)
         ));
         let reg = std::fs::read_to_string(dir.join("plugins/rvow/hooks/register.tsx")).unwrap();
@@ -531,7 +541,7 @@ mod tests {
         .unwrap();
         assert_eq!(m["plugins"][0]["source"], "./plugins/rvow");
         assert!(matches!(
-            claude_mod(&dir, Path::new("/new/rvow")).unwrap(),
+            claude_mod(&dir, Path::new("/new/rvow"), TEST_SKILL).unwrap(),
             Outcome::Written(_)
         ));
     }

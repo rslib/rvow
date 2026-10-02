@@ -38,7 +38,7 @@ CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 | Command logic | `crates/rvow-core/src/<topic>.rs` | The CLI owns the truth; hooks are thin adapters. |
 | Command bodies and output | `crates/rvow/src/cmd/<topic>.rs` | `crates/rvow/src/main.rs` holds only the clap types and dispatch. |
 | Plan-writing guides | `guides/*.md` | Embedded by `crates/rvow-core/src/guide.rs`. |
-| Agent skill | `skills/rvow/SKILL.md` | Embedded by `crates/rvow-core/src/install.rs`. |
+| Agent skill | `skills/rvow/SKILL.md.tmpl` | Rendered by `crates/rvow/src/skill.rs` at install. Write each command as `{{cmd:<args>}}`; a command or flag the CLI lacks fails the render and `cargo test`. |
 | Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-core/src/install.rs`. |
 | pi extension | `extensions/pi/rvow.ts` | Embedded by `crates/rvow-core/src/install.rs`. |
 
