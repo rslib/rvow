@@ -169,7 +169,7 @@ function refinePrompt(plans: RvowPlan[]): string {
 /** Queues the refine prompt as the agent's next turn. */
 async function refine($: EngineInterface, plans: RvowPlan[]) {
   void $.prompt
-    .submit({ text: refinePrompt(plans) })
+    .submit({ text: refinePrompt(plans), asUser: true })
     .catch((err: unknown) =>
       update($, noticeAtom, () => ({ tone: 'fail', text: `cannot queue: ${String(err)}` })),
     )
@@ -308,7 +308,7 @@ export const register: Register = (on) => {
   on('command.run', { command: 'rvow-status' }, async ($) => {
     await refresh($)
     await update($, tabAtom, () => null)
-    await $.ui.open({ id: PANE, title: 'rvow', focus: true })
+    await $.ui.open({ id: PANE, title: 'rvow' })
     return { text: 'rvow pane opened.' }
   })
 

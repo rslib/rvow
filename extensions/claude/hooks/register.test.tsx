@@ -95,7 +95,7 @@ async function seed($: any, on: any, view: object | null) {
     return { value: { exitCode: 0, stdout, stderr: '' } } as any
   })
   on('prompt.submit', async (_$: any, e: any) => {
-    calls.push(['@prompt', e.text])
+    calls.push(['@prompt', e.text, e.origin?.asUser || e.asUser ? 'asUser' : 'plugin'])
     return { text: e.text } as any
   })
   on('ui.status', async () => ({ value: undefined }) as any)
@@ -340,6 +340,7 @@ test('Backlog: other-branch plans take t, e queues a refine, f refines the selec
   expect(one).toHaveLength(1)
   expect(one[0]?.[1]).toContain('Review and refine the rvow plan CHG-3 (Try rvow).')
   expect(one[0]?.[1]).toContain('`rvow check CHG-3`')
+  expect(one[0]?.[2]).toBe('asUser')
   expect(await show('Backlog, after e', pane)).toContain('queued for the agent')
 
   expect(await pane.find({ key: 'refine-picked' })).toBeUndefined()
