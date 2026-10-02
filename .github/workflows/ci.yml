@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+    branches: [trunk]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+      - run: cargo fmt --all --check
+
+  ascii:
+    name: ASCII-only Rust source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No byte outside printable ASCII, tab and newline
+        run: |
+          files=$(git ls-files '*.rs')
+          # shellcheck disable=SC2086
+          if LC_ALL=C grep -nP '[^\t\n -~]' $files; then
+            echo "non-ASCII bytes in Rust source"
+            exit 1
+          fi
+
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - name: The tests make their own git repositories, so they need an identity
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+          git config --global init.defaultBranch trunk
+      - run: cargo test --all-targets --locked
+
+  quickstart:
+    name: Quickstart (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - name: Install as the README says, into a private root
+        run: |
+          cargo install --path crates/rvow --locked --root "$RUNNER_TEMP/rvow"
+          echo "$RUNNER_TEMP/rvow/bin" >> "$GITHUB_PATH"
+      - run: rvow --version
+      - run: .github/scripts/quickstart.sh
+
+  extensions:
+    name: Extensions
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck:pi
+      # The Claude Code steps skip themselves when the claude CLI is missing, as it is here.
+      - run: npm run drift
+      - run: npm run typecheck:claude
+      - run: npm run validate:claude
+      - run: npm run test:claude

@@ -1,0 +1,4 @@
+# One toolchain for local builds, the prek hook and CI, so a new lint shows up everywhere at once.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
