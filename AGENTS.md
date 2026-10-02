@@ -27,7 +27,7 @@ npm --prefix extensions run test:claude  # the whole suite, there is no filter
 ```
 
 The claude steps skip with exit 0 when the `claude` CLI is missing, so a skip proves nothing.
-`.github/scripts/quickstart.sh` runs the README quickstart against the `rvow` on `PATH`, in a throwaway repository and home.
+`.github/scripts/quickstart.sh` runs the README quickstart and `.github/scripts/install.sh` runs `rvow install`, each against the `rvow` on `PATH`, in a throwaway repository and home.
 `prek run` runs the same checks as the git hook, on staged files only.
 CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 

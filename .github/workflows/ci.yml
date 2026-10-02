@@ -100,6 +100,8 @@ jobs:
           echo "$RUNNER_TEMP/rvow/bin" >> "$GITHUB_PATH"
       - run: rvow --version
       - run: .github/scripts/quickstart.sh
+      - name: rvow install writes the skill, the hooks and the gate
+        run: .github/scripts/install.sh
 
   extensions:
     name: Extensions
