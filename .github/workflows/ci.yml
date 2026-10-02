@@ -119,6 +119,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck:pi
+      - run: npm run test:pi
       # The Claude Code steps skip themselves when the claude CLI is missing, as it is here.
       - run: npm run drift
       - run: npm run typecheck:claude

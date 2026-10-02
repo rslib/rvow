@@ -2,10 +2,18 @@ import { spawn } from "node:child_process";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ThemeBg,
   ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  type KeyId,
+  matchesKey,
+  type TUI,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 
 const BIN = process.env.RVOW_BIN || "rvow";
 const MAX_CONTINUES = 8;
@@ -64,16 +72,34 @@ type Change = {
   drift?: { class: string; what: string }[];
   pending?: { id: string; reason: string }[];
 };
-type Question = { change: string; question: string; recommended?: string | null };
-type View = {
-  branch?: string | null;
-  changes?: Change[];
-  plans?: { id: string; title: string }[];
-  questions?: Question[];
-  needs_you?: { amendments?: number; questions?: number; plans?: number };
-  next?: { task: string; title: string; verify?: string };
+type Plan = {
+  id: string;
+  title: string;
+  branch?: string;
+  here?: boolean;
+  ready?: boolean;
+  tasks?: number;
+  questions?: number;
+  issues?: number;
+  path?: string;
 };
-type HookOutput = View & {
+type Question = { change: string; question: string; recommended?: string | null };
+type Archived = { id: string; title: string; outcome: string; date?: string };
+type Next = { change?: string; task: string; title: string; verify?: string };
+type NeedsYou = { amendments: number; questions: number; blocked: number; plans: number };
+type View = {
+  branch: string | null;
+  changes: Change[];
+  backlog: Plan[];
+  archive: Archived[];
+  questions: Question[];
+  next: Next | null;
+  needs_you: NeedsYou;
+};
+type HookOutput = Partial<Omit<View, "changes">> & {
+  changes?: Change[];
+  plans?: Plan[];
+  status?: unknown;
   reason?: unknown;
   hookSpecificOutput?: {
     permissionDecision?: unknown;
@@ -100,6 +126,19 @@ async function hook(
   }
 }
 
+function normalize(out: HookOutput | undefined): View | undefined {
+  if (!out || !Array.isArray(out.changes)) return undefined;
+  return {
+    branch: out.branch ?? null,
+    changes: out.changes,
+    backlog: out.backlog ?? out.plans ?? [],
+    archive: out.archive ?? [],
+    questions: out.questions ?? [],
+    next: out.next ?? null,
+    needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0, ...out.needs_you },
+  };
+}
+
 const CLAUDE_NAMES: Record<string, string> = { bash: "Bash", edit: "Edit", write: "Write" };
 
 async function brief(cwd: string): Promise<string | undefined> {
@@ -108,9 +147,15 @@ async function brief(cwd: string): Promise<string | undefined> {
   return typeof text === "string" && text ? text : undefined;
 }
 
-type Paint = { fg: (color: ThemeColor, text: string) => string; bold: (text: string) => string };
-const PLAIN: Paint = { fg: (_c, t) => t, bold: (t) => t };
+type Paint = {
+  fg: (color: ThemeColor, text: string) => string;
+  bold: (text: string) => string;
+  inverse: (text: string) => string;
+  bg: (color: ThemeBg, text: string) => string;
+};
+const PLAIN: Paint = { fg: (_c, t) => t, bold: (t) => t, inverse: (t) => t, bg: (_c, t) => t };
 
+// These strings and glyphs mirror extensions/claude/hooks/format.ts; rvow.test.ts keeps them equal.
 const MARKS: Record<string, [string, ThemeColor]> = {
   proved: ["✓", "success"],
   failed: ["✗", "error"],
@@ -119,74 +164,401 @@ const MARKS: Record<string, [string, ThemeColor]> = {
   blocked: ["⊘", "accent"],
   missing: ["·", "dim"],
 };
+const OUTCOME: Record<string, [string, ThemeColor]> = {
+  done: ["✓", "success"],
+  dropped: ["✗", "error"],
+  superseded: ["↷", "warning"],
+};
 const DRIFT_COLOR: Record<string, ThemeColor> = { weaken: "error", confirm: "warning" };
+const ID = /\b(?:CHG|TSK|REQ|AMD)-[a-z0-9]+\b/g;
+const MAX_LINES = 200;
+const MAX_WIDTH = 100;
+const PANEL_ROWS = 34;
+
+export const REFINE_STEPS =
+  "Follow `rvow guide proposal`, `rvow guide spec` and `rvow guide tasks`. Ask me about open points with the rvow_ask tool before changing scope. Then tighten the proposal and tasks so `rvow check` passes, and tell me what changed.";
+
+export function refinePrompt(plans: { id: string; title: string }[]): string {
+  const [p] = plans;
+  if (plans.length === 1 && p) {
+    return `Review and refine the rvow plan ${p.id} (${p.title}). Run \`rvow show ${p.id}\` and \`rvow check ${p.id}\`. ${REFINE_STEPS}`;
+  }
+  return [
+    "Review and refine these rvow plans, one plan at a time, in this order:",
+    ...plans.map((x) => `- ${x.id} (${x.title})`),
+    `For each plan: run \`rvow show <id>\` and \`rvow check <id>\`. ${REFINE_STEPS}`,
+  ].join("\n");
+}
+
+export function decisionPrompt(argv: string[], out: string): string | null {
+  const [verb, id] = argv;
+  if (verb === "archive") return `I archived ${id}. The change is closed.`;
+  if (verb === "accept") {
+    const next = out.split("\n").find((l) => l.startsWith("next:"));
+    return `I accepted ${id}.${next ? ` ${next}.` : ""} Continue with it.`;
+  }
+  const ids = [...new Set(`${argv.join(" ")}\n${out}`.match(/AMD-[\w-]+/g) ?? [])].join(", ");
+  if (argv.includes("--accept")) return `I accepted the plan edit ${ids}. Continue the tasks.`;
+  if (argv.includes("--reject"))
+    return `I rejected the plan edit ${ids}. Undo it, or amend it again with a different change.`;
+  return null;
+}
+
+const later = (work: () => Promise<unknown>) => void work().catch(() => undefined);
 
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function needsYou(v: View): string {
-  const n = v?.needs_you ?? {};
+function blocker(p: Plan): string {
+  return !p.here
+    ? "take it to this branch first"
+    : (p.questions ?? 0) > 0
+      ? "answer the open questions first"
+      : (p.issues ?? 0) > 0
+        ? "fix what rvow check reports"
+        : "add at least one task with a verify command";
+}
+
+function middle(text: string, width: number): string {
+  if (text.length <= width) return text;
+  const keep = Math.max(2, width - 3);
+  return `${text.slice(0, Math.ceil(keep / 2))}...${text.slice(-Math.floor(keep / 2))}`;
+}
+
+function cut(text: string, width: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length <= width ? line : `${line.slice(0, Math.max(0, width - 3))}...`;
+}
+
+function band(v: View): string | undefined {
+  const n = v.needs_you;
+  const ready = v.backlog.find((p) => p.here === true && p.ready === true);
   const parts = [
-    (n.amendments ?? 0) > 0 && plural(n.amendments ?? 0, "amendment"),
-    (n.questions ?? 0) > 0 && plural(n.questions ?? 0, "question"),
-    (n.plans ?? 0) > 0 && plural(n.plans ?? 0, "plan"),
+    n.plans > 0 &&
+      `${plural(n.plans, "plan")} to accept${ready ? `: /rvow-accept ${ready.id}` : ""}`,
+    n.amendments > 0 && `${plural(n.amendments, "amendment")}: /rvow-confirm`,
+    n.questions > 0 && plural(n.questions, "question"),
   ].filter(Boolean);
-  return parts.join(" · ");
+  return parts.length ? `rvow · needs you: ${parts.join(" · ")}` : undefined;
 }
 
-function summary(v: View, p: Paint): string[] {
+type Tab = "backlog" | "active" | "archive";
+type Kind = "plan" | "change" | "task" | "archive";
+type Detail = { kind: Kind; id: string; title: string; text: string | null };
+type Notice = { tone: "ok" | "fail"; text: string };
+type Item =
+  | { kind: "plan"; plan: Plan }
+  | { kind: "change"; change: Change }
+  | { kind: "task"; change: Change; task: Task }
+  | { kind: "archive"; entry: Archived };
+type Exit =
+  | { act: "close" }
+  | { act: "accept" | "claim" | "archive" | "ask"; id: string }
+  | { act: "amend" }
+  | { act: "refine"; plans: Plan[] };
+type Body = { lines: string[]; spans: [number, number][]; items: Item[] };
+
+const TABS: Tab[] = ["backlog", "active", "archive"];
+const KINDS: Kind[] = ["plan", "change", "task", "archive"];
+const BADGE: Record<Kind, [string, ThemeColor]> = {
+  plan: [" PLAN ", "warning"],
+  change: [" CHANGE ", "accent"],
+  task: [" TASK ", "accent"],
+  archive: [" ARCHIVED ", "dim"],
+};
+const TONE: Record<Notice["tone"], [string, ThemeColor]> = {
+  ok: ["✓", "success"],
+  fail: ["✗", "error"],
+};
+const ENTRY = "rvow-pane";
+
+const isTab = (v: unknown): v is Tab => TABS.some((t) => t === v);
+const isKind = (v: unknown): v is Kind => KINDS.some((k) => k === v);
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const fit = (s: string, n: number) => truncateToWidth(s, n, "...", true);
+const spread = (left: string, right: string, n: number) =>
+  `${truncateToWidth(left, Math.max(0, n - visibleWidth(right) - 1), "...", true)} ${right}`;
+
+function card(rows: string[], w: number, color: ThemeColor, lit: boolean, th: Paint): string[] {
+  const edge = (s: string) => th.fg(color, s);
+  const gutter = lit ? th.fg("accent", "▌ ") : "  ";
+  return [
+    `${gutter}${edge(`╭${"─".repeat(w - 4)}╮`)}`,
+    ...rows.map((r) => `${gutter}${edge("│")} ${fit(r, w - 6)} ${edge("│")}`),
+    `${gutter}${edge(`╰${"─".repeat(w - 4)}╯`)}`,
+  ];
+}
+
+type Button = { key: string; label: string; primary?: boolean };
+
+function buttons(bs: Button[], n: number, on: boolean, th: Paint): string[] {
   const lines: string[] = [];
-  for (const c of v.changes ?? []) {
-    const tasks = c.tasks ?? [];
-    const proved = tasks.filter((t) => t.state === "proved").length;
-    lines.push(`rvow ${c.id}: ${proved}/${tasks.length} proved`);
+  let cur = "";
+  let used = 0;
+  for (const b of bs) {
+    const width = b.key.length + 1 + b.label.length;
+    if (cur && used + 3 + width > n) {
+      lines.push(cur);
+      cur = "";
+    }
+    used = cur ? used + 3 + width : width;
+    const key = th.fg(on ? "accent" : "dim", th.bold(b.key));
+    const label = on ? (b.primary ? th.bold(b.label) : b.label) : th.fg("dim", b.label);
+    cur += `${cur ? "   " : ""}${key} ${label}`;
   }
-  const need = needsYou(v);
-  if (need) lines.push(p.fg("warning", `needs you: ${need}`));
-  return lines;
+  return cur ? [...lines, cur] : lines;
 }
 
-function detail(v: View, p: Paint, width: number): string[] {
-  const out: string[] = [];
-  const add = (s = "") => out.push(truncateToWidth(s, width));
-  for (const c of v.changes ?? []) {
-    if (out.length) add();
-    add(`${p.fg("dim", c.id)} ${p.bold(c.title)}${v.branch ? p.fg("dim", `  (${v.branch})`) : ""}`);
-    for (const t of c.tasks ?? []) {
-      const [mark, color] = MARKS[t.state] ?? ["?", "dim"];
-      const why = t.reasons?.length ? p.fg("dim", ` (${t.reasons.join(", ")})`) : "";
-      add(`  ${p.fg(color, mark)} ${p.fg("dim", t.id)} ${t.title}${why}`);
-    }
-    if (c.drift?.length) {
-      add();
-      add(p.bold("Drift"));
-      for (const d of c.drift) add(`  ${p.fg(DRIFT_COLOR[d.class] ?? "dim", d.class)} ${d.what}`);
-    }
-    if (c.pending?.length) {
-      add();
-      add(`${p.bold("Pending amendments")} ${p.fg("dim", "/rvow-confirm")}`);
-      for (const a of c.pending) add(`  ${p.fg("warning", a.id)} ${a.reason}`);
-    }
+function planButtons(p: Plan, inDetail: boolean, picked: boolean): Button[] {
+  const ready = p.ready === true && p.here === true;
+  return [
+    { key: "a", label: "Review & accept", primary: ready },
+    ...(p.here ? [] : [{ key: "t", label: "Take to this branch", primary: true }]),
+    ...(p.here && (p.questions ?? 0) > 0
+      ? [{ key: "A", label: "Answer questions", primary: true }]
+      : []),
+    ...(inDetail ? [] : [{ key: "d", label: "Details" }]),
+    { key: "e", label: "Refine with agent" },
+    { key: "s", label: picked ? "Unselect" : "Select" },
+    { key: "r", label: "Refresh" },
+  ];
+}
+
+const archivable = (c: Change) =>
+  (c.tasks ?? []).length > 0 &&
+  (c.tasks ?? []).every((t) => t.state === "proved") &&
+  (c.pending ?? []).length === 0;
+
+const HOME_DIR = process.env.HOME;
+
+function planCard(v: View, p: Plan, picked: boolean, lit: boolean, w: number, th: Paint): string[] {
+  const inner = w - 6;
+  const files =
+    HOME_DIR && p.path?.startsWith(`${HOME_DIR}/`) ? `~${p.path.slice(HOME_DIR.length)}` : p.path;
+  const why = p.ready && p.here ? null : blocker(p);
+  const check =
+    (p.issues ?? 0) > 0
+      ? th.fg("error", plural(p.issues ?? 0, "issue"))
+      : p.ready
+        ? th.fg("success", "ready")
+        : th.fg("warning", "not ready");
+  const rows = [
+    spread(
+      `${picked ? th.fg("accent", "◉") : th.fg("dim", "○")} ${th.inverse(th.fg("warning", th.bold(" PLAN ")))} ${th.bold(p.title)}`,
+      th.fg("dim", p.id),
+      inner,
+    ),
+    p.here ? th.fg("warning", "● waiting for your accept") : th.fg("dim", `on ${p.branch ?? "?"}`),
+    `${th.fg("dim", `${plural(p.tasks ?? 0, "task")} · ${plural(p.questions ?? 0, "open question")} · check: `)}${check}`,
+    ...(files ? [th.fg("dim", `files: ${middle(files, inner - 7)}`)] : []),
+    ...v.questions
+      .filter((q) => q.change === p.id)
+      .map(
+        (q) =>
+          `${th.fg("warning", "?")} ${q.question}${q.recommended ? th.fg("dim", ` (recommended: ${q.recommended})`) : ""}`,
+      ),
+    why
+      ? th.fg("dim", `to accept: ${why}`)
+      : `${th.fg("accent", "▸")} Review the plan, then accept it.`,
+    ...buttons(planButtons(p, false, picked), inner, lit, th),
+  ];
+  return card(rows, w, "warning", lit, th);
+}
+
+function changeCard(
+  v: View,
+  c: Change,
+  focus: number,
+  first: number,
+  w: number,
+  th: Paint,
+): { lines: string[]; taskRows: number[] } {
+  const inner = w - 6;
+  const tasks = c.tasks ?? [];
+  const proved = tasks.filter((t) => t.state === "proved").length;
+  const label = ` ${proved}/${tasks.length} proved`;
+  const bar = Math.max(4, Math.min(32, inner - label.length));
+  const fill = tasks.length ? Math.round((bar * proved) / tasks.length) : 0;
+  const next = v.next && v.next.change === c.id ? v.next : null;
+  const lit = focus >= first && focus <= first + tasks.length;
+  const rows = [
+    spread(th.bold(c.title), th.fg("dim", c.id), inner),
+    `${th.fg("success", "█".repeat(fill))}${th.fg("dim", "░".repeat(bar - fill))}${label}`,
+    "",
+  ];
+  const taskRows: number[] = [];
+  for (const [i, t] of tasks.entries()) {
+    const [mark, color] = MARKS[t.state] ?? ["?", "dim"];
+    const reasons = t.reasons?.length ? ` (${t.reasons.join(", ")})` : "";
+    const on = focus === first + 1 + i;
+    taskRows.push(rows.length);
+    const text = cut(`${t.id} ${t.title}`, inner - 4 - reasons.length);
+    rows.push(
+      `${on ? th.fg("accent", "›") : " "} ${th.fg(color, mark)} ${on ? th.bold(text) : text}${th.fg("dim", reasons)}`,
+    );
   }
-  if (v.plans?.length) {
-    if (out.length) add();
-    add(p.bold("Plans waiting for accept"));
-    for (const pl of v.plans) {
-      add(`  ${p.fg("dim", pl.id)} ${pl.title}`);
-      for (const q of (v.questions ?? []).filter((x) => x.change === pl.id)) {
-        add(`    ${p.fg("warning", "?")} ${q.question}`);
-        if (q.recommended) add(p.fg("dim", `      recommended: ${q.recommended}`));
+  if ((c.drift ?? []).length > 0 || (c.pending ?? []).length > 0) {
+    rows.push("", th.fg("warning", th.bold("needs you")));
+    for (const d of c.drift ?? [])
+      rows.push(`${th.fg(DRIFT_COLOR[d.class] ?? "dim", d.class)} ${d.what}`);
+    for (const a of c.pending ?? [])
+      rows.push(`${th.fg("warning", "amend")} ${th.fg("dim", a.id)} ${a.reason}`);
+  }
+  if (next) {
+    rows.push(
+      "",
+      `${th.fg("accent", th.bold("▸ next"))} ${th.fg("dim", next.task)} ${next.title}`,
+      th.fg("dim", `$ ${next.verify ?? ""}`),
+    );
+  }
+  rows.push(
+    ...buttons(
+      [
+        ...(archivable(c) ? [{ key: "x", label: "Archive", primary: true }] : []),
+        ...((c.pending ?? []).length > 0
+          ? [{ key: "c", label: "Review amendments", primary: true }]
+          : []),
+        { key: "d", label: "Details" },
+      ],
+      inner,
+      lit,
+      th,
+    ),
+  );
+  return { lines: card(rows, w, "accent", lit, th), taskRows };
+}
+
+function empty(lines: string[], w: number, th: Paint): string[] {
+  return card(lines, w, "borderMuted", false, th);
+}
+
+const START = (th: Paint) =>
+  `${th.fg("dim", "Start a plan: ")}${th.fg("accent", 'rvow new "<title>"')}`;
+
+function tabBody(v: View, tab: Tab, picked: string[], focus: number, w: number, th: Paint): Body {
+  const b: Body = { lines: [], spans: [], items: [] };
+  const push = (lines: string[], item: Item, from = b.lines.length, to = from + lines.length) => {
+    b.lines.push(...lines);
+    b.items.push(item);
+    b.spans.push([from, to]);
+  };
+  if (tab === "backlog") {
+    if (v.backlog.length === 0) {
+      b.lines = empty(["No plan in the backlog.", START(th)], w, th);
+      return b;
+    }
+    const n = v.backlog.filter((p) => picked.includes(p.id)).length;
+    if (n > 0) {
+      b.lines.push(
+        ...buttons([{ key: "f", label: `Refine ${n} selected`, primary: true }], w, true, th),
+        "",
+      );
+    }
+    for (const p of v.backlog) {
+      push(planCard(v, p, picked.includes(p.id), focus === b.items.length, w, th), {
+        kind: "plan",
+        plan: p,
+      });
+    }
+  } else if (tab === "active") {
+    if (v.changes.length === 0) {
+      const there = v.branch ? ` on ${v.branch}` : "";
+      b.lines = empty(
+        [`Nothing active${there}.`, th.fg("dim", "Accept a plan on the Backlog tab first.")],
+        w,
+        th,
+      );
+      return b;
+    }
+    for (const c of v.changes) {
+      const first = b.items.length;
+      const start = b.lines.length;
+      const card = changeCard(v, c, focus, first, w, th);
+      b.lines.push(...card.lines);
+      b.items.push({ kind: "change", change: c });
+      b.spans.push([start, start + card.lines.length]);
+      for (const [i, t] of (c.tasks ?? []).entries()) {
+        const at = start + 1 + (card.taskRows[i] ?? 0);
+        b.items.push({ kind: "task", change: c, task: t });
+        b.spans.push([at, at + 1]);
       }
     }
+  } else {
+    if (v.archive.length === 0) {
+      b.lines = empty(["Nothing archived yet."], w, th);
+      return b;
+    }
+    for (const a of v.archive) {
+      const [mark, color] = OUTCOME[a.outcome] ?? ["?", "dim"];
+      const on = focus === b.items.length;
+      const head = `${on ? th.fg("accent", "›") : " "} ${th.fg(color, mark)} ${th.fg("dim", `${a.date ?? ""} ${a.id}`)} `;
+      push([fit(`${head}${on ? th.bold(a.title) : a.title}`, w)], { kind: "archive", entry: a });
+    }
+    b.lines.push("", th.fg("dim", "Press enter on an entry to read it."));
   }
-  if (v.next) {
-    if (out.length) add();
-    add(`${p.bold("Next")} ${p.fg("dim", v.next.task)} ${v.next.title}`);
-    if (v.next.verify) add(p.fg("dim", `  verify: ${v.next.verify}`));
-  }
-  return out;
+  return b;
 }
+
+function styled(line: string, th: Paint): string {
+  const ids = (s: string) => s.replace(ID, (m) => th.fg("dim", m));
+  const heading = /^#+ (.*)$/.exec(line)?.[1] ?? (/^\S[^:]*:$/.test(line) ? line : null);
+  if (heading !== null) return th.bold(ids(heading));
+  const kv = /^(\s*)([a-z][a-z ]*):( .*)?$/.exec(line);
+  if (kv?.[2] === "verify") return th.fg("dim", line);
+  return kv ? `${kv[1]}${th.fg("dim", `${kv[2]}:`)}${ids(kv[3] ?? "")}` : ids(line);
+}
+
+function detailBody(
+  v: View,
+  d: Detail,
+  picked: boolean,
+  focus: number,
+  w: number,
+  th: Paint,
+): Body {
+  const b: Body = { lines: [], spans: [], items: [] };
+  const change = d.kind === "change" ? v.changes.find((c) => c.id === d.id) : undefined;
+  if (d.text === null) {
+    b.lines.push(th.fg("warning", `… loading rvow show ${d.id}`));
+  } else {
+    const all = d.text.split("\n").filter((l) => l !== d.id && l !== `title: ${d.title}`);
+    for (const line of all.slice(0, MAX_LINES)) {
+      const m = change ? /^\s+(TSK-[a-z0-9]+) (.*)$/.exec(line) : null;
+      const task = change?.tasks?.find((t) => t.id === m?.[1]);
+      if (change && m && task) {
+        const [mark, color] = MARKS[task.state] ?? ["?", "dim"];
+        const on = focus === b.items.length;
+        const at = b.lines.length;
+        b.items.push({ kind: "task", change, task });
+        b.spans.push([at, at + 1]);
+        b.lines.push(
+          fit(
+            `  ${on ? th.fg("accent", "›") : " "} ${th.fg(color, mark)} ${cut(`${m[1]} ${m[2]}`, w - 8)}`,
+            w,
+          ),
+        );
+      } else {
+        b.lines.push(...wrapTextWithAnsi(styled(line, th), w));
+      }
+    }
+    if (all.length > MAX_LINES)
+      b.lines.push(
+        th.fg("dim", `… ${all.length - MAX_LINES} more lines cut; run rvow show ${d.id}`),
+      );
+    if (change) b.lines.push("", th.fg("dim", "Press enter on a task to read its requirements."));
+  }
+  const plan = d.kind === "plan" ? v.backlog.find((p) => p.id === d.id) : undefined;
+  if (plan) b.lines.push("", ...buttons(planButtons(plan, true, picked), w, true, th));
+  if (change && archivable(change))
+    b.lines.push("", ...buttons([{ key: "x", label: "Archive", primary: true }], w, true, th));
+  return b;
+}
+
+const firstTab = (v: View): Tab =>
+  v.changes.length > 0 ? "active" : v.backlog.length > 0 ? "backlog" : "archive";
 
 type Option = { label: string; description?: string };
 type Ask = { ref: string; question: string; header?: string; options: Option[] };
@@ -240,24 +612,433 @@ async function ask(ctx: ExtensionContext): Promise<string> {
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join("\n");
 }
 
+async function showText(cwd: string, d: Pick<Detail, "kind" | "id">) {
+  const shown = await run(["show", d.id, "--human"], cwd, "", SLOW_MS);
+  if (!shown) return { ok: false, text: `cannot run '${BIN}'` };
+  let text = shown.out.trim();
+  if (d.kind === "task") {
+    const covers = /^\s*covers:\s*(.+)$/m.exec(text)?.[1]?.match(ID) ?? [];
+    for (const req of covers) {
+      text = text
+        .split("\n")
+        .filter((l) => !l.startsWith(`${req} `))
+        .join("\n");
+      const r = await run(["show", req, "--human"], cwd, "", SLOW_MS);
+      if (r) text += `\n\n${r.out.trim()}`;
+    }
+  }
+  return { ok: shown.code === 0, text: text || "no output" };
+}
+
+async function show(ctx: ExtensionContext, lines: (p: Paint, width: number) => string[]) {
+  if (ctx.mode !== "tui") return ctx.ui.notify(lines(PLAIN, 80).join("\n"), "info");
+  await ctx.ui.custom<void>((tui, theme, _kb, done) => ({
+    invalidate() {},
+    render: (width: number) => {
+      const w = Math.min(width, 80);
+      return ["", ...lines(theme, w), "", theme.fg("dim", "esc to close")].map((l) =>
+        truncateToWidth(l, w),
+      );
+    },
+    handleInput(data: string) {
+      if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "q")) done();
+      tui.requestRender();
+    },
+  }));
+}
+
+type State = {
+  view?: View;
+  tab?: Tab;
+  stack: Detail[];
+  selected: string[];
+  cursor: Record<string, number>;
+  top: Record<string, number>;
+  follow: boolean;
+  notice?: Notice;
+  loaded: boolean;
+  loading: boolean;
+  saved: string;
+};
+
 export default function (pi: ExtensionAPI) {
   let resend = false;
   let continues = 0;
-  let cached: View | undefined;
+  const S: State = {
+    stack: [],
+    selected: [],
+    cursor: {},
+    top: {},
+    follow: true,
+    loaded: false,
+    loading: false,
+    saved: "",
+  };
+  let redraw = () => {};
 
   async function refresh(ctx: ExtensionContext) {
-    cached = await hook("view", ctx.cwd, {}, SLOW_MS);
+    const [view, status] = await Promise.all([
+      hook("view", ctx.cwd, {}, SLOW_MS),
+      hook("status", ctx.cwd, {}, SLOW_MS),
+    ]);
+    const v = normalize(view);
+    S.view = v ?? S.view;
+    S.selected = S.selected.filter((id) => S.view?.backlog.some((p) => p.id === id));
+    await Promise.all(
+      S.stack.map(async (d) => {
+        const r = await showText(ctx.cwd, d);
+        if (r.ok) d.text = r.text;
+      }),
+    );
     if (!ctx.hasUI) return;
-    const v = cached;
+    ctx.ui.setStatus("rvow", typeof status?.status === "string" ? status.status : undefined);
+    const line = v && band(v);
     ctx.ui.setWidget(
       "rvow",
-      v
+      line
         ? (_tui, theme) => ({
             invalidate() {},
-            render: (width: number) => summary(v, theme).map((l) => truncateToWidth(l, width)),
+            render: (width: number) => [
+              truncateToWidth(
+                `${theme.fg("warning", line)} ${theme.fg("dim", "/rvow-status")}`,
+                width,
+              ),
+            ],
           })
         : undefined,
     );
+  }
+
+  function savePane() {
+    const state = JSON.stringify({
+      tab: S.tab,
+      details: S.stack.map(({ kind, id, title }) => ({ kind, id, title })),
+    });
+    if (state === S.saved) return;
+    S.saved = state;
+    pi.appendEntry(ENTRY, JSON.parse(state));
+  }
+
+  async function restore(ctx: ExtensionContext) {
+    const v = S.view;
+    const last = ctx.sessionManager
+      .getEntries()
+      .filter((e) => e.type === "custom" && e.customType === ENTRY)
+      .at(-1);
+    const data = last?.type === "custom" ? last.data : undefined;
+    if (!v || !isRecord(data)) return;
+    if (isTab(data.tab)) S.tab = data.tab;
+    const alive = (d: Detail) =>
+      d.kind === "plan"
+        ? v.backlog.some((p) => p.id === d.id)
+        : d.kind === "change"
+          ? v.changes.some((c) => c.id === d.id)
+          : d.kind === "archive"
+            ? v.archive.some((a) => a.id === d.id)
+            : v.changes.some((c) => c.tasks?.some((t) => t.id === d.id));
+    const stack: Detail[] = [];
+    for (const d of Array.isArray(data.details) ? data.details : []) {
+      if (!isRecord(d) || !isKind(d.kind) || typeof d.id !== "string") continue;
+      const frame: Detail = { kind: d.kind, id: d.id, title: String(d.title ?? ""), text: null };
+      if (alive(frame)) stack.push(frame);
+    }
+    S.stack = stack;
+    await Promise.all(
+      stack.map(async (d) => {
+        d.text = (await showText(ctx.cwd, d)).text;
+      }),
+    );
+  }
+
+  function settle(r: { code: number; out: string } | undefined) {
+    if (!r) return;
+    const lines = r.out.split("\n").filter((l) => l.trim());
+    const text = r.code === 0 ? (lines.at(-1) ?? "") : lines.slice(0, 3).join("\n");
+    S.notice = { tone: r.code === 0 ? "ok" : "fail", text: text || "no output" };
+  }
+
+  function layout(tui: TUI, th: Paint, wide: number) {
+    const pw = Math.max(24, Math.min(wide, MAX_WIDTH));
+    const w = pw - 4;
+    const v = S.view;
+    const d = S.stack.at(-1);
+    const tab = S.tab ?? (v ? firstTab(v) : "backlog");
+    const key = d ? `d${S.stack.length}` : tab;
+    const make = (focus: number): Body =>
+      !v
+        ? {
+            lines: empty(
+              S.loading ? ["loading rvow..."] : ["No rvow change on this branch.", START(th)],
+              w,
+              th,
+            ),
+            spans: [],
+            items: [],
+          }
+        : d
+          ? detailBody(v, d, S.selected.includes(d.id), focus, w, th)
+          : tabBody(v, tab, S.selected, focus, w, th);
+    const probe = make(0);
+    const focus = Math.max(0, Math.min(S.cursor[key] ?? 0, probe.items.length - 1));
+    const body = focus === 0 ? probe : make(focus);
+
+    const head: string[] = [];
+    let title = "";
+    if (v) {
+      const labels = [
+        `1 Backlog ${v.backlog.length}`,
+        `2 Active ${v.changes.length}`,
+        `3 Archive ${v.archive.length}`,
+      ];
+      const bar = labels
+        .map((l, i) => {
+          const text = ` ${l} `;
+          return TABS[i] === tab
+            ? th.inverse(th.fg("accent", th.bold(text)))
+            : th.fg("muted", text);
+        })
+        .join(" ");
+      const branch = v.branch ? th.fg("dim", `⎇ ${v.branch}`) : "";
+      title =
+        branch && visibleWidth(bar) + 2 + visibleWidth(branch) <= w ? spread(bar, branch, w) : bar;
+    }
+    if (d) {
+      const [badge, color] = BADGE[d.kind];
+      head.push(
+        th.fg("accent", th.bold("b")) + th.fg("dim", " Back"),
+        spread(
+          `${th.inverse(th.fg(color, th.bold(badge)))} ${th.bold(d.title)}`,
+          th.fg("dim", d.id),
+          w,
+        ),
+        th.fg("dim", "─".repeat(w)),
+      );
+    }
+    if (S.notice) {
+      const [glyph, color] = TONE[S.notice.tone];
+      for (const [i, l] of S.notice.text.split("\n").entries())
+        head.push(`${th.fg(color, i === 0 ? glyph : " ")} ${l}`);
+      head.push("");
+    }
+
+    const item = body.items[focus];
+    const plan =
+      item?.kind === "plan"
+        ? item.plan
+        : d?.kind === "plan"
+          ? v?.backlog.find((p) => p.id === d.id)
+          : undefined;
+    const change =
+      item?.kind === "change" || item?.kind === "task"
+        ? item.change
+        : d?.kind === "change"
+          ? v?.changes.find((c) => c.id === d.id)
+          : undefined;
+    const keys: [string, string][] = [
+      ["1-3", "tabs"],
+      ["j/k", body.items.length ? "move" : "scroll"],
+    ];
+    if (d) keys.unshift(["b", "back"]);
+    if (item) keys.push(["enter", "open"]);
+    if (plan) keys.push(["a", "accept"], ["e", "refine"], ["s", "select"]);
+    if (plan && !plan.here) keys.push(["t", "take"]);
+    if (change && archivable(change)) keys.push(["x", "archive"]);
+    keys.push(["r", "refresh"], ["esc", "close"]);
+    const text = (ks: [string, string][]) => ks.map(([k, l]) => `${k} ${l}`).join("  ");
+    while (keys.length > 2 && text(keys).length > w - 9) keys.splice(keys.length - 3, 1);
+    const hint = keys.map(([k, l]) => `${th.fg("accent", k)} ${th.fg("dim", l)}`).join("  ");
+
+    const panelH = Math.max(12, Math.min(PANEL_ROWS, Math.floor(tui.terminal.rows * 0.9)));
+    const bodyH = Math.max(3, panelH - 6 - head.length);
+    const total = body.lines.length;
+    let top = Math.min(S.top[key] ?? 0, Math.max(0, total - bodyH));
+    const span = body.spans[focus];
+    if (S.follow && span) {
+      if (span[0] < top) top = span[0];
+      else if (span[1] > top + bodyH) top = Math.min(span[0], span[1] - bodyH);
+    }
+    top = Math.max(0, Math.min(top, Math.max(0, total - bodyH)));
+    S.top[key] = top;
+    const more =
+      total > bodyH ? th.fg("dim", `  ${top + 1}-${Math.min(total, top + bodyH)}/${total}`) : "";
+    const shown = body.lines.slice(top, top + bodyH);
+    const edge = (c: string) => th.fg("border", c);
+    const row = (inner: string) =>
+      th.bg("toolPendingBg", `${edge("│")} ${fit(inner, w)} ${edge("│")}`);
+    const rule = (l: string, r: string) =>
+      th.bg("toolPendingBg", edge(`${l}${"─".repeat(pw - 2)}${r}`));
+    const inside = [
+      rule("╭", "╮"),
+      row(title),
+      rule("├", "┤"),
+      ...head.map(row),
+      ...shown.map(row),
+      ...Array.from({ length: bodyH - shown.length }, () => row("")),
+      rule("├", "┤"),
+      row(`${hint}${more}`),
+      rule("╰", "╯"),
+    ];
+    const left = " ".repeat(Math.floor(Math.max(0, wide - pw) / 2));
+    return {
+      lines: inside.map((l) => truncateToWidth(`${left}${l}`, wide, "", true)),
+      body,
+      focus,
+      key,
+      plan,
+      change,
+      item,
+      bodyH,
+      tab,
+      d,
+      v,
+    };
+  }
+
+  function component(ctx: ExtensionContext, tui: TUI, th: Paint, done: (e: Exit) => void) {
+    redraw = () => tui.requestRender();
+    let wide = MAX_WIDTH;
+
+    async function open(d: Pick<Detail, "kind" | "id" | "title">) {
+      const frame: Detail = { ...d, text: null };
+      S.stack.push(frame);
+      S.notice = undefined;
+      S.follow = true;
+      redraw();
+      const r = await showText(ctx.cwd, d);
+      frame.text = r.text;
+      redraw();
+    }
+
+    async function reload() {
+      await refresh(ctx);
+      if (!S.view) S.notice = { tone: "fail", text: "rvow did not answer; press r to retry" };
+      redraw();
+    }
+
+    function openItem(item: Item | undefined) {
+      if (item?.kind === "plan")
+        void open({ kind: "plan", id: item.plan.id, title: item.plan.title });
+      else if (item?.kind === "change")
+        void open({ kind: "change", id: item.change.id, title: item.change.title });
+      else if (item?.kind === "task")
+        void open({ kind: "task", id: item.task.id, title: item.task.title });
+      else if (item?.kind === "archive")
+        void open({ kind: "archive", id: item.entry.id, title: item.entry.title });
+    }
+
+    function handleInput(data: string) {
+      const l = layout(tui, th, wide);
+      const is = (k: KeyId) => matchesKey(data, k);
+      const { plan, change, item, d, v } = l;
+      const move = (n: number) => {
+        const next = Math.max(0, Math.min(l.focus + n, l.body.items.length - 1));
+        if (next === l.focus) S.top[l.key] = Math.max(0, (S.top[l.key] ?? 0) + n * 3);
+        S.cursor[l.key] = next;
+        S.follow = next !== l.focus || S.follow;
+      };
+      const scroll = (n: number) => {
+        S.top[l.key] = Math.max(0, (S.top[l.key] ?? 0) + n);
+        S.follow = false;
+      };
+      const tabTo = (t: Tab) => {
+        S.notice = undefined;
+        S.stack = [];
+        S.tab = t;
+        S.follow = true;
+      };
+      const finish = (e: Exit) => done(e);
+
+      if (is("escape") || is("q") || is("ctrl+c")) return finish({ act: "close" });
+      if (d && (is("b") || is("backspace"))) {
+        S.stack.pop();
+        S.notice = undefined;
+        delete S.cursor[l.key];
+        delete S.top[l.key];
+        S.follow = true;
+      } else if (is("up") || is("k")) move(-1);
+      else if (is("down") || is("j")) move(1);
+      else if (is("pageUp")) scroll(-Math.max(1, l.bodyH - 1));
+      else if (is("pageDown")) scroll(Math.max(1, l.bodyH - 1));
+      else if (is("1")) tabTo("backlog");
+      else if (is("2")) tabTo("active");
+      else if (is("3")) tabTo("archive");
+      else if (!d && (is("tab") || is("right")))
+        tabTo(TABS[(TABS.indexOf(l.tab) + 1) % TABS.length] ?? "backlog");
+      else if (!d && (is("shift+tab") || is("left")))
+        tabTo(TABS[(TABS.indexOf(l.tab) + TABS.length - 1) % TABS.length] ?? "backlog");
+      else if (is("enter") || is("d")) openItem(item);
+      else if (is("r")) void reload();
+      else if (is("a") && plan) {
+        if (plan.ready && plan.here) return finish({ act: "accept", id: plan.id });
+        S.notice = { tone: "fail", text: `Not ready: ${blocker(plan)}.` };
+      } else if (is("t") && plan && !plan.here) return finish({ act: "claim", id: plan.id });
+      else if (data === "A" && plan?.here && (plan.questions ?? 0) > 0)
+        return finish({ act: "ask", id: plan.id });
+      else if (is("e") && plan) return finish({ act: "refine", plans: [plan] });
+      else if (is("s") && plan)
+        S.selected = S.selected.includes(plan.id)
+          ? S.selected.filter((x) => x !== plan.id)
+          : [...S.selected, plan.id];
+      else if (is("f") && v && S.selected.length > 0)
+        return finish({ act: "refine", plans: v.backlog.filter((p) => S.selected.includes(p.id)) });
+      else if (is("x") && change && archivable(change))
+        return finish({ act: "archive", id: change.id });
+      else if (is("c") && change && (change.pending ?? []).length > 0)
+        return finish({ act: "amend" });
+      else return;
+      tui.requestRender();
+    }
+
+    return {
+      invalidate() {},
+      render: (width: number) => {
+        wide = width;
+        return layout(tui, th, width).lines;
+      },
+      handleInput,
+    };
+  }
+
+  async function pane(ctx: ExtensionContext) {
+    S.loading = true;
+    // The pane opens at once; rvow runs in the background and the pane redraws when it answers.
+    void refresh(ctx)
+      .then(async () => {
+        if (S.loaded) return;
+        S.loaded = true;
+        await restore(ctx);
+      })
+      .finally(() => {
+        S.loading = false;
+        if (!S.view)
+          S.notice = { tone: "fail", text: `rvow did not answer; is '${BIN}' installed?` };
+        redraw();
+      });
+    for (;;) {
+      const exit = await ctx.ui.custom<Exit | undefined>(
+        (tui, theme, _kb, done) => component(ctx, tui, theme, done),
+        { overlay: true, overlayOptions: { width: "100%", anchor: "center" } },
+      );
+      savePane();
+      if (!exit || exit.act === "close") return;
+      if (!(await perform(ctx, exit))) return;
+    }
+  }
+
+  async function perform(ctx: ExtensionContext, exit: Exclude<Exit, { act: "close" }>) {
+    if (exit.act === "refine") {
+      pi.sendUserMessage(refinePrompt(exit.plans), { deliverAs: "followUp" });
+      S.selected = [];
+      ctx.ui.notify("Refine prompt sent to the agent.", "info");
+      return false;
+    }
+    if (exit.act === "amend") await confirmAmendments(ctx);
+    else if (exit.act === "ask") {
+      S.notice = { tone: "ok", text: await ask(ctx) };
+      await refresh(ctx);
+    } else if (exit.act === "accept") settle(await acceptPlan(ctx, exit.id));
+    else settle(await decide(ctx, [exit.act, exit.id]));
+    return true;
   }
 
   pi.on("tool_call", async (event, ctx) => {
@@ -273,20 +1054,26 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    const text = await brief(ctx.cwd);
-    if (text) pi.sendMessage({ customType: "rvow", content: text, display: false });
-    await refresh(ctx);
+  // These handlers only update the status line, so pi never waits for a slow rvow.
+  pi.on("session_start", (_event, ctx) => {
+    S.loaded = false;
+    S.stack = [];
+    S.saved = "";
+    later(async () => {
+      const text = await brief(ctx.cwd);
+      if (text) pi.sendMessage({ customType: "rvow", content: text, display: false });
+    });
+    later(() => refresh(ctx));
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    await refresh(ctx);
+  pi.on("agent_settled", (_event, ctx) => {
+    later(() => refresh(ctx));
   });
 
-  pi.on("tool_result", async (event, ctx) => {
+  pi.on("tool_result", (event, ctx) => {
     const cmd = (event.input as Record<string, unknown>).command;
     if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd))
-      await refresh(ctx);
+      later(() => refresh(ctx));
   });
 
   pi.on("session_compact", () => {
@@ -328,26 +1115,47 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("rvow-status", {
     description: "Show the rvow view of this branch",
     handler: async (_args, ctx) => {
+      if (ctx.mode === "tui") return pane(ctx);
       await refresh(ctx);
-      const v = cached;
-      if (!v) return ctx.ui.notify("no active rvow change on this branch", "info");
-      if (ctx.mode !== "tui") return ctx.ui.notify(detail(v, PLAIN, 80).join("\n"), "info");
-      await ctx.ui.custom<void>((tui, theme, _kb, done) => ({
-        invalidate() {},
-        render: (width: number) => {
-          const w = Math.min(width, 80);
-          return ["", ...detail(v, theme, w), "", theme.fg("dim", "esc to close")].map((l) =>
-            truncateToWidth(l, w),
-          );
-        },
-        handleInput(data: string) {
-          if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "q"))
-            done();
-          tui.requestRender();
-        },
-      }));
+      const v = S.view;
+      if (!v) return ctx.ui.notify(`rvow did not answer; is '${BIN}' installed?`, "warning");
+      const tabs = TABS.map((t) => [t, ...tabBody(v, t, [], -1, 80, PLAIN).lines].join("\n"));
+      ctx.ui.notify(tabs.join("\n\n"), "info");
     },
   });
+
+  async function confirmAmendments(ctx: ExtensionContext) {
+    const list = await run(["confirm"], ctx.cwd, "", SLOW_MS);
+    if (!list) return ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
+    const ids = list.out
+      .split("\n")
+      .filter((l) => l.startsWith("AMD-"))
+      .map((l) => l.split(/\s/)[0] ?? "");
+    if (list.code !== 0 || ids.length === 0) {
+      return ctx.ui.notify(
+        list.out.trim() || "No pending amendments.",
+        list.code === 0 ? "info" : "error",
+      );
+    }
+    const decided: Record<"accept" | "reject", string[]> = { accept: [], reject: [] };
+    for (const id of ids) {
+      const accept = await ctx.ui.confirm(`rvow ${id}`, `${list.out.trim()}\n\nAccept ${id}?`);
+      const verb = accept ? "accept" : "reject";
+      const r = await run(["confirm", id, `--${verb}`], ctx.cwd, "", SLOW_MS);
+      if (r?.code === 0) decided[verb].push(id);
+      ctx.ui.notify(
+        r?.out.trim() || `${id}: ${accept ? "accepted" : "rejected"}`,
+        r?.code === 0 ? "info" : "error",
+      );
+    }
+    for (const verb of ["accept", "reject"] as const) {
+      const prompt = decided[verb].length
+        ? decisionPrompt(["confirm", `--${verb}`, ...decided[verb]], "")
+        : null;
+      if (prompt) pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+    }
+    await refresh(ctx);
+  }
 
   pi.registerCommand("rvow-confirm", {
     description: "Review and decide pending rvow amendments",
@@ -356,32 +1164,95 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("Run `rvow confirm` in a terminal to decide amendments.", "warning");
         return;
       }
-      const list = await run(["confirm"], ctx.cwd, "", SLOW_MS);
-      if (!list) return ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
-      const ids = list.out
-        .split("\n")
-        .filter((l) => l.startsWith("AMD-"))
-        .map((l) => l.split(/\s/)[0]);
-      if (list.code !== 0 || ids.length === 0) {
-        return ctx.ui.notify(
-          list.out.trim() || "No pending amendments.",
-          list.code === 0 ? "info" : "error",
-        );
-      }
-      for (const id of ids) {
-        const accept = await ctx.ui.confirm(`rvow ${id}`, `${list.out.trim()}\n\nAccept ${id}?`);
-        const r = await run(
-          ["confirm", id, accept ? "--accept" : "--reject"],
-          ctx.cwd,
-          "",
-          SLOW_MS,
-        );
-        ctx.ui.notify(
-          r?.out.trim() || `${id}: ${accept ? "accepted" : "rejected"}`,
-          r?.code === 0 ? "info" : "error",
-        );
-      }
+      await confirmAmendments(ctx);
     },
+  });
+
+  // These decide for the user, so they exist only as commands a person types, and need a dialog.
+  function userCommand(
+    name: string,
+    description: string,
+    body: (ctx: ExtensionContext, arg: string) => Promise<void>,
+  ) {
+    pi.registerCommand(name, {
+      description,
+      handler: async (args, ctx) => {
+        if (!ctx.hasUI) {
+          ctx.ui.notify(`Run \`rvow ${name.slice(5)}\` in a terminal.`, "warning");
+          return;
+        }
+        await body(ctx, args.trim().split(/\s+/)[0] ?? "");
+      },
+    });
+  }
+
+  async function pick(ctx: ExtensionContext, arg: string): Promise<string | undefined> {
+    if (arg) return arg;
+    await refresh(ctx);
+    const ps = (S.view?.backlog ?? []).filter((x) => x.here && x.ready);
+    const [only] = ps;
+    if (!only) {
+      ctx.ui.notify("no plan waits on this branch; see /rvow-status", "info");
+      return;
+    }
+    if (ps.length === 1) return only.id;
+    const shown = new Map(ps.map((x) => [`${x.id} ${x.title}`, x.id]));
+    const choice = await ctx.ui.select("Which plan?", [...shown.keys()]);
+    return choice === undefined ? undefined : shown.get(choice);
+  }
+
+  async function rvow(ctx: ExtensionContext, argv: string[]) {
+    const r = await run(argv, ctx.cwd, "", SLOW_MS);
+    if (!r) ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
+    return r;
+  }
+
+  async function decide(ctx: ExtensionContext, argv: string[]) {
+    ctx.ui.setStatus("rvow", `rvow ${argv.join(" ")} ...`);
+    const r = await rvow(ctx, argv);
+    if (r) {
+      ctx.ui.notify(
+        r.out.trim() || `rvow ${argv.join(" ")}: done`,
+        r.code === 0 ? "info" : "error",
+      );
+      const prompt = r.code === 0 ? decisionPrompt(argv, r.out) : null;
+      if (prompt) pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+    }
+    await refresh(ctx);
+    return r;
+  }
+
+  async function acceptPlan(ctx: ExtensionContext, id: string) {
+    const r = await rvow(ctx, ["review", id]);
+    if (!r) return;
+    if (r.code !== 0) {
+      ctx.ui.notify(r.out.trim(), "error");
+      return r;
+    }
+    if (!(await ctx.ui.confirm(`rvow ${id}`, `${r.out.trim()}\n\nAccept ${id}?`))) return;
+    return decide(ctx, ["accept", id]);
+  }
+
+  userCommand(
+    "rvow-review",
+    "Read a waiting rvow plan and the accept checklist",
+    async (ctx, arg) => {
+      const id = await pick(ctx, arg);
+      const r = id && (await rvow(ctx, ["review", id]));
+      if (!r) return;
+      if (r.code !== 0) return ctx.ui.notify(r.out.trim(), "error");
+      await show(ctx, () => r.out.trim().split("\n"));
+    },
+  );
+
+  userCommand("rvow-accept", "Accept a waiting rvow plan after reading it", async (ctx, arg) => {
+    const id = await pick(ctx, arg);
+    if (id) await acceptPlan(ctx, id);
+  });
+
+  userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
+    if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
+    await decide(ctx, ["archive", arg]);
   });
 
   pi.registerTool({
