@@ -76,6 +76,50 @@ async function userOnly(
   }
 }
 
+const ASK = 'mcp__rvow__rvow_ask'
+const EDIT_HINT = 'Edit the text each answer changes.'
+
+type Asked = {
+  ref: string
+  question: string
+  header?: string
+  options: { label: string; description?: string }[]
+}
+
+/** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
+async function ask($: EngineInterface): Promise<string> {
+  const cwd = await $.session.cwd()
+  const run = (argv: string[]) => $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
+  let round: { questions?: Asked[]; remaining?: number }
+  try {
+    round = JSON.parse((await run(['clarify', '--json'])).stdout)
+  } catch (err) {
+    return `cannot read the open questions from ${BIN}: ${String(err)}`
+  }
+  const qs = round.questions ?? []
+  if (qs.length === 0) return 'no open questions'
+  const done: string[] = []
+  for (const [i, q] of qs.entries()) {
+    const detail = q.options.filter((o) => o.description).map((o) => `${o.label}: ${o.description}`)
+    const text = [q.question, ...detail].join('\n')
+    const stay = () =>
+      `cancelled; still open: ${qs
+        .slice(i)
+        .map((x) => x.ref)
+        .join(', ')}`
+    let choice: string
+    try {
+      choice = await $.ui.ask(text, { header: q.header, options: q.options.map((o) => o.label) })
+    } catch {
+      return [...done, stay()].join('\n')
+    }
+    const r = await run(['answer', q.ref, choice, '--via', 'dialog']).catch(() => undefined)
+    if (!r || r.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
+    done.push(`${q.ref} ${q.question} -> ${choice}`)
+  }
+  return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join('\n')
+}
+
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -93,8 +137,19 @@ export const register: Register = (on) => {
       name: 'rvow',
       description: 'Show the rvow state of this branch in a pane',
     })
+    await $.tool.register({
+      name: 'rvow_ask',
+      description:
+        'Ask the user the open questions of the rvow plan on this branch, one round of at most 4, and record the answers. Use it instead of asking in chat.',
+    })
     await refresh($)
     return started
+  })
+
+  on('tool.call', { tool: ASK }, async ($) => {
+    const result = await ask($)
+    await refresh($)
+    return { result }
   })
 
   on('tool.call', async ($, e, next) => {

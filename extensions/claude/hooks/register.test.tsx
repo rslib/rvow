@@ -85,3 +85,39 @@ test('nothing from rvow draws the empty pane and no band', async ($, on) => {
   })
   expect((await band.find({ type: 'Text' }))?.text).toBe('fallthrough')
 })
+
+test('rvow_ask asks each question and records the answer', async ($, on) => {
+  const calls: string[][] = []
+  const round = {
+    questions: [
+      {
+        ref: 'CHG-1:proposal.md:12',
+        question: 'Which store?',
+        header: 'Which store?',
+        options: [
+          { label: 'sqlite (Recommended)', description: 'one file' },
+          { label: 'json', description: '' },
+        ],
+      },
+    ],
+    remaining: 3,
+  }
+  on('session.cwd', async () => ({ value: '/tmp' }) as any)
+  on('process.run', async (_$: any, e: any) => {
+    calls.push(e.argv ?? e.command)
+    const out = String(calls.at(-1)).includes('clarify') ? JSON.stringify(round) : ''
+    return { value: { exitCode: 0, stdout: out, stderr: '' } } as any
+  })
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$: any, e: any) => ({
+    result: { questions: e.questions, answers: { [e.questions[0].question]: 'json' } },
+  }))
+  on('ui.status', async () => ({ value: undefined }) as any)
+  const out = await $.tool.call({ tool: 'mcp__rvow__rvow_ask' } as any)
+  const text = JSON.stringify(out)
+  expect(text).toContain('CHG-1:proposal.md:12 Which store? -> json')
+  expect(text).toContain('3 questions remain')
+  expect(text).toContain('Edit the text each answer changes.')
+  expect(
+    calls.some((c) => c.includes('answer') && c.includes('json') && c.includes('dialog')),
+  ).toBe(true)
+})
