@@ -42,6 +42,14 @@ export type RvowView = {
   needs_you: { amendments: number; questions: number; blocked: number; plans: number }
 }
 export type RvowTab = 'backlog' | 'active' | 'archive'
+/** A drill-down view drawn over the selected tab. */
+export type RvowDetail = {
+  kind: 'plan' | 'change' | 'task' | 'archive'
+  id: string
+  title: string
+  /** `rvow show <id> --human`, plus a task's covered requirements; null while it runs. */
+  text: string | null
+}
 /** The last thing a pane button ran, drawn under the header. */
 export type RvowNotice = { tone: 'ok' | 'fail' | 'busy'; text: string }
 
@@ -58,6 +66,8 @@ declare module 'claude-code' {
       tab: RvowTab | null
       /** Backlog plan ids picked for one refine prompt. */
       selected: string[]
+      /** Open detail views, the drawn one last; empty draws the tab. */
+      details: RvowDetail[]
     }
   }
 }
