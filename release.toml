@@ -1,0 +1,10 @@
+# `cargo release <patch|minor|major> --execute` from a clean `trunk`: sets the workspace version,
+# commits it, tags `v<version>` and pushes both. The tag starts .github/workflows/release.yml,
+# which builds and publishes the binaries. `publish = false` in Cargo.toml keeps it off crates.io.
+allow-branch = ["trunk"]
+shared-version = true
+consolidate-commits = true
+pre-release-commit-message = "chore: bump version to {{version}}"
+tag-name = "v{{version}}"
+tag-message = "rvow {{version}}"
+push = true
