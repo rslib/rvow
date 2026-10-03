@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { compositeTuiLine, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  Container,
+  compositeTuiLine,
+  stripTerminalSequences,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
   decisionPrompt as modDecision,
   refinePrompt as modRefine,
@@ -95,7 +102,12 @@ const DONE = {
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type Command = { handler: (args: string, ctx: unknown) => Promise<void> };
-type Rendered = { render: (width: number) => string[]; handleInput?: (data: string) => void };
+type Rendered = {
+  render: (width: number) => string[];
+  invalidate: () => void;
+  handleInput?: (data: string) => void;
+  handleMouse?: (e: TuiMouseEvent) => TuiMouseEventResult | undefined;
+};
 type Factory = (
   tui: unknown,
   theme: unknown,
@@ -267,12 +279,18 @@ function setup(files: Files, ui: Ui = {}) {
     assert.ok(h, `${name} is registered`);
     return h(ctx);
   };
+  const dockComponent = async () => {
+    const c = components.get("rvow-dock");
+    assert.ok(c, "the dock widget is set");
+    return c;
+  };
   const dock = async (width = ui.cols ?? 100) => {
     const c = components.get("rvow-dock");
     assert.ok(c, "the dock widget is set");
     return c.render(width);
   };
   return {
+    dockComponent,
     queue,
     widget,
     key,
@@ -1850,4 +1868,414 @@ test("the focus hint lists the tab keys and shortens at narrow widths", async ()
   const hint = (await narrow.dock(50)).at(-1) ?? "";
   assert.match(hint, /1-3 tabs.*esc editor/);
   assert.equal(visibleWidth(hint), 50);
+});
+
+type MouseOver = Partial<TuiMouseEvent>;
+
+function at(lines: string[], text: string, nth = 0) {
+  const hits = lines.flatMap((line, row) => {
+    const plain = stripTerminalSequences(line);
+    const i = plain.indexOf(text);
+    return i < 0 ? [] : [{ row, col: visibleWidth(plain.slice(0, i)) }];
+  });
+  return hits[nth];
+}
+
+function event(x: number, y: number, width: number, height: number, over: MouseOver = {}) {
+  const e: TuiMouseEvent = {
+    type: "click",
+    button: "left",
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...over,
+  };
+  return e;
+}
+
+/** Clicks `dx` columns into the first visible occurrence of `text`. */
+function clickText(c: Rendered, text: string, over: MouseOver = {}, dx = 1, nth = 0, width = 100) {
+  const lines = c.render(width);
+  const pos = at(lines, text, nth);
+  assert.ok(pos, `${text} is on screen`);
+  return c.handleMouse?.(event(pos.col + dx, pos.row, width, lines.length, over));
+}
+
+const noEditor = (t: { calls: Call[] }) =>
+  assert.deepEqual(
+    t.calls.filter((c) => c.kind === "editor"),
+    [],
+  );
+
+test("dock: clicking a tab label switches the tab and focuses the dock", async () => {
+  const t = await docked(FULL, { mark: true, draft: "my draft" });
+  const dock = await t.dockComponent();
+  const marked = () => /«([^»]*)»/.exec(dock.render(100)[1] ?? "")?.[1]?.trim();
+  assert.equal(marked(), "2 Active 1");
+  assert.deepEqual(clickText(dock, "3 Archive"), { handled: true });
+  assert.equal(marked(), "3 Archive 10");
+  assert.match(dock.render(100).join("\n"), / focus /);
+  clickText(dock, "1 Backlog");
+  assert.equal(marked(), "1 Backlog 2");
+  assert.match(dock.render(100).join("\n"), /PLAN Alpha/);
+  clickText(dock, "2 Active");
+  assert.equal(marked(), "2 Active 1");
+  noEditor(t);
+  assert.equal(t.editor.text, "my draft");
+});
+
+test("dock: tab click regions end at the label (wide titles do not shift them)", async () => {
+  const t = await docked({ ...FULL, branch: "日本語ブランチ" });
+  const dock = await t.dockComponent();
+  const lines = dock.render(100);
+  const pos = at(lines, "3 Archive");
+  assert.ok(pos);
+  const label = " 3 Archive 10 ".length;
+  const send = (dx: number) =>
+    dock.handleMouse?.(event(pos.col - 1 + dx, pos.row, 100, lines.length));
+  assert.equal(send(-1), undefined, "the gap before the label");
+  assert.deepEqual(send(0), { handled: true });
+  assert.deepEqual(send(label - 1), { handled: true });
+  assert.equal(send(label), undefined, "the gap after the label");
+});
+
+test("dock: a click on a row moves the cursor and focuses; a second click opens the modal", async () => {
+  const t = await docked(
+    FULL,
+    { draft: "my draft" },
+    { "show-TSK-2.txt": "TSK-2\ntitle: b\nstage: t2" },
+  );
+  const dock = await t.dockComponent();
+  const cursor = () => (dock.render(100).find((l) => l.includes("›")) ?? "").replace(/\s+/g, " ");
+  assert.equal(cursor(), "");
+  clickText(dock, "title of TSK-2", {}, 3);
+  assert.match(cursor(), /TSK-2/);
+  assert.match(dock.render(100).join("\n"), / focus /);
+  assert.equal(t.opened(), 0, "the first click only selects");
+  let seen = "";
+  t.queue(async (p) => {
+    await until(p, /stage: t2/);
+    seen = text(p);
+    press(p, KEY.esc);
+  });
+  clickText(dock, "title of TSK-2", {}, 3);
+  await waitFor(() => /stage: t2/.test(seen));
+  assert.match(seen, /TASK {2}title of TSK-2/);
+  noEditor(t);
+  assert.equal(t.editor.text, "my draft");
+});
+
+test("dock: a double click (clickCount 2) opens the modal at once", async () => {
+  const t = await docked(FULL, {}, { "show-CHG-1.txt": "CHG-1\ntitle: Do it\nstage: dbl" });
+  const dock = await t.dockComponent();
+  let seen = "";
+  t.queue(async (p) => {
+    await until(p, /stage: dbl/);
+    seen = text(p);
+    press(p, KEY.esc);
+  });
+  clickText(dock, "▸ Do it", { clickCount: 2 });
+  await waitFor(() => /stage: dbl/.test(seen));
+  assert.match(seen, /CHANGE {2}Do it/);
+});
+
+test("dock: the title tag focuses and unfocuses", async () => {
+  const t = await docked(FULL);
+  const dock = await t.dockComponent();
+  assert.match(dock.render(100)[0] ?? "", /alt\+r focus/);
+  clickText(dock, "alt+r focus");
+  assert.match(dock.render(100)[0] ?? "", / focus ─╮/);
+  clickText(dock, " focus ", {}, 2);
+  assert.match(dock.render(100)[0] ?? "", /alt\+r focus/);
+});
+
+test("dock: the wheel scrolls the current tab, focused or not", async () => {
+  const t = await docked({ ...EMPTY, archive: ARCHIVE10 });
+  const dock = await t.dockComponent();
+  const lines = () => dock.render(100).join("\n");
+  assert.match(lines(), /Shipped 0/);
+  for (let i = 0; i < 9; i++)
+    clickText(dock, "Shipped", { type: "wheel", button: "none", wheelDelta: 1 });
+  assert.match(lines(), /Shipped 9/);
+  assert.doesNotMatch(lines(), /Shipped 0/);
+  assert.match(dock.render(100).at(-1) ?? "", /4-10\/10/);
+  for (let i = 0; i < 9; i++)
+    clickText(dock, "Shipped", { type: "wheel", button: "none", wheelDelta: -1 });
+  assert.match(lines(), /Shipped 0/);
+});
+
+test("dock: blank space, borders, other buttons and press/release do nothing", async () => {
+  const t = await docked(FULL, { draft: "my draft" });
+  const dock = await t.dockComponent();
+  const before = dock.render(100).join("\n");
+  const lines = dock.render(100);
+  const send = (x: number, y: number, over: MouseOver = {}) =>
+    dock.handleMouse?.(event(x, y, 100, lines.length, over));
+  assert.equal(send(90, 1), undefined, "blank part of the tab bar");
+  assert.equal(send(5, 0), undefined, "the title text");
+  assert.equal(send(50, lines.length - 1), undefined, "the bottom border");
+  assert.equal(send(5, 2, { button: "right" }), undefined);
+  const pos = at(lines, "2 Active");
+  assert.ok(pos);
+  const press = send(pos.col + 3, pos.row, { type: "press" });
+  assert.deepEqual(press, { handled: true, render: false });
+  send(pos.col + 3, pos.row, { type: "release" });
+  assert.equal(dock.render(100).join("\n"), before);
+  noEditor(t);
+  assert.equal(t.editor.text, "my draft");
+});
+
+test("dock: clicks reach the dock through pi's real container hit-testing", async () => {
+  const t = await docked(FULL);
+  const dock = await t.dockComponent();
+  const box = new Container();
+  box.addChild({ render: () => ["transcript one", "transcript two"], invalidate() {} });
+  box.addChild(dock);
+  const lines = box.render(100);
+  const pos = at(lines, "3 Archive");
+  assert.ok(pos);
+  const r = box.handleMouse(event(pos.col + 3, pos.row, 100, lines.length));
+  assert.equal(r?.handled, true);
+  assert.match(dock.render(100).join("\n"), /CHG-a0 done Shipped 0/);
+  assert.equal(
+    box.handleMouse(event(3, 0, 100, lines.length)),
+    undefined,
+    "the transcript is not ours",
+  );
+});
+
+test("dock: clicks are ignored while a modal or dialog owns the screen", async () => {
+  const t = await docked(FULL, {}, { "show-CHG-1.txt": "CHG-1\ntitle: Do it\nstage: m" });
+  const dock = await t.dockComponent();
+  await t.shortcut("alt+r");
+  let during: unknown = "unset";
+  t.queue(async (p) => {
+    await until(p, /stage: m/);
+    during = clickText(dock, "3 Archive");
+    press(p, KEY.esc);
+  });
+  t.key("\r");
+  await waitFor(() => during !== "unset");
+  assert.equal(during, undefined);
+});
+
+async function pane(view: object, files: Files = {}, ui: Ui = {}) {
+  const t = setup({ "view.json": json(view), ...files }, ui);
+  return t;
+}
+
+test("pane: tab labels are clickable", async () => {
+  const t = await pane(FULL);
+  await t.status((p) => {
+    clickText(p, "3 Archive");
+    assert.match(text(p), /CHG-a0/);
+    clickText(p, "1 Backlog");
+    assert.match(text(p), /PLAN {2}Alpha/);
+    clickText(p, "2 Active");
+    assert.match(text(p), /Do it/);
+  });
+  noEditor(t);
+});
+
+test("pane: plan card buttons do what their hotkeys do, on the card that was clicked", async () => {
+  const two = { ...EMPTY, backlog: [plan("CHG-a", "A"), plan("CHG-b", "B")] };
+  const accept = await pane(two, { "review.txt": "checklist" });
+  await accept.status((p) => {
+    assert.ok(clickText(p, "a Review & accept", {}, 2, 1), "the second card's button");
+  });
+  assert.deepEqual(decided(accept.argv()), ["accept CHG-b"]);
+  assert.match(String(accept.calls.find((c) => c.kind === "confirm")?.args[1]), /checklist/);
+
+  const refine = await pane(two);
+  await refine.status((p) => void clickText(p, "e Refine with agent", {}, 2, 0));
+  assert.deepEqual(refine.users(), [modRefine([plan("CHG-a", "A")])]);
+
+  const pick = await pane(two);
+  await pick.status((p) => {
+    clickText(p, "s Select", {}, 2, 1);
+    assert.match(text(p), /f Refine 1 selected/);
+    assert.match(text(p), /s Unselect/);
+    clickText(p, "f Refine 1 selected", {}, 2);
+  });
+  assert.deepEqual(pick.users(), [modRefine([plan("CHG-b", "B")])]);
+
+  const detail = await pane(two, { "show-CHG-b.txt": "CHG-b\ntitle: B\nstage: clicked" });
+  await detail.status(async (p) => {
+    clickText(p, "d Details", {}, 2, 1);
+    await until(p, /stage: clicked/);
+    assert.match(text(p), /PLAN {2}B/);
+    clickText(p, "b Back", {}, 2);
+    assert.doesNotMatch(text(p), /stage: clicked/);
+  });
+});
+
+test("pane: Take, Answer questions, Refresh and not-ready buttons", async () => {
+  const away = plan("CHG-far", "Far", { here: false, branch: "other" });
+  const take = await pane({ ...EMPTY, backlog: [away] });
+  await take.status((p) => void clickText(p, "t Take to this branch", {}, 2));
+  assert.deepEqual(decided(take.argv()), ["claim CHG-far"]);
+
+  const asked = {
+    questions: [{ ref: "Q1", question: "Which?", options: [{ label: "one" }] }],
+    remaining: 0,
+  };
+  const withQ = { ...EMPTY, backlog: [plan("CHG-a", "A", { questions: 1 })] };
+  const ask = await pane(withQ, { "clarify.json": json(asked) });
+  await ask.status((p) => void clickText(p, "A Answer questions", {}, 2));
+  assert.ok(ask.argv().includes("answer Q1 one --via dialog"));
+
+  const notReady = { ...EMPTY, backlog: [plan("CHG-a", "A", { ready: false, tasks: 0 })] };
+  const nr = await pane(notReady);
+  await nr.status((p) => {
+    clickText(p, "a Review & accept", {}, 2);
+    assert.match(text(p), /Not ready: add at least one task/);
+  });
+
+  const fresh = await pane(WAITING({ id: "CHG-a", title: "A" }));
+  await fresh.status(async (p) => {
+    fresh.write(
+      "view.json",
+      json(WAITING({ id: "CHG-a", title: "A" }, { id: "CHG-b", title: "B" })),
+    );
+    clickText(p, "r Refresh", {}, 2);
+    await until(p, /CHG-b/);
+  });
+});
+
+test("pane: Archive, Review amendments and Details buttons on a change card", async () => {
+  const done = await pane(DONE);
+  await done.status((p) => void clickText(p, "x Archive", {}, 2));
+  assert.deepEqual(decided(done.argv()), ["archive CHG-1"]);
+
+  const view = { ...ACTIVE, changes: [change({ pending: [{ id: "AMD-1", reason: "add" }] })] };
+  const amend = await pane(view, { "confirm.txt": "AMD-1 add" }, { rows: 60 });
+  await amend.status((p) => void clickText(p, "c Review amendments", {}, 2));
+  assert.ok(amend.argv().includes("confirm AMD-1 --accept"));
+
+  const det = await pane(
+    ACTIVE,
+    { "show-CHG-1.txt": "CHG-1\ntitle: Do it\nstage: chg" },
+    { rows: 60 },
+  );
+  await det.status(async (p) => {
+    clickText(p, "d Details", {}, 2);
+    await until(p, /stage: chg/);
+    assert.match(text(p), /CHANGE {2}Do it/);
+  });
+});
+
+test("pane: the Archive button inside a finished change's detail works", async () => {
+  const t = await pane(DONE, { "show-CHG-1.txt": "CHG-1\ntitle: Do it\nstage: fin" });
+  await t.status(async (p) => {
+    press(p, "d");
+    await until(p, /stage: fin/);
+    clickText(p, "x Archive", {}, 2);
+  });
+  assert.deepEqual(decided(t.argv()), ["archive CHG-1"]);
+});
+
+test("pane: task rows and archive rows open like enter; a card body only focuses it", async () => {
+  const t = await pane(
+    ACTIVE,
+    {
+      "show-TSK-2.txt": "TSK-2\ntitle: b\nstage: task2",
+      "show-CHG-xgnmc0.txt": "CHG-xgnmc0\nstage: arch",
+    },
+    { rows: 60 },
+  );
+  await t.status(async (p) => {
+    clickText(p, "TSK-2 title of TSK-2", {}, 3);
+    await until(p, /stage: task2/);
+    assert.match(text(p), /TASK {2}title of TSK-2/);
+    clickText(p, "b Back", {}, 2);
+    clickText(p, "3 Archive");
+    clickText(p, "CHG-xgnmc0", {}, 3);
+    await until(p, /stage: arch/);
+    clickText(p, "b Back", {}, 2);
+    clickText(p, "2 Active");
+    assert.match(focused(p), /Do it/);
+    clickText(p, "Do it", {}, 2);
+    assert.doesNotMatch(text(p), /TASK|CHANGE {2}/, "one click on a card body only focuses it");
+  });
+});
+
+test("pane: a double click on a card opens it", async () => {
+  const t = await pane(WAITING({ id: "CHG-a", title: "A" }), {
+    "show-CHG-a.txt": "CHG-a\nstage: dbl",
+  });
+  await t.status(async (p) => {
+    clickText(p, "waiting for your accept", { clickCount: 2 });
+    await until(p, /stage: dbl/);
+  });
+});
+
+test("pane: the wheel scrolls the body and the esc close hint closes", async () => {
+  const lines = Array.from({ length: 80 }, (_, i) => `line ${i}`).join("\n");
+  const t = await pane(WAITING({ id: "CHG-a", title: "A" }), {
+    "show-CHG-a.txt": `CHG-a\n${lines}`,
+  });
+  await t.status(async (p) => {
+    press(p, "d");
+    await until(p, /line 0/);
+    for (let i = 0; i < 5; i++)
+      clickText(p, "line", { type: "wheel", button: "none", wheelDelta: 1 });
+    assert.doesNotMatch(text(p), /line 0\b/);
+    assert.match(text(p), /line 15/);
+    clickText(p, "line", { type: "wheel", button: "none", wheelDelta: -1 });
+    clickText(p, "esc close", {}, 2);
+  });
+  assert.equal(t.opened(), 1);
+});
+
+test("pane: regions are exact, survive wide characters and a narrow terminal", async () => {
+  const wide = WAITING({ id: "CHG-a", title: "日本語のタイトル" });
+  const t = await pane(wide, { "review.txt": "x", "show-CHG-a.txt": "CHG-a\nstage: w" });
+  await t.status(async (p) => {
+    for (const width of [100, 60, 40]) {
+      const lines = p.render(width);
+      const pos = at(lines, "d Details");
+      assert.ok(pos, `Details at ${width}`);
+      const send = (dx: number) =>
+        p.handleMouse?.(event(pos.col + dx, pos.row, width, lines.length));
+      assert.equal(send(-2)?.handled, true, "still inside the card (focuses it)");
+      const before = text(p, width);
+      assert.equal(send(0)?.handled, true);
+      await until(p, /stage: w/, width);
+      press(p, "b");
+      assert.equal(text(p, width), before);
+    }
+  });
+  noEditor(t);
+});
+
+test("pane: right clicks and clicks on blank space do nothing", async () => {
+  const t = await pane(WAITING({ id: "CHG-a", title: "A" }), {}, { draft: "keep me" });
+  await t.status((p) => {
+    const lines = p.render(100);
+    const before = text(p);
+    assert.equal(p.handleMouse?.(event(50, 1, 100, lines.length)), undefined, "blank tab bar");
+    assert.equal(p.handleMouse?.(event(3, 0, 100, lines.length)), undefined, "the border");
+    const pos = at(lines, "a Review & accept");
+    assert.ok(pos);
+    assert.equal(
+      p.handleMouse?.(event(pos.col + 2, pos.row, 100, lines.length, { button: "right" })),
+      undefined,
+    );
+    assert.equal(text(p), before);
+  });
+  assert.deepEqual(decided(t.argv()), []);
+  noEditor(t);
+  assert.equal(t.editor.text, "keep me");
+});
+
+test("no mouse handler is needed in regular mode: keys still do everything", async () => {
+  const t = await pane(WAITING({ id: "CHG-a", title: "A" }), { "review.txt": "x" });
+  await t.status((p) => press(p, "a"));
+  assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
 });

@@ -10,6 +10,8 @@ import {
   type KeyId,
   matchesKey,
   type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -260,7 +262,9 @@ type Exit =
   | { act: "accept" | "claim" | "archive" | "ask"; id: string }
   | { act: "amend" }
   | { act: "refine"; plans: Plan[] };
-type Body = { lines: string[]; spans: [number, number][]; items: Item[] };
+type ScreenHit = { row: number; x0: number; x1: number; key: string; item?: number };
+type Hit = { line: number; x0: number; x1: number; key: string; item?: number };
+type Body = { lines: string[]; spans: [number, number][]; items: Item[]; hits: Hit[] };
 
 const TABS: Tab[] = ["backlog", "active", "archive"];
 const KINDS: Kind[] = ["plan", "change", "task", "archive"];
@@ -316,6 +320,24 @@ function buttons(bs: Button[], n: number, on: boolean, th: Paint): string[] {
   return cur ? [...lines, cur] : lines;
 }
 
+/** Where `buttons()` puts each label: line within its output and visible columns. */
+function buttonRuns(bs: Button[], n: number): Hit[] {
+  const runs: Hit[] = [];
+  let line = 0;
+  let used = 0;
+  for (const b of bs) {
+    const width = b.key.length + 1 + b.label.length;
+    if (used > 0 && used + 3 + width > n) {
+      line++;
+      used = 0;
+    }
+    const x0 = used > 0 ? used + 3 : 0;
+    runs.push({ line, x0, x1: x0 + width, key: b.key });
+    used = x0 + width;
+  }
+  return runs;
+}
+
 function planButtons(p: Plan, inDetail: boolean, picked: boolean): Button[] {
   const ready = p.ready === true && p.here === true;
   return [
@@ -338,7 +360,14 @@ const archivable = (c: Change) =>
 
 const HOME_DIR = process.env.HOME;
 
-function planCard(v: View, p: Plan, picked: boolean, lit: boolean, w: number, th: Paint): string[] {
+function planCard(
+  v: View,
+  p: Plan,
+  picked: boolean,
+  lit: boolean,
+  w: number,
+  th: Paint,
+): { lines: string[]; hits: Hit[] } {
   const inner = w - 6;
   const files =
     HOME_DIR && p.path?.startsWith(`${HOME_DIR}/`) ? `~${p.path.slice(HOME_DIR.length)}` : p.path;
@@ -367,9 +396,17 @@ function planCard(v: View, p: Plan, picked: boolean, lit: boolean, w: number, th
     why
       ? th.fg("dim", `to accept: ${why}`)
       : `${th.fg("accent", "▸")} Review the plan, then accept it.`,
-    ...buttons(planButtons(p, false, picked), inner, lit, th),
   ];
-  return card(rows, w, "warning", lit, th);
+  const bs = planButtons(p, false, picked);
+  const at = rows.length;
+  rows.push(...buttons(bs, inner, lit, th));
+  const hits = buttonRuns(bs, inner).map((h) => ({
+    ...h,
+    line: 1 + at + h.line,
+    x0: h.x0 + 4,
+    x1: h.x1 + 4,
+  }));
+  return { lines: card(rows, w, "warning", lit, th), hits };
 }
 
 function changeCard(
@@ -379,7 +416,7 @@ function changeCard(
   first: number,
   w: number,
   th: Paint,
-): { lines: string[]; taskRows: number[] } {
+): { lines: string[]; taskRows: number[]; hits: Hit[] } {
   const inner = w - 6;
   const tasks = c.tasks ?? [];
   const proved = tasks.filter((t) => t.state === "proved").length;
@@ -418,21 +455,22 @@ function changeCard(
       th.fg("dim", `$ ${next.verify ?? ""}`),
     );
   }
-  rows.push(
-    ...buttons(
-      [
-        ...(archivable(c) ? [{ key: "x", label: "Archive", primary: true }] : []),
-        ...((c.pending ?? []).length > 0
-          ? [{ key: "c", label: "Review amendments", primary: true }]
-          : []),
-        { key: "d", label: "Details" },
-      ],
-      inner,
-      lit,
-      th,
-    ),
-  );
-  return { lines: card(rows, w, "accent", lit, th), taskRows };
+  const bs: Button[] = [
+    ...(archivable(c) ? [{ key: "x", label: "Archive", primary: true }] : []),
+    ...((c.pending ?? []).length > 0
+      ? [{ key: "c", label: "Review amendments", primary: true }]
+      : []),
+    { key: "d", label: "Details" },
+  ];
+  const at = rows.length;
+  rows.push(...buttons(bs, inner, lit, th));
+  const hits = buttonRuns(bs, inner).map((h) => ({
+    ...h,
+    line: 1 + at + h.line,
+    x0: h.x0 + 4,
+    x1: h.x1 + 4,
+  }));
+  return { lines: card(rows, w, "accent", lit, th), taskRows, hits };
 }
 
 function empty(lines: string[], w: number, th: Paint): string[] {
@@ -443,9 +481,16 @@ const START = (th: Paint) =>
   `${th.fg("dim", "Start a plan: ")}${th.fg("accent", 'rvow new "<title>"')}`;
 
 function tabBody(v: View, tab: Tab, picked: string[], focus: number, w: number, th: Paint): Body {
-  const b: Body = { lines: [], spans: [], items: [] };
-  const push = (lines: string[], item: Item, from = b.lines.length, to = from + lines.length) => {
+  const b: Body = { lines: [], spans: [], items: [], hits: [] };
+  const push = (
+    lines: string[],
+    item: Item,
+    hits: Hit[] = [],
+    from = b.lines.length,
+    to = from + lines.length,
+  ) => {
     b.lines.push(...lines);
+    b.hits.push(...hits.map((h) => ({ ...h, line: from + h.line, item: b.items.length })));
     b.items.push(item);
     b.spans.push([from, to]);
   };
@@ -456,16 +501,13 @@ function tabBody(v: View, tab: Tab, picked: string[], focus: number, w: number, 
     }
     const n = v.backlog.filter((p) => picked.includes(p.id)).length;
     if (n > 0) {
-      b.lines.push(
-        ...buttons([{ key: "f", label: `Refine ${n} selected`, primary: true }], w, true, th),
-        "",
-      );
+      const refine = [{ key: "f", label: `Refine ${n} selected`, primary: true }];
+      b.hits.push(...buttonRuns(refine, w));
+      b.lines.push(...buttons(refine, w, true, th), "");
     }
     for (const p of v.backlog) {
-      push(planCard(v, p, picked.includes(p.id), focus === b.items.length, w, th), {
-        kind: "plan",
-        plan: p,
-      });
+      const c = planCard(v, p, picked.includes(p.id), focus === b.items.length, w, th);
+      push(c.lines, { kind: "plan", plan: p }, c.hits);
     }
   } else if (tab === "active") {
     if (v.changes.length === 0) {
@@ -482,6 +524,7 @@ function tabBody(v: View, tab: Tab, picked: string[], focus: number, w: number, 
       const start = b.lines.length;
       const card = changeCard(v, c, focus, first, w, th);
       b.lines.push(...card.lines);
+      b.hits.push(...card.hits.map((h) => ({ ...h, line: start + h.line, item: first })));
       b.items.push({ kind: "change", change: c });
       b.spans.push([start, start + card.lines.length]);
       for (const [i, t] of (c.tasks ?? []).entries()) {
@@ -523,7 +566,7 @@ function detailBody(
   w: number,
   th: Paint,
 ): Body {
-  const b: Body = { lines: [], spans: [], items: [] };
+  const b: Body = { lines: [], spans: [], items: [], hits: [] };
   const change = d.kind === "change" ? v.changes.find((c) => c.id === d.id) : undefined;
   if (d.text === null) {
     b.lines.push(th.fg("warning", `… loading rvow show ${d.id}`));
@@ -555,9 +598,16 @@ function detailBody(
     if (change) b.lines.push("", th.fg("dim", "Press enter on a task to read its requirements."));
   }
   const plan = d.kind === "plan" ? v.backlog.find((p) => p.id === d.id) : undefined;
-  if (plan) b.lines.push("", ...buttons(planButtons(plan, true, picked), w, true, th));
-  if (change && archivable(change))
-    b.lines.push("", ...buttons([{ key: "x", label: "Archive", primary: true }], w, true, th));
+  const actions = plan
+    ? planButtons(plan, true, picked)
+    : change && archivable(change)
+      ? [{ key: "x", label: "Archive", primary: true }]
+      : [];
+  if (actions.length) {
+    b.lines.push("");
+    b.hits.push(...buttonRuns(actions, w).map((h) => ({ ...h, line: b.lines.length + h.line })));
+    b.lines.push(...buttons(actions, w, true, th));
+  }
   return b;
 }
 
@@ -565,7 +615,13 @@ const firstTab = (v: View): Tab =>
   v.changes.length > 0 ? "active" : v.backlog.length > 0 ? "backlog" : "archive";
 
 type DockRow = { text: string; item?: Item };
-type Dock = { lines: string[]; items: Item[] };
+type DockHit = {
+  row: number;
+  x0: number;
+  x1: number;
+  act: "tag" | { tab: Tab } | { item: number };
+};
+type Dock = { lines: string[]; items: Item[]; hits: DockHit[] };
 type DockIn = {
   picked: string[];
   cursor: number;
@@ -603,13 +659,24 @@ const needsText = (n: NeedsYou) =>
     .filter(Boolean)
     .join(" · ");
 
+const tabLabels = (v: View) => [
+  `1 Backlog ${v.backlog.length}`,
+  `2 Active ${v.changes.length}`,
+  `3 Archive ${v.archive.length}`,
+];
+
+/** Visible columns of each tab label in `tabCounts`, keyed by its digit. */
+function tabSpans(v: View): { key: string; x0: number; x1: number }[] {
+  let x = 0;
+  return tabLabels(v).map((l, i) => {
+    const span = { key: String(i + 1), x0: x, x1: x + l.length + 2 };
+    x = span.x1 + 1;
+    return span;
+  });
+}
+
 function tabCounts(v: View, active: Tab | undefined, th: Paint): string {
-  const labels = [
-    `1 Backlog ${v.backlog.length}`,
-    `2 Active ${v.changes.length}`,
-    `3 Archive ${v.archive.length}`,
-  ];
-  return labels
+  return tabLabels(v)
     .map((l, i) => {
       const text = ` ${l} `;
       return TABS[i] === active ? th.inverse(th.fg("accent", th.bold(text))) : th.fg("muted", text);
@@ -678,9 +745,7 @@ function dockPanel(v: View, o: DockIn, th: Paint): Dock {
   const at = Math.max(0, Math.min(o.cursor, items.length - 1));
   const budget = Math.max(1, o.cap - (o.loading ? 2 : 3));
   const first = rows.findIndex((r) => r.item === items[at]);
-  const start = o.focus
-    ? Math.max(0, Math.min(first - Math.floor(budget / 2), rows.length - budget))
-    : 0;
+  const start = Math.max(0, Math.min(first - Math.floor(budget / 2), rows.length - budget));
   const w = o.width;
   const edge = (c: string) => th.fg(o.focus ? "accent" : "borderMuted", c);
   const tag = o.focus
@@ -708,7 +773,23 @@ function dockPanel(v: View, o: DockIn, th: Paint): Dock {
     }),
     `${edge("╰")}${th.fg("dim", hint)}${edge("─".repeat(gap))}${th.fg("dim", marker)}${edge("╯")}`,
   ];
-  return { lines, items };
+  const hits: DockHit[] = [
+    {
+      row: 0,
+      x0: 1 + visibleWidth(title) + fill,
+      x1: 1 + visibleWidth(title) + fill + visibleWidth(tag),
+      act: "tag",
+    },
+  ];
+  if (!o.loading) {
+    for (const [i, sp] of tabSpans(v).entries())
+      hits.push({ row: 1, x0: 2 + sp.x0, x1: 2 + sp.x1, act: { tab: TABS[i] ?? "active" } });
+  }
+  for (const [i, r] of rows.slice(start, start + budget).entries()) {
+    const item = r.item ? items.indexOf(r.item) : -1;
+    if (item >= 0) hits.push({ row: (o.loading ? 1 : 2) + i, x0: 2, x1: w - 2, act: { item } });
+  }
+  return { lines, items, hits };
 }
 
 type Sel = { plan?: Plan; change?: Change; v?: View };
@@ -965,6 +1046,7 @@ export default function (pi: ExtensionAPI) {
             ),
             spans: [],
             items: [],
+            hits: [],
           }
         : d
           ? detailBody(v, d, S.selected.includes(d.id), focus, w, th)
@@ -1041,6 +1123,31 @@ export default function (pi: ExtensionAPI) {
     const more =
       total > bodyH ? th.fg("dim", `  ${top + 1}-${Math.min(total, top + bodyH)}/${total}`) : "";
     const shown = body.lines.slice(top, top + bodyH);
+    const left = " ".repeat(Math.floor(Math.max(0, wide - pw) / 2));
+    const ox = left.length + 2;
+    const bodyRow0 = 3 + head.length;
+    const hits: ScreenHit[] = [];
+    if (v)
+      for (const sp of tabSpans(v))
+        hits.push({ row: 1, x0: ox + sp.x0, x1: ox + sp.x1, key: sp.key });
+    if (d) hits.push({ row: 3, x0: ox, x1: ox + "b Back".length, key: "b" });
+    const escAt = text(keys.slice(0, -1)).length + (keys.length > 1 ? 2 : 0);
+    hits.push({
+      row: bodyRow0 + bodyH + 1,
+      x0: ox + escAt,
+      x1: ox + escAt + "esc close".length,
+      key: "\u001b",
+    });
+    for (const h of body.hits) {
+      if (h.line >= top && h.line < top + bodyH)
+        hits.push({
+          row: bodyRow0 + h.line - top,
+          x0: ox + h.x0,
+          x1: ox + h.x1,
+          key: h.key,
+          item: h.item,
+        });
+    }
     const edge = (c: string) => th.fg("border", c);
     const row = (inner: string) =>
       th.bg("toolPendingBg", `${edge("│")} ${fit(inner, w)} ${edge("│")}`);
@@ -1057,8 +1164,10 @@ export default function (pi: ExtensionAPI) {
       row(`${hint}${more}`),
       rule("╰", "╯"),
     ];
-    const left = " ".repeat(Math.floor(Math.max(0, wide - pw) / 2));
     return {
+      hits,
+      bodyRow0,
+      top,
       lines: inside.map((l) => truncateToWidth(`${left}${l}`, wide, "", true)),
       body,
       focus,
@@ -1157,6 +1266,36 @@ export default function (pi: ExtensionAPI) {
       tui.requestRender();
     }
 
+    function handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
+      const l = layout(tui, th, wide);
+      if (e.type === "wheel") {
+        S.top[l.key] = Math.max(0, (S.top[l.key] ?? 0) + Math.sign(e.wheelDelta ?? 0) * 3);
+        S.follow = false;
+        return { handled: true };
+      }
+      if (e.button !== "left") return undefined;
+      const hit = l.hits.find((h) => h.row === e.y && e.x >= h.x0 && e.x < h.x1);
+      const line = e.y - l.bodyRow0 + l.top;
+      let at = -1;
+      if (e.y >= l.bodyRow0 && e.y < l.bodyRow0 + l.bodyH) {
+        for (const [i, [a, b]] of l.body.spans.entries()) {
+          const [pa, pb] = l.body.spans[at] ?? [0, Number.POSITIVE_INFINITY];
+          if (line >= a && line < b && b - a <= pb - pa) at = i;
+        }
+      }
+      if (!hit && at < 0) return undefined;
+      if (e.type !== "click") return { handled: true, render: false };
+      if (hit) {
+        if (hit.item !== undefined) S.cursor[l.key] = hit.item;
+        handleInput(hit.key);
+      } else {
+        S.cursor[l.key] = at;
+        const kind = l.body.items[at]?.kind;
+        if (kind === "task" || kind === "archive" || (e.clickCount ?? 1) >= 2) handleInput("\r");
+      }
+      return { handled: true };
+    }
+
     return {
       invalidate() {},
       render: (width: number) => {
@@ -1164,6 +1303,7 @@ export default function (pi: ExtensionAPI) {
         return layout(tui, th, width).lines;
       },
       handleInput,
+      handleMouse,
     };
   }
 
@@ -1268,12 +1408,14 @@ export default function (pi: ExtensionAPI) {
       S.dock
         ? (tui, theme) => {
             dockTui = tui;
+            let last: Dock | undefined;
             return {
               invalidate() {},
-              render: (width: number) =>
-                (dockNow(tui, theme, width)?.lines ?? []).map((l) =>
-                  truncateToWidth(l, width, "", true),
-                ),
+              handleMouse: (e: TuiMouseEvent) => dockMouse(e, last),
+              render: (width: number) => {
+                last = dockNow(tui, theme, width);
+                return (last?.lines ?? []).map((l) => truncateToWidth(l, width, "", true));
+              },
               dispose() {
                 dockTui = undefined;
               },
@@ -1402,6 +1544,33 @@ export default function (pi: ExtensionAPI) {
     const exit = r.exit;
     if (exit && exit.act !== "close") void modal(() => perform(ctx, exit));
     return eat();
+  }
+
+  // Fullscreen mode routes clicks and the wheel here with coordinates local to the dock. Every
+  // action goes through dockInput, so a click does what the key does and never touches the editor.
+  function dockMouse(e: TuiMouseEvent, dock: Dock | undefined): TuiMouseEventResult | undefined {
+    if (!dock || S.modal || !S.view) return undefined;
+    if (e.type === "wheel") {
+      const items = dockItems(S.view, S.tab ?? firstTab(S.view));
+      const to = S.dockCursor + Math.sign(e.wheelDelta ?? 0);
+      S.dockCursor = Math.max(0, Math.min(items.length - 1, to));
+      return { handled: true };
+    }
+    if (e.button !== "left") return undefined;
+    const hit = dock.hits.find((h) => h.row === e.y && e.x >= h.x0 && e.x < h.x1);
+    if (!hit) return undefined;
+    if (e.type !== "click") return { handled: true, render: false };
+    if (hit.act === "tag") S.dockFocus = !S.dockFocus;
+    else if ("tab" in hit.act) {
+      S.dockFocus = true;
+      dockInput(String(TABS.indexOf(hit.act.tab) + 1));
+    } else {
+      const was = S.dockFocus && S.dockCursor === hit.act.item;
+      S.dockFocus = true;
+      S.dockCursor = hit.act.item;
+      if (was || (e.clickCount ?? 1) >= 2) dockInput("\r");
+    }
+    return { handled: true };
   }
 
   pi.on("tool_call", async (event, ctx) => {
