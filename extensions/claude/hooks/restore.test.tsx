@@ -1,4 +1,7 @@
+import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult } from './testkit'
 
 const PLAN = {
   id: 'CHG-1',
@@ -21,17 +24,11 @@ const VIEW = {
   next: null,
   needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
 }
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
+const PANE = pane()
 
 const SAVED = { details: [{ kind: 'plan', id: 'CHG-1', title: 'Plan' }], review: ['CHG-1'] }
 
-async function seed($: any, on: any, entries?: Record<string, unknown>) {
+async function seed($: Engine, on: On, entries?: Record<string, unknown>) {
   mock.env(on, { HOME: '/home/me' })
   if (entries) mock.store(on, entries)
   else {
@@ -42,19 +39,19 @@ async function seed($: any, on: any, entries?: Record<string, unknown>) {
       throw new Error('no store')
     })
   }
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('ui.open', async () => ({ value: undefined }) as any)
-  on('process.run', async (_$: any, e: any) => {
-    const argv: string[] = e.argv ?? e.command
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async () => PLACED)
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
     const stdout = argv.includes('show') ? 'CHG-1\nstage: backlog' : JSON.stringify(VIEW)
-    return { value: { exitCode: 0, stdout, stderr: '' } } as any
+    return { value: procResult(0, stdout) }
   })
-  on('ui.render', { component: 'AbovePrompt' }, async ($: any, e: any) => {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>fallthrough</Text>
   })
-  await $.command.run({ command: 'rvow-status', args: '', origin: { kind: 'composer' } } as any)
+  await $.command.run(cmd('rvow-status', ''))
   return $.ui.mount(PANE)
 }
 

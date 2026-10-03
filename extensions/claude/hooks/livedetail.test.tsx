@@ -1,4 +1,7 @@
+import type { On } from 'claude-code'
+import type { Engine, Mounted } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult } from './testkit'
 
 const TASK = { id: 'TSK-a1', title: 'Print it', state: 'open' }
 const VIEW = {
@@ -22,35 +25,29 @@ const VIEW = {
   next: null,
   needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
 }
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
+const PANE = pane()
 
-async function seed($: any, on: any, show: { out: string; exitCode: number }) {
+async function seed($: Engine, on: On, show: { out: string; exitCode: number }) {
   mock.env(on, { HOME: '/home/me' })
   mock.store(on, {
     pane: { details: [{ kind: 'task', id: TASK.id, title: TASK.title }], review: [] },
   })
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('ui.status', async () => ({ value: undefined }) as any)
-  on('ui.open', async () => ({ value: undefined }) as any)
-  on('process.run', async (_$: any, e: any) => {
-    const argv: string[] = e.argv ?? e.command
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async () => PLACED)
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
     const isShow = argv.includes('show')
     const stdout = isShow ? show.out : JSON.stringify(VIEW)
-    return { value: { exitCode: isShow ? show.exitCode : 0, stdout, stderr: '' } } as any
+    return { value: procResult(isShow ? show.exitCode : 0, stdout) }
   })
-  on('tool.call', { tool: 'Bash' }, async () => ({ result: 'ok' }) as any)
-  await $.command.run({ command: 'rvow-status', args: '', origin: { kind: 'composer' } } as any)
+  on('tool.call', { tool: 'Bash' }, async () => ({ result: 'ok' }))
+  await $.command.run(cmd('rvow-status', ''))
   return $.ui.mount(PANE)
 }
-const texts = async (pane: any) =>
-  (await pane.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
-const prove = ($: any) => $.tool.call({ tool: 'Bash', command: 'rvow prove TSK-a1' } as any)
+const texts = async (pane: Mounted<'terminal', 'Pane'>) =>
+  (await pane.findAll({ type: 'Text' })).map((t) => t.text).join('\n')
+const prove = ($: Engine) => $.tool.call({ tool: 'Bash', command: 'rvow prove TSK-a1' })
 
 test('an open task page reloads after an rvow command', async ($, on) => {
   const show = { out: 'TSK-a1\nstate: open', exitCode: 0 }

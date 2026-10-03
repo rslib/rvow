@@ -37,11 +37,7 @@ impl NoteKind {
 /// until a confirmed amendment changes the task.
 pub fn block(project: &Project, input: &str, reason: &str) -> Result<(Id, String)> {
     if reason.trim().is_empty() {
-        return Err(Error::new(
-            "reason",
-            "a block needs a reason",
-            "say what stops the task with --reason \"...\"",
-        ));
+        return Err(Error::new("reason", "a block needs a reason", "say what stops the task with --reason \"...\""));
     }
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -60,11 +56,7 @@ pub fn block(project: &Project, input: &str, reason: &str) -> Result<(Id, String
 pub fn note(project: &Project, cwd: &Path, kind: NoteKind, text: &str) -> Result<(Id, bool)> {
     let text = text.trim();
     if text.is_empty() {
-        return Err(Error::new(
-            "text",
-            "the note is empty",
-            "write the note text",
-        ));
+        return Err(Error::new("text", "the note is empty", "write the note text"));
     }
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -72,20 +64,10 @@ pub fn note(project: &Project, cwd: &Path, kind: NoteKind, text: &str) -> Result
     let c = proof::on_branch(&changes, &branch)
         .into_iter()
         .next()
-        .ok_or_else(|| {
-            Error::new(
-                "no-change",
-                "this branch has no active change",
-                "accept a change on this branch first",
-            )
-        })?;
+        .ok_or_else(|| Error::new("no-change", "this branch has no active change", "accept a change on this branch first"))?;
     let lines: Vec<&str> = text.lines().collect();
     let cut = kind == NoteKind::Handoff && lines.len() > HANDOFF_LINES;
-    let kept = if cut {
-        lines[..HANDOFF_LINES].join("\n")
-    } else {
-        text.to_string()
-    };
+    let kept = if cut { lines[..HANDOFF_LINES].join("\n") } else { text.to_string() };
     let mut data = Map::new();
     data.insert("note".into(), kind.name().into());
     data.insert("text".into(), kept.into());
@@ -106,12 +88,7 @@ mod tests {
         let (living, _) = change::load_living(p).unwrap();
         let changes = proof::active(p, &living).unwrap();
         let cfg = config::load(p, home).unwrap();
-        let now = Now {
-            top: repo,
-            config: &cfg,
-            env: fingerprint::env(repo, &cfg).unwrap(),
-            living: &living,
-        };
+        let now = Now { top: repo, config: &cfg, env: fingerprint::env(repo, &cfg).unwrap(), living: &living };
         proof::state(&changes[0], &changes[0].loaded.tasks[0], &now).unwrap()
     }
 
@@ -123,20 +100,12 @@ mod tests {
         block(&p, &task[4..8], "the spec and the test disagree").unwrap();
         assert_eq!(task_state(&p, &home, &repo), State::Blocked);
 
-        let dir = std::fs::read_dir(p.root.join("active"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let tasks = dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
         std::fs::write(&tasks, text.replace("Write ok", "Write ok, spec fixed")).unwrap();
-        let ids: Vec<String> = amend::amend(&p, &home, &repo, None, "fix the task", None)
-            .unwrap()
-            .iter()
-            .map(|a| a.id.to_string())
-            .collect();
+        let ids: Vec<String> =
+            amend::amend(&p, &home, &repo, None, "fix the task", None).unwrap().iter().map(|a| a.id.to_string()).collect();
         amend::confirm(&p, &ids, Decision::Accept, None).unwrap();
         assert_eq!(task_state(&p, &home, &repo), State::Missing);
     }
@@ -147,19 +116,11 @@ mod tests {
         assert!(!note(&p, &repo, NoteKind::Decision, "use JSON").unwrap().1);
         let long = "1\n2\n3\n4\n5\n6\n7";
         assert!(note(&p, &repo, NoteKind::Handoff, long).unwrap().1);
-        let dir = std::fs::read_dir(p.root.join("active"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let (events, _) = ledger::read(&dir.join(LEDGER)).unwrap();
         let last = events.last().unwrap();
         assert_eq!(last.data["note"], "handoff");
         assert_eq!(last.data["text"], "1\n2\n3\n4\n5");
-        assert_eq!(
-            note(&p, &repo, NoteKind::Surprise, " ").unwrap_err().code,
-            "text"
-        );
+        assert_eq!(note(&p, &repo, NoteKind::Surprise, " ").unwrap_err().code, "text");
     }
 }

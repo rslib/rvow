@@ -4,13 +4,14 @@
   "type": "module",
   "scripts": {
     "format": "biome format --write .",
-    "lint": "biome check .",
+    "lint": "biome check --error-on-warnings .",
     "typecheck:pi": "tsc --noEmit -p pi",
+    "test:pi": "node --test pi/rvow.test.ts",
     "typecheck:claude": "node scripts/claude.mjs tsc",
     "validate:claude": "node scripts/claude.mjs validate",
     "test:claude": "node scripts/claude.mjs test",
     "drift": "node scripts/drift.mjs",
-    "check": "npm run drift && npm run lint && npm run typecheck:pi && npm run typecheck:claude && npm run validate:claude && npm run test:claude"
+    "check": "npm run drift && npm run lint && npm run typecheck:pi && npm run test:pi && npm run typecheck:claude && npm run validate:claude && npm run test:claude"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
@@ -19,5 +20,5 @@
     "@types/node": "26.6.4",
     "typescript": "7.0.2"
   },
-  "claudeCodeTypes": "2.1.287"
+  "claudeCodeTypes": "2.1.288"
 }

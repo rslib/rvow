@@ -1,0 +1,136 @@
+use rvow_core::error::Result;
+use rvow_core::gate::{self, Options};
+use rvow_core::proof;
+use rvow_core::store;
+
+use super::{branch_label, cwd, project};
+use crate::output::Reply;
+use crate::toon::Obj;
+
+/// Adds one proof run's human line and returns its row and warnings.
+pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
+    let o = &p.outcome;
+    let tests = o.tests_run.map_or("unknown".to_string(), |n| n.to_string());
+    let verdict = if p.proved {
+        "proved".to_string()
+    } else if o.timed_out {
+        "failed: timed out".to_string()
+    } else if o.passed() {
+        "failed: the command passed but ran 0 tests".to_string()
+    } else {
+        format!("failed: exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
+    };
+    r.line(format!("{} {verdict} ({tests} tests, {} ms, event {})", p.task, o.duration_ms, p.event));
+    let mut warnings: Vec<String> = p.lfs_pointers.iter().map(|f| format!("{f} is a Git LFS pointer, run git lfs pull")).collect();
+    for w in &warnings {
+        r.line(format!("warning: {w}"));
+    }
+    if p.looping {
+        let hint = format!(
+            "the same failure {} times in a row; if the task cannot pass as written, run rvow block {} --reason \"...\"",
+            proof::LOOP_RUNS,
+            p.task
+        );
+        r.line(format!("hint: {hint}"));
+        warnings.push(hint);
+    }
+    let row = obj! {
+        "task" => p.task.to_string(),
+        "result" => verdict,
+        "tests" => o.tests_run,
+        "ms" => o.duration_ms,
+        "event" => p.event,
+    };
+    (row, warnings)
+}
+
+pub fn prove(task: &str) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let proved = proof::prove(&p, &home, &cwd()?, task, &mut std::io::stderr())?;
+    let mut r = Reply::new();
+    let (row, warnings) = proof_run(&mut r, &proved);
+    r.data = row;
+    if !warnings.is_empty() {
+        r.set("warnings", warnings);
+    }
+    match &proved.next {
+        Some(next) => {
+            r.text.push_str(&format!("next: {next}"));
+            r.set("next", next.lines().collect::<Vec<_>>());
+        }
+        None => {
+            let done = "every task on this branch is proved or blocked";
+            r.line(format!("next: {done}"));
+            r.set("next", done);
+            r.help("Run `rvow gate` to check the branch before push");
+        }
+    }
+    r.ok = proved.proved;
+    Ok(r)
+}
+
+pub fn prove_stale() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let cwd = cwd()?;
+    let stale = proof::stale_tasks(&p, &home, &cwd)?;
+    let mut r = Reply::new();
+    if stale.is_empty() {
+        r.line("no stale tasks");
+        r.set("proofs", format!("0 stale tasks on branch {}", branch_label()));
+        return Ok(r);
+    }
+    let mut rows = Vec::new();
+    let mut all_warnings = Vec::new();
+    for task in &stale {
+        let proved = proof::prove(&p, &home, &cwd, task, &mut std::io::stderr())?;
+        let (row, warnings) = proof_run(&mut r, &proved);
+        rows.push(row);
+        all_warnings.extend(warnings);
+        r.ok &= proved.proved;
+    }
+    r.set("count", format!("{} stale tasks", rows.len()));
+    r.table("proofs", rows, "");
+    if !all_warnings.is_empty() {
+        r.set("warnings", all_warnings);
+    }
+    Ok(r)
+}
+
+pub fn gate(opts: Options) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let g = gate::gate(&p, &home, &cwd()?, opts, &mut std::io::stderr())?;
+    let mut r = Reply::new();
+    let mut rows = Vec::new();
+    for (task, ms) in &g.timings {
+        r.line(format!("rerun {task}: {ms} ms"));
+        rows.push(obj! { "task" => task, "ms" => ms });
+    }
+    for w in &g.warnings {
+        r.line(format!("warning: {w}"));
+    }
+    for f in &g.failures {
+        r.line(format!("fail: {f}"));
+    }
+    r.ok = g.passed();
+    if r.ok {
+        r.line(format!("gate passed ({} active changes on this branch)", g.changes));
+    } else {
+        r.line(format!("gate failed: {} problems", g.failures.len()));
+        r.help("Run `rvow status` to see each task's state");
+    }
+    r.set("passed", r.ok);
+    r.set("changes", g.changes);
+    if !rows.is_empty() {
+        r.table("reruns", rows, "");
+    }
+    if !g.warnings.is_empty() {
+        r.set("warnings", g.warnings);
+    }
+    if !g.failures.is_empty() {
+        r.set("failures", g.failures);
+    }
+    Ok(r)
+}

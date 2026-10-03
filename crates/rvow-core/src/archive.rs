@@ -39,12 +39,7 @@ pub(crate) fn today() -> String {
         // tm is a valid value to overwrite.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-            return format!(
-                "{:04}-{:02}-{:02}",
-                tm.tm_year + 1900,
-                tm.tm_mon + 1,
-                tm.tm_mday
-            );
+            return format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
         }
     }
     // UTC from days since the epoch, by Howard Hinnant's civil_from_days
@@ -61,16 +56,11 @@ pub(crate) fn today() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-fn lines_of<'a>(
-    caps: &'a mut BTreeMap<String, Vec<String>>,
-    texts: &[(String, String)],
-    cap: &str,
-) -> &'a mut Vec<String> {
-    caps.entry(cap.to_string())
-        .or_insert_with(|| match texts.iter().find(|(c, _)| c == cap) {
-            Some((_, t)) => split(t),
-            None => vec![format!("# {cap}")],
-        })
+fn lines_of<'a>(caps: &'a mut BTreeMap<String, Vec<String>>, texts: &[(String, String)], cap: &str) -> &'a mut Vec<String> {
+    caps.entry(cap.to_string()).or_insert_with(|| match texts.iter().find(|(c, _)| c == cap) {
+        Some((_, t)) => split(t),
+        None => vec![format!("# {cap}")],
+    })
 }
 
 /// Moves a change into `stage` under a date prefix.
@@ -97,11 +87,7 @@ fn open(project: &Project, input: &str, verb: &str) -> Result<ChangeDir> {
 
 fn need_reason(reason: &str) -> Result<()> {
     if reason.trim().is_empty() {
-        return Err(Error::new(
-            "reason",
-            "a reason is required",
-            "say why with --reason \"...\"",
-        ));
+        return Err(Error::new("reason", "a reason is required", "say why with --reason \"...\""));
     }
     Ok(())
 }
@@ -124,11 +110,7 @@ pub fn supersede(project: &Project, old: &str, by: &str, reason: &str) -> Result
     let old = open(project, old, "superseded")?;
     let by = open(project, by, "named by --by")?;
     if old.id == by.id {
-        return Err(Error::new(
-            "supersede",
-            format!("{} cannot supersede itself", old.id),
-            "name the change that replaces it with --by",
-        ));
+        return Err(Error::new("supersede", format!("{} cannot supersede itself", old.id), "name the change that replaces it with --by"));
     }
     let lock = project.lock()?;
     for (dir, key, other) in [(&old, "superseded_by", &by), (&by, "supersedes", &old)] {
@@ -200,17 +182,9 @@ fn join(lines: &[String]) -> String {
 /// requirement left, and the merged ids by op.
 type Merge = (BTreeMap<String, Option<String>>, Vec<(DeltaOp, String)>);
 
-fn merge(
-    texts: &[(String, String)],
-    living: &[CapSpec],
-    change: &ChangeDir,
-    loaded: &change::Loaded,
-) -> Result<Merge> {
-    let index: BTreeMap<String, String> = Living { specs: living }
-        .index()
-        .into_iter()
-        .map(|(id, cap)| (id.to_string(), cap.to_string()))
-        .collect();
+fn merge(texts: &[(String, String)], living: &[CapSpec], change: &ChangeDir, loaded: &change::Loaded) -> Result<Merge> {
+    let index: BTreeMap<String, String> =
+        Living { specs: living }.index().into_iter().map(|(id, cap)| (id.to_string(), cap.to_string())).collect();
     let mut caps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut merged = Vec::new();
     for (cap, file) in &loaded.deltas {
@@ -226,13 +200,7 @@ fn merge(
                 block
             };
             let home = index.get(&id).map(String::as_str).unwrap_or(cap);
-            let missing = || {
-                Error::new(
-                    "merge",
-                    format!("{id} is not in specs/{home}/spec.md"),
-                    "run rvow validate and fix the delta",
-                )
-            };
+            let missing = || Error::new("merge", format!("{id} is not in specs/{home}/spec.md"), "run rvow validate and fix the delta");
             let lines = lines_of(&mut caps, texts, home);
             match d.op {
                 DeltaOp::Add => append_block(lines, body()),
@@ -278,11 +246,7 @@ fn merge(
 }
 
 fn error_keys(findings: &[Finding]) -> BTreeSet<String> {
-    findings
-        .iter()
-        .filter(|(_, d)| d.severity() == Severity::Error)
-        .map(|(p, d)| format!("{p}: {}", d.message))
-        .collect()
+    findings.iter().filter(|(_, d)| d.severity() == Severity::Error).map(|(p, d)| format!("{p}: {}", d.message)).collect()
 }
 
 /// `rvow archive`: checks the change with the strict gate, merges its deltas
@@ -301,10 +265,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     let texts = change::living_texts(project)?;
     let (living, findings) = change::living_from(&texts);
     let changes = proof::active(project, &living)?;
-    let c = changes
-        .iter()
-        .find(|a| a.dir.id == dir.id)
-        .ok_or_else(|| Error::internal(format!("{} is not listed as active", dir.id)))?;
+    let c = changes.iter().find(|a| a.dir.id == dir.id).ok_or_else(|| Error::internal(format!("{} is not listed as active", dir.id)))?;
 
     let (all, _) = change::list(project)?;
     let waiting: Vec<&str> = c
@@ -312,20 +273,13 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         .proposal
         .after
         .iter()
-        .filter(|a| {
-            !all.iter()
-                .any(|d| d.stage == Stage::Done && d.id.to_string() == **a)
-        })
+        .filter(|a| !all.iter().any(|d| d.stage == Stage::Done && d.id.to_string() == **a))
         .map(String::as_str)
         .collect();
     if !waiting.is_empty() {
         return Err(Error::new(
             "after",
-            format!(
-                "{} comes after {}, which is not archived",
-                dir.id,
-                waiting.join(", ")
-            ),
+            format!("{} comes after {}, which is not archived", dir.id, waiting.join(", ")),
             "archive those changes first",
         ));
     }
@@ -335,11 +289,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         let ids: Vec<String> = moved.into_iter().map(|(id, _)| id).collect();
         return Err(Error::new(
             "conflict",
-            format!(
-                "the living text of {} changed since {} recorded its base",
-                ids.join(", "),
-                dir.id
-            ),
+            format!("the living text of {} changed since {} recorded its base", ids.join(", "), dir.id),
             "update the delta to the new living text, record it with rvow amend --reason and ask the user to confirm",
         ));
     }
@@ -348,11 +298,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     if !r.passed() {
         return Err(Error::new(
             "gate",
-            format!(
-                "the strict gate fails for {}:\n  {}",
-                dir.id,
-                r.failures.join("\n  ")
-            ),
+            format!("the strict gate fails for {}:\n  {}", dir.id, r.failures.join("\n  ")),
             "fix each failure, then run rvow archive again",
         ));
     }
@@ -362,25 +308,15 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         .iter()
         .filter(|(cap, _)| !new_caps.contains_key(cap))
         .cloned()
-        .chain(
-            new_caps
-                .iter()
-                .filter_map(|(cap, t)| Some((cap.clone(), t.clone()?))),
-        )
+        .chain(new_caps.iter().filter_map(|(cap, t)| Some((cap.clone(), t.clone()?))))
         .collect();
     let (new_living, new_findings) = change::living_from(&new_texts);
     let before = error_keys(&findings);
-    let fresh: Vec<String> = error_keys(&new_findings)
-        .into_iter()
-        .filter(|k| !before.contains(k))
-        .collect();
+    let fresh: Vec<String> = error_keys(&new_findings).into_iter().filter(|k| !before.contains(k)).collect();
     if !fresh.is_empty() {
         return Err(Error::new(
             "merge",
-            format!(
-                "the merged specs would not validate:\n  {}",
-                fresh.join("\n  ")
-            ),
+            format!("the merged specs would not validate:\n  {}", fresh.join("\n  ")),
             "fix the deltas so the merged specs validate, then run rvow archive again",
         ));
     }
@@ -409,37 +345,19 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     data.insert("record".into(), json!(hashes));
     ledger::append(&dir.path.join(LEDGER), &lock, Kind::Archive, data)?;
     let path = retire(project, &dir, Stage::Done)?;
-    Ok(Archived {
-        id: dir.id,
-        path,
-        merged,
-    })
+    Ok(Archived { id: dir.id, path, merged })
 }
 
 /// Updates spec-record.json for the merge and returns the new hash of each
 /// merged requirement that is still living. An empty record is seeded with
 /// every living requirement, so the gate's record check covers them from now.
-fn write_record(
-    project: &Project,
-    lock: &Lock,
-    living: &[CapSpec],
-    merged: &[(DeltaOp, String)],
-) -> Result<BTreeMap<String, String>> {
-    let hash_of: BTreeMap<String, String> = living
-        .iter()
-        .flat_map(|(_, s)| s.requirements.iter())
-        .map(|r| (r.id.to_string(), requirement_hash(r)))
-        .collect();
+fn write_record(project: &Project, lock: &Lock, living: &[CapSpec], merged: &[(DeltaOp, String)]) -> Result<BTreeMap<String, String>> {
+    let hash_of: BTreeMap<String, String> =
+        living.iter().flat_map(|(_, s)| s.requirements.iter()).map(|r| (r.id.to_string(), requirement_hash(r))).collect();
     let mut rec = record::load(project)?;
     if rec.is_empty() {
         for (id, hash) in &hash_of {
-            rec.insert(
-                id.clone(),
-                Entry {
-                    hash: hash.clone(),
-                    legacy: false,
-                },
-            );
+            rec.insert(id.clone(), Entry { hash: hash.clone(), legacy: false });
         }
     }
     let mut out = BTreeMap::new();
@@ -450,13 +368,7 @@ fn write_record(
         }
         let hash = hash_of[id].clone();
         let legacy = !op.has_body() && rec.get(id).is_some_and(|e| e.legacy);
-        rec.insert(
-            id.clone(),
-            Entry {
-                hash: hash.clone(),
-                legacy,
-            },
-        );
+        rec.insert(id.clone(), Entry { hash: hash.clone(), legacy });
         out.insert(id.clone(), hash);
     }
     record::save(project, lock, &rec)?;
@@ -496,37 +408,17 @@ pub fn trace(project: &Project, input: &str) -> Result<(Id, Vec<Touch>)> {
         spec.requirements.iter().for_each(|r| note(&r.id));
     }
     for (_, l) in &loaded {
-        l.deltas
-            .iter()
-            .flat_map(|(_, f)| f.deltas.iter())
-            .for_each(|d| note(&d.req.id));
-        l.tasks
-            .iter()
-            .flat_map(|t| t.covers.iter())
-            .for_each(&mut note);
+        l.deltas.iter().flat_map(|(_, f)| f.deltas.iter()).for_each(|d| note(&d.req.id));
+        l.tasks.iter().flat_map(|t| t.covers.iter()).for_each(&mut note);
     }
-    let input = if input.contains('-') {
-        input.to_string()
-    } else {
-        format!("REQ-{input}")
-    };
-    let id = id::resolve(&input, &known).map_err(|e| {
-        Error::new(
-            "trace",
-            format!("{input}: {e}"),
-            "give a REQ id that a spec or a change names",
-        )
-    })?;
+    let input = if input.contains('-') { input.to_string() } else { format!("REQ-{input}") };
+    let id = id::resolve(&input, &known)
+        .map_err(|e| Error::new("trace", format!("{input}: {e}"), "give a REQ id that a spec or a change names"))?;
     let want = Ref::Id(id.clone());
     let mut out = Vec::new();
     for (d, l) in loaded {
-        let mut ops: Vec<&'static str> = l
-            .deltas
-            .iter()
-            .flat_map(|(_, f)| f.deltas.iter())
-            .filter(|x| x.req.id == want)
-            .map(|x| x.op.word())
-            .collect();
+        let mut ops: Vec<&'static str> =
+            l.deltas.iter().flat_map(|(_, f)| f.deltas.iter()).filter(|x| x.req.id == want).map(|x| x.op.word()).collect();
         if l.tasks.iter().any(|t| t.covers.contains(&want)) {
             ops.push("covers");
         }
@@ -536,19 +428,8 @@ pub fn trace(project: &Project, input: &str) -> Result<(Id, Vec<Touch>)> {
         let (events, _) = ledger::read(&d.path.join(LEDGER))?;
         let first = events.first().map_or(u64::MAX, |e| e.time);
         let name = d.path.file_name().unwrap_or_default().to_string_lossy();
-        let date = (!matches!(d.stage, Stage::Backlog | Stage::Active))
-            .then(|| name.get(..10).map(String::from))
-            .flatten();
-        out.push((
-            first,
-            Touch {
-                change: d.id,
-                stage: d.stage,
-                date,
-                ops,
-                title: l.proposal.title,
-            },
-        ));
+        let date = (!matches!(d.stage, Stage::Backlog | Stage::Active)).then(|| name.get(..10).map(String::from)).flatten();
+        out.push((first, Touch { change: d.id, stage: d.stage, date, ops, title: l.proposal.title }));
     }
     out.sort_by(|a, b| (a.0, &a.1.change).cmp(&(b.0, &b.1.change)));
     Ok((id, out.into_iter().map(|(_, t)| t).collect()))
@@ -592,13 +473,8 @@ rvow SHALL keep three.
         let home = tmp.0.join("home");
         let repo = repo_with_commit(&tmp.0, "r");
         let p = init(&repo, &home, Mode::Home).unwrap();
-        for (cap, text) in [
-            ("core", CORE),
-            (
-                "gone",
-                "# Gone\n\n## REQ-7xq2a5 Last\nrvow SHALL go.\n### Scenario: s\n- WHEN a\n- THEN b\n",
-            ),
-        ] {
+        for (cap, text) in [("core", CORE), ("gone", "# Gone\n\n## REQ-7xq2a5 Last\nrvow SHALL go.\n### Scenario: s\n- WHEN a\n- THEN b\n")]
+        {
             let dir = p.root.join("specs").join(cap);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("spec.md"), text).unwrap();
@@ -608,20 +484,9 @@ rvow SHALL keep three.
 
     /// Accepts a change with these delta files and one task that checks
     /// `file`, and returns its id and task id.
-    fn accept(
-        p: &Project,
-        home: &Path,
-        repo: &Path,
-        deltas: &[(&str, &str)],
-        covers: &str,
-        file: &str,
-    ) -> (String, String) {
+    fn accept(p: &Project, home: &Path, repo: &Path, deltas: &[(&str, &str)], covers: &str, file: &str) -> (String, String) {
         let c = change::new(p, file, "main", false).unwrap();
-        let covers = if covers.is_empty() {
-            String::new()
-        } else {
-            format!("  covers: {covers}\n")
-        };
+        let covers = if covers.is_empty() { String::new() } else { format!("  covers: {covers}\n") };
         std::fs::write(
             c.path.join("tasks.md"),
             format!("- TSK-new1 T\n{covers}  verify: grep -q ok {file} && echo 'test result: ok. 1 passed; 0 failed;'\n  files: {file}\n"),
@@ -638,11 +503,7 @@ rvow SHALL keep three.
 
     fn prove_ok(p: &Project, home: &Path, repo: &Path, task: &str, file: &str) {
         std::fs::write(repo.join(file), "ok").unwrap();
-        assert!(
-            prove(p, home, repo, task, &mut std::io::sink())
-                .unwrap()
-                .proved
-        );
+        assert!(prove(p, home, repo, task, &mut std::io::sink()).unwrap().proved);
     }
 
     fn spec(p: &Project, cap: &str) -> String {
@@ -658,12 +519,7 @@ rvow SHALL keep three.
             &p,
             &home,
             &repo,
-            &[
-                ("core", core),
-                ("elsewhere", elsewhere),
-                ("other", "## MOVE REQ-h4t6v9\n"),
-                ("gone", "## REMOVE REQ-7xq2a5\n"),
-            ],
+            &[("core", core), ("elsewhere", elsewhere), ("other", "## MOVE REQ-h4t6v9\n"), ("gone", "## REMOVE REQ-7xq2a5\n")],
             "REQ-new1, REQ-k3f9m2",
             "out.txt",
         );
@@ -681,10 +537,7 @@ rvow SHALL keep three.
                 "# Core\n\n## REQ-k3f9m2 One again\nrvow SHALL keep one twice.\n### Scenario: s\n- WHEN a\n- THEN c\n\n## REQ-q8w2c7 Two\nstatus: deprecated\n\nrvow SHALL keep two.\n### Scenario: s\n- WHEN a\n- THEN b\n\n## {added} Four\nrvow SHALL keep four.\n### Scenario: s\n- WHEN a\n- THEN b\n"
             )
         );
-        assert_eq!(
-            spec(&p, "other"),
-            "# other\n\n## REQ-h4t6v9 Three\nrvow SHALL keep three.\n### Scenario: s\n- WHEN a\n- THEN b\n"
-        );
+        assert_eq!(spec(&p, "other"), "# other\n\n## REQ-h4t6v9 Three\nrvow SHALL keep three.\n### Scenario: s\n- WHEN a\n- THEN b\n");
         assert!(!p.root.join("specs/gone").exists());
         assert!(!p.root.join("specs/elsewhere").exists());
 
@@ -703,14 +556,7 @@ rvow SHALL keep three.
         assert_eq!(last.data["merged"]["REMOVE"], json!(["REQ-7xq2a5"]));
         assert_eq!(last.data["record"].as_object().unwrap().len(), 4);
 
-        let r = gate::gate(
-            &p,
-            &home,
-            &repo,
-            gate::Options::default(),
-            &mut std::io::sink(),
-        )
-        .unwrap();
+        let r = gate::gate(&p, &home, &repo, gate::Options::default(), &mut std::io::sink()).unwrap();
         assert!(r.passed(), "{r:?}");
         assert_eq!(archive(&p, &home, &repo, &id).unwrap_err().code, "stage");
     }
@@ -718,27 +564,9 @@ rvow SHALL keep three.
     #[test]
     fn a_second_change_on_a_requirement_conflicts_until_rebased() {
         let (_tmp, p, repo, home) = setup();
-        let delta = |text: &str| {
-            format!(
-                "## CHANGE REQ-k3f9m2 One\nrvow SHALL keep {text}.\n### Scenario: s\n- WHEN a\n- THEN b\n"
-            )
-        };
-        let (first, t1) = accept(
-            &p,
-            &home,
-            &repo,
-            &[("core", &delta("one, first"))],
-            "REQ-k3f9m2",
-            "a1.txt",
-        );
-        let (second, t2) = accept(
-            &p,
-            &home,
-            &repo,
-            &[("core", &delta("one, second"))],
-            "REQ-k3f9m2",
-            "a2.txt",
-        );
+        let delta = |text: &str| format!("## CHANGE REQ-k3f9m2 One\nrvow SHALL keep {text}.\n### Scenario: s\n- WHEN a\n- THEN b\n");
+        let (first, t1) = accept(&p, &home, &repo, &[("core", &delta("one, first"))], "REQ-k3f9m2", "a1.txt");
+        let (second, t2) = accept(&p, &home, &repo, &[("core", &delta("one, second"))], "REQ-k3f9m2", "a2.txt");
         prove_ok(&p, &home, &repo, &t1, "a1.txt");
         prove_ok(&p, &home, &repo, &t2, "a2.txt");
         archive(&p, &home, &repo, &first).unwrap();
@@ -749,20 +577,10 @@ rvow SHALL keep three.
         assert!(err.fix.contains("new living text"), "{err}");
 
         let (dirs, _) = change::list(&p).unwrap();
-        let dir = &dirs
-            .iter()
-            .find(|d| d.id.to_string() == second)
-            .unwrap()
-            .path;
+        let dir = &dirs.iter().find(|d| d.id.to_string() == second).unwrap().path;
         std::fs::write(dir.join("specs/core.md"), delta("one, first and second")).unwrap();
         let a = amend::amend(&p, &home, &repo, None, "rebase on the first", None).unwrap();
-        assert!(
-            a[0].items
-                .iter()
-                .any(|i| i.what.contains("living REQ-k3f9m2 changed")),
-            "{:?}",
-            a[0].items
-        );
+        assert!(a[0].items.iter().any(|i| i.what.contains("living REQ-k3f9m2 changed")), "{:?}", a[0].items);
         amend::confirm(&p, &[a[0].id.to_string()], amend::Decision::Accept, None).unwrap();
         prove_ok(&p, &home, &repo, &t2, "a2.txt");
         archive(&p, &home, &repo, &second).unwrap();
@@ -776,21 +594,13 @@ rvow SHALL keep three.
         let c = change::new(&p, "later", "main", true).unwrap();
         let prop = c.path.join(change::PROPOSAL);
         let text = std::fs::read_to_string(&prop).unwrap();
-        std::fs::write(
-            &prop,
-            text.replace("branch: main\n", &format!("branch: main\nafter: {first}\n")),
-        )
-        .unwrap();
+        std::fs::write(&prop, text.replace("branch: main\n", &format!("branch: main\nafter: {first}\n"))).unwrap();
         std::fs::write(
             c.path.join("tasks.md"),
             "- TSK-new1 T\n  verify: grep -q ok b2.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: b2.txt\n",
         )
         .unwrap();
-        let vowed = vow::commit(
-            &p,
-            vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap(),
-        )
-        .unwrap();
+        let vowed = vow::commit(&p, vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap()).unwrap();
         let t2 = vowed.minted[0].1.to_string();
         prove_ok(&p, &home, &repo, &t1, "b1.txt");
         prove_ok(&p, &home, &repo, &t2, "b2.txt");
@@ -809,19 +619,11 @@ rvow SHALL keep three.
         let new = change::new(&p, "New", "main", true).unwrap();
         let backlog = change::new(&p, "Idle", "main", true).unwrap();
 
-        assert_eq!(
-            drop_change(&p, &backlog.id.to_string(), " ")
-                .unwrap_err()
-                .code,
-            "reason"
-        );
+        assert_eq!(drop_change(&p, &backlog.id.to_string(), " ").unwrap_err().code, "reason");
         let dropped = drop_change(&p, &backlog.id.to_string(), "not needed").unwrap();
         assert!(dropped.starts_with(p.root.join("archive/dropped")));
         let (events, _) = ledger::read(&dropped.join(LEDGER)).unwrap();
-        assert_eq!(
-            (events[0].kind, &events[0].data["reason"]),
-            (Kind::Drop, &json!("not needed"))
-        );
+        assert_eq!((events[0].kind, &events[0].data["reason"]), (Kind::Drop, &json!("not needed")));
         let err = drop_change(&p, &backlog.id.to_string(), "again").unwrap_err();
         assert_eq!(err.code, "stage");
 
@@ -838,14 +640,7 @@ rvow SHALL keep three.
         let (events, _) = ledger::read(&new.path.join(LEDGER)).unwrap();
         assert_eq!(events[0].data["supersedes"], json!(old));
 
-        let r = gate::gate(
-            &p,
-            &home,
-            &repo,
-            gate::Options::default(),
-            &mut std::io::sink(),
-        )
-        .unwrap();
+        let r = gate::gate(&p, &home, &repo, gate::Options::default(), &mut std::io::sink()).unwrap();
         assert!(r.passed(), "{r:?}");
     }
 
@@ -853,22 +648,8 @@ rvow SHALL keep three.
     fn trace_lists_every_change_oldest_first() {
         let (_tmp, p, repo, home) = setup();
         let change = "## CHANGE REQ-k3f9m2 One\nrvow SHALL keep one more.\n### Scenario: s\n- WHEN a\n- THEN b\n";
-        let (first, t1) = accept(
-            &p,
-            &home,
-            &repo,
-            &[("core", change)],
-            "REQ-k3f9m2",
-            "d1.txt",
-        );
-        let (second, _) = accept(
-            &p,
-            &home,
-            &repo,
-            &[("core", "## REMOVE REQ-k3f9m2\n")],
-            "",
-            "d2.txt",
-        );
+        let (first, t1) = accept(&p, &home, &repo, &[("core", change)], "REQ-k3f9m2", "d1.txt");
+        let (second, _) = accept(&p, &home, &repo, &[("core", "## REMOVE REQ-k3f9m2\n")], "", "d2.txt");
         let idle = change::new(&p, "Idle", "main", false).unwrap();
         std::fs::write(idle.path.join("specs/core.md"), "## DEPRECATE REQ-k3f9m2\n").unwrap();
         prove_ok(&p, &home, &repo, &t1, "d1.txt");
@@ -876,10 +657,8 @@ rvow SHALL keep three.
 
         let (id, touches) = trace(&p, "k3f9").unwrap();
         assert_eq!(id.to_string(), "REQ-k3f9m2");
-        let got: Vec<(String, Stage, Option<String>, Vec<&str>)> = touches
-            .into_iter()
-            .map(|t| (t.change.to_string(), t.stage, t.date, t.ops))
-            .collect();
+        let got: Vec<(String, Stage, Option<String>, Vec<&str>)> =
+            touches.into_iter().map(|t| (t.change.to_string(), t.stage, t.date, t.ops)).collect();
         assert_eq!(
             got,
             [
@@ -897,18 +676,11 @@ rvow SHALL keep three.
         let (id, task) = accept(&p, &home, &repo, &[], "", "e1.txt");
         let (dirs, _) = change::list(&p).unwrap();
         let dir = &dirs.iter().find(|d| d.id.to_string() == id).unwrap().path;
-        std::fs::write(
-            dir.join("specs/core.md"),
-            "## ADD REQ-new2 Late\nrvow SHALL be late.\n### Scenario: s\n- WHEN a\n- THEN b\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("specs/core.md"), "## ADD REQ-new2 Late\nrvow SHALL be late.\n### Scenario: s\n- WHEN a\n- THEN b\n")
+            .unwrap();
         let tasks = dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
-        std::fs::write(
-            &tasks,
-            text.replacen("  verify", "  covers: REQ-new2\n  verify", 1),
-        )
-        .unwrap();
+        std::fs::write(&tasks, text.replacen("  verify", "  covers: REQ-new2\n  verify", 1)).unwrap();
         let a = amend::amend(&p, &home, &repo, None, "one more", None).unwrap();
         amend::confirm(&p, &[a[0].id.to_string()], amend::Decision::Accept, None).unwrap();
         prove_ok(&p, &home, &repo, &task, "e1.txt");

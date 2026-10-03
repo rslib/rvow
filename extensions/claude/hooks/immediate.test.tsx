@@ -1,4 +1,7 @@
+import type { On } from 'claude-code'
+import type { Engine, Mounted } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult } from './testkit'
 
 const VIEW = {
   branch: 'trunk',
@@ -10,41 +13,32 @@ const VIEW = {
   next: null,
   needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
 }
-const PANE = {
-  plugin: 'rvow',
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: 'rvow',
-  props: { title: 'rvow', isFocused: true, bodyColumns: 80, placement: 'inline' } as any,
-} as const
+const PANE = pane()
 
-async function start($: any, on: any, exitCode: number) {
+async function start($: Engine, on: On, exitCode: number) {
   const clock = mock.clock(on)
   let release: () => void = () => {}
   const gate = new Promise<void>((r) => (release = r))
   let opened = 0
   mock.env(on, { HOME: '/home/me' })
-  on('store.get', async () => ({ value: undefined }) as any)
-  on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('ui.status', async () => ({ value: undefined }) as any)
+  on('store.get', async () => ({ value: undefined }))
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
   on('ui.open', async () => {
     opened++
-    return { value: undefined } as any
+    return PLACED
   })
   on('process.run', async () => {
     await gate
-    return { value: { exitCode, stdout: exitCode ? '' : JSON.stringify(VIEW), stderr: '' } } as any
+    return { value: procResult(exitCode, exitCode ? '' : JSON.stringify(VIEW)) }
   })
-  const done = $.command.run({
-    command: 'rvow-status',
-    args: '',
-    origin: { kind: 'composer' },
-  } as any)
+  const done = $.command.run(cmd('rvow-status', ''))
   while (!opened) await clock.advance(0)
   return { clock, release, done, opened: () => opened }
 }
 
-const texts = async (pane: any) => (await pane.findAll({ type: 'Text' })).map((t: any) => t.text)
+const texts = async (pane: Mounted<'terminal', 'Pane'>) =>
+  (await pane.findAll({ type: 'Text' })).map((t) => t.text)
 
 test('the pane opens before rvow answers and shows loading', async ($, on) => {
   const run = await start($, on, 0)

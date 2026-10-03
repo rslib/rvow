@@ -76,11 +76,7 @@ impl Active {
         self.bases()
             .into_iter()
             .filter_map(|(id, base)| {
-                let now = living
-                    .iter()
-                    .flat_map(|(_, s)| s.requirements.iter())
-                    .find(|r| r.id.to_string() == id)
-                    .map(requirement_hash);
+                let now = living.iter().flat_map(|(_, s)| s.requirements.iter()).find(|r| r.id.to_string() == id).map(requirement_hash);
                 (now.as_deref() != base.as_str()).then_some((id, now))
             })
             .collect()
@@ -102,12 +98,7 @@ pub fn active(project: &Project, living: &[CapSpec]) -> Result<Vec<Active>> {
     for dir in changes.into_iter().filter(|c| c.stage == Stage::Active) {
         let loaded = change::load(&dir.path, living)?;
         let (events, ledger_diags) = ledger::read(&dir.path.join(LEDGER))?;
-        out.push(Active {
-            dir,
-            loaded,
-            events,
-            ledger_diags,
-        });
+        out.push(Active { dir, loaded, events, ledger_diags });
     }
     out.sort_by_key(|a| a.vow_time());
     Ok(out)
@@ -115,10 +106,7 @@ pub fn active(project: &Project, living: &[CapSpec]) -> Result<Vec<Active>> {
 
 /// The active changes whose vow names `branch`.
 pub fn on_branch<'a>(changes: &'a [Active], branch: &str) -> Vec<&'a Active> {
-    changes
-        .iter()
-        .filter(|a| a.branch() == Some(branch))
-        .collect()
+    changes.iter().filter(|a| a.branch() == Some(branch)).collect()
 }
 
 /// The current hash of every requirement a task covers: the delta text when
@@ -127,18 +115,13 @@ pub fn covered(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> BTreeMap<Str
     task.covers
         .iter()
         .map(|r| {
-            let hash =
-                find_requirement(r, loaded, living).map_or("missing".into(), requirement_hash);
+            let hash = find_requirement(r, loaded, living).map_or("missing".into(), requirement_hash);
             (r.to_string(), hash)
         })
         .collect()
 }
 
-pub fn find_requirement<'a>(
-    r: &Ref,
-    loaded: &'a Loaded,
-    living: &'a [CapSpec],
-) -> Option<&'a Requirement> {
+pub fn find_requirement<'a>(r: &Ref, loaded: &'a Loaded, living: &'a [CapSpec]) -> Option<&'a Requirement> {
     loaded
         .deltas
         .iter()
@@ -187,12 +170,7 @@ pub struct Now<'a> {
 
 impl Now<'_> {
     pub fn inputs(&self, task: &Task) -> Result<fingerprint::Inputs> {
-        let globs: Vec<String> = task
-            .files
-            .iter()
-            .chain(&self.config.inputs)
-            .cloned()
-            .collect();
+        let globs: Vec<String> = task.files.iter().chain(&self.config.inputs).cloned().collect();
         fingerprint::inputs(self.top, &globs)
     }
 }
@@ -208,38 +186,26 @@ fn is_proved(e: &Event) -> bool {
 /// The state of `task` in `change`, from its latest proof or block.
 pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
     let id = task.id.to_string();
-    let mine: Vec<&Event> = change
-        .events
-        .iter()
-        .filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id)
-        .collect();
+    let mine: Vec<&Event> =
+        change.events.iter().filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id).collect();
     let Some(last) = mine.last() else {
         return Ok(State::Missing);
     };
     if last.kind == Kind::Block {
         // A confirmed amendment that changed the task ends the block.
-        return Ok(if str_of(last, "task_hash") == task_hash(task) {
-            State::Blocked
-        } else {
-            State::Missing
-        });
+        return Ok(if str_of(last, "task_hash") == task_hash(task) { State::Blocked } else { State::Missing });
     }
     if !is_proved(last) {
         return Ok(State::Failed);
     }
     let key = str_of(last, "key");
-    let flaky = mine
-        .iter()
-        .any(|e| e.kind == Kind::Prove && str_of(e, "key") == key && !is_proved(e));
+    let flaky = mine.iter().any(|e| e.kind == Kind::Prove && str_of(e, "key") == key && !is_proved(e));
     let mut reasons = Vec::new();
     if str_of(last, "task_hash") != task_hash(task) {
         reasons.push("task-changed");
     }
-    let reqs: BTreeMap<String, String> = last
-        .data
-        .get("requirements")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+    let reqs: BTreeMap<String, String> =
+        last.data.get("requirements").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
     if reqs != covered(task, &change.loaded, now.living) {
         reasons.push("requirement-changed");
     }
@@ -273,13 +239,8 @@ pub fn next<'a>(queue: &[&'a Active], now: &Now) -> Result<Option<(&'a Active, &
 
 /// A task in full: id, title, command, scope and the text of what it covers.
 pub fn render_task(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> String {
-    let mut out = format!(
-        "{} {}\n  verify: {}\n  files: {}\n",
-        task.id,
-        task.title,
-        task.verify.as_deref().unwrap_or(""),
-        task.files.join(", ")
-    );
+    let mut out =
+        format!("{} {}\n  verify: {}\n  files: {}\n", task.id, task.title, task.verify.as_deref().unwrap_or(""), task.files.join(", "));
     for r in &task.covers {
         match find_requirement(r, loaded, living) {
             Some(req) => {
@@ -347,18 +308,9 @@ pub fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, 
             Ref::Placeholder { .. } => None,
         })
         .collect();
-    let input = if input.contains('-') {
-        input.to_string()
-    } else {
-        format!("TSK-{input}")
-    };
-    let id = id::resolve(&input, &ids).map_err(|e| {
-        Error::new(
-            "task",
-            format!("{input}: {e}"),
-            "run rvow status to see the tasks, or rvow ids to name new ones",
-        )
-    })?;
+    let input = if input.contains('-') { input.to_string() } else { format!("TSK-{input}") };
+    let id = id::resolve(&input, &ids)
+        .map_err(|e| Error::new("task", format!("{input}: {e}"), "run rvow status to see the tasks, or rvow ids to name new ones"))?;
     let r = Ref::Id(id);
     changes
         .iter()
@@ -367,13 +319,7 @@ pub fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, 
 }
 
 /// Runs a task's stored verify command and records the proof.
-pub fn prove(
-    project: &Project,
-    home: &Path,
-    cwd: &Path,
-    input: &str,
-    echo: &mut dyn Write,
-) -> Result<Proved> {
+pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut dyn Write) -> Result<Proved> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
@@ -386,32 +332,17 @@ pub fn prove(
         ));
     }
     let config = config::load(project, home)?;
-    let now = Now {
-        top: &top,
-        config: &config,
-        env: fingerprint::env(&top, &config)?,
-        living: &living,
-    };
+    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let inputs = now.inputs(task)?;
     let cmd = task.verify_command()?;
     let started = ledger::now_ms();
-    let outcome = runner::run(
-        cmd,
-        &top,
-        &[],
-        task.timeout.unwrap_or(config.timeout()),
-        echo,
-    )?;
+    let outcome = runner::run(cmd, &top, &[], task.timeout.unwrap_or(config.timeout()), echo)?;
     let proved = outcome.passed() && outcome.tests_run != Some(0);
 
     let thash = task_hash(task);
     let reqs = covered(task, &change.loaded, &living);
     let env_key = now.env.key();
-    let key = sha256_hex(
-        json!([thash, reqs, inputs.hash, env_key])
-            .to_string()
-            .as_bytes(),
-    );
+    let key = sha256_hex(json!([thash, reqs, inputs.hash, env_key]).to_string().as_bytes());
     let mut data = Map::new();
     data.insert("task".into(), task.id.to_string().into());
     data.insert("task_hash".into(), thash.into());
@@ -430,10 +361,7 @@ pub fn prove(
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
     if proved {
-        data.insert(
-            "tests".into(),
-            Value::Object(crate::guard::capture(project, &top, &config, task)?),
-        );
+        data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
     }
     data.insert(
         "run".into(),
@@ -454,20 +382,14 @@ pub fn prove(
 
     let (events, _) = ledger::read(&ledger_path)?;
     let id = task.id.to_string();
-    let runs: Vec<&Event> = events
-        .iter()
-        .filter(|e| e.kind == Kind::Prove && str_of(e, "task") == id)
-        .collect();
+    let runs: Vec<&Event> = events.iter().filter(|e| e.kind == Kind::Prove && str_of(e, "task") == id).collect();
     let looping = runs.len() >= LOOP_RUNS
-        && runs[runs.len() - LOOP_RUNS..]
-            .iter()
-            .all(|e| !is_proved(e) && e.data.get("tail") == runs[runs.len() - 1].data.get("tail"));
+        && runs[runs.len() - LOOP_RUNS..].iter().all(|e| !is_proved(e) && e.data.get("tail") == runs[runs.len() - 1].data.get("tail"));
 
     let changes = active(project, &living)?;
     let branch = change_branch(&changes, &change.dir.id);
     let queue = on_branch(&changes, &branch);
-    let next = next(&queue, &now)?
-        .map(|(c, t, s)| format!("[{}] {}", s.name(), render_task(t, &c.loaded, &living)));
+    let next = next(&queue, &now)?.map(|(c, t, s)| format!("[{}] {}", s.name(), render_task(t, &c.loaded, &living)));
     Ok(Proved {
         change: change.dir.id.clone(),
         task: task.id.clone(),
@@ -481,12 +403,7 @@ pub fn prove(
 }
 
 fn change_branch(changes: &[Active], id: &Id) -> String {
-    changes
-        .iter()
-        .find(|c| &c.dir.id == id)
-        .and_then(|c| c.branch())
-        .unwrap_or("")
-        .to_string()
+    changes.iter().find(|c| &c.dir.id == id).and_then(|c| c.branch()).unwrap_or("").to_string()
 }
 
 pub struct TaskLine {
@@ -512,38 +429,21 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now {
-        top: &top,
-        config: &config,
-        env: fingerprint::env(&top, &config)?,
-        living: &living,
-    };
+    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let branch = git::branch(&top)?;
     let mut out = Vec::new();
     for c in &changes {
         if !all && c.branch() != branch.as_deref() {
             continue;
         }
-        let mut problems: Vec<String> = c
-            .loaded
-            .errors()
-            .map(|(p, d)| format!("{p}:{}: {}", d.line, d.message))
-            .collect();
-        problems.extend(
-            c.ledger_diags
-                .iter()
-                .map(|d| format!("{LEDGER}:{}: {}", d.line, d.message)),
-        );
+        let mut problems: Vec<String> = c.loaded.errors().map(|(p, d)| format!("{p}:{}: {}", d.line, d.message)).collect();
+        problems.extend(c.ledger_diags.iter().map(|d| format!("{LEDGER}:{}: {}", d.line, d.message)));
         if c.vow().is_none() {
             problems.push("no vow event, the change was moved by hand".into());
         }
         let mut tasks = Vec::new();
         for t in &c.loaded.tasks {
-            tasks.push(TaskLine {
-                task: t.id.clone(),
-                title: t.title.clone(),
-                state: state(c, t, &now)?,
-            });
+            tasks.push(TaskLine { task: t.id.clone(), title: t.title.clone(), state: state(c, t, &now)? });
         }
         out.push(ChangeStatus {
             id: c.dir.id.clone(),
@@ -565,12 +465,7 @@ pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<Str
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now {
-        top: &top,
-        config: &config,
-        env: fingerprint::env(&top, &config)?,
-        living: &living,
-    };
+    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let branch = git::branch(&top)?.unwrap_or_default();
     let mut out = Vec::new();
     for c in on_branch(&changes, &branch) {
@@ -610,13 +505,7 @@ pub(crate) mod tests {
         .unwrap();
         let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         let vowed = vow::commit(&p, prepared).unwrap();
-        let task = vowed
-            .minted
-            .iter()
-            .find(|(from, _)| from == "TSK-new1")
-            .unwrap()
-            .1
-            .to_string();
+        let task = vowed.minted.iter().find(|(from, _)| from == "TSK-new1").unwrap().1.to_string();
         (tmp, p, repo, task)
     }
 
@@ -659,12 +548,7 @@ pub(crate) mod tests {
     fn zero_tests_is_not_a_proof_and_flakes_show() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
-        let active_dir = std::fs::read_dir(p.root.join("active"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let active_dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let tasks = active_dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
         std::fs::write(&tasks, text.replace("1 passed", "0 passed")).unwrap();
@@ -676,26 +560,10 @@ pub(crate) mod tests {
 
         let flaky = "f=$(cat n 2>/dev/null || echo 0); echo $((f+1)) > n; [ $f -ne 0 ] && echo 'test result: ok. 1 passed; 0 failed;'";
         let text = std::fs::read_to_string(&tasks).unwrap();
-        let verify_line = text
-            .lines()
-            .find(|l| l.contains("verify:"))
-            .unwrap()
-            .to_string();
-        std::fs::write(
-            &tasks,
-            text.replace(&verify_line, &format!("  verify: {flaky}")),
-        )
-        .unwrap();
-        assert!(
-            !prove(&p, &home, &repo, &task, &mut std::io::sink())
-                .unwrap()
-                .proved
-        );
-        assert!(
-            prove(&p, &home, &repo, &task, &mut std::io::sink())
-                .unwrap()
-                .proved
-        );
+        let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
+        std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: {flaky}"))).unwrap();
+        assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "flaky");
     }
 

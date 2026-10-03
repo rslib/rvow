@@ -1,0 +1,37 @@
+---
+name: rvow
+description: Work on a change that the user accepted with rvow (a vow). Use when the session brief names an rvow change or task, when a task needs proof, when the plan must change, or when a task cannot pass as written.
+---
+
+# rvow
+
+The user and you agreed on a plan, and rvow holds you to it with checks outside the model.
+The brief at session start names the next task. {{cmd:brief}} prints it again.
+
+## Work
+
+- Do the next task, then run {{cmd:prove <task>}}. rvow runs the stored verify command. Never run the check yourself and claim it passed.
+- A pass with 0 tests run is not a proof. Make the test exist and run.
+- {{cmd:status}} shows each task and any drift. {{cmd:prove --stale}} re-proves stale tasks.
+- Stay inside each task's `files:` scope. The gate fails on files outside it.
+
+## Before accept
+
+- While a plan waits for accept, code edits are denied. Run {{cmd:guide proposal}} and follow its interview steps: ask with the `rvow_ask` tool, or ask in chat and record with {{cmd:answer}}.
+- Then run {{cmd:check}} and ask the user to run `/rvow-accept <id>`.
+
+## When the plan must change
+
+- Edit the plan files, then run {{cmd:amend --reason "..."}} and ask the user to run `/rvow-confirm` (or to type ! {{cmd:confirm}}).
+- To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user.
+- You never run {{cmd:accept}} or {{cmd:confirm}}. The hooks deny them.
+
+## Stop and report
+
+When a task cannot pass as written, run {{cmd:block <task> --reason "..."}} and tell the user why.
+Never weaken a verify command, edit a test to make it pass, special-case the tested input or skip a hook.
+
+## Notes
+
+- {{cmd:note decision "..."}} records a choice the next session needs.
+- {{cmd:note handoff "..."}} leaves at most 5 lines for the next session.

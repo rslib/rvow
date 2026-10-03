@@ -1,7 +1,11 @@
 [package]
 name = "rvow-core"
-version = "0.1.0"
-edition = "2024"
+description = "Library behind the rvow command line: plans, vows, proof and the gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 getrandom = "0.4.3"

@@ -2,6 +2,37 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
+import {
+  ACCENT,
+  ASK,
+  type Asked,
+  BADGE,
+  BRANCH,
+  blocker,
+  cut,
+  DRIFT,
+  decisionPrompt,
+  EDIT_HINT,
+  firstTab,
+  ID,
+  MARKS,
+  MAX_LINES,
+  OPEN,
+  OUTCOME,
+  PANE,
+  REVIEW,
+  RULE,
+  refinePrompt,
+  TABS,
+} from './format'
+
+const viewAtom = atom({ plugin: 'rvow', key: 'view' } as const, null)
+const reviewAtom = atom({ plugin: 'rvow', key: 'review' } as const, {})
+const amendmentsAtom = atom({ plugin: 'rvow', key: 'amendments' } as const, null)
+const noticeAtom = atom({ plugin: 'rvow', key: 'notice' } as const, null)
+const tabAtom = atom({ plugin: 'rvow', key: 'tab' } as const, null)
+const selectedAtom = atom({ plugin: 'rvow', key: 'selected' } as const, [])
+const detailsAtom = atom({ plugin: 'rvow', key: 'details' } as const, [])
 
 // `rvow install` writes the absolute path of the binary here.
 const INSTALLED_BIN = '__RVOW_BIN__'
@@ -10,74 +41,6 @@ const MAX_BLOCKS = 8
 const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*)$/
 
 type Event = 'pre-tool-use' | 'session-start' | 'stop' | 'status' | 'view'
-
-const PANE = 'rvow'
-// No focus, so the pane never takes the keys from the prompt. No size, so the dock keeps the width the
-// diff panel has. No closeOnEscape: Esc hands the keys back and the pane stays; the dock keeps both as tabs.
-const OPEN = { id: PANE, title: 'rvow' } as const
-const viewAtom = atom({ plugin: 'rvow', key: 'view' } as const, null)
-const reviewAtom = atom({ plugin: 'rvow', key: 'review' } as const, {})
-const amendmentsAtom = atom({ plugin: 'rvow', key: 'amendments' } as const, null)
-const noticeAtom = atom({ plugin: 'rvow', key: 'notice' } as const, null)
-const TABS = ['backlog', 'active', 'archive']
-const tabAtom = atom({ plugin: 'rvow', key: 'tab' } as const, null)
-const selectedAtom = atom({ plugin: 'rvow', key: 'selected' } as const, [])
-const detailsAtom = atom({ plugin: 'rvow', key: 'details' } as const, [])
-const ACCENT = 'cyan'
-const RULE = '─'
-const BRANCH = '⎇'
-const BADGE: Record<RvowDetail['kind'], [string, string | undefined]> = {
-  plan: [' PLAN ', 'yellow'],
-  change: [' CHANGE ', ACCENT],
-  task: [' TASK ', ACCENT],
-  archive: [' ARCHIVED ', undefined],
-}
-const ID = /\b(?:CHG|TSK|REQ|AMD)-[a-z0-9]+\b/g
-// The pane body scrolls; this cap only keeps a huge `rvow show` from drawing thousands of rows.
-const MAX_LINES = 200
-// The checklist `rvow accept` prints (crates/rvow/src/main.rs REVIEW).
-const REVIEW = [
-  'before you accept, check:',
-  '  1. Does each requirement say what the system does, not how?',
-  "  2. Does each task's check fail today for the reason the task fixes?",
-  '  3. Is anything in Out of scope that you need now?',
-  '  4. Is every Assumption one you agree with?',
-  '  5. Is the change small enough to review its diff in one sitting?',
-]
-// Drawing only: the state names and drift classes are rvow's own.
-const MARKS: Record<string, [string, string | undefined]> = {
-  proved: ['✓', 'green'],
-  failed: ['✗', 'red'],
-  stale: ['~', 'yellow'],
-  flaky: ['≈', 'yellow'],
-  blocked: ['⊘', 'magenta'],
-  missing: ['·', undefined],
-}
-const DRIFT: Record<string, string | undefined> = { weaken: 'red', confirm: 'yellow' }
-const OUTCOME = {
-  done: ['✓', 'green'],
-  dropped: ['✗', 'red'],
-  superseded: ['↷', 'yellow'],
-} as const
-
-const firstTab = (v: RvowView): RvowTab =>
-  v.changes.length > 0 ? 'active' : v.backlog.length > 0 ? 'backlog' : 'archive'
-
-/** Why a plan cannot be accepted here, in the order the author should fix it. */
-const blocker = (p: RvowPlan) =>
-  !p.here
-    ? 'take it to this branch first'
-    : p.questions > 0
-      ? 'answer the open questions first'
-      : p.issues > 0
-        ? 'fix what rvow check reports'
-        : 'add at least one task with a verify command'
-
-/** `text` on one line, cut to `width` characters with `...`. */
-const cut = (text: string, width: number) => {
-  const line = text.replace(/\s+/g, ' ').trim()
-  return line.length <= width ? line : `${line.slice(0, Math.max(0, width - 3))}...`
-}
 
 let blocks = 0
 let warned = false
@@ -94,8 +57,38 @@ function later($: EngineInterface, work: () => Promise<unknown>) {
   })
 }
 
+/** What `rvow hook claude <event>` prints; each event fills only some fields. */
+type HookOutput = {
+  status?: unknown
+  reason?: unknown
+  hookSpecificOutput?: {
+    permissionDecision?: unknown
+    permissionDecisionReason?: unknown
+    additionalContext?: unknown
+  }
+  changes?: unknown
+  plans?: RvowPlan[]
+  backlog?: RvowPlan[]
+  archive?: RvowView['archive']
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+function isDetail(v: unknown): v is RvowDetail {
+  return (
+    isRecord(v) &&
+    (v.kind === 'plan' || v.kind === 'change' || v.kind === 'task' || v.kind === 'archive') &&
+    typeof v.id === 'string'
+  )
+}
+
 /** Runs `rvow hook claude <event>`. Any failure allows, so a broken rvow never locks the session. */
-async function hook($: EngineInterface, event: Event, input: object): Promise<any> {
+async function hook(
+  $: EngineInterface,
+  event: Event,
+  input: object,
+): Promise<HookOutput | undefined> {
   const cwd = await $.session.cwd()
   try {
     const r = await $.process.run([BIN, 'hook', 'claude', event], {
@@ -104,7 +97,8 @@ async function hook($: EngineInterface, event: Event, input: object): Promise<an
       timeoutMs: event === 'pre-tool-use' ? 10_000 : 60_000,
     })
     const out = r.stdout.trim()
-    return out ? JSON.parse(out) : undefined
+    const parsed: unknown = out ? JSON.parse(out) : undefined
+    return isRecord(parsed) ? parsed : undefined
   } catch (err) {
     if (!warned) {
       warned = true
@@ -206,10 +200,10 @@ const putReview = (
 /** Reopens the saved stack and expanded reviews that still exist in the view; the rest is dropped. */
 async function restore($: EngineInterface) {
   try {
-    const saved: any = await $.store.get('pane')
+    const saved = await $.store.get('pane')
     const view = await read($, viewAtom)
-    if (!view || !saved) return
-    const alive = (d: any) =>
+    if (!view || !isRecord(saved)) return
+    const alive = (d: RvowDetail) =>
       d.kind === 'plan'
         ? view.backlog.some((p) => p.id === d.id)
         : d.kind === 'change'
@@ -217,9 +211,11 @@ async function restore($: EngineInterface) {
           : d.kind === 'archive'
             ? view.archive.some((a) => a.id === d.id)
             : view.changes.some((c) => c.tasks.some((t) => t.id === d.id))
-    const open = (saved.review as string[]).filter((id) => view.backlog.some((p) => p.id === id))
+    const open = (Array.isArray(saved.review) ? (saved.review as string[]) : []).filter((id) =>
+      view.backlog.some((p) => p.id === id),
+    )
     await update($, reviewAtom, () => Object.fromEntries(open.map((id) => [id, true])))
-    for (const d of saved.details as RvowDetail[]) {
+    for (const d of Array.isArray(saved.details) ? saved.details.filter(isDetail) : []) {
       if (alive(d)) await openDetail($, { kind: d.kind, id: d.id, title: String(d.title) })
     }
   } catch {}
@@ -294,37 +290,6 @@ async function userOnly(
   return { text: r.text }
 }
 
-/** What the agent hears after the person decided, or null when argv decided nothing. */
-function decisionPrompt(argv: string[], out: string): string | null {
-  const [verb, id] = argv
-  if (verb === 'archive') return `I archived ${id}. The change is closed.`
-  if (verb === 'accept') {
-    const next = out.split('\n').find((l) => l.startsWith('next:'))
-    return `I accepted ${id}.${next ? ` ${next}.` : ''} Continue with it.`
-  }
-  const ids = [...new Set(`${argv.join(' ')}\n${out}`.match(/AMD-[\w-]+/g) ?? [])].join(', ')
-  if (argv.includes('--accept')) return `I accepted the plan edit ${ids}. Continue the tasks.`
-  if (argv.includes('--reject'))
-    return `I rejected the plan edit ${ids}. Undo it, or amend it again with a different change.`
-  return null
-}
-
-const REFINE_STEPS =
-  'Follow `rvow guide proposal`, `rvow guide spec` and `rvow guide tasks`. Ask me about open points with the rvow_ask tool before changing scope. Then tighten the proposal and tasks so `rvow check` passes, and tell me what changed.'
-
-/** The prompt that asks the agent to refine one plan, or several one at a time. */
-function refinePrompt(plans: RvowPlan[]): string {
-  const [p] = plans
-  if (plans.length === 1 && p) {
-    return `Review and refine the rvow plan ${p.id} (${p.title}). Run \`rvow show ${p.id}\` and \`rvow check ${p.id}\`. ${REFINE_STEPS}`
-  }
-  return [
-    'Review and refine these rvow plans, one plan at a time, in this order:',
-    ...plans.map((x) => `- ${x.id} (${x.title})`),
-    `For each plan: run \`rvow show <id>\` and \`rvow check <id>\`. ${REFINE_STEPS}`,
-  ].join('\n')
-}
-
 /** Queues a prompt as the agent's next turn, as the user. */
 function queue($: EngineInterface, text: string) {
   void $.prompt
@@ -338,16 +303,6 @@ function queue($: EngineInterface, text: string) {
 async function refine($: EngineInterface, plans: RvowPlan[]) {
   queue($, refinePrompt(plans))
   await update($, noticeAtom, () => ({ tone: 'ok', text: 'queued for the agent' }))
-}
-
-const ASK = 'mcp__rvow__rvow_ask'
-const EDIT_HINT = 'Edit the text each answer changes.'
-
-type Asked = {
-  ref: string
-  question: string
-  header?: string
-  options: { label: string; description?: string }[]
 }
 
 /** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
@@ -378,7 +333,7 @@ async function ask($: EngineInterface): Promise<string> {
       return [...done, stay()].join('\n')
     }
     const r = await run(['answer', q.ref, choice, '--via', 'dialog']).catch(() => undefined)
-    if (!r || r.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
+    if (r?.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
     done.push(`${q.ref} ${q.question} -> ${choice}`)
   }
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join('\n')
@@ -441,7 +396,7 @@ export const register: Register = (on) => {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const result = await next(e)
     const out = await Promise.race([hook($, 'session-start', {}), $.clock.sleep(BRIEF_WAIT_MS)])
-    const text = (out as any)?.hookSpecificOutput?.additionalContext
+    const text = out?.hookSpecificOutput?.additionalContext
     if (typeof text !== 'string' || !text || text === sentBrief) return result
     sentBrief = text
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }

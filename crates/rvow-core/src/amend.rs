@@ -29,10 +29,7 @@ pub struct Pending {
 }
 
 fn decided(change: &Active, amendment: &str) -> bool {
-    change.events.iter().any(|e| {
-        e.kind == Kind::Confirm
-            && e.data.get("amendment").and_then(Value::as_str) == Some(amendment)
-    })
+    change.events.iter().any(|e| e.kind == Kind::Confirm && e.data.get("amendment").and_then(Value::as_str) == Some(amendment))
 }
 
 /// Every amendment in the active changes that has no decision yet.
@@ -54,18 +51,8 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
                 id: parsed,
                 change: c.dir.id.clone(),
                 change_path: c.dir.path.clone(),
-                reason: e
-                    .data
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                items: e
-                    .data
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
+                reason: e.data.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
+                items: e.data.get("items").and_then(Value::as_array).cloned().unwrap_or_default(),
                 snapshot: sha256_hex(snapshot.to_string().as_bytes()),
             });
         }
@@ -77,10 +64,7 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
 /// A short hash of the pending set. `confirm --all <digest>` accepts exactly
 /// the set the user read, so an amendment that arrives later is not included.
 pub fn digest(pending: &[Pending]) -> String {
-    let lines: Vec<String> = pending
-        .iter()
-        .map(|p| format!("{} {}", p.id, p.snapshot))
-        .collect();
+    let lines: Vec<String> = pending.iter().map(|p| format!("{} {}", p.id, p.snapshot)).collect();
     short_hash(lines.join("\n").as_bytes())[..8].to_string()
 }
 
@@ -93,45 +77,22 @@ pub struct Amended {
 
 /// Records an amendment for `target`, or for every active change on the
 /// current branch that has drift.
-pub fn amend(
-    project: &Project,
-    home: &Path,
-    cwd: &Path,
-    target: Option<&str>,
-    reason: &str,
-    unlock: Option<&str>,
-) -> Result<Vec<Amended>> {
+pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, reason: &str, unlock: Option<&str>) -> Result<Vec<Amended>> {
     if reason.trim().is_empty() {
-        return Err(Error::new(
-            "reason",
-            "an amendment needs a reason",
-            "say why the plan changed with --reason \"...\"",
-        ));
+        return Err(Error::new("reason", "an amendment needs a reason", "say why the plan changed with --reason \"...\""));
     }
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
-    let wanted: Option<Id> = target
-        .map(|t| change::resolve(project, t))
-        .transpose()?
-        .map(|c| c.id);
+    let wanted: Option<Id> = target.map(|t| change::resolve(project, t)).transpose()?.map(|c| c.id);
     let branch = git::branch(&top)?;
     let config = config::load(project, home)?;
     let unlock = match unlock {
         Some(path) => {
-            let rel = hook::rel_path(Path::new(path), cwd, &top).ok_or_else(|| {
-                Error::new(
-                    "unlock",
-                    format!("{path} is outside the repository"),
-                    "name a file in this repository",
-                )
-            })?;
+            let rel = hook::rel_path(Path::new(path), cwd, &top)
+                .ok_or_else(|| Error::new("unlock", format!("{path} is outside the repository"), "name a file in this repository"))?;
             if !hook::protected(project, &top)?.contains(&rel) {
-                return Err(Error::new(
-                    "unlock",
-                    format!("{rel} is not protected"),
-                    "edit it without an unlock",
-                ));
+                return Err(Error::new("unlock", format!("{rel} is not protected"), "edit it without an unlock"));
             }
             Some(rel)
         }
@@ -168,10 +129,7 @@ pub fn amend(
                 if items.is_empty() {
                     continue;
                 }
-                data.insert(
-                    "snapshot".into(),
-                    Value::Object(drift::snapshot_now(project, &top, &config, c)?),
-                );
+                data.insert("snapshot".into(), Value::Object(drift::snapshot_now(project, &top, &config, c)?));
                 items
             }
         };
@@ -180,18 +138,10 @@ pub fn amend(
         data.insert("reason".into(), reason.trim().into());
         data.insert("items".into(), json!(items));
         ledger::append(&c.dir.path.join(LEDGER), &lock, Kind::Amend, data)?;
-        out.push(Amended {
-            id,
-            change: c.dir.id.clone(),
-            items,
-        });
+        out.push(Amended { id, change: c.dir.id.clone(), items });
     }
     if out.is_empty() {
-        return Err(Error::new(
-            "no-drift",
-            "nothing differs from the accepted plan",
-            "edit the plan first; amend records the edit",
-        ));
+        return Err(Error::new("no-drift", "nothing differs from the accepted plan", "edit the plan first; amend records the edit"));
     }
     Ok(out)
 }
@@ -213,12 +163,7 @@ impl Decision {
 
 /// Records `decision` for each named amendment, or for the whole pending set
 /// when `all_digest` matches it.
-pub fn confirm(
-    project: &Project,
-    ids: &[String],
-    decision: Decision,
-    all_digest: Option<&str>,
-) -> Result<Vec<Id>> {
+pub fn confirm(project: &Project, ids: &[String], decision: Decision, all_digest: Option<&str>) -> Result<Vec<Id>> {
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
     let pending = pending(&changes);
@@ -238,33 +183,18 @@ pub fn confirm(
             let known: Vec<Id> = pending.iter().map(|p| p.id.clone()).collect();
             let mut chosen = Vec::new();
             for input in ids {
-                let input = if input.contains('-') {
-                    input.clone()
-                } else {
-                    format!("AMD-{input}")
-                };
-                let id = id::resolve(&input, &known).map_err(|e| {
-                    Error::new(
-                        "amendment",
-                        format!("{input}: {e}"),
-                        "run rvow confirm to list the pending amendments",
-                    )
-                })?;
-                let found = pending
-                    .iter()
-                    .find(|p| p.id == id)
-                    .ok_or_else(|| Error::internal(format!("{id} resolved but is not pending")))?;
+                let input = if input.contains('-') { input.clone() } else { format!("AMD-{input}") };
+                let id = id::resolve(&input, &known)
+                    .map_err(|e| Error::new("amendment", format!("{input}: {e}"), "run rvow confirm to list the pending amendments"))?;
+                let found =
+                    pending.iter().find(|p| p.id == id).ok_or_else(|| Error::internal(format!("{id} resolved but is not pending")))?;
                 chosen.push(found);
             }
             chosen
         }
     };
     if chosen.is_empty() {
-        return Err(Error::new(
-            "none",
-            "no amendment chosen",
-            "name amendment ids or pass --all <digest>",
-        ));
+        return Err(Error::new("none", "no amendment chosen", "name amendment ids or pass --all <digest>"));
     }
     let lock = project.lock()?;
     for p in &chosen {
@@ -282,12 +212,7 @@ mod tests {
     use crate::proof::tests::accepted;
 
     fn active_dir(p: &Project) -> std::path::PathBuf {
-        std::fs::read_dir(p.root.join("active"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
+        std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path()
     }
 
     fn state(p: &Project, home: &Path, repo: &Path) -> (usize, Vec<Pending>) {
@@ -303,14 +228,8 @@ mod tests {
     fn amend_then_accept_moves_the_baseline() {
         let (tmp, p, repo, _) = accepted();
         let home = tmp.0.join("home");
-        assert_eq!(
-            amend(&p, &home, &repo, None, "x", None).unwrap_err().code,
-            "no-drift"
-        );
-        assert_eq!(
-            amend(&p, &home, &repo, None, " ", None).unwrap_err().code,
-            "reason"
-        );
+        assert_eq!(amend(&p, &home, &repo, None, "x", None).unwrap_err().code, "no-drift");
+        assert_eq!(amend(&p, &home, &repo, None, " ", None).unwrap_err().code, "reason");
 
         let tasks = active_dir(&p).join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();

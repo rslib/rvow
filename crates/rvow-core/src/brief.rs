@@ -23,9 +23,7 @@ fn note_text(change: &Active, kind: &str) -> Vec<(u64, String)> {
     change
         .events
         .iter()
-        .filter(|e| {
-            e.kind == Kind::Note && e.data.get("note").and_then(Value::as_str) == Some(kind)
-        })
+        .filter(|e| e.kind == Kind::Note && e.data.get("note").and_then(Value::as_str) == Some(kind))
         .filter_map(|e| Some((e.time, e.data.get("text")?.as_str()?.trim().to_string())))
         .collect()
 }
@@ -62,10 +60,7 @@ fn fits(text: &str) -> bool {
 /// open and the next steps, so an agent keeps interviewing after compaction.
 fn planning(project: &Project, cwd: &Path) -> Result<String> {
     let mut out = String::new();
-    for r in crate::plan::check(project, cwd, None)?
-        .into_iter()
-        .filter(|r| r.change.stage == crate::change::Stage::Backlog)
-    {
+    for r in crate::plan::check(project, cwd, None)?.into_iter().filter(|r| r.change.stage == crate::change::Stage::Backlog) {
         let id = &r.change.id;
         out.push_str(&format!(
             "plan {id} waits for accept: {} open questions, {} checks that cannot run\n",
@@ -96,22 +91,14 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
             return Ok(String::new());
         }
         let ids: Vec<String> = changes.iter().map(|c| c.dir.id.to_string()).collect();
-        return Ok(format!(
-            "HEAD is detached; active changes: {}; check out a branch\n",
-            ids.join(", ")
-        ));
+        return Ok(format!("HEAD is detached; active changes: {}; check out a branch\n", ids.join(", ")));
     };
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
         return planning(project, cwd);
     }
     let config = config::load(project, home)?;
-    let now = Now {
-        top: &top,
-        config: &config,
-        env: fingerprint::env(&top, &config)?,
-        living: &living,
-    };
+    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
 
     let mut out = String::new();
     for c in &queue {
@@ -132,25 +119,15 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
         }
     }
     let names = ["proved", "stale", "flaky", "failed", "blocked", "missing"];
-    let parts: Vec<String> = names
-        .iter()
-        .zip(counts)
-        .map(|(n, c)| format!("{c} {n}"))
-        .collect();
+    let parts: Vec<String> = names.iter().zip(counts).map(|(n, c)| format!("{c} {n}")).collect();
     out.push_str(&format!("tasks: {}\n", parts.join(", ")));
 
-    let mut decisions: Vec<(u64, String)> = queue
-        .iter()
-        .flat_map(|c| note_text(c, "decision"))
-        .collect();
+    let mut decisions: Vec<(u64, String)> = queue.iter().flat_map(|c| note_text(c, "decision")).collect();
     decisions.sort();
     for (_, text) in decisions.iter().rev().take(DECISIONS) {
         out.push_str(&format!("decision: {text}\n"));
     }
-    let handoff = queue
-        .iter()
-        .flat_map(|c| note_text(c, "handoff"))
-        .max_by_key(|(time, _)| *time);
+    let handoff = queue.iter().flat_map(|c| note_text(c, "handoff")).max_by_key(|(time, _)| *time);
     if let Some((_, text)) = handoff {
         out.push_str(&format!("handoff: {text}\n"));
     }
@@ -159,11 +136,7 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
         Some((c, t, _)) => {
             let full = format!("next: {}", proof::render_task(t, &c.loaded, &living));
             let all = format!("{out}{full}");
-            out = if fits(&all) {
-                all
-            } else {
-                out + &compact(t, c, &living)
-            };
+            out = if fits(&all) { all } else { out + &compact(t, c, &living) };
         }
         None => out.push_str("next: every task on this branch is proved or blocked\n"),
     }
@@ -179,12 +152,7 @@ mod tests {
     use serde_json::{Map, json};
 
     fn note(p: &Project, kind: &str, text: &str) {
-        let dir = std::fs::read_dir(p.root.join("active"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let mut data = Map::new();
         data.insert("note".into(), json!(kind));
         data.insert("text".into(), json!(text));
@@ -203,10 +171,7 @@ mod tests {
         let b = brief(&p, &home, &repo).unwrap();
         let lines: Vec<&str> = b.lines().collect();
         assert!(lines[0].ends_with(" Out"), "{b}");
-        assert_eq!(
-            lines[1],
-            "tasks: 0 proved, 0 stale, 0 flaky, 0 failed, 0 blocked, 1 missing"
-        );
+        assert_eq!(lines[1], "tasks: 0 proved, 0 stale, 0 flaky, 0 failed, 0 blocked, 1 missing");
         assert!(!b.contains("choice 1"));
         assert!(b.contains("decision: choice 4") && b.contains("decision: choice 2"));
         assert!(b.contains("handoff: pick up here"));
@@ -242,16 +207,9 @@ mod tests {
         let c = crate::change::new(&p, "T", "main", true).unwrap();
         let prop = c.path.join("proposal.md");
         let text = std::fs::read_to_string(&prop).unwrap();
-        std::fs::write(
-            &prop,
-            text + "[NEEDS CLARIFICATION: Which? | recommended: this]\n",
-        )
-        .unwrap();
+        std::fs::write(&prop, text + "[NEEDS CLARIFICATION: Which? | recommended: this]\n").unwrap();
         let b = brief(&p, &home, &repo).unwrap();
-        assert!(
-            b.contains(&format!("plan {} waits for accept: 1 open questions", c.id)),
-            "{b}"
-        );
+        assert!(b.contains(&format!("plan {} waits for accept: 1 open questions", c.id)), "{b}");
         assert!(b.contains("rvow_ask"), "{b}");
     }
 
@@ -263,10 +221,7 @@ mod tests {
         assert_eq!(brief(&p, &home, &repo).unwrap(), "");
         git(&repo, &["checkout", "-q", "--detach"]);
         let b = brief(&p, &home, &repo).unwrap();
-        assert!(
-            b.contains("CHG-") && b.contains("check out a branch"),
-            "{b}"
-        );
+        assert!(b.contains("CHG-") && b.contains("check out a branch"), "{b}");
         let empty = TempDir::new();
         let repo = repo_with_commit(&empty.0, "r");
         let p = crate::store::init(&repo, &empty.0.join("home"), crate::store::Mode::Home).unwrap();

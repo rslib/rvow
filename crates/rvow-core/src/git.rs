@@ -20,11 +20,7 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
     if !out.status.success() {
         return Err(Error::new(
             "git",
-            format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
+            format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()),
             "run the command in a git repository",
         ));
     }
@@ -53,9 +49,7 @@ pub fn root_commits(dir: &Path) -> Result<Vec<String>> {
 }
 
 pub fn origin_url(dir: &Path) -> Option<String> {
-    run(dir, &["remote", "get-url", "origin"])
-        .ok()
-        .filter(|u| !u.is_empty())
+    run(dir, &["remote", "get-url", "origin"]).ok().filter(|u| !u.is_empty())
 }
 
 /// The current branch, or `None` on a detached HEAD.
@@ -83,10 +77,7 @@ pub fn remote_path(url: &str) -> Option<String> {
         format!("{host}/{path}")
     };
     let parts: Vec<&str> = rest.split('/').collect();
-    let safe = parts.len() >= 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains('\\'));
+    let safe = parts.len() >= 3 && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains('\\'));
     safe.then(|| parts.join("/").to_lowercase())
 }
 
@@ -156,10 +147,7 @@ mod tests {
         let cases = [
             ("git@github.com:Ray/rvow.git", Some("github.com/ray/rvow")),
             ("https://github.com/ray/rvow", Some("github.com/ray/rvow")),
-            (
-                "https://user@github.com/ray/rvow.git/",
-                Some("github.com/ray/rvow"),
-            ),
+            ("https://user@github.com/ray/rvow.git/", Some("github.com/ray/rvow")),
             ("ssh://git@host.x:2222/a/b/c.git", Some("host.x/a/b/c")),
             ("/srv/repos/rvow.git", None),
             ("../rvow", None),

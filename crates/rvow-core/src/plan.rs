@@ -11,15 +11,14 @@ use crate::tasks::Task;
 
 /// Shell builtins and keywords a verify command may start with.
 const BUILTINS: &[&str] = &[
-    "cd", "test", "[", "true", "false", "echo", "export", "set", "exit", ":", "printf", "read",
-    "source", ".", "eval", "command", "type", "if", "for", "while", "!", "(", "{",
+    "cd", "test", "[", "true", "false", "echo", "export", "set", "exit", ":", "printf", "read", "source", ".", "eval", "command", "type",
+    "if", "for", "while", "!", "(", "{",
 ];
 
 /// The program a shell command runs first, after `VAR=value` assignments and
 /// `env`.
 fn program(cmd: &str) -> Option<&str> {
-    cmd.split_whitespace()
-        .find(|w| !(w.contains('=') && !w.starts_with('=')) && *w != "env")
+    cmd.split_whitespace().find(|w| !(w.contains('=') && !w.starts_with('=')) && *w != "env")
 }
 
 fn on_path(name: &str) -> bool {
@@ -46,11 +45,7 @@ pub fn missing_programs(top: &Path, tasks: &[Task]) -> Vec<(String, String)> {
         let found = BUILTINS.contains(&prog)
             || if prog.contains('/') {
                 let p = Path::new(prog);
-                if p.is_absolute() {
-                    p.exists()
-                } else {
-                    top.join(p).exists()
-                }
+                if p.is_absolute() { p.exists() } else { top.join(p).exists() }
             } else {
                 on_path(prog)
             };
@@ -71,21 +66,14 @@ pub struct Report {
 
 impl Report {
     pub fn blocking(&self) -> bool {
-        self.findings
-            .iter()
-            .any(|(_, d)| d.severity() == crate::diag::Severity::Error)
+        self.findings.iter().any(|(_, d)| d.severity() == crate::diag::Severity::Error)
             || !self.missing.is_empty()
             || !self.questions.is_empty()
     }
 }
 
 fn report(change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
-    Report {
-        missing: missing_programs(top, &loaded.tasks),
-        questions: questions(&loaded.texts),
-        findings: loaded.findings,
-        change,
-    }
+    Report { missing: missing_programs(top, &loaded.tasks), questions: questions(&loaded.texts), findings: loaded.findings, change }
 }
 
 /// Checks `target`, or every open change whose proposal names the current
@@ -99,10 +87,7 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
             let branch = git::branch(&top)?.unwrap_or_default();
             let (all, _) = change::list(project)?;
             let mut out = Vec::new();
-            for c in all
-                .into_iter()
-                .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
-            {
+            for c in all.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
                 if change::load(&c.path, &living)?.proposal.branch == branch {
                     out.push(c);
                 }
@@ -125,21 +110,12 @@ pub fn claim(project: &Project, cwd: &Path, input: &str) -> Result<String> {
     if c.stage != Stage::Backlog {
         return Err(crate::error::Error::new(
             "stage",
-            format!(
-                "{} is {}; only a backlog plan moves between branches",
-                c.id,
-                c.stage.name()
-            ),
+            format!("{} is {}; only a backlog plan moves between branches", c.id, c.stage.name()),
             "an accepted change keeps its branch; amend it instead",
         ));
     }
-    let branch = git::branch(&git::toplevel(cwd)?)?.ok_or_else(|| {
-        crate::error::Error::new(
-            "detached",
-            "HEAD is detached",
-            "check out the branch to claim the plan for",
-        )
-    })?;
+    let branch = git::branch(&git::toplevel(cwd)?)?
+        .ok_or_else(|| crate::error::Error::new("detached", "HEAD is detached", "check out the branch to claim the plan for"))?;
     let _lock = project.lock()?;
     let path = c.path.join(change::PROPOSAL);
     let text = std::fs::read_to_string(&path).map_err(|e| crate::error::Error::io(&path, e))?;
@@ -201,20 +177,13 @@ mod tests {
         )
         .unwrap();
         let prop = std::fs::read_to_string(c.path.join("proposal.md")).unwrap();
-        std::fs::write(
-            c.path.join("proposal.md"),
-            prop + "[NEEDS CLARIFICATION: Which? | recommended: this]\n",
-        )
-        .unwrap();
+        std::fs::write(c.path.join("proposal.md"), prop + "[NEEDS CLARIFICATION: Which? | recommended: this]\n").unwrap();
         let reports = check(&p, &repo, None).unwrap();
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
         assert_eq!(
             r.missing,
-            [
-                ("TSK-new2".to_string(), "no-such-tool-xyz".to_string()),
-                ("TSK-new4".to_string(), "./scripts/gone.sh".to_string())
-            ]
+            [("TSK-new2".to_string(), "no-such-tool-xyz".to_string()), ("TSK-new4".to_string(), "./scripts/gone.sh".to_string())]
         );
         assert_eq!(r.questions.len(), 1);
         assert!(r.blocking());

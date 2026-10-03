@@ -52,21 +52,11 @@ pub struct Item {
 }
 
 fn item(class: Class, what: impl Into<String>) -> Item {
-    Item {
-        class,
-        what: what.into(),
-        before: None,
-        after: None,
-    }
+    Item { class, what: what.into(), before: None, after: None }
 }
 
 fn changed(class: Class, what: impl Into<String>, before: &str, after: &str) -> Item {
-    Item {
-        class,
-        what: what.into(),
-        before: Some(before.to_string()),
-        after: Some(after.to_string()),
-    }
+    Item { class, what: what.into(), before: Some(before.to_string()), after: Some(after.to_string()) }
 }
 
 fn object(project: &Project, hash: &str) -> Result<String> {
@@ -78,11 +68,7 @@ fn hashes(snapshot: &Map<String, Value>, key: &str) -> BTreeMap<String, String> 
     snapshot
         .get(key)
         .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect()
-        })
+        .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default()
 }
 
@@ -90,12 +76,7 @@ fn hashes(snapshot: &Map<String, Value>, key: &str) -> BTreeMap<String, String> 
 /// under a `dir/**` glob, or anything under `**`. Reading text and not files
 /// keeps `newdir/**` from looking free while it matches nothing yet.
 pub fn inside(glob: &str, scope: &[String]) -> bool {
-    scope.iter().any(|s| {
-        s == glob
-            || s == "**"
-            || s.strip_suffix("/**")
-                .is_some_and(|dir| glob.starts_with(&format!("{dir}/")))
-    })
+    scope.iter().any(|s| s == glob || s == "**" || s.strip_suffix("/**").is_some_and(|dir| glob.starts_with(&format!("{dir}/"))))
 }
 
 fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
@@ -115,63 +96,25 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
             ));
         }
         if old.title != new.title {
-            out.push(changed(
-                Class::Confirm,
-                format!("{id} title changed"),
-                &old.title,
-                &new.title,
-            ));
+            out.push(changed(Class::Confirm, format!("{id} title changed"), &old.title, &new.title));
         }
         if old.covers != new.covers {
-            let list = |t: &Task| {
-                t.covers
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            out.push(changed(
-                Class::Confirm,
-                format!("{id} covers changed"),
-                &list(old),
-                &list(new),
-            ));
+            let list = |t: &Task| t.covers.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            out.push(changed(Class::Confirm, format!("{id} covers changed"), &list(old), &list(new)));
         }
         if old.files != new.files {
             let wider = new.files.iter().any(|g| !inside(g, &old.files));
             let class = if wider { Class::Confirm } else { Class::Free };
-            let what = if wider {
-                "scope made wider"
-            } else {
-                "scope made narrower"
-            };
-            out.push(changed(
-                class,
-                format!("{id} {what}"),
-                &old.files.join(", "),
-                &new.files.join(", "),
-            ));
+            let what = if wider { "scope made wider" } else { "scope made narrower" };
+            out.push(changed(class, format!("{id} {what}"), &old.files.join(", "), &new.files.join(", ")));
         }
         if old.baseline_pass != new.baseline_pass || old.timeout != new.timeout {
-            out.push(item(
-                Class::Free,
-                format!("{id} baseline or timeout changed"),
-            ));
+            out.push(item(Class::Free, format!("{id} baseline or timeout changed")));
         }
     }
-    for new in after
-        .iter()
-        .filter(|t| !before.iter().any(|o| o.id == t.id))
-    {
-        let class = if new.files.iter().all(|g| inside(g, &scope)) {
-            Class::Free
-        } else {
-            Class::Confirm
-        };
-        out.push(item(
-            class,
-            format!("{} added with files {}", new.id, new.files.join(", ")),
-        ));
+    for new in after.iter().filter(|t| !before.iter().any(|o| o.id == t.id)) {
+        let class = if new.files.iter().all(|g| inside(g, &scope)) { Class::Free } else { Class::Confirm };
+        out.push(item(class, format!("{} added with files {}", new.id, new.files.join(", "))));
     }
 }
 
@@ -179,34 +122,21 @@ fn delta_map(files: &BTreeMap<String, String>) -> BTreeMap<String, (DeltaOp, Str
     let mut map = BTreeMap::new();
     for text in files.values() {
         for d in parse_deltas(text).0.deltas {
-            let hash = if d.op.has_body() {
-                requirement_hash(&d.req)
-            } else {
-                String::new()
-            };
+            let hash = if d.op.has_body() { requirement_hash(&d.req) } else { String::new() };
             map.insert(d.req.id.to_string(), (d.op, hash));
         }
     }
     map
 }
 
-fn delta_items(
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-    out: &mut Vec<Item>,
-) {
+fn delta_items(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>, out: &mut Vec<Item>) {
     let old = delta_map(before);
     let new = delta_map(after);
     for (id, (op, hash)) in &old {
         match new.get(id) {
             None => out.push(item(Class::Confirm, format!("delta for {id} removed"))),
-            Some((nop, _)) if nop != op => out.push(item(
-                Class::Confirm,
-                format!("delta for {id} changed from {op:?} to {nop:?}"),
-            )),
-            Some((_, nhash)) if nhash != hash => {
-                out.push(item(Class::Confirm, format!("requirement {id} changed")))
-            }
+            Some((nop, _)) if nop != op => out.push(item(Class::Confirm, format!("delta for {id} changed from {op:?} to {nop:?}"))),
+            Some((_, nhash)) if nhash != hash => out.push(item(Class::Confirm, format!("requirement {id} changed"))),
             Some(_) => {}
         }
     }
@@ -229,20 +159,11 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
 
     let vowed_branch = base.get("branch").and_then(Value::as_str).unwrap_or("");
     if vowed_branch != loaded.proposal.branch {
-        out.push(changed(
-            Class::Confirm,
-            "branch changed",
-            vowed_branch,
-            &loaded.proposal.branch,
-        ));
+        out.push(changed(Class::Confirm, "branch changed", vowed_branch, &loaded.proposal.branch));
     }
 
     let files = hashes(base, "files");
-    let now: BTreeMap<String, String> = loaded
-        .texts
-        .iter()
-        .map(|(rel, text)| (rel.clone(), sha256_hex(text.as_bytes())))
-        .collect();
+    let now: BTreeMap<String, String> = loaded.texts.iter().map(|(rel, text)| (rel.clone(), sha256_hex(text.as_bytes()))).collect();
     if files.get(PROPOSAL) != now.get(PROPOSAL) {
         out.push(item(Class::Confirm, "proposal changed"));
     }
@@ -261,20 +182,13 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
     for (rel, h) in files.iter().filter(|(rel, _)| rel.starts_with(&prefix)) {
         old_deltas.insert(rel.clone(), object(project, h)?);
     }
-    let new_deltas: BTreeMap<String, String> = loaded
-        .texts
-        .iter()
-        .filter(|(rel, _)| rel.starts_with(&prefix))
-        .cloned()
-        .collect();
+    let new_deltas: BTreeMap<String, String> = loaded.texts.iter().filter(|(rel, _)| rel.starts_with(&prefix)).cloned().collect();
     delta_items(&old_deltas, &new_deltas, &mut out);
 
     let (living, _) = crate::change::load_living(project)?;
     for (id, now) in change.moved_bases(&living) {
         let what = match now {
-            Some(_) => format!(
-                "the living {id} changed since its base was recorded; update the delta to the new living text"
-            ),
+            Some(_) => format!("the living {id} changed since its base was recorded; update the delta to the new living text"),
             None => {
                 format!("the living {id} was removed since its base was recorded; update the delta")
             }
@@ -287,12 +201,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
     let config_then = base.get("config").and_then(Value::as_str).unwrap_or("");
     if config_now != config_then {
         let before = object(project, config_then).unwrap_or_default();
-        out.push(changed(
-            Class::Weaken,
-            "config changed",
-            &before,
-            &canonical,
-        ));
+        out.push(changed(Class::Weaken, "config changed", &before, &canonical));
     }
 
     let protected_then: BTreeMap<String, String> = base
@@ -313,9 +222,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
                     let old = object(project, hash).ok();
                     let new = String::from_utf8(bytes).ok();
                     out.push(match (old, new) {
-                        (Some(o), Some(n)) if o.len() + n.len() <= SHOW_LIMIT => {
-                            changed(Class::Weaken, what, &o, &n)
-                        }
+                        (Some(o), Some(n)) if o.len() + n.len() <= SHOW_LIMIT => changed(Class::Weaken, what, &o, &n),
                         _ => item(Class::Weaken, what),
                     });
                 }
@@ -328,19 +235,8 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
 }
 
 /// The snapshot of the change as it is now, for an amendment.
-pub fn snapshot_now(
-    project: &Project,
-    top: &Path,
-    config: &Config,
-    change: &Active,
-) -> Result<Map<String, Value>> {
-    let mut data = vow::snapshot(
-        project,
-        top,
-        config,
-        &change.loaded,
-        &change.loaded.proposal.branch,
-    )?;
+pub fn snapshot_now(project: &Project, top: &Path, config: &Config, change: &Active) -> Result<Map<String, Value>> {
+    let mut data = vow::snapshot(project, top, config, &change.loaded, &change.loaded.proposal.branch)?;
     let (living, _) = crate::change::load_living(project)?;
     data.insert("bases".into(), vow::bases(&change.loaded, &living).into());
     Ok(data)
@@ -360,20 +256,11 @@ mod tests {
         let changes = proof::active(p, &living).unwrap();
         let top = git::toplevel(repo).unwrap();
         let cfg = config::load(p, home).unwrap();
-        drift(p, &top, &cfg, &changes[0])
-            .unwrap()
-            .into_iter()
-            .map(|i| (i.class, i.what))
-            .collect()
+        drift(p, &top, &cfg, &changes[0]).unwrap().into_iter().map(|i| (i.class, i.what)).collect()
     }
 
     fn active_dir(p: &Project) -> std::path::PathBuf {
-        std::fs::read_dir(p.root.join("active"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
+        std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path()
     }
 
     fn edit(path: &Path, from: &str, to: &str) {
@@ -429,41 +316,18 @@ mod tests {
     fn classifies_deltas_config_branch_and_protected_files() {
         let (_tmp, p, repo, _) = accepted();
         let dir = active_dir(&p);
-        edit(
-            &dir.join("specs/out.md"),
-            "rvow SHALL write ok.",
-            "rvow SHALL write ok twice.",
-        );
+        edit(&dir.join("specs/out.md"), "rvow SHALL write ok.", "rvow SHALL write ok twice.");
         let mut text = std::fs::read_to_string(dir.join("specs/out.md")).unwrap();
         text.push_str("## REMOVE REQ-zzzzzz\n");
         std::fs::write(dir.join("specs/out.md"), text).unwrap();
         edit(&dir.join(PROPOSAL), "branch: main", "branch: other");
         std::fs::write(p.root.join("config.toml"), "base = \"trunk\"\n").unwrap();
-        let got: Vec<String> = drift_of(&p, &repo)
-            .into_iter()
-            .map(|(c, w)| format!("{}: {w}", c.name()))
-            .collect();
-        assert!(
-            got.contains(&"weaken: config changed".to_string()),
-            "{got:?}"
-        );
-        assert!(
-            got.contains(&"weaken: new delta Remove REQ-zzzzzz".to_string()),
-            "{got:?}"
-        );
-        assert!(
-            got.iter()
-                .any(|g| g.starts_with("confirm: requirement REQ-")),
-            "{got:?}"
-        );
-        assert!(
-            got.contains(&"confirm: branch changed".to_string()),
-            "{got:?}"
-        );
-        assert!(
-            got.contains(&"confirm: proposal changed".to_string()),
-            "{got:?}"
-        );
+        let got: Vec<String> = drift_of(&p, &repo).into_iter().map(|(c, w)| format!("{}: {w}", c.name())).collect();
+        assert!(got.contains(&"weaken: config changed".to_string()), "{got:?}");
+        assert!(got.contains(&"weaken: new delta Remove REQ-zzzzzz".to_string()), "{got:?}");
+        assert!(got.iter().any(|g| g.starts_with("confirm: requirement REQ-")), "{got:?}");
+        assert!(got.contains(&"confirm: branch changed".to_string()), "{got:?}");
+        assert!(got.contains(&"confirm: proposal changed".to_string()), "{got:?}");
     }
 
     #[test]
@@ -475,31 +339,15 @@ mod tests {
         std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
         let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
         let c = change::new(&p, "T", "main", true).unwrap();
-        std::fs::write(
-            c.path.join(TASKS),
-            "- TSK-new1 T\n  verify: false\n  files: src/**\n",
-        )
-        .unwrap();
+        std::fs::write(c.path.join(TASKS), "- TSK-new1 T\n  verify: false\n  files: src/**\n").unwrap();
         let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         vow::commit(&p, prepared).unwrap();
 
         assert_eq!(drift_of(&p, &repo), []);
         std::fs::write(repo.join("tests/t.sh"), "exit 0 # weaker").unwrap();
         std::fs::write(repo.join("tests/new.sh"), "exit 0").unwrap();
-        assert_eq!(
-            drift_of(&p, &repo),
-            [(
-                Class::Weaken,
-                "protected file tests/t.sh changed".to_string()
-            )]
-        );
+        assert_eq!(drift_of(&p, &repo), [(Class::Weaken, "protected file tests/t.sh changed".to_string())]);
         std::fs::remove_file(repo.join("tests/t.sh")).unwrap();
-        assert_eq!(
-            drift_of(&p, &repo),
-            [(
-                Class::Weaken,
-                "protected file tests/t.sh removed".to_string()
-            )]
-        );
+        assert_eq!(drift_of(&p, &repo), [(Class::Weaken, "protected file tests/t.sh removed".to_string())]);
     }
 }

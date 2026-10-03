@@ -91,45 +91,22 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
     backlog.sort_by_key(|(other, _)| *other);
     let backlog: Vec<Value> = backlog.into_iter().map(|(_, v)| v).collect();
     let mut archive: Vec<(String, Value)> = Vec::new();
-    for c in all
-        .iter()
-        .filter(|c| matches!(c.stage, Stage::Done | Stage::Dropped | Stage::Superseded))
-    {
-        let name = c
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let date = name
-            .get(..10)
-            .filter(|d| d.as_bytes().get(4) == Some(&b'-'))
-            .unwrap_or("")
-            .to_string();
-        let title = std::fs::read_to_string(c.path.join(change::PROPOSAL))
-            .map(|t| crate::proposal::parse_proposal(&t).0.title)
-            .unwrap_or_default();
-        archive.push((
-            format!("{date} {}", c.id),
-            json!({"id": c.id.to_string(), "title": title, "outcome": c.stage.name(), "date": date}),
-        ));
+    for c in all.iter().filter(|c| matches!(c.stage, Stage::Done | Stage::Dropped | Stage::Superseded)) {
+        let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let date = name.get(..10).filter(|d| d.as_bytes().get(4) == Some(&b'-')).unwrap_or("").to_string();
+        let title =
+            std::fs::read_to_string(c.path.join(change::PROPOSAL)).map(|t| crate::proposal::parse_proposal(&t).0.title).unwrap_or_default();
+        archive
+            .push((format!("{date} {}", c.id), json!({"id": c.id.to_string(), "title": title, "outcome": c.stage.name(), "date": date})));
     }
     archive.sort_by(|a, b| b.0.cmp(&a.0));
-    let archive: Vec<Value> = archive
-        .into_iter()
-        .take(ARCHIVE_SHOWN)
-        .map(|(_, v)| v)
-        .collect();
+    let archive: Vec<Value> = archive.into_iter().take(ARCHIVE_SHOWN).map(|(_, v)| v).collect();
     if queue.is_empty() && backlog.is_empty() && archive.is_empty() {
         return Ok(None);
     }
 
     let config = config::load(project, home)?;
-    let now = Now {
-        top: &top,
-        config: &config,
-        env: fingerprint::env(&top, &config)?,
-        living: &living,
-    };
+    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let mut changes = Vec::new();
     let mut blocked = 0;
     let mut amendments = 0;
@@ -148,14 +125,10 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
                 "reasons": reasons,
             }));
         }
-        let drift: Vec<Value> = drift::drift(project, &top, &config, c)?
-            .into_iter()
-            .map(|i| json!({"class": i.class.name(), "what": i.what}))
-            .collect();
-        let pending: Vec<Value> = amend::pending(std::slice::from_ref(c))
-            .into_iter()
-            .map(|p| json!({"id": p.id.to_string(), "reason": p.reason}))
-            .collect();
+        let drift: Vec<Value> =
+            drift::drift(project, &top, &config, c)?.into_iter().map(|i| json!({"class": i.class.name(), "what": i.what})).collect();
+        let pending: Vec<Value> =
+            amend::pending(std::slice::from_ref(c)).into_iter().map(|p| json!({"id": p.id.to_string(), "reason": p.reason})).collect();
         amendments += pending.len();
         changes.push(json!({
             "id": c.dir.id.to_string(),
@@ -210,11 +183,7 @@ mod tests {
         let plan = change::new(&p, "Later", "main", true).unwrap();
         let prop = plan.path.join("proposal.md");
         let text = std::fs::read_to_string(&prop).unwrap();
-        std::fs::write(
-            &prop,
-            text + "[NEEDS CLARIFICATION: Which? | recommended: this]\n",
-        )
-        .unwrap();
+        std::fs::write(&prop, text + "[NEEDS CLARIFICATION: Which? | recommended: this]\n").unwrap();
         let v = view(&p, &home, &repo).unwrap().unwrap();
         assert_eq!(v["plans"][0]["id"], plan.id.to_string().as_str());
         assert_eq!(v["plans"][0]["questions"], 1);

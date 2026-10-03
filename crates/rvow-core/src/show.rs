@@ -37,25 +37,15 @@ pub fn show(project: &Project, input: &str) -> Result<String> {
     let (living, _) = change::load_living(project)?;
     let (dirs, _) = change::list(project)?;
     if id.kind() == Kind::Chg {
-        let dir = dirs
-            .iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| not_listed(&id))?;
+        let dir = dirs.iter().find(|c| c.id == id).ok_or_else(|| not_listed(&id))?;
         return show_change(dir, &living);
     }
     let mut open = Vec::new();
-    for dir in dirs
-        .into_iter()
-        .filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active))
-    {
+    for dir in dirs.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
         let loaded = change::load(&dir.path, &living)?;
         open.push((dir, loaded));
     }
-    if id.kind() == Kind::Req {
-        show_requirement(project, &id, &living, &open)
-    } else {
-        show_task(&id, &living, &open)
-    }
+    if id.kind() == Kind::Req { show_requirement(project, &id, &living, &open) } else { show_task(&id, &living, &open) }
 }
 
 fn not_listed(id: &Id) -> Error {
@@ -77,19 +67,9 @@ fn render_requirement(req: &Requirement) -> String {
     out
 }
 
-fn show_requirement(
-    project: &Project,
-    id: &Id,
-    living: &[CapSpec],
-    open: &[(ChangeDir, Loaded)],
-) -> Result<String> {
+fn show_requirement(project: &Project, id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> Result<String> {
     let want = Ref::Id(id.clone());
-    let rel = |p: &std::path::Path| {
-        p.strip_prefix(&project.root)
-            .unwrap_or(p)
-            .display()
-            .to_string()
-    };
+    let rel = |p: &std::path::Path| p.strip_prefix(&project.root).unwrap_or(p).display().to_string();
     let mut found = living.iter().find_map(|(cap, spec)| {
         let req = spec.requirements.iter().find(|r| r.id == want)?;
         Some((req, format!("specs/{cap}/spec.md")))
@@ -142,10 +122,8 @@ fn render_task(task: &Task) -> String {
 
 fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> Result<String> {
     let want = Ref::Id(id.clone());
-    let (dir, loaded, task) = open
-        .iter()
-        .find_map(|(d, l)| Some((d, l, l.tasks.iter().find(|t| t.id == want)?)))
-        .ok_or_else(|| not_listed(id))?;
+    let (dir, loaded, task) =
+        open.iter().find_map(|(d, l)| Some((d, l, l.tasks.iter().find(|t| t.id == want)?))).ok_or_else(|| not_listed(id))?;
     let mut out = render_task(task);
     let _ = writeln!(out, "change: {}", dir.id);
     for r in &task.covers {
@@ -168,43 +146,17 @@ const HISTORY_RUNS: usize = 10;
 fn proof_history(change: &std::path::Path, id: &Id) -> String {
     let (events, _) = ledger::read(&change.join(change::LEDGER)).unwrap_or_default();
     let id = id.to_string();
-    let runs: Vec<_> = events
-        .iter()
-        .filter(|e| {
-            e.kind == ledger::Kind::Prove
-                && e.data.get("task").and_then(|v| v.as_str()) == Some(&id)
-        })
-        .collect();
+    let runs: Vec<_> =
+        events.iter().filter(|e| e.kind == ledger::Kind::Prove && e.data.get("task").and_then(|v| v.as_str()) == Some(&id)).collect();
     if runs.is_empty() {
         return "proof runs: none yet\n".to_string();
     }
-    let mut out = format!(
-        "proof runs: {} in total, newest {} first\n",
-        runs.len(),
-        runs.len().min(HISTORY_RUNS)
-    );
+    let mut out = format!("proof runs: {} in total, newest {} first\n", runs.len(), runs.len().min(HISTORY_RUNS));
     for e in runs.iter().rev().take(HISTORY_RUNS) {
-        let verdict = if e.data.get("proved").and_then(|v| v.as_bool()) == Some(true) {
-            "proved"
-        } else {
-            "failed"
-        };
-        let tests = e
-            .data
-            .get("tests_run")
-            .and_then(|v| v.as_u64())
-            .map_or("unknown tests".to_string(), |n| format!("{n} tests"));
-        let ms = e
-            .data
-            .get("duration_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let machine = e
-            .data
-            .get("run")
-            .and_then(|r| r.get("machine"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let verdict = if e.data.get("proved").and_then(|v| v.as_bool()) == Some(true) { "proved" } else { "failed" };
+        let tests = e.data.get("tests_run").and_then(|v| v.as_u64()).map_or("unknown tests".to_string(), |n| format!("{n} tests"));
+        let ms = e.data.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+        let machine = e.data.get("run").and_then(|r| r.get("machine")).and_then(|v| v.as_str()).unwrap_or("unknown");
         let _ = writeln!(out, "  {verdict}, {tests}, {ms} ms, {machine}");
     }
     out
@@ -213,13 +165,8 @@ fn proof_history(change: &std::path::Path, id: &Id) -> String {
 fn show_change(dir: &ChangeDir, living: &[CapSpec]) -> Result<String> {
     let loaded = change::load(&dir.path, living)?;
     let (events, _) = ledger::read(&dir.path.join(change::LEDGER))?;
-    let mut out = format!(
-        "{}\nstage: {}\nbranch: {}\ntitle: {}\n",
-        dir.id,
-        dir.stage.name(),
-        loaded.proposal.branch,
-        loaded.proposal.title
-    );
+    let mut out =
+        format!("{}\nstage: {}\nbranch: {}\ntitle: {}\n", dir.id, dir.stage.name(), loaded.proposal.branch, loaded.proposal.title);
     if !loaded.tasks.is_empty() {
         out.push_str("tasks:\n");
         for t in &loaded.tasks {
@@ -236,9 +183,7 @@ fn show_change(dir: &ChangeDir, living: &[CapSpec]) -> Result<String> {
     }
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     for e in &events {
-        *kinds
-            .entry(format!("{:?}", e.kind).to_lowercase())
-            .or_default() += 1;
+        *kinds.entry(format!("{:?}", e.kind).to_lowercase()).or_default() += 1;
     }
     if !kinds.is_empty() {
         out.push_str("ledger:\n");
@@ -285,13 +230,7 @@ mod tests {
         let (living, _) = change::load_living(&p).unwrap();
         assert_eq!(
             overview(&living),
-            [(
-                "ledger".to_string(),
-                vec![
-                    "REQ-q8w2c7 Old thing (deprecated)".to_string(),
-                    "REQ-k3f9m2 Record a proof run".to_string()
-                ]
-            )]
+            [("ledger".to_string(), vec!["REQ-q8w2c7 Old thing (deprecated)".to_string(), "REQ-k3f9m2 Record a proof run".to_string()])]
         );
         assert!(overview(&[]).is_empty());
     }
@@ -305,9 +244,7 @@ mod tests {
         )
         .unwrap();
         let out = show(&p, "REQ-q8w").unwrap();
-        assert!(
-            out.starts_with("## REQ-q8w2c7 Old thing\nstatus: deprecated\n\nrvow SHALL keep it.\n")
-        );
+        assert!(out.starts_with("## REQ-q8w2c7 Old thing\nstatus: deprecated\n\nrvow SHALL keep it.\n"));
         assert!(out.contains("\n### Scenario: kept\n- WHEN a\n- THEN b\n"));
         assert!(out.contains("\nin: specs/ledger/spec.md\n"));
         assert!(out.ends_with(&format!("touched by:\n  {} DEPRECATE\n", c.id)));
@@ -347,19 +284,9 @@ mod tests {
                 c.id
             )
         );
-        std::fs::write(
-            c.path.join("tasks.md"),
-            "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\n",
-        )
-        .unwrap();
+        std::fs::write(c.path.join("tasks.md"), "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\n").unwrap();
         let out = show(&p, "x7k").unwrap();
-        assert_eq!(
-            out,
-            format!(
-                "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\nchange: {}\nproof runs: none yet\n",
-                c.id
-            )
-        );
+        assert_eq!(out, format!("- TSK-x7k2q4 Plain\n  verify: true\n  files: a\nchange: {}\nproof runs: none yet\n", c.id));
     }
 
     #[test]
@@ -380,10 +307,7 @@ mod tests {
         }
         drop(lock);
         let out = show(&p, "TSK-x7k2q4").unwrap();
-        assert!(
-            out.contains("proof runs: 12 in total, newest 10 first\n"),
-            "{out}"
-        );
+        assert!(out.contains("proof runs: 12 in total, newest 10 first\n"), "{out}");
         let lines: Vec<_> = out.lines().filter(|l| l.starts_with("  proved")).collect();
         assert_eq!(lines.len(), 10, "{out}");
         assert_eq!(lines[0], "  proved, 3 tests, 111 ms, laptop", "{out}");
@@ -402,13 +326,7 @@ mod tests {
         let (_t, p, c) = fixture();
         let lock = p.lock().unwrap();
         for kind in [Ev::Note, Ev::Prove, Ev::Note] {
-            ledger::append(
-                &c.path.join(change::LEDGER),
-                &lock,
-                kind,
-                Default::default(),
-            )
-            .unwrap();
+            ledger::append(&c.path.join(change::LEDGER), &lock, kind, Default::default()).unwrap();
         }
         let out = show(&p, &c.id.to_string()).unwrap();
         assert_eq!(

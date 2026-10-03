@@ -43,15 +43,8 @@ struct TestCount {
 }
 
 fn count_before(line: &str, words: &[&str]) -> u64 {
-    let tokens: Vec<&str> = line
-        .split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '.')
-        .filter(|t| !t.is_empty())
-        .collect();
-    tokens
-        .windows(2)
-        .filter(|w| words.contains(&w[1]))
-        .filter_map(|w| w[0].parse::<u64>().ok())
-        .sum()
+    let tokens: Vec<&str> = line.split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '.').filter(|t| !t.is_empty()).collect();
+    tokens.windows(2).filter(|w| words.contains(&w[1])).filter_map(|w| w[0].parse::<u64>().ok()).sum()
 }
 
 impl TestCount {
@@ -63,10 +56,7 @@ impl TestCount {
             if t.contains("no tests ran") {
                 self.pytest = Some(0);
             } else {
-                let n = count_before(
-                    t,
-                    &["passed", "failed", "error", "errors", "xfailed", "xpassed"],
-                );
+                let n = count_before(t, &["passed", "failed", "error", "errors", "xfailed", "xpassed"]);
                 if n > 0 {
                     self.pytest = Some(n);
                 }
@@ -108,8 +98,7 @@ pub fn mask(line: &str, home: Option<&str>, repo: &str) -> String {
             } else {
                 let t = tok.as_str();
                 out.push_str(&mask_token(t));
-                hide_next = (names_secret(t) && t.ends_with(['=', ':']))
-                    || ((t == "=" || t == ":") && prev_secret);
+                hide_next = (names_secret(t) && t.ends_with(['=', ':'])) || ((t == "=" || t == ":") && prev_secret);
                 prev_secret = names_secret(t) && !t.contains(['=', ':']);
             }
             tok.clear();
@@ -126,18 +115,7 @@ fn names_secret(name: &str) -> bool {
     SECRET_NAMES.iter().any(|s| upper.contains(s))
 }
 
-const PREFIXES: &[&str] = &[
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "github_pat_",
-    "glpat-",
-    "xoxb-",
-    "xoxp-",
-    "sk-",
-    "AKIA",
-];
+const PREFIXES: &[&str] = &["ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "sk-", "AKIA"];
 const SECRET_NAMES: &[&str] = &["TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD"];
 
 fn mask_token(tok: &str) -> String {
@@ -148,21 +126,13 @@ fn mask_token(tok: &str) -> String {
         let sep = &tok[name.len()..name.len() + 1];
         return format!("{name}{sep}<masked>");
     }
-    let secret = PREFIXES
-        .iter()
-        .any(|p| tok.starts_with(p) && tok.len() > p.len() + 8)
+    let secret = PREFIXES.iter().any(|p| tok.starts_with(p) && tok.len() > p.len() + 8)
         || (tok.starts_with("eyJ") && tok.matches('.').count() == 2)
         || (tok.len() >= 32
-            && tok
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "+/=_-".contains(c))
+            && tok.chars().all(|c| c.is_ascii_alphanumeric() || "+/=_-".contains(c))
             && tok.chars().any(|c| c.is_ascii_digit())
             && tok.chars().any(|c| c.is_ascii_alphabetic()));
-    if secret {
-        "<masked>".into()
-    } else {
-        tok.into()
-    }
+    if secret { "<masked>".into() } else { tok.into() }
 }
 
 #[cfg(unix)]
@@ -176,13 +146,7 @@ fn signal_group(pid: u32, sig: i32) {
 
 /// Runs `cmd` with the extra variables `env` and streams its output to `echo`
 /// while it runs.
-pub fn run(
-    cmd: &str,
-    cwd: &Path,
-    env: &[(String, String)],
-    timeout: Duration,
-    echo: &mut dyn Write,
-) -> Result<Outcome> {
+pub fn run(cmd: &str, cwd: &Path, env: &[(String, String)], timeout: Duration, echo: &mut dyn Write) -> Result<Outcome> {
     let (reader, writer) = std::io::pipe().map_err(|e| Error::io(cwd, e))?;
     let mut command = Command::new("sh");
     command
@@ -199,22 +163,13 @@ pub fn run(
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let start = Instant::now();
-    let mut child = command.spawn().map_err(|e| {
-        Error::new(
-            "spawn",
-            format!("cannot run sh: {e}"),
-            "check that sh is on PATH",
-        )
-    })?;
+    let mut child = command.spawn().map_err(|e| Error::new("spawn", format!("cannot run sh: {e}"), "check that sh is on PATH"))?;
     drop(command);
 
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in BufReader::new(reader).split(b'\n').map_while(|l| l.ok()) {
-            if tx
-                .send(String::from_utf8_lossy(&line).into_owned())
-                .is_err()
-            {
+            if tx.send(String::from_utf8_lossy(&line).into_owned()).is_err() {
                 break;
             }
         }
@@ -272,13 +227,7 @@ pub fn run(
         take(line, echo);
     }
     let exit = status.code();
-    Ok(Outcome {
-        exit,
-        timed_out,
-        tests_run: count.finish(cmd, exit),
-        duration_ms: start.elapsed().as_millis() as u64,
-        tail: tail.into(),
-    })
+    Ok(Outcome { exit, timed_out, tests_run: count.finish(cmd, exit), duration_ms: start.elapsed().as_millis() as u64, tail: tail.into() })
 }
 
 #[cfg(test)]
@@ -292,10 +241,7 @@ mod tests {
 
     #[test]
     fn exit_status_and_tail() {
-        let o = quiet(
-            "for i in 1 2 3 4 5 6 7; do echo line$i; done; exit 3",
-            Duration::from_secs(10),
-        );
+        let o = quiet("for i in 1 2 3 4 5 6 7; do echo line$i; done; exit 3", Duration::from_secs(10));
         assert_eq!(o.exit, Some(3));
         assert!(!o.passed());
         assert_eq!(o.tail, ["line3", "line4", "line5", "line6", "line7"]);
@@ -324,17 +270,11 @@ mod tests {
             Duration::from_secs(10),
         );
         assert_eq!(o.tests_run, Some(4));
-        let o = quiet(
-            "echo '========== 2 passed, 1 failed in 0.12s =========='",
-            Duration::from_secs(10),
-        );
+        let o = quiet("echo '========== 2 passed, 1 failed in 0.12s =========='", Duration::from_secs(10));
         assert_eq!(o.tests_run, Some(3));
         let o = quiet("echo pytest; exit 5", Duration::from_secs(10));
         assert_eq!(o.tests_run, Some(0));
-        let o = quiet(
-            "echo 'test result: ok. 0 passed; 0 failed; 5 filtered out'",
-            Duration::from_secs(10),
-        );
+        let o = quiet("echo 'test result: ok. 0 passed; 0 failed; 5 filtered out'", Duration::from_secs(10));
         assert_eq!(o.tests_run, Some(0));
     }
 
@@ -349,10 +289,7 @@ mod tests {
         assert_eq!(m("token ghp_ABCDEFGHIJKLMNOP1234"), "token <masked>");
         assert_eq!(m("AKIAABCDEFGHIJKLMNOP"), "<masked>");
         assert_eq!(m("eyJhbGc.eyJzdWI.sig"), "<masked>");
-        assert_eq!(
-            m("blob 0123456789abcdef0123456789abcdef01234567"),
-            "blob <masked>"
-        );
+        assert_eq!(m("blob 0123456789abcdef0123456789abcdef01234567"), "blob <masked>");
         assert_eq!(m("at /Users/me/code/r/src/a.rs:3"), "at <repo>/src/a.rs:3");
         assert_eq!(m("cache /Users/me/.cargo"), "cache ~/.cargo");
         assert_eq!(m("test result: ok. 3 passed"), "test result: ok. 3 passed");

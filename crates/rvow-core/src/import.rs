@@ -62,22 +62,14 @@ impl fmt::Display for Report {
             )?;
         }
         writeln!(f, "archived changes left alone: {}", self.archived)?;
-        let missing: Vec<_> = self
-            .changes
-            .iter()
-            .flat_map(|c| c.missing_verify.iter().map(move |t| (&c.name, t)))
-            .collect();
+        let missing: Vec<_> = self.changes.iter().flat_map(|c| c.missing_verify.iter().map(move |t| (&c.name, t))).collect();
         if !missing.is_empty() {
             writeln!(f, "tasks without verify, fix before accept:")?;
             for (name, t) in missing {
                 writeln!(f, "  {name} {t}")?;
             }
         }
-        let unmatched: Vec<_> = self
-            .changes
-            .iter()
-            .flat_map(|c| c.unmatched.iter().map(move |t| (&c.name, t)))
-            .collect();
+        let unmatched: Vec<_> = self.changes.iter().flat_map(|c| c.unmatched.iter().map(move |t| (&c.name, t))).collect();
         if !unmatched.is_empty() {
             writeln!(f, "unmatched titles, not converted:")?;
             for (name, t) in unmatched {
@@ -112,19 +104,14 @@ struct OsSpec {
 
 impl OsSpec {
     fn group(&self, name: &str) -> &[OsReq] {
-        self.groups
-            .iter()
-            .find(|(g, _)| g == name)
-            .map_or(&[], |(_, r)| r)
+        self.groups.iter().find(|(g, _)| g == name).map_or(&[], |(_, r)| r)
     }
 }
 
 fn step(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("- **")?;
     let (word, text) = rest.split_once("**")?;
-    STEPS
-        .contains(&word)
-        .then(|| format!("{word} {}", text.trim()))
+    STEPS.contains(&word).then(|| format!("{word} {}", text.trim()))
 }
 
 fn requirement_title(s: &str) -> Option<&str> {
@@ -153,10 +140,7 @@ fn parse_openspec(src: &str) -> OsSpec {
         } else if group == "RENAMED Requirements" {
             let item = line.trim().trim_start_matches("- ");
             if let Some(from) = item.strip_prefix("FROM:") {
-                out.renames.push((
-                    requirement_title(from).unwrap_or("").to_string(),
-                    String::new(),
-                ));
+                out.renames.push((requirement_title(from).unwrap_or("").to_string(), String::new()));
             } else if let Some(to) = item.strip_prefix("TO:")
                 && let Some(last) = out.renames.last_mut()
             {
@@ -164,17 +148,10 @@ fn parse_openspec(src: &str) -> OsSpec {
             }
         } else if let Some((_, reqs)) = out.groups.last_mut().filter(|_| !group.is_empty()) {
             if !fenced && let Some(title) = line.strip_prefix("### Requirement:") {
-                reqs.push(OsReq {
-                    title: title.trim().to_string(),
-                    text: String::new(),
-                    scenarios: Vec::new(),
-                });
+                reqs.push(OsReq { title: title.trim().to_string(), text: String::new(), scenarios: Vec::new() });
             } else if let Some(req) = reqs.last_mut() {
                 if !fenced && let Some(title) = line.strip_prefix("#### Scenario:") {
-                    req.scenarios.push(OsScenario {
-                        title: title.trim().to_string(),
-                        steps: Vec::new(),
-                    });
+                    req.scenarios.push(OsScenario { title: title.trim().to_string(), steps: Vec::new() });
                 } else if let Some(sc) = req.scenarios.last_mut() {
                     match (step(line), sc.steps.last_mut()) {
                         (Some(s), _) => sc.steps.push(s),
@@ -209,10 +186,7 @@ fn render_req(heading: &str, req: &OsReq) -> String {
 }
 
 fn find_title<'a>(reqs: &'a [(Id, OsReq)], title: &str) -> Option<&'a (Id, OsReq)> {
-    reqs.iter().find(|(_, r)| r.title == title).or_else(|| {
-        reqs.iter()
-            .find(|(_, r)| r.title.eq_ignore_ascii_case(title))
-    })
+    reqs.iter().find(|(_, r)| r.title == title).or_else(|| reqs.iter().find(|(_, r)| r.title.eq_ignore_ascii_case(title)))
 }
 
 struct Cap {
@@ -228,11 +202,7 @@ fn read(path: &Path) -> Result<String> {
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect(),
+        Ok(entries) => entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(Error::io(dir, e)),
     };
@@ -271,20 +241,11 @@ fn living(
             reqs.push((id, r.clone()));
         }
         let (spec, diags) = parse_spec(&md);
-        report.legacy_warnings += diags
-            .iter()
-            .chain(&lint::lint_spec(&spec))
-            .filter(|d| d.severity() == crate::diag::Severity::Error)
-            .count();
+        report.legacy_warnings +=
+            diags.iter().chain(&lint::lint_spec(&spec)).filter(|d| d.severity() == crate::diag::Severity::Error).count();
         for r in &spec.requirements {
             if let crate::id::Ref::Id(id) = &r.id {
-                rec.insert(
-                    id.to_string(),
-                    Entry {
-                        hash: requirement_hash(r),
-                        legacy: true,
-                    },
-                );
+                rec.insert(id.to_string(), Entry { hash: requirement_hash(r), legacy: true });
             }
         }
         report.requirements += reqs.len();
@@ -294,10 +255,7 @@ fn living(
         if is_placeholder_purpose(&os.purpose) {
             report.purposes_skipped += 1;
         } else if !os.purpose.is_empty() {
-            files.push((
-                spec_dir.join("design.md"),
-                format!("# Purpose\n\n{}\n", os.purpose),
-            ));
+            files.push((spec_dir.join("design.md"), format!("# Purpose\n\n{}\n", os.purpose)));
         }
         caps.push(Cap { name, reqs });
     }
@@ -330,13 +288,7 @@ fn title_of(src: &str, name: &str) -> String {
         None => {
             let b = name.as_bytes();
             let dated = b.len() > 11
-                && b[..10].iter().enumerate().all(|(i, c)| {
-                    if i == 4 || i == 7 {
-                        *c == b'-'
-                    } else {
-                        c.is_ascii_digit()
-                    }
-                })
+                && b[..10].iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() })
                 && b[10] == b'-';
             let name = if dated { &name[11..] } else { name };
             name.replace(['-', '_'], " ")
@@ -349,13 +301,7 @@ fn proposal(src: &str, name: &str, branch: &str) -> (String, String) {
     let bullets = |text: String| {
         text.lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| {
-                if l.trim_start().starts_with("- ") {
-                    l.to_string()
-                } else {
-                    format!("- {}", l.trim())
-                }
-            })
+            .map(|l| if l.trim_start().starts_with("- ") { l.to_string() } else { format!("- {}", l.trim()) })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -386,9 +332,7 @@ fn task_line(line: &str) -> Option<(bool, &str)> {
     let mut s = line.trim_start();
     if let Some(r) = s.strip_prefix(['-', '*', '+']) {
         s = r;
-    } else if let Some(r) = s
-        .trim_start_matches(|c: char| c.is_ascii_digit())
-        .strip_prefix(['.', ')'])
+    } else if let Some(r) = s.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix(['.', ')'])
         && r.len() < s.len() - 1
     {
         s = r;
@@ -404,10 +348,7 @@ fn tasks(src: &str, report: &mut ChangeReport) -> String {
     let mut flush = |raw: &mut Vec<String>, out: &mut String| {
         if let Some(text) = raw.pop() {
             let (number, text) = match text.split_once(' ') {
-                Some((n, t))
-                    if n.starts_with(|c: char| c.is_ascii_digit())
-                        && n.chars().all(|c| c.is_ascii_digit() || c == '.') =>
-                {
+                Some((n, t)) if n.starts_with(|c: char| c.is_ascii_digit()) && n.chars().all(|c| c.is_ascii_digit() || c == '.') => {
                     (n.trim_end_matches('.').to_string(), t)
                 }
                 _ => (String::new(), text.as_str()),
@@ -417,9 +358,7 @@ fn tasks(src: &str, report: &mut ChangeReport) -> String {
             out.push_str(&format!("- TSK-new{} {title}\n", report.tasks));
             match verify {
                 Some(cmd) => out.push_str(&format!("  verify: {cmd}\n")),
-                None => report
-                    .missing_verify
-                    .push(format!("{number} {title}").trim().to_string()),
+                None => report.missing_verify.push(format!("{number} {title}").trim().to_string()),
             }
             out.push_str("  files: **\n");
         }
@@ -432,10 +371,7 @@ fn tasks(src: &str, report: &mut ChangeReport) -> String {
             flush(&mut raw, &mut out);
             if let Some(name) = h.strip_prefix("# ") {
                 let name = name.trim();
-                let name = name
-                    .split_once(". ")
-                    .filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit()))
-                    .map_or(name, |(_, rest)| rest);
+                let name = name.split_once(". ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())).map_or(name, |(_, rest)| rest);
                 out.push_str(&format!("\n## {name}\n\n"));
             }
         } else if !line.trim().is_empty()
@@ -452,8 +388,7 @@ fn tasks(src: &str, report: &mut ChangeReport) -> String {
 fn deltas(os: &OsSpec, cap: Option<&Cap>, next: &mut u32, rep: &mut ChangeReport) -> String {
     let empty = Vec::new();
     let reqs = cap.map_or(&empty, |c| &c.reqs);
-    let label =
-        |kind: &str, title: &str| format!("{} {kind} {title:?}", cap.map_or("?", |c| &c.name));
+    let label = |kind: &str, title: &str| format!("{} {kind} {title:?}", cap.map_or("?", |c| &c.name));
     let mut out = String::new();
     let mut seen: HashSet<&Id> = HashSet::new();
     let mut emit = |s: String| {
@@ -464,19 +399,11 @@ fn deltas(os: &OsSpec, cap: Option<&Cap>, next: &mut u32, rep: &mut ChangeReport
         *next += 1;
         emit(render_req(&format!("ADD REQ-new{next} {}", r.title), r));
     }
-    let renamed_from = |title: &str| {
-        os.renames
-            .iter()
-            .find(|(_, to)| to.eq_ignore_ascii_case(title))
-            .map(|(from, _)| from.as_str())
-    };
+    let renamed_from = |title: &str| os.renames.iter().find(|(_, to)| to.eq_ignore_ascii_case(title)).map(|(from, _)| from.as_str());
     for r in os.group("MODIFIED Requirements") {
-        let hit = find_title(reqs, &r.title)
-            .or_else(|| renamed_from(&r.title).and_then(|from| find_title(reqs, from)));
+        let hit = find_title(reqs, &r.title).or_else(|| renamed_from(&r.title).and_then(|from| find_title(reqs, from)));
         match hit {
-            Some((id, _)) if seen.insert(id) => {
-                emit(render_req(&format!("CHANGE {id} {}", r.title), r))
-            }
+            Some((id, _)) if seen.insert(id) => emit(render_req(&format!("CHANGE {id} {}", r.title), r)),
             Some(_) => {}
             None => rep.unmatched.push(label("MODIFIED", &r.title)),
         }
@@ -491,10 +418,7 @@ fn deltas(os: &OsSpec, cap: Option<&Cap>, next: &mut u32, rep: &mut ChangeReport
     for (from, to) in &os.renames {
         match find_title(reqs, from) {
             Some((id, living)) if seen.insert(id) => {
-                let renamed = OsReq {
-                    title: to.clone(),
-                    ..living.clone()
-                };
+                let renamed = OsReq { title: to.clone(), ..living.clone() };
                 emit(render_req(&format!("CHANGE {id} {to}"), &renamed));
             }
             Some(_) => {}
@@ -516,17 +440,9 @@ fn change(
     let proposal_src = std::fs::read_to_string(dir.join("proposal.md")).unwrap_or_default();
     let (title, proposal_md) = proposal(&proposal_src, &name, branch);
     let id = mint(Kind::Chg, None)?;
-    let slug = Some(slugify(&title))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "change".into());
+    let slug = Some(slugify(&title)).filter(|s| !s.is_empty()).unwrap_or_else(|| "change".into());
     let out = root.join(Stage::Backlog.dir()).join(format!("{id}-{slug}"));
-    let mut rep = ChangeReport {
-        name,
-        id,
-        tasks: 0,
-        missing_verify: Vec::new(),
-        unmatched: Vec::new(),
-    };
+    let mut rep = ChangeReport { name, id, tasks: 0, missing_verify: Vec::new(), unmatched: Vec::new() };
     files.push((out.join(change::PROPOSAL), proposal_md));
     let tasks_src = std::fs::read_to_string(dir.join("tasks.md")).unwrap_or_default();
     files.push((out.join(change::TASKS), tasks(&tasks_src, &mut rep)));
@@ -541,12 +457,7 @@ fn change(
             continue;
         }
         let os = parse_openspec(&read(&path)?);
-        let md = deltas(
-            &os,
-            caps.iter().find(|c| c.name == cap_name),
-            &mut next,
-            &mut rep,
-        );
+        let md = deltas(&os, caps.iter().find(|c| c.name == cap_name), &mut next, &mut rep);
         files.push((out.join(change::DELTAS).join(format!("{cap_name}.md")), md));
     }
     Ok(rep)
@@ -580,10 +491,7 @@ pub fn openspec(project: &Project, from: &Path, branch: &str, dry_run: bool) -> 
             Ok(id)
         }
     };
-    let mut report = Report {
-        dry_run,
-        ..Report::default()
-    };
+    let mut report = Report { dry_run, ..Report::default() };
     let mut files = Vec::new();
     let (caps, mut rec) = living(from, &project.root, &mut mint, &mut report, &mut files)?;
     let changes = from.join("changes");
@@ -727,14 +635,8 @@ Touches the ledger.
         w("specs/ledger/spec.md", LIVING);
         w("changes/2026-10-01-proof-context/proposal.md", PROPOSAL);
         w("changes/2026-10-01-proof-context/tasks.md", TASKS);
-        w(
-            "changes/2026-10-01-proof-context/design.md",
-            "# Design\n\nD1.\n",
-        );
-        w(
-            "changes/2026-10-01-proof-context/specs/ledger/spec.md",
-            DELTA,
-        );
+        w("changes/2026-10-01-proof-context/design.md", "# Design\n\nD1.\n");
+        w("changes/2026-10-01-proof-context/specs/ledger/spec.md", DELTA);
         w("changes/archive/2026-09-29-old/proposal.md", "# Proposal\n");
         (p, os)
     }
@@ -760,26 +662,14 @@ Touches the ledger.
         let d = parse_openspec(DELTA);
         assert_eq!(d.group("ADDED Requirements").len(), 1);
         assert_eq!(d.group("REMOVED Requirements").len(), 2);
-        assert_eq!(
-            d.renames[0],
-            ("Staleness".to_string(), "Freshness".to_string())
-        );
+        assert_eq!(d.renames[0], ("Staleness".to_string(), "Freshness".to_string()));
     }
 
     #[test]
     fn verify_clause_rules() {
-        assert_eq!(
-            split_verify("Do it; verify `cargo test x` passes"),
-            ("Do it", Some("cargo test x"))
-        );
-        assert_eq!(
-            split_verify("Do it; verify with tests"),
-            ("Do it; verify with tests", None)
-        );
-        assert_eq!(
-            split_verify("Do; verify `a` then `b` exits"),
-            ("Do; verify `a` then `b` exits", None)
-        );
+        assert_eq!(split_verify("Do it; verify `cargo test x` passes"), ("Do it", Some("cargo test x")));
+        assert_eq!(split_verify("Do it; verify with tests"), ("Do it; verify with tests", None));
+        assert_eq!(split_verify("Do; verify `a` then `b` exits"), ("Do; verify `a` then `b` exits", None));
     }
 
     #[test]
@@ -867,9 +757,7 @@ Touches the ledger.
         let rec = record::load(&p).unwrap();
         assert_eq!(rec.len(), 2);
         for q in reqs {
-            let crate::id::Ref::Id(id) = &q.id else {
-                panic!()
-            };
+            let crate::id::Ref::Id(id) = &q.id else { panic!() };
             let e = &rec[&id.to_string()];
             assert!(e.legacy);
             assert_eq!(e.hash, requirement_hash(q));
@@ -878,13 +766,7 @@ Touches the ledger.
         let c = &r.changes[0];
         assert_eq!(c.tasks, 4);
         assert_eq!(c.missing_verify.len(), 2);
-        assert_eq!(
-            c.unmatched,
-            [
-                "ledger REMOVED \"Never heard of it\"",
-                "ledger RENAMED \"Missing one\""
-            ]
-        );
+        assert_eq!(c.unmatched, ["ledger REMOVED \"Never heard of it\"", "ledger RENAMED \"Missing one\""]);
         let dir = change::resolve(&p, &c.id.to_string()).unwrap();
         assert_eq!(dir.stage, Stage::Backlog);
         assert_eq!(dir.slug, "proof-context");
@@ -897,10 +779,7 @@ Touches the ledger.
         assert!(!delta.contains("Freshness"));
         let loaded = change::load(&dir.path, &living).unwrap();
         assert!(
-            loaded
-                .findings
-                .iter()
-                .all(|(f, d)| f != "specs/ledger.md" || d.rule != crate::diag::Rule::UnknownId),
+            loaded.findings.iter().all(|(f, d)| f != "specs/ledger.md" || d.rule != crate::diag::Rule::UnknownId),
             "{:?}",
             loaded.findings
         );
@@ -930,12 +809,7 @@ Touches the ledger.
         let (p, os) = setup(&tmp);
         openspec(&p, &os, "main", false).unwrap();
         assert_eq!(openspec(&p, &os, "main", false).unwrap_err().code, "import");
-        assert_eq!(
-            openspec(&p, &tmp.0.join("none"), "main", false)
-                .unwrap_err()
-                .code,
-            "import"
-        );
+        assert_eq!(openspec(&p, &tmp.0.join("none"), "main", false).unwrap_err().code, "import");
     }
 
     #[test]
@@ -950,10 +824,6 @@ Touches the ledger.
         let lock = p.lock().unwrap();
         record::save(&p, &lock, &rec).unwrap();
         let (_, findings) = change::load_living(&p).unwrap();
-        assert!(
-            findings
-                .iter()
-                .any(|(_, d)| d.severity() == crate::diag::Severity::Error)
-        );
+        assert!(findings.iter().any(|(_, d)| d.severity() == crate::diag::Severity::Error));
     }
 }

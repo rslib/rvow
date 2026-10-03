@@ -49,6 +49,13 @@ repos:
         language: system
         files: ^extensions/
         pass_filenames: false
+      - id: ext-pi-test
+        name: pi extension test
+        # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
+        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run test:pi'
+        language: system
+        files: ^extensions/
+        pass_filenames: false
       - id: ext-tsc-claude
         name: tsc claude mod
         # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.

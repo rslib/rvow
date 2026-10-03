@@ -15,12 +15,7 @@ pub struct Reply {
 
 impl Reply {
     pub fn new() -> Reply {
-        Reply {
-            text: String::new(),
-            data: Obj::new(),
-            help: Vec::new(),
-            ok: true,
-        }
+        Reply { text: String::new(), data: Obj::new(), help: Vec::new(), ok: true }
     }
 
     /// A command that printed its own natural text and has nothing more to say.
@@ -109,18 +104,10 @@ mod tests {
     fn long_text_is_cut_with_its_size_and_the_full_hint() {
         let text = "a\n".repeat(1000);
         let r = Reply::long(text.clone(), false, "rvow show REQ-x");
-        let Some((_, Node::List(lines))) = r.data.first() else {
-            panic!("no lines")
-        };
+        let Some((_, Node::List(lines))) = r.data.first() else { panic!("no lines") };
         assert_eq!(lines.len(), 751);
-        assert_eq!(
-            lines.last(),
-            Some(&Node::from("... (truncated, 2000 chars total)"))
-        );
-        assert_eq!(
-            r.help,
-            ["Run `rvow show REQ-x --full` to see all 2000 chars"]
-        );
+        assert_eq!(lines.last(), Some(&Node::from("... (truncated, 2000 chars total)")));
+        assert_eq!(r.help, ["Run `rvow show REQ-x --full` to see all 2000 chars"]);
         assert_eq!(r.text, text);
         assert!(Reply::long(text, true, "x").help.is_empty());
     }
@@ -128,14 +115,8 @@ mod tests {
     #[test]
     fn errors_print_one_help_line_or_a_list() {
         assert_eq!(error("bad", vec![]), "error: bad");
-        assert_eq!(
-            error("bad", vec!["run rvow init".into()]),
-            "error: bad\nhelp: run rvow init"
-        );
-        assert_eq!(
-            error("x: y", vec!["a".into(), "b".into()]),
-            "error: \"x: y\"\nhelp[2]:\n  a\n  b"
-        );
+        assert_eq!(error("bad", vec!["run rvow init".into()]), "error: bad\nhelp: run rvow init");
+        assert_eq!(error("x: y", vec!["a".into(), "b".into()]), "error: \"x: y\"\nhelp[2]:\n  a\n  b");
     }
 
     #[test]
@@ -143,9 +124,6 @@ mod tests {
         let mut r = Reply::new();
         r.table("changes", vec![], "0 on branch main");
         r.table("rows", vec![obj! { "id" => "a", "n" => 1usize }], "");
-        assert_eq!(
-            toon::encode(&r.data),
-            "changes: 0 on branch main\nrows[1]{id,n}:\n  a,1"
-        );
+        assert_eq!(toon::encode(&r.data), "changes: 0 on branch main\nrows[1]{id,n}:\n  a,1");
     }
 }

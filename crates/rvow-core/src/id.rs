@@ -32,9 +32,7 @@ impl Kind {
     }
 
     fn from_prefix(s: &str) -> Option<Kind> {
-        Kind::ALL
-            .into_iter()
-            .find(|k| k.prefix().eq_ignore_ascii_case(s))
+        Kind::ALL.into_iter().find(|k| k.prefix().eq_ignore_ascii_case(s))
     }
 }
 
@@ -104,11 +102,7 @@ fn normalize_char(c: char) -> Result<char, ParseError> {
         'o' => '0',
         c => c,
     };
-    if c.is_ascii() && ALPHABET.contains(&(c as u8)) {
-        Ok(c)
-    } else {
-        Err(ParseError::BadChar(c))
-    }
+    if c.is_ascii() && ALPHABET.contains(&(c as u8)) { Ok(c) } else { Err(ParseError::BadChar(c)) }
 }
 
 fn normalize_body(s: &str) -> Result<String, ParseError> {
@@ -130,10 +124,7 @@ impl Id {
     pub fn mint(kind: Kind, taken: &HashSet<Id>) -> crate::error::Result<Id> {
         loop {
             let bytes = Error::random::<BODY_LEN>()?;
-            let body = bytes
-                .iter()
-                .map(|b| ALPHABET[(b & 31) as usize] as char)
-                .collect();
+            let body = bytes.iter().map(|b| ALPHABET[(b & 31) as usize] as char).collect();
             let id = Id { kind, body };
             if !taken.contains(&id) {
                 return Ok(id);
@@ -152,10 +143,7 @@ impl FromStr for Id {
         if len != BODY_LEN {
             return Err(ParseError::BadLength(len));
         }
-        Ok(Id {
-            kind,
-            body: normalize_body(body)?,
-        })
+        Ok(Id { kind, body: normalize_body(body)? })
     }
 }
 
@@ -173,8 +161,7 @@ impl FromStr for Ref {
             && let Some(n) = rest.strip_prefix("new")
             && let Ok(n) = n.parse()
         {
-            let kind =
-                Kind::from_prefix(kind).ok_or_else(|| ParseError::UnknownKind(kind.into()))?;
+            let kind = Kind::from_prefix(kind).ok_or_else(|| ParseError::UnknownKind(kind.into()))?;
             return Ok(Ref::Placeholder { kind, n });
         }
         s.parse().map(Ref::Id)
@@ -205,29 +192,17 @@ impl std::error::Error for ResolveError {}
 
 /// Finds the one id among `known` that a user's short form names, as git does
 /// with commit prefixes. `x7k`, `TSK-x7k` and `tsk-X7K` all name `TSK-x7k2q4`.
-pub fn resolve<'a>(
-    input: &str,
-    known: impl IntoIterator<Item = &'a Id>,
-) -> Result<Id, ResolveError> {
+pub fn resolve<'a>(input: &str, known: impl IntoIterator<Item = &'a Id>) -> Result<Id, ResolveError> {
     let (kind, body) = match input.split_once('-') {
-        Some((k, b)) => (
-            Some(
-                Kind::from_prefix(k)
-                    .ok_or_else(|| ResolveError::Invalid(ParseError::UnknownKind(k.into())))?,
-            ),
-            b,
-        ),
+        Some((k, b)) => (Some(Kind::from_prefix(k).ok_or_else(|| ResolveError::Invalid(ParseError::UnknownKind(k.into())))?), b),
         None => (None, input),
     };
     let body = normalize_body(body).map_err(ResolveError::Invalid)?;
     if body.is_empty() {
         return Err(ResolveError::NotFound);
     }
-    let mut hits: Vec<Id> = known
-        .into_iter()
-        .filter(|id| kind.is_none_or(|k| id.kind == k) && id.body.starts_with(&body))
-        .cloned()
-        .collect();
+    let mut hits: Vec<Id> =
+        known.into_iter().filter(|id| kind.is_none_or(|k| id.kind == k) && id.body.starts_with(&body)).cloned().collect();
     hits.sort();
     hits.dedup();
     match hits.len() {
@@ -259,23 +234,14 @@ mod tests {
     #[test]
     fn rejects_bad_ids() {
         assert_eq!("k3f9m2".parse::<Id>(), Err(ParseError::MissingKind));
-        assert_eq!(
-            "FOO-k3f9m2".parse::<Id>(),
-            Err(ParseError::UnknownKind("FOO".into()))
-        );
+        assert_eq!("FOO-k3f9m2".parse::<Id>(), Err(ParseError::UnknownKind("FOO".into())));
         assert_eq!("REQ-k3f9m".parse::<Id>(), Err(ParseError::BadLength(5)));
         assert_eq!("REQ-k3f9mu".parse::<Id>(), Err(ParseError::BadChar('u')));
     }
 
     #[test]
     fn placeholders_parse_apart_from_ids() {
-        assert_eq!(
-            "REQ-new1".parse::<Ref>(),
-            Ok(Ref::Placeholder {
-                kind: Kind::Req,
-                n: 1
-            })
-        );
+        assert_eq!("REQ-new1".parse::<Ref>(), Ok(Ref::Placeholder { kind: Kind::Req, n: 1 }));
         assert_eq!("TSK-x7k2q4".parse::<Ref>(), Ok(Ref::Id(id("TSK-x7k2q4"))));
         assert!("REQ-newx".parse::<Ref>().is_err());
     }
@@ -296,13 +262,7 @@ mod tests {
         assert_eq!(resolve("x7k2", &known), Ok(id("TSK-x7k2q4")));
         assert_eq!(resolve("TSK-x7k", &known), Ok(id("TSK-x7k2q4")));
         assert_eq!(resolve("tsk-X7K", &known), Ok(id("TSK-x7k2q4")));
-        assert_eq!(
-            resolve("x7k", &known),
-            Err(ResolveError::Ambiguous(vec![
-                id("REQ-x7k999"),
-                id("TSK-x7k2q4")
-            ]))
-        );
+        assert_eq!(resolve("x7k", &known), Err(ResolveError::Ambiguous(vec![id("REQ-x7k999"), id("TSK-x7k2q4")])));
         assert_eq!(resolve("zzz", &known), Err(ResolveError::NotFound));
         assert_eq!(resolve("", &known), Err(ResolveError::NotFound));
     }

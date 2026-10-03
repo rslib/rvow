@@ -1,3 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/rvow","crates/rvow-core"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
