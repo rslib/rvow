@@ -468,12 +468,16 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
     }
     let joined = w.join(" ").to_lowercase();
     let lower = cmd.to_lowercase();
-    if lower.contains("core.hookspath") || joined.contains("core.hookspath") {
+    let writes = writes_files(&invs, cmd);
+    if invs.iter().any(|inv| sets_hooks_path(inv))
+        || w.iter().any(|x| is_assignment(x) && x.to_lowercase().contains("core.hookspath"))
+        || (writes && (lower.contains("core.hookspath") || joined.contains("core.hookspath")) && w.iter().any(|x| x.ends_with("config")))
+    {
         return Some("core.hooksPath decides which hooks run; changing it is for the user. If the plan needs it, run rvow block <task> --reason \"...\"".into());
     }
     let in_git_dir =
         w.iter().any(|x| x.ends_with(".git") || x.ends_with(".git/")) && w.iter().any(|x| x.to_lowercase().starts_with("hooks"));
-    if lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir {
+    if writes && (lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir) {
         return Some(".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
     }
     let names_cache = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == CACHE_FILE);
@@ -534,6 +538,68 @@ pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {
 }
 
 const WRITERS: &[&str] = &["rm", "mv", "cp", "tee", "sed", "perl", "python", "python3", "chmod", "ln", "truncate", "dd", "install"];
+const CONFIG_WRITE_FLAGS: &[&str] = &["--unset", "--unset-all", "--add", "--replace-all", "-e", "--edit"];
+
+/// True when `cmd` redirects output to a file; `2>&1` and `>/dev/null` do not count.
+fn redirects_to_file(cmd: &str) -> bool {
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '>' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && matches!(chars[j], '>' | '|') {
+            j += 1;
+        }
+        if chars.get(j) == Some(&'&') && chars.get(j + 1).is_some_and(|c| c.is_ascii_digit() || *c == '-') {
+            i = j + 1;
+            continue;
+        }
+        if chars.get(j) == Some(&'&') {
+            j += 1;
+        }
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        let target: String = chars[j..].iter().take_while(|c| !c.is_whitespace() && !SEPARATORS.contains(c)).collect();
+        if target != "/dev/null" {
+            return true;
+        }
+        i = j.max(i + 1);
+    }
+    false
+}
+
+/// A command that changes files: a writer such as `rm` or `sed -i`, or a redirect to a file.
+fn writes_files(invs: &[&[String]], cmd: &str) -> bool {
+    redirects_to_file(cmd)
+        || invs.iter().any(|inv| {
+            let name = base_name(&inv[0]);
+            WRITERS.contains(&name)
+                && (name != "sed"
+                    || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
+        })
+}
+
+/// A `git` call that sets or removes `core.hooksPath`; reading it is fine.
+fn sets_hooks_path(inv: &[String]) -> bool {
+    if base_name(&inv[0]) != "git" {
+        return false;
+    }
+    let args = &inv[1..];
+    let key = |w: &str| w.to_lowercase().starts_with("core.hookspath");
+    let env_form = |w: &String| w.strip_prefix("--config-env=").is_some_and(key);
+    if args.windows(2).any(|p| (p[0] == "-c" || p[0] == "--config-env") && key(&p[1])) || args.iter().any(env_form) {
+        return true;
+    }
+    let Some(("config", rest)) = git_subcommand(args) else {
+        return false;
+    };
+    let positional: Vec<&String> = rest.iter().filter(|w| !w.starts_with('-')).collect();
+    positional.iter().any(|w| key(w)) && (positional.len() >= 2 || rest.iter().any(|w| CONFIG_WRITE_FLAGS.contains(&w.as_str())))
+}
 
 fn names_path(sh: &Shell, cmd: &str, path: &Path) -> bool {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -548,7 +614,8 @@ fn names_path(sh: &Shell, cmd: &str, path: &Path) -> bool {
 pub(super) fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<String> {
     let sh = parse(cmd, 0, &HashMap::new());
     let named = paths.iter().find(|p| names_path(&sh, cmd, p))?;
-    let writes = cmd.contains('>') || sh.words.iter().any(|w| WRITERS.contains(&base_name(w)));
+    let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
+    let writes = writes_files(&invs, cmd);
     writes.then(|| {
         format!(
             "{} enforces rvow; changing it is for the user. If the plan needs it, run `rvow block <task> --reason \"...\"`",

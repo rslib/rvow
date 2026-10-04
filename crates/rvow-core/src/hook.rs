@@ -20,6 +20,7 @@ use crate::proof::{self, Now, State};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 
 mod shell;
+mod stop_state;
 pub use shell::{bash_denial, script_denial};
 use shell::{bash_enforcement_denial, bash_secret_denial};
 
@@ -387,6 +388,17 @@ pub fn claude_session_start(project: &Project, home: &Path, input: &Value) -> Re
     }))
 }
 
+const MAX_DRIFT_ITEMS: usize = 3;
+
+/// True while a rebase, merge or cherry-pick is half done in the repository at `top`.
+fn git_operation_running(top: &Path) -> bool {
+    let Ok(dir) = git::run(top, &["rev-parse", "--absolute-git-dir"]) else {
+        return false;
+    };
+    let dir = PathBuf::from(dir.trim());
+    ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"].iter().any(|n| dir.join(n).exists())
+}
+
 /// Why the agent must keep working, or `None` when it may stop. Pending
 /// amendments let it stop, since only the user can decide them.
 pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
@@ -394,6 +406,9 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     let Some(branch) = git::branch(&top)? else {
         return Ok(None);
     };
+    if git_operation_running(&top) {
+        return Ok(None);
+    }
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
     let queue = proof::on_branch(&changes, &branch);
@@ -408,9 +423,13 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
         let blocking: Vec<String> =
             drift::drift(project, &top, &config, c)?.into_iter().filter(|i| i.class.blocks()).map(|i| i.what).collect();
         if !blocking.is_empty() {
+            let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
+            let mut shown = blocking[..blocking.len() - more].join("; ");
+            if more > 0 {
+                shown.push_str(&format!("; and {more} more"));
+            }
             return Ok(Some(format!(
-                "the plan changed without an amendment ({}); run rvow amend --reason \"...\" and ask the user to run /rvow-confirm (or ! rvow confirm)",
-                blocking.join("; ")
+                "the plan changed without an amendment ({shown}); run rvow amend --reason \"...\" and ask the user to run /rvow-confirm (or ! rvow confirm)"
             )));
         }
     }
@@ -505,7 +524,21 @@ pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
 /// Claude Code `Stop`: a block response, or `None` to let the agent stop.
 pub fn claude_stop(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    Ok(stop_reason(project, home, &cwd)?.map(|reason| json!({"decision": "block", "reason": format!("rvow: {reason}")})))
+    let flag = |k: &str| input.get(k).and_then(Value::as_bool).unwrap_or(false);
+    if input.get("agent_id").is_some() || flag("stop_hook_active") {
+        return Ok(None);
+    }
+    let session = input.get("session_id").and_then(Value::as_str);
+    let Some(reason) = stop_reason(project, home, &cwd)? else {
+        if let Some(s) = session {
+            stop_state::clear(project, s);
+        }
+        return Ok(None);
+    };
+    if session.is_some_and(|s| stop_state::already_given(project, s, &reason)) {
+        return Ok(None);
+    }
+    Ok(Some(json!({"decision": "block", "reason": format!("rvow: {reason}")})))
 }
 
 #[cfg(test)]
