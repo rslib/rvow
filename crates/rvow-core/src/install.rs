@@ -251,14 +251,6 @@ fn run_claude(claude: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn names(json: &str, key: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<Value>>(json)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|v| v.get(key).and_then(Value::as_str).map(String::from))
-        .collect()
-}
-
 /// Registers the marketplace in `dir` with Claude Code and installs or updates
 /// the rvow plugin from it. Each step is skipped or turned into an update when
 /// it already holds, so a repeated install is safe. Returns what it did.
@@ -289,9 +281,15 @@ pub fn register_claude_mod(claude: &Path, dir: &Path) -> Result<Vec<String>> {
         }
     }
     let plugins = run_claude(claude, &["plugin", "list", "--json"])?;
-    if names(&plugins, "id").iter().any(|n| n == "rvow@rvow") {
+    let listed: Vec<Value> = serde_json::from_str(&plugins).unwrap_or_default();
+    let ours = listed.iter().find(|v| v.get("id").and_then(Value::as_str) == Some("rvow@rvow"));
+    if let Some(ours) = ours {
         run_claude(claude, &["plugin", "update", "rvow@rvow"])?;
         done.push("updated the rvow plugin; restart Claude Code to load it".into());
+        if ours.get("enabled").and_then(Value::as_bool) == Some(false) {
+            run_claude(claude, &["plugin", "enable", "rvow@rvow"])?;
+            done.push("enabled the rvow plugin, which was disabled; run /reload-plugins in Claude Code".into());
+        }
     } else {
         run_claude(claude, &["plugin", "install", "rvow@rvow"])?;
         done.push("installed the rvow plugin; restart Claude Code to load it".into());
@@ -621,6 +619,15 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(calls.contains(&format!("plugin marketplace add {}", dir.display())), "{calls}");
         assert!(calls.contains("plugin update rvow@rvow"), "{calls}");
+
+        std::fs::write(
+            &fake,
+            std::fs::read_to_string(&fake).unwrap().replace("{\"id\":\"rvow@rvow\"}", "{\"id\":\"rvow@rvow\",\"enabled\":false}"),
+        )
+        .unwrap();
+        let off = register_claude_mod(&fake, &dir).unwrap();
+        assert!(off[2].starts_with("enabled the rvow plugin"), "{off:?}");
+        assert!(std::fs::read_to_string(&log).unwrap().contains("plugin enable rvow@rvow"));
 
         let moved = tmp.0.join("new-home-market");
         let third = register_claude_mod(&fake, &moved).unwrap();
