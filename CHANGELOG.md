@@ -5,7 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Changed
+
+- Make the Stop hook give each reason once per session, and let subagent stops and stops during a rebase, merge or cherry-pick pass.
+- Let the hook allow read-only shell commands on the enforcement files and the git hooks folder, and text that only names a protected action.
+- Shorten the plan-changed message to three items and a count.
+
 ### Added
+
+- Add a signed cache to `rvow gate --rerun` that skips a task when an earlier clean pass had the same key.
+  Use `--no-cache` to run every task, and see `docs/settings.md` for `rerun_cache`, `cache_with_links` and `tools`.
+- Add `max_age:` and `depends_on:` task fields for the gate cache.
+- Add scoped `setup` and `checks` entries, `{ run, files }`, that run only when a task or a changed file matches.
+  The rerun worktree and `setup` now wait until a task needs them.
 
 - Add `rvow init`, `rvow new` and `rvow validate` to create the rvow tree, plan a change and check it.
 - Add `rvow accept` to run the baseline and record the plan as the vow.
@@ -48,5 +60,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow install` leaving the rvow plugin disabled when it was installed but turned off.
 - Fix `rvow check` to report a plan with no tasks as not ready, and the brief to ask for `rvow check` instead of accept.
 - Fix the planning brief to print only the counters that are not zero.

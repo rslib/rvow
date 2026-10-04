@@ -74,6 +74,15 @@ It runs every verify command again in a clean worktree of HEAD, so a proof that 
 The rerun also covers tasks of archived changes on the branch, so a later change cannot break what an earlier change proved.
 `rvow gate --out` writes the rerun results to a file, and `rvow ingest` adds them to the ledger of a home store.
 
+A rerun skips a task when an earlier clean pass has the same key.
+The key holds the content of the task's files at HEAD, the task and its requirements, the environment, the tools you list and the keys of the tasks it depends on.
+A rebase or an amend does not change the key, but a changed byte in scope does.
+The gate writes a pass only when the task ran tests, and signs each entry with a key that agents cannot read.
+`rvow gate --rerun --no-cache` runs every task, and so does `--out`.
+A scoped `setup` or `checks` entry runs only when a task that runs or a changed file matches it, so a Python change does not rebuild the C++ code.
+When the cache answers every task, the gate makes no worktree and runs no `setup`.
+[docs/settings.md](settings.md) lists the keys that tune the cache.
+
 ## The pre-push gate
 
 `rvow install` adds a pre-push hook that runs `rvow gate --strict --rerun`.

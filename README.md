@@ -54,10 +54,11 @@ The table names every key.
 | `inputs` | Extra globs whose content is part of a proof's input identity. |
 | `test_globs` | Globs that mark a file as a test the vow protects. |
 | `protect_infra` | Globs of test setup files the vow protects. |
-| `checks` | Commands the gate runs after task verification. |
-| `setup` | Commands the gate rerun runs before verification. |
+| `checks` | Commands the gate runs after task verification, each a string or `{ run, files }`. |
+| `setup` | Commands the gate rerun runs before verification, each a string or `{ run, files }`. |
 | `rerun_env` | Environment pairs applied when the gate reruns a task. |
 | `rerun_links` | Ignored folders that the rerun worktree links in. |
+| `rerun_cache`, `cache_with_links`, `tools` | How long a cached rerun pass lasts, whether links keep the cache on, and the binaries in the cache key. |
 | `env`, `env_vars` | Commands and variables captured in the proof environment. |
 | `interview_cap` | The most questions a clarify round asks (default 3). |
 | `require_signature` | When true, only signed confirmations pass the gate. |
