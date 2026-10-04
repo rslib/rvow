@@ -14,7 +14,7 @@ Write `tasks.md` as a list of tasks. The order in the file is the work order.
 
 ## The verify command
 
-- It must fail before the work and pass after. Run it before you write the code, and see it fail for the reason that the task fixes.
+- It must fail before the work and pass after. Run it before you write the code, and see it fail for the reason that the task fixes. The one exception is `baseline: pass`, a guard that must stay green.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists. Write the test first if it does not.
 - Do not use `true`, `echo` or a build alone as the check. Run the test that covers the behavior.
 - Each task lands its own tests. Do not defer tests to a final task.

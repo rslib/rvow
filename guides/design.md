@@ -22,13 +22,13 @@ For any other change, skip the file. Put the reason for a choice in the task or 
 
 ## What stays out
 
-- A description of existing code. Read the code instead, because a copy goes stale and misleads the next agent.
-- Requirement text. Point to the spec by id, as in `see REQ-k3f9m2`.
-- Steps of the work. Write those as tasks.
+- Keep existing code out; read the code instead, because a copy goes stale and misleads the next agent.
+- Keep requirement text out; point to the spec by id, as in `see REQ-k3f9m2`.
+- Keep steps of the work out; write those as tasks.
 
 ## Size
 
-At most 300 lines. A design that grows past that mixes in a description of the code. Cut it to the decisions.
+At most 100 lines. A design that grows past that mixes in a description of the code. Cut it to the decisions.
 
 ## Example
 

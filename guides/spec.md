@@ -10,7 +10,7 @@ Write one file per capability: `specs/<capability>.md` in the change. It holds d
 
 ## Deltas
 
-- `## ADD REQ-new1 <title>`: a new requirement. Number the placeholders new1, new2 and so on.
+- `## ADD REQ-new1 <title>`: a new requirement. Number the placeholders new1, new2 and so on; rvow mints the real id at accept and rewrites every reference.
 - `## CHANGE REQ-id <title>`: the full new text and scenarios. Do not send a partial edit.
 - `## DEPRECATE REQ-id`, `## MOVE REQ-id` and `## REMOVE REQ-id`: the id only, with no text.
 
@@ -22,8 +22,8 @@ Write one file per capability: `specs/<capability>.md` in the change. It holds d
 - Each scenario has an optional GIVEN, one WHEN and at least one THEN.
 - Give concrete values in scenarios. Include one edge case, such as an empty input or a limit.
 - Test each requirement: if the implementation can change without changing externally visible behavior, it does not belong in the spec. Write it in `design.md` or in a task.
-- Do not name files or code in the sentence. Name the visible behavior.
-- Do not write vague words such as fast or several. Write the number or the limit.
+- Name the visible behavior, not files or code.
+- Write the number or the limit instead of vague words such as fast or several.
 
 ## Example
 

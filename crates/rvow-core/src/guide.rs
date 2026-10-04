@@ -39,6 +39,6 @@ mod tests {
         assert_eq!(loaded.tasks.len(), 1);
         assert_eq!(loaded.deltas.len(), 1);
         assert!(example(PROPOSAL).split_whitespace().count() <= 150);
-        assert!(example(DESIGN).lines().count() <= 300);
+        assert!(example(DESIGN).lines().count() <= change::MAX_DESIGN_LINES);
     }
 }

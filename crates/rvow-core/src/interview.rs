@@ -13,7 +13,7 @@ use crate::plan;
 use crate::store::Project;
 
 /// Questions per round: the most `AskUserQuestion` takes in one call.
-pub const ROUND: usize = 4;
+pub const ROUND: usize = 3;
 const HEADER_LEN: usize = 12;
 /// The option offered when a question names only its recommended answer, so
 /// every question has the two options `AskUserQuestion` needs.
@@ -62,14 +62,22 @@ fn question_json(change: &str, q: &Question) -> Value {
 /// The next round of open questions for the branch's plans (or `target`),
 /// at most `ROUND`, with the count still waiting after it.
 pub fn round(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Value> {
+    round_with_cap(project, cwd, target, ROUND)
+}
+
+/// The next round, with a caller's configured cap between one and four.
+pub fn round_with_cap(project: &Project, cwd: &Path, target: Option<&str>, cap: usize) -> Result<Value> {
+    if !(1..=3).contains(&cap) {
+        return Err(Error::new("config", format!("interview cap {cap} is outside 1..=3"), "set interview_cap to 1, 2 or 3"));
+    }
     let mut all = Vec::new();
     for r in plan::check(project, cwd, target)? {
         for q in &r.questions {
             all.push(question_json(&r.change.id.to_string(), q));
         }
     }
-    let remaining = all.len().saturating_sub(ROUND);
-    all.truncate(ROUND);
+    let remaining = all.len().saturating_sub(cap);
+    all.truncate(cap);
     Ok(json!({"questions": all, "remaining": remaining}))
 }
 
@@ -203,7 +211,7 @@ mod tests {
 
         let r = round(&p, &repo, None).unwrap();
         assert_eq!(r["questions"].as_array().unwrap().len(), ROUND);
-        assert_eq!(r["remaining"], 1);
+        assert_eq!(r["remaining"], 2);
         let q0 = &r["questions"][0];
         assert_eq!(q0["options"][0]["label"], "a1 (Recommended)");
         assert_eq!(q0["options"][0]["description"], "w1");
