@@ -1,0 +1,138 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { run } from "./rvow/tools.ts";
+import { proofArgs, registerTypedTools, viewArgs } from "./rvow/typed-tools.ts";
+
+function tool(name: string, execute: typeof run) {
+  const tools = new Map<string, ToolDefinition>();
+  registerTypedTools(
+    {
+      registerTool: (value: ToolDefinition) => tools.set(value.name, value),
+    } as unknown as ExtensionAPI,
+    execute,
+  );
+  const value = tools.get(name);
+  assert.ok(value);
+  return value;
+}
+
+function call(value: ToolDefinition, input: object, signal = new AbortController().signal) {
+  return value.execute("call", input, signal, undefined, { cwd: "/tmp" } as Parameters<
+    typeof value.execute
+  >[4]);
+}
+
+const dashboard = {
+  branch: "trunk",
+  changes: [],
+  backlog: [],
+  archive: [],
+  questions: [],
+  next: null,
+  needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
+};
+
+test("view and status use existing JSON flags and expose data to scripts", async () => {
+  for (const target of ["view", "status"] as const) {
+    const argv = target === "view" ? ["hook", "view"] : ["status", "--json"];
+    assert.deepEqual(viewArgs({ target }), argv);
+    const value = tool("rvow_view", async (args) => {
+      assert.deepEqual(args, argv);
+      return { code: 0, out: JSON.stringify(dashboard) };
+    });
+    assert.ok(value.outputSchema);
+    const result = await call(value, { target });
+    assert.deepEqual(result.details, { kind: target, code: 0, data: dashboard });
+    assert.deepEqual(result.structuredContent, result.details);
+  }
+  const result = await call(
+    tool("rvow_view", async () => ({ code: 0, out: "null\n" })),
+    {},
+  );
+  assert.deepEqual(result.details, { kind: "view", code: 0, data: null });
+});
+
+test("show declares an artifact-text variant rather than claiming parsed data", async () => {
+  const text = "lines[1]:\n  artifact";
+  const result = await call(
+    tool("rvow_view", async () => ({ code: 0, out: text })),
+    { target: "show", id: "REQ-abc" },
+  );
+  assert.deepEqual(result.details, { kind: "artifact-text", code: 0, id: "REQ-abc", text });
+});
+
+test("proof preserves controlled TOON fields for success and failed verification", async () => {
+  assert.deepEqual(proofArgs({ task: "TSK-abc" }), ["prove", "TSK-abc", "--toon"]);
+  for (const code of [0, 1]) {
+    const verdict = code ? '"failed: exit 1"' : "proved";
+    const value = tool("rvow_prove", async () => ({
+      code,
+      out: `task: TSK-abc\nresult: ${verdict}\ntests: null\nms: 42\nevent: 7f00b0a1b2c3d4e5\nnext: done\n`,
+    }));
+    const result = await call(value, { task: "TSK-abc" });
+    assert.deepEqual(result.details, {
+      kind: "proof",
+      code,
+      task: "TSK-abc",
+      result: code ? "failed: exit 1" : "proved",
+      tests: null,
+      duration_ms: 42,
+      event: "7f00b0a1b2c3d4e5",
+    });
+    assert.deepEqual(result.structuredContent, result.details);
+    assert.equal(result.isError ?? false, code !== 0);
+  }
+});
+
+test("CLI failure details survive and the proof queue recovers", async () => {
+  let count = 0;
+  const value = tool("rvow_prove", async () =>
+    ++count === 1
+      ? { code: 1, out: 'error: "no task: TSK-abc"\ncode: missing\nhelp: read status' }
+      : { code: 0, out: "task: TSK-abc\nresult: proved\ntests: 3\nms: 4\nevent: a1b2c3d4e5f60718" },
+  );
+  const failed = await call(value, { task: "TSK-abc" });
+  assert.equal(failed.isError, true);
+  assert.deepEqual(failed.details, {
+    kind: "failure",
+    code: 1,
+    error: "no task: TSK-abc",
+    cliCode: "missing",
+    stdout: 'error: "no task: TSK-abc"\ncode: missing\nhelp: read status',
+  });
+  assert.deepEqual(failed.structuredContent, failed.details);
+  assert.equal((await call(value, { task: "TSK-abc" })).isError, undefined);
+});
+
+test("invalid successful output fails closed and aborted queued proof never executes", async () => {
+  await assert.rejects(
+    call(
+      tool("rvow_view", async () => ({ code: 0, out: "{}" })),
+      {},
+    ),
+    /invalid structured/,
+  );
+  let unblock = () => {};
+  let executions = 0;
+  const pending = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const value = tool("rvow_prove", async () => {
+    executions++;
+    await pending;
+    return {
+      code: 0,
+      out: "task: TSK-abc\nresult: proved\ntests: 3\nms: 4\nevent: a1b2c3d4e5f60718",
+    };
+  });
+  const first = call(value, { task: "TSK-abc" });
+  const controller = new AbortController();
+  const second = call(value, { task: "TSK-def" }, controller.signal);
+  controller.abort();
+  const rejected = assert.rejects(second, /cancelled before execution/);
+  unblock();
+  await first;
+  await rejected;
+  assert.equal(executions, 1);
+});
