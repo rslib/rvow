@@ -340,14 +340,17 @@ fn errors_are_records_on_stdout() {
     let r = Repo::new("errors");
     let (out, code) = r.rvow(&["ls"]);
     assert_eq!(code, 1);
-    assert_eq!(out, "error: this repository has no rvow tree\nhelp: \"run rvow init; it writes to the rvow home, not the repository\"\n");
+    assert_eq!(
+        out,
+        "error: this repository has no rvow tree\ncode: no-project\nhelp: \"run rvow init; it writes to the rvow home, not the repository\"\n"
+    );
     let (out, code) = r.rvow(&["--human", "ls"]);
     assert_eq!(code, 1);
     assert!(out.starts_with("error[no-project]: "), "{out}");
 
     let (out, code) = r.rvow(&["status", "--bogus"]);
     assert_eq!(code, 2);
-    assert!(out.starts_with("error: unexpected argument '--bogus' found\nhelp[2]:\n"), "{out}");
+    assert!(out.starts_with("error: unexpected argument '--bogus' found\ncode: usage\nhelp[2]:\n"), "{out}");
     assert!(out.contains("valid flags for `rvow status`: --all, --json;"), "{out}");
     let (out, code) = r.rvow(&["--human", "accept"]);
     assert_eq!(code, 2);
@@ -356,4 +359,31 @@ fn errors_are_records_on_stdout() {
     assert_eq!(code, 2);
     assert!(out.contains("valid subcommands for `rvow spec`: list\n"), "{out}");
     assert!(r.ok(&["ls", "--help"]).contains("Usage: rvow ls"));
+}
+
+#[test]
+fn ingest_round_trip_keeps_the_proofs() {
+    let (r, _root, id) = accepted("ingestrt");
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    r.git(&["add", "out.txt"]);
+    r.git(&["commit", "-q", "-m", "ok"]);
+
+    // gate streams the rerun to stderr, so drive it directly and check the exit
+    // code; the observable result is the run file it writes.
+    let gate = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["gate", "--strict", "--rerun", "--out", "run.jsonl"]).output().unwrap();
+    assert!(gate.status.success(), "gate: {gate:?}");
+
+    let file = std::fs::read_to_string(r.repo().join("run.jsonl")).unwrap();
+    let line = file.lines().next().expect("gate --out wrote no runs");
+    let run: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(run["proved"], serde_json::json!(true));
+    assert_eq!(run["tests_run"], serde_json::json!(1));
+    assert_eq!(run["change"], serde_json::json!(id));
+    let task = run["task"].as_str().unwrap().to_string();
+
+    let ingested = r.ok(&["ingest", "run.jsonl"]);
+    assert!(ingested.contains("count: 1") && ingested.contains("skipped: 0"), "{ingested}");
+
+    let shown = r.ok(&["show", &task]);
+    assert!(shown.contains("proved, 1 tests"), "{shown}");
 }

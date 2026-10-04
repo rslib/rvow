@@ -95,6 +95,14 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
                 new.verify.as_deref().unwrap_or(""),
             ));
         }
+        if old.mutants != new.mutants {
+            out.push(changed(
+                Class::Weaken,
+                format!("{id} mutants changed"),
+                old.mutants.as_deref().unwrap_or(""),
+                new.mutants.as_deref().unwrap_or(""),
+            ));
+        }
         if old.title != new.title {
             out.push(changed(Class::Confirm, format!("{id} title changed"), &old.title, &new.title));
         }

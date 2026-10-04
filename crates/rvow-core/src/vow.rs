@@ -42,7 +42,7 @@ pub fn put_object(project: &Project, bytes: &[u8]) -> Result<String> {
 
 pub fn task_hash(t: &Task) -> String {
     let covers: Vec<String> = t.covers.iter().map(Ref::to_string).collect();
-    let v = json!({
+    let mut v = json!({
         "title": t.title,
         "verify": t.verify,
         "covers": covers,
@@ -50,6 +50,9 @@ pub fn task_hash(t: &Task) -> String {
         "baseline_pass": t.baseline_pass,
         "timeout_secs": t.timeout.map(|d| d.as_secs()),
     });
+    if let Some(command) = &t.mutants {
+        v["mutants"] = command.clone().into();
+    }
     sha256_hex(v.to_string().as_bytes())
 }
 
@@ -263,7 +266,16 @@ pub fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, P
     let patterns: Vec<String> =
         config.test_globs.iter().chain(&config.protect_infra).cloned().chain(ENFORCEMENT.iter().map(|s| s.to_string())).collect();
     let set = fingerprint::globset(&patterns)?;
-    Ok(fingerprint::candidate_files(top)?.into_iter().filter(|f| set.is_match(f)).map(|f| (f.clone(), top.join(f))).collect())
+    let mut files: BTreeMap<String, PathBuf> =
+        fingerprint::candidate_files(top)?.into_iter().filter(|f| set.is_match(f)).map(|f| (f.clone(), top.join(f))).collect();
+    if !config.allowed_signers.is_empty() {
+        let given = Path::new(&config.allowed_signers);
+        let file = if given.is_absolute() { given.to_path_buf() } else { top.join(given) };
+        if file.is_file() {
+            files.insert(format!("allowed_signers:{}", file.display()), file);
+        }
+    }
+    Ok(files)
 }
 
 /// Mints a real id for every placeholder of a change, rewrites each Markdown

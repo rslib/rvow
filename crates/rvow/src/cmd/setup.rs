@@ -28,10 +28,14 @@ pub fn init(in_repo: bool) -> Result<Reply> {
     Ok(r)
 }
 
-pub fn rebind() -> Result<Reply> {
+pub fn rebind(commit_map: Option<&Path>) -> Result<Reply> {
     let home = store::home_dir()?;
     let mut r = Reply::new();
-    match store::rebind(&cwd()?, &home)? {
+    let result = match commit_map {
+        Some(path) => store::rebind_with_map(&cwd()?, &home, path)?,
+        None => store::rebind(&cwd()?, &home)?,
+    };
+    match result {
         Rebind::Unchanged(root) => {
             r.line(format!("up to date at {}", root.display()));
             r.set("unchanged", root.display().to_string());
@@ -60,6 +64,13 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     let run = || -> Result<Option<serde_json::Value>> {
         let home = store::home_dir()?;
         let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
+        if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
+            let out = match store::find(&cwd, &home) {
+                Ok(Some(p)) => hooks::claude_session_start(&p, &home, &input)?,
+                _ => None,
+            };
+            return session_start_skill_warning(out, &home);
+        }
         let Ok(Some(p)) = store::find(&cwd, &home) else {
             return Ok(None);
         };
@@ -77,6 +88,26 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
     }
     ExitCode::SUCCESS
+}
+
+fn session_start_skill_warning(mut out: Option<serde_json::Value>, rvow_home: &Path) -> Result<Option<serde_json::Value>> {
+    let Some(home) = env_dir("HOME") else {
+        return Ok(out);
+    };
+    let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
+    let rendered = crate::skill::render()?;
+    let pi = install::pi_dir(Some(&home));
+    for path in install::stale_managed_files(&claude, rvow_home, pi.as_deref(), &rendered) {
+        let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
+        let warning =
+            format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display());
+        let value = out
+            .get_or_insert_with(|| serde_json::json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ""}}));
+        let context = &mut value["hookSpecificOutput"]["additionalContext"];
+        let previous = context.as_str().unwrap_or("");
+        *context = rvow_core::brief::with_warning(previous, &warning).into();
+    }
+    Ok(out)
 }
 
 fn report(r: &mut Reply, what: &str, o: install::Outcome) {
@@ -146,7 +177,7 @@ fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
 }
 
 fn install_pi(r: &mut Reply, home: &Path) -> Result<()> {
-    let pi = home.join(".pi/agent");
+    let pi = install::pi_dir(Some(home)).unwrap_or_else(|| home.join(".pi/agent"));
     if pi.is_dir() {
         report(r, "pi extension", install::pi_extension(&pi)?);
     } else {

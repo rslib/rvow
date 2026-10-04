@@ -95,20 +95,112 @@ pub struct Env {
     pub arch: String,
     /// Each configured command and the first line of its output.
     pub commands: BTreeMap<String, String>,
-    /// Each configured variable and its value, or empty when unset.
+    /// Configured values, with secret-named variables stored as stable digests.
     pub vars: BTreeMap<String, String>,
+    /// The CPU model, for people; never part of the staleness key.
+    pub cpu: String,
+    /// The number of cores, for people; never part of the staleness key.
+    pub cores: Option<u64>,
+    /// The installed memory in bytes, for people; never part of the stale key.
+    pub memory: Option<u64>,
 }
 
 pub fn env(top: &Path, config: &Config) -> Result<Env> {
+    env_with(top, config, &[])
+}
+
+pub(crate) fn env_with(top: &Path, config: &Config, overrides: &[(String, String)]) -> Result<Env> {
     let mut commands = BTreeMap::new();
     for cmd in &config.env {
-        let out = runner::run(cmd, top, &[], ENV_TIMEOUT, &mut std::io::sink())?;
+        let out = runner::run(cmd, top, overrides, ENV_TIMEOUT, &mut std::io::sink())?;
         let first = out.tail.first().cloned().unwrap_or_default();
         let value = if out.passed() { first } else { format!("failed: {first}") };
-        commands.insert(cmd.clone(), value);
+        let masked = runner::mask(cmd, std::env::var("HOME").ok().as_deref(), &top.display().to_string());
+        let name = if masked == *cmd { masked } else { format!("{masked} [sha256:{}]", sha256_hex(cmd.as_bytes())) };
+        commands.insert(name, value);
     }
-    let vars = config.env_vars.iter().map(|k| (k.clone(), std::env::var(k).unwrap_or_default())).collect();
-    Ok(Env { os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(), commands, vars })
+    let vars = config
+        .env_vars
+        .iter()
+        .map(|k| {
+            let raw =
+                overrides.iter().rev().find(|(name, _)| name == k).map(|(_, value)| Ok(value.clone())).unwrap_or_else(|| std::env::var(k));
+            let value = match raw {
+                Ok(value) if runner::names_secret(k) => format!("sha256:{}", sha256_hex(value.as_bytes())),
+                Ok(value) => {
+                    let masked = runner::mask(&value, std::env::var("HOME").ok().as_deref(), &top.display().to_string());
+                    if masked == value { value } else { format!("sha256:{}", sha256_hex(value.as_bytes())) }
+                }
+                Err(_) => String::new(),
+            };
+            (k.clone(), value)
+        })
+        .collect();
+    let (cpu, cores, memory) = machine();
+    Ok(Env { os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(), commands, vars, cpu, cores, memory })
+}
+
+/// The CPU model, core count and memory, best-effort: any failure leaves an
+/// empty model and no counts. Never an error, so a proof cannot fail because
+/// the machine could not be described.
+fn machine() -> (String, Option<u64>, Option<u64>) {
+    #[cfg(target_os = "macos")]
+    {
+        let cpu = sysctl("machdep.cpu.brand_string").unwrap_or_default();
+        let cores = sysctl("hw.ncpu").and_then(|s| s.parse().ok());
+        let memory = sysctl("hw.memsize").and_then(|s| s.parse().ok());
+        (cpu, cores, memory)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        (linux_cpu_model(), linux_cores(), linux_memory())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        (String::new(), None, None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl(name: &str) -> Option<String> {
+    let out = std::process::Command::new("sysctl").args(["-n", name]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cpu_model() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("model name"))
+                .and_then(|value| value.split_once(':'))
+                .map(|(_, name)| name.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cores() -> Option<u64> {
+    std::fs::read_to_string("/proc/cpuinfo").ok().map(|t| t.lines().filter(|l| l.starts_with("processor")).count()).map(|n| n as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_memory() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("MemTotal"))
+                .and_then(|value| value.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .and_then(|kb| kb.checked_mul(1024))
 }
 
 impl Env {
@@ -117,6 +209,90 @@ impl Env {
         let v = serde_json::json!({"commands": self.commands, "vars": self.vars});
         sha256_hex(v.to_string().as_bytes())
     }
+}
+
+/// A detected CI provider: its short name, the run id and a URL for that run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ci {
+    pub provider: String,
+    pub run: String,
+    pub url: String,
+}
+
+enum Provider {
+    Github,
+    Gitlab,
+    Circle,
+    Buildkite,
+    Azure,
+    Jenkins,
+    Generic,
+}
+
+impl Provider {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Github => "github-actions",
+            Self::Gitlab => "gitlab-ci",
+            Self::Circle => "circleci",
+            Self::Buildkite => "buildkite",
+            Self::Azure => "azure-pipelines",
+            Self::Jenkins => "jenkins",
+            Self::Generic => "generic",
+        }
+    }
+}
+
+/// The CI provider the process runs under, read from the environment, if any.
+pub fn ci() -> Option<Ci> {
+    ci_from(&|k| std::env::var(k).ok())
+}
+
+/// Detect the CI provider from `get`, which maps a variable name to its value.
+/// `ci()` wraps this with the process environment; tests call it directly with
+/// a fixed map so they do not mutate the process-wide environment.
+pub fn ci_from(get: &dyn Fn(&str) -> Option<String>) -> Option<Ci> {
+    if get("GITHUB_ACTIONS").as_deref() != Some("true") {
+        let enabled = |key: &str| get(key).is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1");
+        for (marker, provider, run_key, url_key) in [
+            ("GITLAB_CI", Provider::Gitlab, "CI_PIPELINE_ID", "CI_PIPELINE_URL"),
+            ("CIRCLECI", Provider::Circle, "CIRCLE_BUILD_NUM", "CIRCLE_BUILD_URL"),
+            ("BUILDKITE", Provider::Buildkite, "BUILDKITE_BUILD_ID", "BUILDKITE_BUILD_URL"),
+        ] {
+            if enabled(marker) {
+                return Some(Ci {
+                    provider: provider.name().into(),
+                    run: get(run_key).unwrap_or_default(),
+                    url: get(url_key).unwrap_or_default(),
+                });
+            }
+        }
+        if enabled("TF_BUILD") {
+            let run = get("BUILD_BUILDID").unwrap_or_default();
+            let collection = get("SYSTEM_COLLECTIONURI").unwrap_or_default();
+            let project = get("SYSTEM_TEAMPROJECT").unwrap_or_default();
+            let url = if collection.is_empty() || project.is_empty() || run.is_empty() {
+                String::new()
+            } else {
+                format!("{}/{}/_build/results?buildId={run}", collection.trim_end_matches('/'), project.replace(' ', "%20"))
+            };
+            return Some(Ci { provider: Provider::Azure.name().into(), run, url });
+        }
+        if get("JENKINS_URL").is_some_and(|url| !url.is_empty()) {
+            return Some(Ci {
+                provider: Provider::Jenkins.name().into(),
+                run: get("BUILD_NUMBER").unwrap_or_default(),
+                url: get("BUILD_URL").unwrap_or_default(),
+            });
+        }
+        return enabled("CI").then(|| Ci { provider: Provider::Generic.name().into(), run: String::new(), url: String::new() });
+    }
+    // GitHub builds a run URL from three variables; the run id alone has none.
+    let run = get("GITHUB_RUN_ID").unwrap_or_default();
+    let repo = get("GITHUB_REPOSITORY").unwrap_or_default();
+    let server = get("GITHUB_SERVER_URL").unwrap_or_else(|| "https://github.com".into());
+    let url = if run.is_empty() || repo.is_empty() { String::new() } else { format!("{server}/{repo}/actions/runs/{run}") };
+    Some(Ci { provider: Provider::Github.name().into(), run, url })
 }
 
 #[cfg(test)]
@@ -174,11 +350,80 @@ mod tests {
             env: vec!["echo v1".into()],
             env_vars: vec!["RVOW_TEST_UNSET_VAR".into()],
             machine: None,
+            require_signature: false,
+            allowed_signers: String::new(),
+            interview_cap: 3,
+            signing_key: None,
+            agent: None,
+            context: String::new(),
+            rules: Default::default(),
         };
         let a = env(&tmp.0, &cfg).unwrap();
         assert_eq!(a.commands["echo v1"], "v1");
         assert_eq!(a.vars["RVOW_TEST_UNSET_VAR"], "");
         cfg.env = vec!["echo v2".into()];
         assert_ne!(env(&tmp.0, &cfg).unwrap().key(), a.key());
+    }
+
+    #[test]
+    fn env_machine_fields_stay_outside_the_key() {
+        let tmp = TempDir::new();
+        let cfg = crate::config::Config {
+            base: "main".into(),
+            timeout_secs: 60,
+            inputs: vec![],
+            test_globs: vec![],
+            protect_infra: vec![],
+            checks: vec![],
+            setup: vec![],
+            rerun_env: Default::default(),
+            env: vec!["echo v1".into()],
+            env_vars: vec![],
+            machine: None,
+            require_signature: false,
+            allowed_signers: String::new(),
+            interview_cap: 3,
+            signing_key: None,
+            agent: None,
+            context: String::new(),
+            rules: Default::default(),
+        };
+        let e = env(&tmp.0, &cfg).unwrap();
+        // The machine fields are present and differ from machine to machine,
+        // but they never move the staleness key.
+        let mut other = e.clone();
+        other.cpu = "A different CPU".into();
+        other.cores = e.cores.map(|c| c + 4);
+        other.memory = e.memory.map(|m| m / 2);
+        assert_ne!(&other.cpu, &e.cpu, "the CPU fields differ between machines");
+        assert_eq!(other.key(), e.key(), "machine fields never make a proof stale");
+    }
+
+    #[test]
+    fn ci_detection_names_github_actions_with_run_id_and_url() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "GITHUB_ACTIONS" => Some("true".into()),
+                "GITHUB_RUN_ID" => Some("1658821493".into()),
+                "GITHUB_REPOSITORY" => Some("octocat/Hello-World".into()),
+                _ => None,
+            }
+        };
+        let c = ci_from(&env).unwrap();
+        assert_eq!(c.provider, "github-actions");
+        assert_eq!(c.run, "1658821493");
+        assert_eq!(c.url, "https://github.com/octocat/Hello-World/actions/runs/1658821493");
+    }
+
+    #[test]
+    fn ci_detection_off_without_the_actions_marker() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "GITHUB_RUN_ID" => Some("1".into()),
+                "GITHUB_REPOSITORY" => Some("o/r".into()),
+                _ => None,
+            }
+        };
+        assert_eq!(ci_from(&env), None);
     }
 }

@@ -15,6 +15,7 @@ pub struct Task {
     pub group: Option<String>,
     pub covers: Vec<Ref>,
     pub verify: Option<String>,
+    pub mutants: Option<String>,
     pub files: Vec<String>,
     pub baseline_pass: bool,
     pub timeout: Option<Duration>,
@@ -58,6 +59,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                         group: group.clone(),
                         covers: Vec::new(),
                         verify: None,
+                        mutants: None,
                         files: Vec::new(),
                         baseline_pass: false,
                         timeout: None,
@@ -91,6 +93,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                 }
             }
             "verify" if !value.is_empty() => task.verify = Some(value.to_string()),
+            "mutants" if !value.is_empty() => task.mutants = Some(value.to_string()),
             "files" => task.files = split_list(value).map(String::from).collect(),
             "baseline" if value == "pass" => task.baseline_pass = true,
             "timeout" => match parse_duration(value) {
@@ -104,7 +107,7 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                 diags.push(Diagnostic::new(
                     Rule::TaskField,
                     n,
-                    format!("unknown or empty field {key}:, expected covers, verify, files, baseline or timeout"),
+                    format!("unknown or empty field {key}:, expected covers, verify, mutants, files, baseline or timeout"),
                 ));
                 continue;
             }

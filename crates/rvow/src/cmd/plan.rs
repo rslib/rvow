@@ -132,9 +132,39 @@ pub fn validate() -> Result<Reply> {
     Ok(r)
 }
 
-pub fn review(target: &str) -> Result<Reply> {
+pub fn review(target: &str, packet: bool, record: Option<&std::path::Path>) -> Result<Reply> {
     let home = store::home_dir()?;
-    let text = show::show(&project(&home)?, target)?;
+    let p = project(&home)?;
+    if packet {
+        let packet = rvow_core::review::packet_for(&p, &home, &cwd()?, target)?;
+        let mut reply = Reply::new();
+        reply.line(format!("identity: {}\n{}", packet.identity, packet.text));
+        reply.set("identity", packet.identity);
+        reply.set("packet", packet.text);
+        reply.set("evidence_bytes", packet.evidence_bytes);
+        reply.set("truncated", packet.truncated);
+        return Ok(reply);
+    }
+    if let Some(file) = record {
+        let recorded = rvow_core::review::record_for(&p, &home, &cwd()?, target, file)?;
+        let mut reply = Reply::new();
+        reply.line(format!("advisory review: {} of {} findings (event {})", recorded.kept, recorded.total, recorded.event));
+        reply.set("event", recorded.event);
+        reply.set("total", recorded.total);
+        reply.set("kept", recorded.kept);
+        reply.set("truncated", recorded.truncated);
+        let rows = recorded
+            .findings
+            .iter()
+            .map(|finding| {
+                reply.line(format!("  advisory: {}", finding.message));
+                obj! { "message" => finding.message, "path" => finding.path, "line" => finding.line }
+            })
+            .collect();
+        reply.table("findings", rows, "0 advisory findings");
+        return Ok(reply);
+    }
+    let text = show::show(&p, target)?;
     Ok(Reply::lines(format!("{text}\n\n{REVIEW}")))
 }
 
@@ -186,6 +216,15 @@ pub fn check(target: Option<&str>) -> Result<Reply> {
             message: format!("{prog} is neither on PATH nor in the repository"),
             fix: "",
         }));
+        if c.no_tasks {
+            found.push(Problem {
+                at: "tasks.md".to_string(),
+                level: "error",
+                code: "no-tasks",
+                message: "tasks.md has no task".to_string(),
+                fix: "add tasks as `- TSK-new1 <title>` with verify: and files:",
+            });
+        }
         for f in &found {
             f.add(&mut r, "  ");
         }
@@ -230,7 +269,8 @@ pub fn clarify(target: Option<&str>, json: bool) -> Result<Reply> {
     let p = project(&home)?;
     let mut r = Reply::new();
     if json {
-        println!("{}", interview::round(&p, &cwd()?, target)?);
+        let config = rvow_core::config::load(&p, &home)?;
+        println!("{}", interview::round_with_cap(&p, &cwd()?, target, config.interview_cap as usize)?);
         return Ok(r);
     }
     let mut rows = Vec::new();

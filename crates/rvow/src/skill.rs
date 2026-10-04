@@ -84,6 +84,61 @@ mod tests {
     }
 
     #[test]
+    fn skill_description_names_the_trigger_words_and_fits_the_budget() {
+        let text = render().unwrap();
+        let description = text.lines().find(|l| l.starts_with("description: ")).unwrap().trim_start_matches("description: ");
+        for word in ["plan", "propose", "spec", "accept", "prove"] {
+            assert!(description.contains(word), "{word} missing from {description}");
+        }
+        assert!(description.len() < 400, "{} chars", description.len());
+    }
+
+    #[test]
+    fn the_last_rule_names_the_exit_before_the_reason() {
+        let text = render().unwrap();
+        let section = text.split("## Stop and report").nth(1).unwrap();
+        let block = section.trim_start();
+        let exit = block.find("rvow block").unwrap();
+        let reason = block.find("until the user confirms it").unwrap();
+        assert!(exit < reason, "the exit must come first: {block}");
+        assert!(!block.starts_with("Never"), "state the rule in the positive form: {block}");
+    }
+
+    #[test]
+    fn the_always_on_text_fits_the_budget() {
+        let skill = render().unwrap();
+        assert!(skill.lines().count() < 40, "skill has {} lines", skill.lines().count());
+        assert!(skill.len() < 4000, "skill has {} chars", skill.len());
+        let description = skill.lines().find(|l| l.starts_with("description: ")).unwrap();
+        assert!(description.len() < 400, "description has {} chars", description.len());
+        // The brief cap itself is asserted by `fits` in rvow-core/src/brief.rs;
+        // here the worst-case constants are checked against the plan (W10).
+        assert!(skill.contains("rvow block"), "the skill lost the legal exit");
+    }
+
+    #[test]
+    fn the_vocabulary_has_one_sense_each() {
+        let skill = render().unwrap();
+        assert!(skill.contains("the vow is the accepted plan with its hashes"), "{skill}");
+        assert!(!skill.contains("(a vow)"), "{skill}");
+        let readme = include_str!("../../../README.md");
+        assert!(readme.contains("The vow is the accepted plan with its hashes"), "{readme}");
+    }
+
+    #[test]
+    fn the_asking_sentence_is_shared_by_skill_and_tools() {
+        let sentence = "Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing";
+        let skill = render().unwrap();
+        assert!(skill.contains(sentence), "skill: {}", skill);
+        let claude = include_str!("../../../extensions/claude/hooks/register.tsx");
+        let pi = include_str!("../../../extensions/pi/rvow/index.ts");
+        for (name, text) in [("claude", claude), ("pi", pi)] {
+            assert!(text.contains("Ask in chat only when it is missing."), "{name} tool description lacks the rule");
+            assert!(text.contains("one round of at most 3"), "{name} tool description lacks the round size");
+        }
+    }
+
+    #[test]
     fn a_missing_command_or_placeholder_fails_the_render() {
         assert!(render_text("{{cmd:nope}}").is_err());
         assert!(render_text("{{cmd:prove --nope}}").is_err());

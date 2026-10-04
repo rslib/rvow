@@ -38,7 +38,7 @@ const detailsAtom = atom({ plugin: 'rvow', key: 'details' } as const, [])
 const INSTALLED_BIN = '__RVOW_BIN__'
 const BIN = INSTALLED_BIN.startsWith('__') ? 'rvow' : INSTALLED_BIN
 const MAX_BLOCKS = 8
-const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*)$/
+const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*)$/
 
 type Event = 'pre-tool-use' | 'session-start' | 'stop' | 'status' | 'view'
 
@@ -341,6 +341,10 @@ async function ask($: EngineInterface): Promise<string> {
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
+    // A new session (startup, clear, resume) has no brief yet, no warning shown, no blocks in a row.
+    sentBrief = ''
+    warned = false
+    blocks = 0
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
@@ -366,7 +370,7 @@ export const register: Register = (on) => {
     await $.tool.register({
       name: 'rvow_ask',
       description:
-        'Ask the user the open questions of the rvow plan on this branch, one round of at most 4, and record the answers. Use it instead of asking in chat.',
+        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Ask in chat only when it is missing.',
     })
     later($, () => refresh($))
     return started

@@ -59,7 +59,7 @@ pub const DESIGN: &str = "design.md";
 pub const TASKS: &str = "tasks.md";
 pub const DELTAS: &str = "specs";
 pub const LEDGER: &str = "ledger.jsonl";
-pub const MAX_DESIGN_LINES: usize = 300;
+pub const MAX_DESIGN_LINES: usize = 100;
 
 /// Splits `CHG-xxxxxx-slug`, with an optional `YYYY-MM-DD-` prefix in the
 /// archive, into id and slug.

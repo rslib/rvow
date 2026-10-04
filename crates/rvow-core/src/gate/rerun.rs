@@ -1,0 +1,208 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use super::Report;
+use crate::change::{self, Stage};
+use crate::config;
+use crate::error::{Error, Result};
+use crate::fingerprint::{self, globset};
+use crate::git;
+use crate::proof::{self, Active, Now};
+use crate::runner;
+use crate::store::Project;
+use crate::tasks::Task;
+use crate::vow::sha256_hex;
+
+/// A temporary detached worktree of HEAD, removed on drop. This is the one
+/// place where rvow writes to git.
+pub(super) struct Worktree {
+    repo: PathBuf,
+    pub(super) path: PathBuf,
+}
+
+impl Worktree {
+    pub(super) fn add(repo: &Path, links: &[String]) -> Result<Worktree> {
+        let b = Error::random::<6>()?;
+        let name: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("rvow-rerun-{name}"));
+        let p = path.to_string_lossy().into_owned();
+        git::run(repo, &["worktree", "add", "--detach", "--quiet", &p, "HEAD"])?;
+        let tree = Worktree { repo: repo.to_path_buf(), path };
+        tree.link(links)?;
+        Ok(tree)
+    }
+
+    /// Links each `rerun_links` directory of the real repo into the tree.
+    /// Nothing is linked unless the config names it: the tree stays a clean
+    /// checkout of HEAD.
+    fn link(&self, links: &[String]) -> Result<()> {
+        let bad = |name: &str, why: &str| {
+            Error::new(
+                "config",
+                format!("rerun_links entry {name:?} {why}"),
+                "fix or remove that name in the rerun_links key of config.toml",
+            )
+        };
+        let real = self.repo.canonicalize().map_err(|e| Error::io(&self.repo, e))?;
+        for name in links {
+            let rel = Path::new(name);
+            if name.is_empty() || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+                return Err(bad(name, "is not a relative path inside the repository"));
+            }
+            if !git::run(&self.repo, &["ls-files", "--", name])?.trim().is_empty() {
+                return Err(bad(name, "is tracked by git"));
+            }
+            let src = self.repo.join(rel);
+            let Ok(src) = src.canonicalize() else { continue };
+            if !src.starts_with(&real) {
+                return Err(bad(name, "resolves outside the repository"));
+            }
+            if !src.is_dir() {
+                continue;
+            }
+            let dst = self.path.join(rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+            }
+            symlink_dir(&src, &dst)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn symlink_dir(src: &Path, dst: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(src, dst).map_err(|e| {
+        Error::new(
+            "link",
+            format!("cannot link {} to {}: {e}", dst.display(), src.display()),
+            "remove the name from rerun_links in config.toml",
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn symlink_dir(_src: &Path, dst: &Path) -> Result<()> {
+    Err(Error::new(
+        "link",
+        format!("cannot link {}: rerun_links needs symlinks", dst.display()),
+        "remove rerun_links from config.toml on this platform",
+    ))
+}
+
+impl Drop for Worktree {
+    fn drop(&mut self) {
+        let p = self.path.to_string_lossy().into_owned();
+        if git::run(&self.repo, &["worktree", "remove", "--force", &p]).is_err() {
+            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = git::run(&self.repo, &["worktree", "prune"]);
+        }
+    }
+}
+
+pub(super) fn base_ref(top: &Path, base: &str) -> Option<String> {
+    [format!("refs/remotes/origin/{base}"), format!("refs/heads/{base}")]
+        .into_iter()
+        .find(|r| git::run(top, &["rev-parse", "--verify", "--quiet", r]).is_ok())
+}
+
+/// Files that differ from `mb` in the worktree, plus untracked files git does
+/// not ignore.
+pub(super) fn changed_files(top: &Path, mb: &str) -> Result<Vec<String>> {
+    let mut files: Vec<String> = git::run(top, &["diff", "--name-only", mb])?.lines().map(String::from).collect();
+    files.extend(git::run(top, &["ls-files", "-o", "--exclude-standard"])?.lines().map(String::from));
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+/// The Prove event data for one rerun, matching what `rvow prove` records, so
+/// an imported run is recognized as a proof. Computed in the rerun tree.
+pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, inputs: &fingerprint::Inputs) -> Map<String, Value> {
+    let thash = crate::vow::task_hash(t);
+    let reqs = proof::covered(t, &c.loaded, now.living);
+    let env_key = now.env.key();
+    let key = sha256_hex(serde_json::json!([thash, reqs, inputs.hash, env_key]).to_string().as_bytes());
+    let mut data = Map::new();
+    data.insert("task".into(), t.id.to_string().into());
+    data.insert("task_hash".into(), thash.into());
+    data.insert("requirements".into(), serde_json::json!(reqs));
+    data.insert("verify".into(), t.verify.clone().unwrap_or_default().into());
+    data.insert("proved".into(), (o.passed() && o.tests_run != Some(0)).into());
+    data.insert("exit".into(), serde_json::json!(o.exit));
+    data.insert("timed_out".into(), o.timed_out.into());
+    data.insert("tests_run".into(), serde_json::json!(o.tests_run));
+    data.insert("started".into(), crate::ledger::now_ms().into());
+    data.insert("duration_ms".into(), o.duration_ms.into());
+    data.insert("tail".into(), serde_json::json!(o.tail));
+    data.insert("inputs".into(), inputs.hash.clone().into());
+    data.insert("input_files".into(), inputs.files.into());
+    data.insert("env".into(), serde_json::json!(now.env));
+    data.insert("env_key".into(), env_key.into());
+    data.insert("key".into(), key.into());
+    data.insert(
+        "run".into(),
+        serde_json::json!({ "invocation": invocation(), "rvow": env!("CARGO_PKG_VERSION"), "machine": proof::machine(now.config), "agent": proof::agent(now.config), "head": git::run(now.top, &["rev-parse", "HEAD"]).unwrap_or_default(), "branch": git::branch(now.top).ok().flatten(), "ci": fingerprint::ci() }),
+    );
+    data
+}
+
+fn invocation() -> String {
+    Error::random::<8>().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).unwrap_or_default()
+}
+/// Runs the verify commands of archived tasks whose `files` the branch touches.
+/// Failures block the gate and remain separate in its output.
+pub(super) fn rerun_archived(
+    project: &Project,
+    top: &Path,
+    run_dir: &Path,
+    env: &[(String, String)],
+    config: &config::Config,
+    r: &mut Report,
+    echo: &mut dyn Write,
+) -> Result<()> {
+    let Some(base) = base_ref(top, &config.base) else {
+        r.failures.push(format!("neither origin/{} nor {} exists; set base in config.toml", config.base, config.base));
+        return Ok(());
+    };
+    let mb = git::run(top, &["merge-base", "HEAD", &base])?;
+    let touched = changed_files(top, &mb)?;
+    let (all, _) = change::list(project)?;
+    for d in all.iter().filter(|d| d.stage == Stage::Done) {
+        let loaded = match change::load(&d.path, &[]) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                r.failures.push(format!("archived change {} cannot be loaded, so its tasks were not rerun: {}", d.id, e.message));
+                continue;
+            }
+        };
+        for t in &loaded.tasks {
+            let Some(cmd) = t.verify.as_deref() else { continue };
+            let set = match globset(&t.files) {
+                Ok(set) => set,
+                Err(e) => {
+                    r.failures.push(format!("archived task {} of {} has a bad files glob, so it was not rerun: {}", t.id, d.id, e.message));
+                    continue;
+                }
+            };
+            if !touched.iter().any(|f| set.is_match(f)) {
+                continue;
+            }
+            let _ = writeln!(echo, "rerun archived {}: {cmd}", t.id);
+            let o = runner::run(cmd, run_dir, env, t.timeout.unwrap_or(config.timeout()), echo)?;
+            r.timings.push((t.id.to_string(), o.duration_ms));
+            if !(o.passed() && o.tests_run != Some(0)) {
+                let why = if o.timed_out {
+                    "timed out".to_string()
+                } else if o.passed() {
+                    "ran 0 tests".to_string()
+                } else {
+                    format!("exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
+                };
+                r.archived.push(format!("{} failed on rerun ({why}): {cmd}", t.id));
+            }
+        }
+    }
+    Ok(())
+}

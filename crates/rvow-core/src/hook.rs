@@ -18,110 +18,9 @@ use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 
-const SHELL_SPLIT: &[char] = &[';', '&', '|', '(', ')', '`', '\n', '<', '>'];
-
-/// Words of a shell command, split on whitespace and control characters, with
-/// simple quotes removed. Good enough to spot a command name; an obfuscated
-/// call (built from variables) is a known gap that the final gate covers.
-fn words(cmd: &str) -> Vec<String> {
-    cmd.split(|c: char| c.is_whitespace() || SHELL_SPLIT.contains(&c))
-        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
-        .filter(|w| !w.is_empty())
-        .map(String::from)
-        .collect()
-}
-
-fn base_name(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
-}
-
-/// `cmd` without heredoc bodies and quoted text, which a shell does not run.
-/// A double-quoted span that holds `$(` or a backtick stays, since it runs.
-fn unquoted(cmd: &str) -> String {
-    let mut kept = String::new();
-    let mut end: Option<String> = None;
-    for line in cmd.lines() {
-        if let Some(e) = &end {
-            if line.trim() == e {
-                end = None;
-            }
-            continue;
-        }
-        kept.push_str(line);
-        kept.push('\n');
-        if let Some(i) = line.find("<<") {
-            let tag = line[i + 2..].trim_start_matches('-').trim_start();
-            let tag: String = tag.trim_start_matches(['\'', '"']).chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-            if !tag.is_empty() {
-                end = Some(tag);
-            }
-        }
-    }
-    let mut out = String::new();
-    let mut rest = kept.as_str();
-    while let Some(i) = rest.find(['\'', '"']) {
-        out.push_str(&rest[..i]);
-        let q = &rest[i..=i];
-        let tail = &rest[i + 1..];
-        let Some(j) = tail.find(q) else {
-            out.push_str(&rest[i..]);
-            return out;
-        };
-        let span = &tail[..j];
-        if q == "\"" && (span.contains("$(") || span.contains('`')) {
-            out.push_str(span);
-        }
-        out.push(' ');
-        rest = &tail[j + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Why a Bash command must not run, or `None`.
-pub fn bash_denial(cmd: &str) -> Option<String> {
-    let w = words(&unquoted(cmd));
-    let lower = cmd.to_lowercase();
-    for (i, word) in w.iter().enumerate() {
-        let rvow_call = base_name(word) == "rvow" || (word == "run" && i > 0 && base_name(&w[i - 1]) == "cargo");
-        if rvow_call
-            && let Some(sub) = w[i + 1..].iter().find(|x| !x.starts_with('-') && *x != "rvow")
-            && (sub == "accept" || sub == "confirm")
-        {
-            return Some(format!("rvow {sub} is for the user only; ask the user to run `! rvow {sub}`"));
-        }
-    }
-    let rvow_answer = w.iter().any(|x| base_name(x) == "rvow") && w.iter().any(|x| x == "answer");
-    let via_dialog = w.windows(2).any(|p| p[0] == "--via" && p[1] == "dialog") || w.iter().any(|x| x == "--via=dialog");
-    if rvow_answer && via_dialog {
-        return Some(
-            "only the rvow_ask tool records an answer as given in a dialog; record a chat answer with rvow answer <ref> \"<choice>\""
-                .into(),
-        );
-    }
-    let git = w.iter().any(|x| base_name(x) == "git");
-    if git && w.iter().any(|x| x == "--no-verify") {
-        return Some("--no-verify skips the hooks that check the plan".into());
-    }
-    if git && w.iter().any(|x| x == "commit") && w.iter().any(|x| x == "-n") {
-        return Some("git commit -n skips the hooks that check the plan".into());
-    }
-    if lower.contains("core.hookspath") {
-        return Some("core.hooksPath decides which hooks run; changing it is for the user".into());
-    }
-    if lower.contains(".git/hooks") {
-        return Some(".git/hooks holds the pre-push gate; only rvow install writes it".into());
-    }
-    let names_rvow_file = w.iter().any(|x| {
-        let b = base_name(x);
-        b == LEDGER || b == IDS_FILE
-    });
-    let only_rvow = w.first().is_some_and(|x| base_name(x) == "rvow");
-    if names_rvow_file && !only_rvow {
-        return Some(format!("{LEDGER} and {IDS_FILE} are written only by rvow; use rvow commands"));
-    }
-    None
-}
+mod shell;
+pub use shell::{bash_denial, script_denial};
+use shell::{bash_enforcement_denial, bash_secret_denial};
 
 /// The absolute, symlink-free form of `path`, also when the file does not
 /// exist yet: the nearest existing ancestor is resolved and the rest appended.
@@ -162,54 +61,96 @@ pub(crate) fn key(p: &Path) -> String {
     if cfg!(target_os = "macos") { s.to_lowercase() } else { s }
 }
 
-fn file_arg(input: &Value) -> Option<String> {
-    ["file_path", "notebook_path", "path"].iter().find_map(|k| input.get(k).and_then(Value::as_str)).map(String::from)
-}
+/// The argument names that carry a file path for a writing tool.
+const FILE_ARGS: &[&str] =
+    &["file_path", "notebook_path", "path", "filename", "file", "dest", "destination", "target", "to", "output", "out"];
 
-fn writes_files(tool: &str) -> bool {
-    matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") || tool.starts_with("mcp__")
-}
-
-/// Files outside any repository that enforce rvow: the installed mod, Claude
-/// Code's plugins and settings, and the pi extension.
-fn enforcement_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(home) = crate::store::home_dir() {
-        out.push(home.join(crate::install::MARKETPLACE_DIR));
-    }
-    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-        let h = PathBuf::from(h);
-        let claude = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|c| !c.is_empty()).map_or_else(|| h.join(".claude"), PathBuf::from);
-        out.push(claude.join("plugins"));
-        out.push(claude.join("settings.json"));
-        out.push(claude.join("settings.local.json"));
-        out.push(h.join(".pi/agent/extensions/rvow.ts"));
+/// The files a tool call names: path arguments, and the file headers of a
+/// patch text (`*** Update File: x`, `+++ b/x`).
+fn file_args(input: &Value) -> Vec<String> {
+    let mut out: Vec<String> = FILE_ARGS.iter().filter_map(|k| input.get(k).and_then(Value::as_str)).map(String::from).collect();
+    for text in input.as_object().into_iter().flat_map(|o| o.values()).filter_map(Value::as_str).filter(|t| t.contains('\n')) {
+        for line in text.lines() {
+            let named = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "]
+                .iter()
+                .find_map(|p| line.strip_prefix(p))
+                .or_else(|| line.strip_prefix("+++ b/"));
+            out.extend(named.map(|p| p.trim().to_string()));
+        }
     }
     out
 }
 
-const WRITERS: &[&str] = &["rm", "mv", "cp", "tee", "sed", "perl", "python", "python3", "chmod", "ln", "truncate", "dd", "install"];
+/// Whether a tool changes files. The built-in editors do, and so does any
+/// other tool unless its name says it only reads; an unknown name that
+/// carries a file argument counts as a writer.
+fn writes_files(tool: &str) -> bool {
+    if matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+        return true;
+    }
+    if matches!(tool, "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "WebFetch" | "WebSearch" | "TodoWrite" | "Task" | "Agent") {
+        return false;
+    }
+    let name = tool.rsplit("__").next().unwrap_or(tool).to_lowercase();
+    let says = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    if says(&[
+        "write", "edit", "create", "save", "put", "move", "rename", "copy", "delete", "remove", "patch", "append", "update", "replace",
+        "apply", "insert", "mkdir", "upload", "touch", "truncate",
+    ]) {
+        return true;
+    }
+    !says(&[
+        "read", "get", "list", "search", "find", "view", "show", "stat", "fetch", "query", "ls", "cat", "grep", "glob", "info", "describe",
+        "open",
+    ])
+}
 
-/// Why a Bash command that names an enforcement file must not run: a write to
-/// one of them could switch rvow off.
-fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let named = paths.iter().find(|p| {
-        let full = p.display().to_string();
-        let tilde = full.replacen(&home, "~", 1);
-        cmd.contains(&full) || (!home.is_empty() && cmd.contains(&tilde))
-    })?;
-    let writes = cmd.contains('>') || words(cmd).iter().any(|w| WRITERS.contains(&base_name(w)));
-    writes.then(|| format!("{} enforces rvow; changing it is for the user", named.display()))
+/// The directory that holds the hidden checks, which the implementing agent
+/// may not read or write.
+fn secret_paths() -> Vec<PathBuf> {
+    crate::store::home_dir().map(|h| vec![h.join("hidden-checks")]).unwrap_or_default()
+}
+
+/// The allowed-signers file that signed confirmations are checked against, as
+/// the configured path resolves from `top`.
+fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
+    let home = crate::store::home_dir().ok()?;
+    let config = config::load(project, &home).ok()?;
+    (!config.allowed_signers.is_empty()).then(|| top.join(&config.allowed_signers))
+}
+
+/// Files outside any repository that enforce rvow: the installed mod, Claude
+/// Code's plugins and settings, the pi extension and the signing trust file.
+fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(home) = crate::store::home_dir() {
+        out.push(home.join(crate::install::MARKETPLACE_DIR));
+    }
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+    if let Some(h) = &home {
+        let claude = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|c| !c.is_empty()).map_or_else(|| h.join(".claude"), PathBuf::from);
+        out.push(claude.join("plugins"));
+        out.push(claude.join("settings.json"));
+        out.push(claude.join("settings.local.json"));
+    }
+    if let Some(pi) = crate::install::pi_dir(home.as_deref()) {
+        out.push(pi.join("extensions/rvow.ts"));
+        out.push(pi.join("extensions/rvow"));
+    }
+    out.extend(trust.map(Path::to_path_buf));
+    out
 }
 
 /// Why an edit of `file` must not happen, or `None`.
 fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Option<String>> {
     let target = key(&real_path(Path::new(file), cwd));
-    for p in enforcement_paths() {
+    let trust = signers_path(project, top);
+    for p in enforcement_paths(trust.as_deref()) {
         let p = key(&real_path(&p, cwd));
         if target == p || target.starts_with(&format!("{p}/")) {
-            return Ok(Some(format!("{p} enforces rvow; changing it is for the user")));
+            return Ok(Some(format!(
+                "{p} enforces rvow; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
+            )));
         }
     }
     let root = key(&real_path(&project.root, cwd));
@@ -222,16 +163,20 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
             || name == crate::record::RECORD_FILE
             || target.starts_with(&format!("{root}/objects/")))
     {
-        return Ok(Some(format!("{name} is written only by rvow; use rvow commands")));
+        return Ok(Some(format!(
+            "{name} is written only by rvow; run `rvow show <change>` to read it, or `rvow amend --reason \"...\"` to change the plan"
+        )));
     }
     if target.starts_with(&format!("{root}/archive/")) {
-        return Ok(Some("an archived change is history and does not change; start a new change instead".into()));
+        return Ok(Some("an archived change is history and does not change; run `rvow new \"<title>\"` to start a new change".into()));
     }
     if target.starts_with(&format!("{root}/specs/")) {
-        return Ok(Some("living specs change only through a change and rvow archive".into()));
+        return Ok(Some("living specs change only through a change and rvow archive; run rvow guide spec to see how".into()));
     }
     if target.starts_with(&format!("{top_key}/.git/")) {
-        return Ok(Some(".git/ is not edited by hand; the hooks there run the gate".into()));
+        return Ok(Some(
+            ".git/ is not edited by hand; the hooks there run the gate. Use git commands, and run rvow install for the hooks".into(),
+        ));
     }
     let Some(rel) = target.strip_prefix(&format!("{top_key}/")) else {
         return Ok(None);
@@ -244,7 +189,9 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
         )));
     }
     if ENFORCEMENT.iter().any(|e| key(Path::new(e)) == rel) {
-        return Ok(Some(format!("{rel} configures the hooks that enforce the plan; changing it is for the user")));
+        return Ok(Some(format!(
+            "{rel} configures the hooks that enforce the plan; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
+        )));
     }
     if protected(project, top)?.contains(rel) && !unlocked(project, top, rel)? {
         return Ok(Some(format!(
@@ -274,6 +221,9 @@ fn active_scope(project: &Project, top: &Path) -> Result<Option<globset::GlobSet
         return Ok(None);
     }
     let globs: Vec<String> = mine.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.clone())).collect();
+    // The edited path arrives lowercased by `key` on macOS, so the globs must
+    // match it in the same form. macOS file systems ignore case by default.
+    let globs = if cfg!(target_os = "macos") { globs.iter().map(|g| g.to_lowercase()).collect() } else { globs };
     fingerprint::globset(&globs).map(Some)
 }
 
@@ -359,22 +309,53 @@ pub(crate) fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String
     Ok(out)
 }
 
+/// Why `file` must not be read or written: it is inside the hidden checks.
+fn secret_denial(cwd: &Path, file: &str) -> Option<String> {
+    let target = key(&real_path(Path::new(file), cwd));
+    secret_paths().into_iter().find_map(|p| {
+        let p = key(&real_path(&p, cwd));
+        (target == p || target.starts_with(&format!("{p}/"))).then(|| {
+            format!(
+                "{p} holds checks that stay hidden from the implementing agent; do not read or write them. If the plan needs them, run `rvow block <task> --reason \"...\"`"
+            )
+        })
+    })
+}
+
 /// Claude Code `PreToolUse`: a deny response, or `None` to allow.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
     let reason = if tool == "Bash" {
-        args.get("command")
-            .and_then(Value::as_str)
-            .and_then(|c| bash_denial(c).or_else(|| bash_enforcement_denial(c, &enforcement_paths())))
-    } else if writes_files(tool) {
-        match file_arg(&args) {
-            Some(f) => edit_denial(project, &git::toplevel(&cwd)?, &cwd, &f)?,
+        match args.get("command").and_then(Value::as_str) {
+            Some(c) => {
+                let top = git::toplevel(&cwd).ok();
+                let trust = top.as_deref().and_then(|t| signers_path(project, t));
+                bash_denial(c)
+                    .or_else(|| script_denial(c, &cwd))
+                    .or_else(|| bash_secret_denial(c, &secret_paths()))
+                    .or_else(|| bash_enforcement_denial(c, &enforcement_paths(trust.as_deref())))
+            }
             None => None,
         }
     } else {
-        None
+        let files = file_args(&args);
+        let secret = files.iter().find_map(|f| secret_denial(&cwd, f));
+        match secret {
+            Some(r) => Some(r),
+            None if writes_files(tool) => {
+                let mut found = None;
+                for f in &files {
+                    found = edit_denial(project, &git::toplevel(&cwd)?, &cwd, f)?;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                found
+            }
+            None => None,
+        }
     };
     Ok(reason.map(|r| {
         json!({"hookSpecificOutput": {
@@ -420,7 +401,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
             drift::drift(project, &top, &config, c)?.into_iter().filter(|i| i.class.blocks()).map(|i| i.what).collect();
         if !blocking.is_empty() {
             return Ok(Some(format!(
-                "the plan changed without an amendment ({}); run rvow amend --reason \"...\" and ask the user to run ! rvow confirm",
+                "the plan changed without an amendment ({}); run rvow amend --reason \"...\" and ask the user to run /rvow-confirm (or ! rvow confirm)",
                 blocking.join("; ")
             )));
         }
@@ -523,6 +504,50 @@ pub fn claude_stop(project: &Project, home: &Path, input: &Value) -> Result<Opti
 mod tests {
     use super::*;
     use crate::proof::tests::accepted;
+
+    #[test]
+    fn a_literal_glob_matches_a_casewise_edited_path_on_macos() {
+        // `key` lowercases the edited path on macOS; the scope must do the same
+        // to the vowed globs or a literal glob like SKILL.md.tmpl never matches.
+        let rel = "skills/rvow/skill.md.tmpl";
+        let globs = if cfg!(target_os = "macos") {
+            vec!["skills/rvow/SKILL.md.tmpl".to_lowercase()]
+        } else {
+            vec!["skills/rvow/SKILL.md.tmpl".into()]
+        };
+        assert!(fingerprint::globset(&globs).unwrap().is_match(rel));
+    }
+
+    /// Every denial says what is blocked, why, and the command or user action
+    /// to run next, and no text doubles the `rvow:` prefix that the adapter adds.
+    fn denial_has_a_next_step(reason: &str) {
+        assert!(!reason.starts_with("rvow: rvow"), "doubled prefix: {reason}");
+        assert!(!reason.starts_with("Never "), "state the rule in the positive form: {reason}");
+        let next = ["rvow ", "git ", "run ", "ask the user", "only the user", "instead", "Use "];
+        assert!(next.iter().any(|n| reason.contains(n)), "no next step: {reason}");
+    }
+
+    #[test]
+    fn every_deny_reason_names_a_next_step() {
+        for reason in [
+            "x enforces rvow; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\"",
+            "ledger.jsonl is written only by rvow; use rvow commands instead of editing it",
+            "an archived change is history and does not change; start a new change with rvow new instead",
+            "living specs change only through a change and rvow archive; run rvow guide spec to see how",
+            ".git/ is not edited by hand; the hooks there run the gate. Use git commands, and run rvow install for the hooks",
+            "t.sh is a protected test or test setup file; to change it, run rvow amend --unlock t.sh --reason \"...\" and ask the user to confirm",
+            "t.sh is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm",
+            "the plan CHG-x is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept CHG-x (or ! rvow accept CHG-x) before you edit code",
+            "the plan changed without an amendment (a); run rvow amend --reason \"...\" and ask the user to run ! rvow confirm",
+            "rvow accept belongs to the user; the hooks deny it for agents. Ask the user to run /rvow-accept <id>, or to type ! rvow accept",
+            "--no-verify skips the hooks that check the plan; run git commit and git push without it",
+            "git commit -n skips the hooks that check the plan; run git commit without -n",
+            "core.hooksPath decides which hooks run; changing it is for the user. If the plan needs it, run rvow block <task> --reason \"...\"",
+            ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead",
+        ] {
+            denial_has_a_next_step(reason);
+        }
+    }
 
     #[test]
     fn bash_rules() {
@@ -703,7 +728,7 @@ mod tests {
             edit(&p, &repo, file.to_str().unwrap())
                 .map(|v| v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string())
         };
-        assert_eq!(reason(p.root.join("specs/cap/spec.md")).unwrap(), "rvow: living specs change only through a change and rvow archive");
+        assert!(reason(p.root.join("specs/cap/spec.md")).unwrap().ends_with("run rvow guide spec to see how"));
         let archived = reason(p.root.join("archive/done/2026-10-01-CHG-7k2mq8-x/tasks.md"));
         assert!(archived.unwrap().contains("history"));
         let c = change::new(&p, "T", "main", false).unwrap();

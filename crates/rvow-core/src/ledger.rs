@@ -152,6 +152,111 @@ pub(crate) fn append_line(path: &Path, line: &str) -> Result<()> {
     file.write_all(&buf).map_err(|e| Error::io(path, e))
 }
 
+/// A proof run that `gate --out` writes and `rvow ingest` reads: the Prove
+/// event data plus the change it proves and the project folder (under the
+/// home store) that locates that change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Run {
+    pub project: String,
+    pub change: String,
+    #[serde(flatten)]
+    pub data: Map<String, Value>,
+}
+
+/// Records an imported run in the ledger of the active change it names in
+/// the project at `project_root`.
+pub fn ingest_run(project_root: &Path, run: &Run) -> Result<Event> {
+    if ["kind", "time", "parents", "hash", "line"].iter().any(|name| run.data.contains_key(*name)) {
+        return Err(Error::new("run-data", "a proof result contains reserved event fields", "ingest the original CI result file"));
+    }
+    if !crate::bundle::safe_ingest_project(&run.project) {
+        return Err(Error::new(
+            "run-project",
+            format!("{} is not a relative project locator", run.project),
+            "ingest the original CI result file",
+        ));
+    }
+    if let Some(identity) = run.data.get("project_identity") {
+        let path = project_root.join(crate::store::PROJECT_FILE);
+        let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+        let actual: crate::store::Meta =
+            toml::from_str(&text).map_err(|e| Error::new("project-file", format!("{}: {e}", path.display()), "run rvow rebind"))?;
+        let expected: crate::store::Meta = serde_json::from_value(identity.clone())
+            .map_err(|e| Error::new("run-project", e.to_string(), "ingest the original CI result file"))?;
+        if actual != expected {
+            return Err(Error::new(
+                "run-project",
+                format!("{} does not match the run's project identity", project_root.display()),
+                "ingest into the matching project",
+            ));
+        }
+    }
+    let project = crate::store::Project {
+        root: project_root.to_path_buf(),
+        meta: crate::store::Meta { roots: Vec::new(), remote: None, mode: crate::store::Mode::Home },
+    };
+    let change = crate::change::resolve(&project, &run.change).map_err(|_| {
+        Error::new(
+            "no-change",
+            format!("{} is not a change in {}", run.change, project_root.display()),
+            "run ingest where the project's store holds that change",
+        )
+    })?;
+    if change.stage != crate::change::Stage::Active {
+        return Err(Error::new(
+            "no-change",
+            format!("{} is not active in this project", run.change),
+            "ingest proves into an active change",
+        ));
+    }
+    verify_run_matches_plan(&project, &change, run)?;
+    let mut data = run.data.clone();
+    let objects = data.remove("test_objects");
+    if let Some(objects) = &objects {
+        let objects = objects
+            .as_object()
+            .ok_or_else(|| Error::new("run-objects", "test_objects is not an object", "ingest the original CI result file"))?;
+        for (hash, text) in objects {
+            if text.as_str().is_none_or(|text| crate::vow::sha256_hex(text.as_bytes()) != *hash) {
+                return Err(Error::new(
+                    "run-objects",
+                    format!("test object {hash} has invalid content"),
+                    "ingest the original CI result file",
+                ));
+            }
+        }
+    }
+    let lock = project.lock()?;
+    if let Some(objects) = objects.and_then(|v| v.as_object().cloned()) {
+        for text in objects.values().filter_map(serde_json::Value::as_str) {
+            crate::vow::put_object(&project, text.as_bytes())?;
+        }
+    }
+    append(&change.path.join(crate::change::LEDGER), &lock, Kind::Prove, data)
+}
+
+/// A run proves only a task that exists in the change, as it is written now:
+/// the task hash and the covered-requirement hashes must be the plan's own.
+fn verify_run_matches_plan(project: &crate::store::Project, change: &crate::change::ChangeDir, run: &Run) -> Result<()> {
+    let refuse =
+        |what: String| Error::new("run-task", what, "ingest the file that rvow gate --out wrote for this change, or run rvow prove");
+    let id = run.data.get("task").and_then(Value::as_str).unwrap_or("");
+    let (living, _) = crate::change::load_living(project)?;
+    let loaded = crate::change::load(&change.path, &living)?;
+    let Some(task) = loaded.tasks.iter().find(|t| t.id.to_string() == id) else {
+        return Err(refuse(format!("task {id:?} is not in {}", run.change)));
+    };
+    let want = crate::vow::task_hash(task);
+    if run.data.get("task_hash").and_then(Value::as_str) != Some(want.as_str()) {
+        return Err(refuse(format!("task_hash of {id} does not match the plan of {}", run.change)));
+    }
+    let reqs = serde_json::json!(crate::proof::covered(task, &loaded, &living));
+    if run.data.get("requirements") != Some(&reqs) {
+        return Err(refuse(format!("requirements of {id} do not match the covered requirements of {}", run.change)));
+    }
+    Ok(())
+}
+
 /// The events no other event names as a parent.
 fn heads(events: &[Event]) -> Vec<String> {
     let named: HashSet<&str> = events.iter().flat_map(|e| e.parents.iter().map(String::as_str)).collect();

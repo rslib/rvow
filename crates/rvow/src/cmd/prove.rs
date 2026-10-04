@@ -1,5 +1,6 @@
-use rvow_core::error::Result;
+use rvow_core::error::{Error, Result};
 use rvow_core::gate::{self, Options};
+use rvow_core::ledger::Run;
 use rvow_core::proof;
 use rvow_core::store;
 
@@ -13,6 +14,10 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
     let tests = o.tests_run.map_or("unknown".to_string(), |n| n.to_string());
     let verdict = if p.proved {
         "proved".to_string()
+    } else if p.mutants.as_ref().is_some_and(|check| !check.passed()) {
+        "failed: mutation check".to_string()
+    } else if p.private_check.as_ref().is_some_and(|check| !check.passed) {
+        "failed: private check".to_string()
     } else if o.timed_out {
         "failed: timed out".to_string()
     } else if o.passed() {
@@ -101,7 +106,11 @@ pub fn prove_stale() -> Result<Reply> {
 pub fn gate(opts: Options) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
+    let out = opts.out.clone();
     let g = gate::gate(&p, &home, &cwd()?, opts, &mut std::io::stderr())?;
+    if let Some(path) = out {
+        write_runs(&path, &g.runs)?;
+    }
     let mut r = Reply::new();
     let mut rows = Vec::new();
     for (task, ms) in &g.timings {
@@ -114,11 +123,14 @@ pub fn gate(opts: Options) -> Result<Reply> {
     for f in &g.failures {
         r.line(format!("fail: {f}"));
     }
+    for failure in &g.archived {
+        r.line(format!("fail archived: {failure}"));
+    }
     r.ok = g.passed();
     if r.ok {
         r.line(format!("gate passed ({} active changes on this branch)", g.changes));
     } else {
-        r.line(format!("gate failed: {} problems", g.failures.len()));
+        r.line(format!("gate failed: {} problems", g.failures.len() + g.archived.len()));
         r.help("Run `rvow status` to see each task's state");
     }
     r.set("passed", r.ok);
@@ -132,5 +144,56 @@ pub fn gate(opts: Options) -> Result<Reply> {
     if !g.failures.is_empty() {
         r.set("failures", g.failures);
     }
+    if !g.archived.is_empty() {
+        r.set("archived", g.archived);
+    }
     Ok(r)
+}
+
+pub fn bundle(path: &std::path::Path) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let bundle = rvow_core::bundle::export(&p, &home, &cwd()?)?;
+    let text = serde_json::to_string_pretty(&bundle).map_err(|e| Error::internal(format!("bundle does not serialize: {e}")))?;
+    std::fs::write(path, text).map_err(|e| Error::io(path, e))?;
+    let mut reply = Reply::new();
+    reply.line(format!("verification bundle: {}", path.display()));
+    reply.set("bundle", path.display().to_string());
+    reply.help("Run `rvow gate --bundle <file> --out <runs>` in the matching CI checkout");
+    Ok(reply)
+}
+
+pub fn gate_bundle(path: &std::path::Path, out: Option<&std::path::Path>) -> Result<Reply> {
+    let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+    let bundle = serde_json::from_str(&text)
+        .map_err(|e| Error::new("bundle", format!("{}: {e}", path.display()), "export a new bundle from the accepted plan"))?;
+    let verified = rvow_core::bundle::verify(&bundle, &cwd()?, &mut std::io::stderr())?;
+    if let Some(out) = out {
+        write_runs(out, &verified.runs)?;
+    }
+    let mut reply = Reply::new();
+    reply.ok = verified.failures.is_empty();
+    reply.line(if reply.ok { "portable gate passed" } else { "portable gate failed" });
+    reply.set("passed", reply.ok);
+    reply.set("runs", verified.runs.len());
+    for failure in &verified.failures {
+        reply.line(format!("fail: {failure}"));
+    }
+    if !verified.failures.is_empty() {
+        reply.set("failures", verified.failures);
+    }
+    Ok(reply)
+}
+
+/// Writes each run as one JSON line, the shape `rvow ingest` reads. A fresh
+/// file is created; an existing file is replaced.
+fn write_runs(path: &std::path::Path, runs: &[Run]) -> Result<()> {
+    let mut out = String::new();
+    for run in runs {
+        let line =
+            serde_json::to_string(run).map_err(|e| Error::new("out", format!("run does not serialize: {e}"), "report this as a bug"))?;
+        out.push_str(&line);
+        out.push('\n');
+    }
+    std::fs::write(path, out).map_err(|e| Error::io(path, e))
 }

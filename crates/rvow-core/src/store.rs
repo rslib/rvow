@@ -1,5 +1,6 @@
 //! Where a project's rvow tree lives and how a repository finds it.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -181,6 +182,65 @@ fn write_meta(root: &Path, meta: &Meta) -> Result<bool> {
 /// current root commits and origin remote in `project.toml`, and moves a home tree to the path its
 /// remote implies. Running it twice changes nothing.
 pub fn rebind(dir: &Path, home: &Path) -> Result<Rebind> {
+    rebind_impl(dir, home, None)
+}
+
+/// `rebind` with a filter-repo commit map, so a rewritten history whose root
+/// commits no longer match is found again through the map.
+pub fn rebind_with_map(dir: &Path, home: &Path, map_path: &Path) -> Result<Rebind> {
+    let map = read_commit_map(map_path)?;
+    rebind_impl(dir, home, Some(&map))
+}
+
+/// Reads a `git filter-repo` commit map: `<old> <new>` per line.
+fn read_commit_map(path: &Path) -> Result<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(old), Some(new)) = (parts.next(), parts.next()) {
+            map.insert(old.to_string(), new.to_string());
+        }
+    }
+    Ok(map)
+}
+
+/// Maps each root through the commit map, keeping an unmapped root as it is.
+fn map_roots(roots: &[String], map: &BTreeMap<String, String>) -> Vec<String> {
+    roots.iter().map(|r| map.get(r).cloned().unwrap_or_else(|| r.clone())).collect()
+}
+
+/// A project whose recorded roots map through `map` to `roots`, found the
+/// same way `find` matches: one candidate, or one by remote, else ambiguous.
+fn find_mapped(dir: &Path, home: &Path, roots: &[String], map: &BTreeMap<String, String>) -> Result<Option<Project>> {
+    let remote = git::origin_url(dir).and_then(|u| git::remote_path(&u));
+    let mut hits = Vec::new();
+    walk(home, 0, &mut |root| {
+        if let Ok(meta) = read_meta(root) {
+            let mapped = map_roots(&meta.roots, map);
+            if mapped.iter().any(|r| roots.contains(r)) {
+                hits.push(Project { root: root.to_path_buf(), meta });
+            }
+        }
+    });
+    if hits.len() > 1 {
+        hits.retain(|p| p.meta.remote.is_some() && p.meta.remote == remote);
+    }
+    match hits.len() {
+        0 => Ok(None),
+        1 => Ok(hits.pop()),
+        _ => Err(Error::new(
+            "ambiguous-project",
+            format!(
+                "several rvow projects match this repository through the map: {}",
+                hits.iter().map(|p| p.root.display().to_string()).collect::<Vec<_>>().join(", ")
+            ),
+            "give each clone a distinct origin remote",
+        )),
+    }
+}
+
+fn rebind_impl(dir: &Path, home: &Path, map: Option<&BTreeMap<String, String>>) -> Result<Rebind> {
     let top = git::toplevel(dir)?;
     let roots = identity(&top)?;
     let remote = git::origin_url(&top).and_then(|u| git::remote_path(&u));
@@ -189,11 +249,18 @@ pub fn rebind(dir: &Path, home: &Path) -> Result<Rebind> {
         let changed = write_meta(&repo_root, &Meta { roots, remote, mode: Mode::Repo })?;
         return Ok(if changed { Rebind::Updated(repo_root) } else { Rebind::Unchanged(repo_root) });
     }
-    let Some(found) = find(&top, home)? else {
-        return Err(Error::new("no-project", "no rvow tree matches this repository", "run rvow init"));
+    let found = match find(&top, home)? {
+        Some(f) => Some(f),
+        None => match map {
+            Some(m) => find_mapped(&top, home, &roots, m)?,
+            None => None,
+        },
+    };
+    let Some(found) = found else {
+        return Err(Error::new("no-project", "no rvow tree matches this repository", "run rvow init or give it a commit map"));
     };
     let _lock = found.lock()?;
-    let meta = Meta { remote: remote.clone().or(found.meta.remote.clone()), ..found.meta.clone() };
+    let meta = Meta { roots: roots.clone(), remote: remote.clone().or(found.meta.remote.clone()), ..found.meta.clone() };
     let want = remote.map(|r| home.join(r)).unwrap_or_else(|| found.root.clone());
     if want == found.root {
         let changed = write_meta(&found.root, &meta)?;
@@ -472,5 +539,38 @@ mod tests {
         let tmp = TempDir::new();
         let repo = repo_with_commit(&tmp.0, "r");
         assert_eq!(rebind(&repo, &tmp.0.join("home")).unwrap_err().code, "no-project");
+    }
+
+    #[test]
+    fn rebind_with_map_finds_a_rewritten_repo() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let old = repo_with_commit(&tmp.0, "old");
+        let p = init(&old, &home, Mode::Home).unwrap();
+        let a = git::run(&old, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        // A fresh repository with different content stands in for the same
+        // project after a rewrite, so its root commits differ.
+        let new = tmp.0.join("new");
+        std::fs::create_dir_all(&new).unwrap();
+        git(&new, &["init", "-q", "-b", "main"]);
+        std::fs::write(new.join("a.txt"), "rewritten").unwrap();
+        git(&new, &["add", "a.txt"]);
+        git(&new, &["commit", "-q", "-m", "init"]);
+        let b = git::run(&new, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert_ne!(a, b, "the two repositories have different roots after a rewrite");
+
+        let map = tmp.0.join("commit-map");
+        std::fs::write(&map, format!("{a} {b}\n")).unwrap();
+
+        // Without the map the new repo matches no recorded root.
+        assert_eq!(find(&new, &home).unwrap(), None);
+        let changed = rebind_with_map(&new, &home, &map).unwrap();
+        assert_eq!(changed, Rebind::Updated(p.root.clone()));
+
+        // Now a plain find sees the project at its new root.
+        let found = find(&new, &home).unwrap().unwrap();
+        assert_eq!(found.root, p.root);
+        assert_eq!(found.meta.roots, vec![b]);
     }
 }

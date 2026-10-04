@@ -62,6 +62,7 @@ pub struct Report {
     pub findings: Vec<Finding>,
     pub missing: Vec<(String, String)>,
     pub questions: Vec<Question>,
+    pub no_tasks: bool,
 }
 
 impl Report {
@@ -69,11 +70,18 @@ impl Report {
         self.findings.iter().any(|(_, d)| d.severity() == crate::diag::Severity::Error)
             || !self.missing.is_empty()
             || !self.questions.is_empty()
+            || self.no_tasks
     }
 }
 
 fn report(change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
-    Report { missing: missing_programs(top, &loaded.tasks), questions: questions(&loaded.texts), findings: loaded.findings, change }
+    Report {
+        missing: missing_programs(top, &loaded.tasks),
+        questions: questions(&loaded.texts),
+        no_tasks: loaded.tasks.is_empty(),
+        findings: loaded.findings,
+        change,
+    }
 }
 
 /// Checks `target`, or every open change whose proposal names the current

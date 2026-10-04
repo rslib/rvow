@@ -4,24 +4,35 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-
-use crate::amend;
-use crate::change::{self, CapSpec, LEDGER, Stage};
+use crate::change;
 use crate::config;
-use crate::diag::Severity;
-use crate::drift;
-use crate::error::{Error, Result};
-use crate::fingerprint::{self, globset};
+use crate::error::Result;
+use crate::fingerprint;
 use crate::git;
-use crate::ledger::{self, Kind};
-use crate::proof::{self, Active, Now, State};
-use crate::record;
+use crate::ledger::Run;
+use crate::proof::{self, Active, Now};
 use crate::runner;
-use crate::store::{Mode, Project, REPO_DIR};
+use crate::store::Project;
+
+mod check;
+mod rerun;
+mod signature;
+
+use check::check_scope;
+use rerun::{Worktree, prove_data, rerun_archived};
+
+#[cfg(test)]
+use crate::change::Stage;
+#[cfg(test)]
+use crate::record;
+#[cfg(test)]
 use crate::vow::requirement_hash;
 
-const MAX_LISTED: usize = 20;
+#[path = "gate_hook.rs"]
+mod hook_integrity;
+
+pub(crate) use check::{check_change, check_lifecycle, check_record};
+pub use signature::{bound_confirm_payload, confirm_payload, sign};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -29,75 +40,42 @@ pub struct Report {
     pub warnings: Vec<String>,
     /// Each rerun task and how long it took, so slow checks are visible.
     pub timings: Vec<(String, u64)>,
+    /// Archived verification failures, reported separately from active tasks.
+    pub archived: Vec<String>,
+    /// The rerun results of the branch's tasks, when `--out` asked for them:
+    /// each carries the data a `rvow prove` event would, plus the change and
+    /// project that route it back on ingest.
+    pub runs: Vec<crate::ledger::Run>,
     pub changes: usize,
 }
 
 impl Report {
     pub fn passed(&self) -> bool {
-        self.failures.is_empty()
+        self.failures.is_empty() && self.archived.is_empty()
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Options {
     pub strict: bool,
     pub rerun: bool,
-}
-
-/// A temporary detached worktree of HEAD, removed on drop. This is the one
-/// place where rvow writes to git.
-struct Worktree {
-    repo: PathBuf,
-    path: PathBuf,
-}
-
-impl Worktree {
-    fn add(repo: &Path) -> Result<Worktree> {
-        let b = Error::random::<6>()?;
-        let name: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("rvow-rerun-{name}"));
-        let p = path.to_string_lossy().into_owned();
-        git::run(repo, &["worktree", "add", "--detach", "--quiet", &p, "HEAD"])?;
-        Ok(Worktree { repo: repo.to_path_buf(), path })
-    }
-}
-
-impl Drop for Worktree {
-    fn drop(&mut self) {
-        let p = self.path.to_string_lossy().into_owned();
-        if git::run(&self.repo, &["worktree", "remove", "--force", &p]).is_err() {
-            let _ = std::fs::remove_dir_all(&self.path);
-            let _ = git::run(&self.repo, &["worktree", "prune"]);
-        }
-    }
-}
-
-fn base_ref(top: &Path, base: &str) -> Option<String> {
-    [format!("refs/remotes/origin/{base}"), format!("refs/heads/{base}")]
-        .into_iter()
-        .find(|r| git::run(top, &["rev-parse", "--verify", "--quiet", r]).is_ok())
-}
-
-/// Files that differ from `mb` in the worktree, plus untracked files git does
-/// not ignore.
-fn changed_files(top: &Path, mb: &str) -> Result<Vec<String>> {
-    let mut files: Vec<String> = git::run(top, &["diff", "--name-only", mb])?.lines().map(String::from).collect();
-    files.extend(git::run(top, &["ls-files", "-o", "--exclude-standard"])?.lines().map(String::from));
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
-fn list(items: &[String]) -> String {
-    let mut s = items.iter().take(MAX_LISTED).cloned().collect::<Vec<_>>().join(", ");
-    if items.len() > MAX_LISTED {
-        s.push_str(&format!(" and {} more", items.len() - MAX_LISTED));
-    }
-    s
+    /// Write the rerun results to this file, for `rvow ingest` to read.
+    pub out: Option<PathBuf>,
 }
 
 /// Checks the active changes of the current branch.
 pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
+    gate_for(project, home, cwd, opts, None, echo)
+}
+
+fn gate_for(
+    project: &Project,
+    home: &Path,
+    cwd: &Path,
+    opts: Options,
+    target: Option<&crate::id::Id>,
+    echo: &mut dyn Write,
+) -> Result<Report> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -111,37 +89,33 @@ pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mu
     check_lifecycle(project, &mut r)?;
     check_record(project, &living, &mut r)?;
 
-    if let Ok(dir) = git::run(&top, &["config", "--get", "core.hooksPath"])
-        && !dir.is_empty()
+    if let Some(failure) = hook_integrity::failure(&top) {
+        r.failures.push(failure);
+    }
+    let branch = git::branch(&top)?;
+    if branch.is_none() && !changes.is_empty() {
+        r.failures.push(format!("HEAD is detached while {} changes are active; check out a branch", changes.len()));
+    }
+    let queue = branch.as_deref().map_or_else(Vec::new, |branch| proof::on_branch(&changes, branch));
+    if let Some(id) = target
+        && !queue.iter().any(|change| &change.dir.id == id)
     {
-        let hook = top.join(&dir).join("pre-push");
-        let runs_gate = std::fs::read_to_string(&hook).is_ok_and(|t| t.contains("rvow") && t.contains("gate"));
-        if !runs_gate {
-            r.failures.push(format!(
-                "core.hooksPath points to {dir}, whose pre-push hook does not run rvow gate; run rvow install or add the line it prints"
-            ));
-        }
+        r.failures.push(format!("{id} is not active on the current branch; check out its accepted branch before archiving"));
     }
-    let Some(branch) = git::branch(&top)? else {
-        if !changes.is_empty() {
-            r.failures.push(format!("HEAD is detached while {} changes are active; check out a branch", changes.len()));
-        }
-        return Ok(r);
-    };
-    let queue = proof::on_branch(&changes, &branch);
-    r.changes = queue.len();
-    if queue.is_empty() {
-        return Ok(r);
-    }
+    r.changes = queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)).count();
 
     let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
-    for c in &queue {
-        check_change(project, c, &now, opts, &mut r)?;
+    for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
+        check_change(project, c, &now, &opts, &mut r)?;
     }
-    check_scope(project, &top, &config.base, &branch, &living, &queue, &mut r)?;
+    if let Some(branch) = branch.as_deref()
+        && !queue.is_empty()
+    {
+        check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
+    }
 
-    let tree = if opts.rerun { Some(Worktree::add(&top)?) } else { None };
+    let tree = if opts.rerun { Some(Worktree::add(&top, &config::rerun_links(project, home)?)?) } else { None };
     let run_dir = tree.as_ref().map_or(top.clone(), |t| t.path.clone());
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
     if opts.rerun {
@@ -153,12 +127,28 @@ pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mu
                 return Ok(r);
             }
         }
+        let run_projection = match &opts.out {
+            Some(_) => Some({
+                let folder = project
+                    .root
+                    .strip_prefix(home)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| project.root.to_string_lossy().into_owned());
+                let run_now = Now { top: &run_dir, config: &config, env: fingerprint::env_with(&run_dir, &config, &env)?, living: &living };
+                (folder, run_now)
+            }),
+            None => None,
+        };
         for c in &queue {
             for t in &c.loaded.tasks {
+                let inputs = run_projection.as_ref().map(|(_, now)| now.inputs(t)).transpose()?;
                 let cmd = t.verify.as_deref().unwrap_or("");
                 let _ = writeln!(echo, "rerun {}: {cmd}", t.id);
                 let o = runner::run(cmd, &run_dir, &env, t.timeout.unwrap_or(config.timeout()), echo)?;
                 r.timings.push((t.id.to_string(), o.duration_ms));
+                if let (Some((folder, run_now)), Some(inputs)) = (&run_projection, &inputs) {
+                    r.runs.push(Run { project: folder.clone(), change: c.dir.id.to_string(), data: prove_data(c, t, &o, run_now, inputs) });
+                }
                 if !(o.passed() && o.tests_run != Some(0)) {
                     let why = if o.timed_out {
                         "timed out".to_string()
@@ -171,6 +161,7 @@ pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mu
                 }
             }
         }
+        rerun_archived(project, &top, &run_dir, &env, &config, &mut r, echo)?;
     }
     for cmd in &config.checks {
         let _ = writeln!(echo, "check: {cmd}");
@@ -181,149 +172,10 @@ pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mu
     }
     Ok(r)
 }
-
-/// The strict gate for one active change alone, as `archive` runs it: the
-/// vow, validation, drift, pending amendments and every task proved.
-pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active, living: &[CapSpec]) -> Result<Report> {
-    let top = git::toplevel(cwd)?;
-    let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living };
-    let mut r = Report { changes: 1, ..Report::default() };
-    if c.vow().is_none() {
-        r.failures.push(format!("{} is in active/ without a vow event; it was moved by hand", c.dir.id));
-    }
-    let opts = Options { strict: true, rerun: false };
-    check_change(project, c, &now, opts, &mut r)?;
-    Ok(r)
-}
-
-/// A change outside active/ whose ledger does not hold the event that moves it
-/// there was moved by hand.
-fn check_lifecycle(project: &Project, r: &mut Report) -> Result<()> {
-    let (all, _) = change::list(project)?;
-    for c in all.iter().filter(|c| c.stage != Stage::Active) {
-        let (events, _) = ledger::read(&c.path.join(LEDGER))?;
-        let has = |k: Kind| events.iter().any(|e| e.kind == k);
-        let problem = match c.stage {
-            Stage::Backlog if has(Kind::Vow) => "has a vow but sits in backlog/",
-            Stage::Done if !has(Kind::Archive) => "sits in archive/done/ without an archive event",
-            Stage::Dropped if !has(Kind::Drop) => "sits in archive/dropped/ without a drop event",
-            Stage::Superseded if !events.iter().any(|e| e.kind == Kind::Supersede && e.data.contains_key("superseded_by")) => {
-                "sits in archive/superseded/ without a supersede event"
-            }
-            _ => continue,
-        };
-        r.failures.push(format!("{} {problem}; it was moved by hand", c.id));
-    }
-    Ok(())
-}
-
-/// Every living requirement matches the hash in spec-record.json. A project
-/// from before the record existed has none, and the check waits for one.
-fn check_record(project: &Project, living: &[CapSpec], r: &mut Report) -> Result<()> {
-    let mut record = record::load(project)?;
-    if record.is_empty() {
-        return Ok(());
-    }
-    for (cap, spec) in living {
-        for req in &spec.requirements {
-            let id = req.id.to_string();
-            let what = match record.remove(&id) {
-                None => "is not in spec-record.json",
-                Some(e) if e.hash != requirement_hash(req) => "does not match its recorded hash",
-                Some(_) => continue,
-            };
-            r.failures.push(format!("{id} in specs/{cap}/spec.md {what}; a living spec was edited outside a change"));
-        }
-    }
-    for id in record.keys() {
-        r.failures.push(format!("{id} is in spec-record.json but in no living spec; a living spec was edited outside a change"));
-    }
-    Ok(())
-}
-
-fn check_change(project: &Project, c: &Active, now: &Now, opts: Options, r: &mut Report) -> Result<()> {
-    let id = &c.dir.id;
-    for (path, d) in c.loaded.errors() {
-        r.failures.push(format!("{id}: {path}:{}: {}", d.line, d.message));
-    }
-    for d in &c.ledger_diags {
-        let line = format!("{id}: {LEDGER}:{}: {}", d.line, d.message);
-        match d.severity() {
-            Severity::Error => r.failures.push(line),
-            Severity::Warning => r.warnings.push(line),
-        }
-    }
-    for item in drift::drift(project, now.top, now.config, c)?.into_iter().filter(|i| i.class.blocks()) {
-        r.failures.push(format!(
-            "{id}: {} drift: {}; record it with rvow amend --reason and ask the user to confirm",
-            item.class.name(),
-            item.what
-        ));
-    }
-    for p in amend::pending(std::slice::from_ref(c)) {
-        r.failures.push(format!("{id}: amendment {} waits for the user's confirmation", p.id));
-    }
-    if opts.rerun {
-        return Ok(());
-    }
-    for t in &c.loaded.tasks {
-        let s = proof::state(c, t, now)?;
-        let line = match &s {
-            State::Stale(why) => format!("{} is stale ({})", t.id, why.join(", ")),
-            other => format!("{} is {}", t.id, other.name()),
-        };
-        match s {
-            State::Proved => {}
-            State::Stale(_) | State::Flaky if !opts.strict => r.warnings.push(line),
-            _ => r.failures.push(line),
-        }
-    }
-    Ok(())
-}
-
-fn check_scope(
-    project: &Project,
-    top: &Path,
-    base: &str,
-    branch: &str,
-    living: &[CapSpec],
-    queue: &[&Active],
-    r: &mut Report,
-) -> Result<()> {
-    let Some(base_ref) = base_ref(top, base) else {
-        r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
-        return Ok(());
-    };
-    let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
-    for c in queue {
-        let vowed = c.vow().and_then(|v| v.data.get("base_commit")).and_then(Value::as_str).unwrap_or("");
-        if !vowed.is_empty() && git::run(top, &["merge-base", "--is-ancestor", vowed, &mb]).is_err() {
-            r.failures.push(format!(
-                "{}: the merge base with {base_ref} is not after the base recorded at accept; {base} moved backwards",
-                c.dir.id
-            ));
-        }
-    }
-    let mut globs: Vec<String> = queue.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())).collect();
-    let (all, _) = change::list(project)?;
-    for d in all.iter().filter(|d| d.stage == Stage::Done) {
-        let loaded = change::load(&d.path, living)?;
-        if loaded.proposal.branch == branch {
-            globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
-        }
-    }
-    let set = globset(&globs)?;
-    let repo_dir = format!("{REPO_DIR}/");
-    let outside: Vec<String> = changed_files(top, &mb)?
-        .into_iter()
-        .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
-        .filter(|f| !set.is_match(f))
-        .collect();
-    if !outside.is_empty() {
-        r.failures.push(format!("{} changed files lie outside every task's files: {}", outside.len(), list(&outside)));
-    }
-    Ok(())
+/// Checks repository integrity and scope while requiring proofs only for the
+/// selected change, so other unfinished changes can remain on the branch.
+pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Result<Report> {
+    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), &mut std::io::sink())
 }
 
 #[cfg(test)]
@@ -335,6 +187,73 @@ mod tests {
 
     fn run_gate(p: &Project, home: &Path, repo: &Path, opts: Options) -> Report {
         gate(p, home, repo, opts, &mut std::io::sink()).unwrap()
+    }
+
+    #[test]
+    fn rerun_archived_reports_a_regression_the_branch_caused() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "out"]);
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let id = proof::active(&p, &change::load_living(&p).unwrap().0).unwrap()[0].dir.id.to_string();
+        crate::archive::archive(&p, &home, &repo, &id).unwrap();
+
+        // A later change on a feature branch off main touches more.txt only.
+        git(&repo, &["checkout", "-q", "-b", "feat/next"]);
+        let c = change::new(&p, "Next", "feat/next", false).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new2 Write more\n  verify: grep -q ok more.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: more.txt, out.txt\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(&p, prepared).unwrap();
+        std::fs::write(repo.join("more.txt"), "ok").unwrap();
+        git(&repo, &["add", "more.txt"]);
+        git(&repo, &["commit", "-q", "-m", "more"]);
+
+        // Nothing touched yet: the archived task is not rerun.
+        let opts = Options { strict: true, rerun: true, out: None };
+        let r = run_gate(&p, &home, &repo, opts.clone());
+        assert!(r.passed() && r.archived.is_empty(), "{r:?}");
+
+        // The feature branch edits out.txt in its scope but breaks the archived requirement.
+        std::fs::write(repo.join("out.txt"), "bad").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "break"]);
+        let r = run_gate(&p, &home, &repo, opts);
+        assert!(!r.passed(), "archived regressions must block: {r:?}");
+        assert_eq!(r.archived.len(), 1, "{r:?}");
+        assert!(r.archived[0].contains(&task) && r.archived[0].contains("failed on rerun"), "{r:?}");
+    }
+
+    #[test]
+    fn a_failed_run_keeps_the_gate_failing() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        // The task fails: out.txt does not hold the required value.
+        std::fs::write(repo.join("out.txt"), "bad").unwrap();
+        crate::proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(r.failures.iter().any(|f| f.contains("is failed")), "{r:?}");
+        // A later, still-failing run does not let the gate pass.
+        crate::proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(r.failures.iter().any(|f| f.contains("is failed")), "{r:?}");
+    }
+
+    #[test]
+    fn gate_records_a_timing_per_rerun_task() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "out"]);
+        let r = run_gate(&p, &home, &repo, Options { strict: true, rerun: true, out: None });
+        assert!(r.passed(), "{r:?}");
+        assert!(r.timings.iter().any(|(id, _)| id.contains(&task)), "no timing for {task}: {:?}", r.timings);
     }
 
     #[test]
@@ -355,8 +274,8 @@ mod tests {
         std::fs::remove_file(repo.join("stray.txt")).unwrap();
 
         // The rerun uses HEAD, where out.txt is not committed yet.
-        let opts = Options { strict: true, rerun: true };
-        let r = run_gate(&p, &home, &repo, opts);
+        let opts = Options { strict: true, rerun: true, out: None };
+        let r = run_gate(&p, &home, &repo, opts.clone());
         assert!(r.failures.iter().any(|f| f.contains("failed on rerun")), "{r:?}");
         git(&repo, &["add", "out.txt"]);
         git(&repo, &["commit", "-q", "-m", "out"]);
@@ -369,8 +288,122 @@ mod tests {
         std::fs::write(repo.join("out.txt"), "ok\n").unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(r.passed() && !r.warnings.is_empty(), "{r:?}");
-        let r = run_gate(&p, &home, &repo, Options { strict: true, rerun: false });
+        let r = run_gate(&p, &home, &repo, Options { strict: true, rerun: false, out: None });
         assert!(!r.passed(), "strict fails on stale");
+    }
+
+    #[test]
+    fn signed_confirmation_refused_when_unsigned_or_not_allowed() {
+        let tmp = TempDir::new();
+        let keys = tmp.0.join("keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        run_keygen(&keys.join("trusted"));
+        run_keygen(&keys.join("rogue"));
+        let allowed_signers = keys.join("allowed_signers");
+        std::fs::write(&allowed_signers, signers_line(&keys.join("trusted.pub"), "alice@example")).unwrap();
+
+        // Each case gets a fresh project so earlier Confirm events cannot leak.
+        // The TempDir stays in the tuple so the case's files live until the
+        // caller is done with them.
+        let case = || {
+            let (tmp, p, repo, _) = accepted();
+            let home = tmp.0.join("home");
+            let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+            let tasks = dir.join("tasks.md");
+            let text = std::fs::read_to_string(&tasks).unwrap();
+            std::fs::write(&tasks, text.replace("Write ok", "Write one")).unwrap();
+            assert!(crate::amend::amend(&p, &home, &repo, None, "edit", None).is_ok());
+            std::fs::write(repo.join("out.txt"), "ok").unwrap();
+            let (living, _) = crate::change::load_living(&p).unwrap();
+            let changes = crate::proof::active(&p, &living).unwrap();
+            crate::proof::prove(&p, &home, &repo, &changes[0].loaded.tasks.first().unwrap().id.to_string(), &mut std::io::sink()).unwrap();
+            let amd = crate::amend::pending(&changes).first().unwrap().id.to_string();
+            std::fs::write(
+                p.root.join("config.toml"),
+                format!("require_signature = true\nallowed_signers = \"{}\"\n", allowed_signers.display()),
+            )
+            .unwrap();
+            (tmp, p, home, repo, dir, amd)
+        };
+
+        // Append one Confirm event and report whether the gate calls it signed.
+        let gate_signed_ok = |data: serde_json::Map<String, serde_json::Value>| {
+            let (tmp, p, home, repo, dir, _) = case();
+            let lock = p.lock().unwrap();
+            crate::ledger::append(&dir.join(crate::change::LEDGER), &lock, crate::ledger::Kind::Confirm, data).unwrap();
+            drop(lock);
+            let r = run_gate(&p, &home, &repo, Options::default());
+            drop(tmp);
+            !r.failures.iter().any(|f| f.contains("not signed with an allowed key"))
+        };
+
+        // 1. unsigned is refused.
+        let mut data = serde_json::Map::new();
+        data.insert("amendment".into(), "AMD-x".into());
+        data.insert("decision".into(), "accept".into());
+        assert!(!gate_signed_ok(data), "an unsigned confirm must be refused");
+
+        let (tmp, paid, home, repo, _, amd) = case();
+        crate::amend::confirm_signed(
+            &paid,
+            &[amd],
+            crate::amend::Decision::Accept,
+            None,
+            Some(crate::amend::Signing { key: &keys.join("rogue"), signer: "alice@example" }),
+        )
+        .unwrap();
+        let r = run_gate(&paid, &home, &repo, Options::default());
+        assert!(r.failures.iter().any(|f| f.contains("not signed with an allowed key")), "a rogue-key signature must be refused");
+        drop(tmp);
+
+        // Legacy signatures remain invalid even when the signing key is allowed.
+        let (tmp, p, home, repo, dir, amd) = case();
+        let lock = p.lock().unwrap();
+        let mut data = serde_json::Map::new();
+        data.insert("amendment".into(), amd.clone().into());
+        data.insert("decision".into(), "accept".into());
+        data.insert("signer".into(), "alice@example".into());
+        data.insert("signature".into(), sign(&keys.join("trusted"), &confirm_payload(&amd, "accept")).unwrap().into());
+        crate::ledger::append(&dir.join(crate::change::LEDGER), &lock, crate::ledger::Kind::Confirm, data).unwrap();
+        drop(lock);
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(r.failures.iter().any(|f| f.contains("not signed with an allowed key")), "a legacy signature must be refused");
+        drop(tmp);
+
+        let (tmp, p, home, repo, _, amd) = case();
+        crate::amend::confirm_signed(
+            &p,
+            &[amd],
+            crate::amend::Decision::Accept,
+            None,
+            Some(crate::amend::Signing { key: &keys.join("trusted"), signer: "alice@example" }),
+        )
+        .unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(
+            !r.failures.iter().any(|f| f.contains("not signed with an allowed key")),
+            "a content-bound allowed signature must be accepted"
+        );
+        drop(tmp);
+    }
+
+    fn run_keygen(path: &Path) {
+        let st = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f"])
+            .arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "ssh-keygen failed for {}", path.display());
+    }
+
+    /// The allowed-signers line for `pub_path`: principal, key type, key.
+    fn signers_line(pub_path: &Path, principal: &str) -> String {
+        let pub_text = std::fs::read_to_string(pub_path).unwrap();
+        let fields: Vec<&str> = pub_text.split_whitespace().take(2).collect();
+        assert_eq!(fields.len(), 2, "{pub_text}");
+        format!("{principal} {} {}\n", fields[0], fields[1])
     }
 
     #[test]
@@ -468,7 +501,16 @@ mod tests {
         let hooks_path_failure = |r: &Report| r.failures.iter().any(|f| f.contains("core.hooksPath"));
         assert!(hooks_path_failure(&run_gate(&p, &home, &repo, Options::default())));
         std::fs::create_dir_all(repo.join(".husky")).unwrap();
-        std::fs::write(repo.join(".husky/pre-push"), "npx lint\n'/opt/rvow' gate --strict --rerun\n").unwrap();
+        let hook = repo.join(".husky/pre-push");
+        std::fs::write(&hook, "npx lint\n'/opt/rvow' gate --strict --rerun\n").unwrap();
+        assert!(hooks_path_failure(&run_gate(&p, &home, &repo, Options::default())));
+        let binary = std::env::current_exe().unwrap();
+        std::fs::write(&hook, crate::install::pre_push_script(&binary).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert!(!hooks_path_failure(&run_gate(&p, &home, &repo, Options::default())));
     }
 

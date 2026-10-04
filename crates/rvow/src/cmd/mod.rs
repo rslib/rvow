@@ -4,6 +4,8 @@ use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::store::{self, Project};
 
+pub mod export;
+pub mod ingest;
 pub mod lifecycle;
 pub mod plan;
 pub mod prove;

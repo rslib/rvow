@@ -164,6 +164,28 @@ impl Decision {
 /// Records `decision` for each named amendment, or for the whole pending set
 /// when `all_digest` matches it.
 pub fn confirm(project: &Project, ids: &[String], decision: Decision, all_digest: Option<&str>) -> Result<Vec<Id>> {
+    confirm_signed(project, ids, decision, all_digest, None)
+}
+
+/// A key and explicit allowed-signers principal for a confirmation.
+pub struct Signing<'a> {
+    pub key: &'a Path,
+    pub signer: &'a str,
+}
+
+/// Selects and records decisions under one lock. All signatures are prepared
+/// before appending any confirmation, so a signing failure records nothing.
+pub fn confirm_signed(
+    project: &Project,
+    ids: &[String],
+    decision: Decision,
+    all_digest: Option<&str>,
+    signing: Option<Signing<'_>>,
+) -> Result<Vec<Id>> {
+    let lock = project.lock()?;
+    if signing.as_ref().is_some_and(|s| s.signer.trim().is_empty()) {
+        return Err(Error::new("signer", "the signer identity is empty", "pass --signer <identity>"));
+    }
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
     let pending = pending(&changes);
@@ -196,12 +218,36 @@ pub fn confirm(project: &Project, ids: &[String], decision: Decision, all_digest
     if chosen.is_empty() {
         return Err(Error::new("none", "no amendment chosen", "name amendment ids or pass --all <digest>"));
     }
-    let lock = project.lock()?;
+    let mut prepared = Vec::new();
     for p in &chosen {
+        let c = changes.iter().find(|c| c.dir.id == p.change).ok_or_else(|| Error::internal("pending change missing"))?;
+        let amendment_id = p.id.to_string();
+        let events: Vec<_> = c
+            .events
+            .iter()
+            .filter(|e| e.kind == Kind::Amend && e.data.get("amendment").and_then(Value::as_str) == Some(amendment_id.as_str()))
+            .collect();
+        if events.len() != 1 {
+            return Err(Error::new(
+                "amendment",
+                format!("{} has ambiguous amendment events", p.id),
+                "inspect the change ledger before confirming",
+            ));
+        }
+        let event = events[0];
         let mut data = Map::new();
         data.insert("amendment".into(), p.id.to_string().into());
         data.insert("decision".into(), decision.name().into());
-        ledger::append(&p.change_path.join(LEDGER), &lock, Kind::Confirm, data)?;
+        data.insert("amendment_event".into(), event.hash.clone().into());
+        if let Some(signing) = &signing {
+            let payload = crate::gate::bound_confirm_payload(project, &p.change, event, decision.name())?;
+            data.insert("signer".into(), signing.signer.into());
+            data.insert("signature".into(), crate::gate::sign(signing.key, &payload)?.into());
+        }
+        prepared.push((p.change_path.join(LEDGER), data));
+    }
+    for (path, data) in prepared {
+        ledger::append(&path, &lock, Kind::Confirm, data)?;
     }
     Ok(chosen.iter().map(|p| p.id.clone()).collect())
 }
