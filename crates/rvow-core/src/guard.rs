@@ -1,9 +1,14 @@
 //! Tests that a passing proof relied on. A proof saves the test files in the
 //! task's scope and the `#[cfg(test)]` modules of its Rust files; later edits
-//! that remove or change a saved line are weaken drift, while added lines stay
-//! free, so a later task can add tests but not weaken earlier ones.
+//! that change protected order, multiplicity or lexical context are weaken
+//! drift. New Rust test items and standalone non-Rust checks stay free.
+//! Existing Rust items stay exact at the token level. This is conservative
+//! lexical protection, not a claim of semantic equivalence.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+
+#[path = "guard_rust.rs"]
+mod rust;
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -21,33 +26,16 @@ use crate::vow::put_object;
 /// The key suffix for the test modules of a Rust file.
 pub const RUST_TESTS: &str = "#cfg(test)";
 
-/// The `#[cfg(test)]` modules of a Rust source, joined. Braces are counted
-/// naively, so a brace inside a string can end a module early; that only makes
-/// the saved text shorter, never wider.
+/// The `#[cfg(test)]` modules of a Rust source, joined. Unrecognized or
+/// unterminated lexical context protects the whole source rather than truncating it.
 pub fn rust_test_modules(src: &str) -> String {
-    let lines: Vec<&str> = src.lines().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].trim() != "#[cfg(test)]" {
-            i += 1;
-            continue;
-        }
-        let mut depth = 0i64;
-        let mut opened = false;
-        while i < lines.len() {
-            let line = lines[i];
-            out.push_str(line);
-            out.push('\n');
-            depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
-            opened |= line.contains('{');
-            i += 1;
-            if opened && depth <= 0 {
-                break;
-            }
-        }
-    }
-    out
+    rust::modules(src).unwrap_or_else(|| src.to_string())
+}
+
+/// The names of `#[cfg(test)] mod <name>;` submodule includes in a Rust source.
+/// These pull a separate test file into the crate under test.
+pub fn rust_test_submodules(src: &str) -> Vec<String> {
+    rust::test_submodules(src)
 }
 
 /// Saves the guarded text for `task` and returns key to object hash. Keys are
@@ -67,6 +55,22 @@ pub fn capture(project: &Project, top: &Path, config: &Config, task: &Task) -> R
             let modules = rust_test_modules(&text);
             if !modules.is_empty() {
                 out.insert(format!("{rel}{RUST_TESTS}"), put_object(project, modules.as_bytes())?.into());
+            }
+            // A `#[cfg(test)] mod x;` include pulls a separate test file into the
+            // crate under test. Guard that file the same way we guard a test file,
+            // whether or not it matches a test glob. Inline test modules are already
+            // covered above; the pointed-at file is what bodyless includes actually test.
+            let dir = Path::new(&rel).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            for name in rust_test_submodules(&text) {
+                for candidate in [dir.join(format!("{name}.rs")), dir.join(name).join("mod.rs")] {
+                    let key = candidate.to_string_lossy().into_owned();
+                    if !out.contains_key(&key)
+                        && let Ok(sub) = std::fs::read_to_string(top.join(&candidate))
+                    {
+                        out.insert(key, put_object(project, sub.as_bytes())?.into());
+                        break;
+                    }
+                }
             }
         }
     }
@@ -100,27 +104,52 @@ pub fn guarded(change: &Active) -> BTreeMap<String, String> {
 
 fn current(top: &Path, key: &str) -> Option<String> {
     match key.strip_suffix(RUST_TESTS) {
-        Some(rel) => std::fs::read_to_string(top.join(rel)).ok().map(|t| rust_test_modules(&t)),
+        Some(rel) => std::fs::read_to_string(top.join(rel)).ok().and_then(|t| rust::modules(&t)),
         None => std::fs::read_to_string(top.join(key)).ok(),
     }
 }
 
-/// Weaken drift for every guarded text that lost or changed a saved line.
+fn added_lines_safe(before: &str, now: &str) -> bool {
+    let mut old = before.lines().peekable();
+    now.lines().all(|line| {
+        if old.peek().is_some_and(|saved| *saved == line) {
+            old.next();
+            true
+        } else {
+            // Without a parser for this language, only standalone added checks are free.
+            let line = line.trim();
+            line.is_empty()
+                || ((line.starts_with("check_") || line.starts_with("assert"))
+                    && !line.contains(['{', '}', '#', '/', '\\', '\'', '"', ';', '&', '|', '<', '>', '(', ')', '$', '`']))
+        }
+    }) && old.next().is_none()
+}
+
+/// Weaken drift for saved content whose order, multiplicity or lexical context changed.
 pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
     let mut out = Vec::new();
     for (key, hash) in guarded(change) {
-        let Ok(before) = std::fs::read_to_string(project.root.join("objects").join(&hash)) else {
-            continue;
-        };
         let what = |how: &str| format!("test {key} {how} after its first passing proof");
+        let before = std::fs::read_to_string(project.root.join("objects").join(&hash));
+        let before = match before {
+            Ok(text) if crate::vow::sha256_hex(text.as_bytes()) == hash => text,
+            _ => {
+                out.push(Item { class: Class::Weaken, what: what("has a missing or corrupt saved object"), before: None, after: None });
+                continue;
+            }
+        };
         let Some(now) = current(top, &key) else {
             out.push(Item { class: Class::Weaken, what: what("was removed"), before: None, after: None });
             continue;
         };
-        let kept: HashSet<&str> = now.lines().collect();
-        let lost: Vec<&str> = before.lines().filter(|l| !kept.contains(l)).collect();
-        if !lost.is_empty() {
-            out.push(Item { class: Class::Weaken, what: what("lost or changed lines"), before: Some(lost.join("\n")), after: None });
+        let preserved = if key.ends_with(RUST_TESTS) || key.ends_with(".rs") {
+            rust::preserved(&before, &now)
+        } else {
+            let mut remaining = now.lines();
+            before.lines().all(|line| remaining.by_ref().any(|candidate| candidate == line)) && added_lines_safe(&before, &now)
+        };
+        if !preserved {
+            out.push(Item { class: Class::Weaken, what: what("lost or changed lines"), before: Some(before), after: None });
         }
     }
     out
@@ -202,5 +231,33 @@ mod tests {
         let src = "fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n\nfn b() {}\n";
         assert_eq!(rust_test_modules(src), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n");
         assert_eq!(rust_test_modules("fn a() {}\n"), "");
+    }
+
+    #[test]
+    fn gated_use_and_bodyless_mod_do_not_break_test_module_extraction() {
+        // A #[cfg(test)] on a `use`, a `fn` or a bodyless `mod x;` submodule
+        // include is not a guardable test module. The lexer must skip these
+        // instead of failing, or a real inline test module later in the file
+        // would be reported as removed.
+        let src = "#[cfg(test)]\nuse crate::change::DELTAS;\n\n#[cfg(test)]\nmod helper;\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n";
+        assert_eq!(rust_test_modules(src), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n");
+        // pub(crate) visibility before the module name must be accepted.
+        let vis = "#[cfg(test)]\npub(crate) mod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n";
+        assert_eq!(rust_test_modules(vis), "#[cfg(test)]\npub(crate) mod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n");
+        // A file with only gated non-test items has no extractable test module.
+        assert_eq!(rust_test_modules("#[cfg(test)]\nuse crate::x;\n"), "");
+    }
+
+    #[test]
+    fn bodyless_cfg_test_mod_includes_are_listed_for_guarding() {
+        let src = "#[cfg(test)]\nmod harness;\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n";
+        assert_eq!(rust_test_submodules(src), ["harness"]);
+        // A bodyed module, a `use` or a plain `mod x;` without cfg(test) is not listed.
+        assert_eq!(
+            rust_test_submodules("#[cfg(test)]\npub(crate) mod tests { fn t(){} }\n#[cfg(test)]\nuse crate::y;\nmod plain;\n"),
+            Vec::<String>::new()
+        );
+        // No cfg(test) attributes at all.
+        assert_eq!(rust_test_submodules("mod plain;\n"), Vec::<String>::new());
     }
 }
