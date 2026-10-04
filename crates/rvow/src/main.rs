@@ -170,6 +170,11 @@ enum Cmd {
         #[arg(value_enum)]
         event: Option<HookEvent>,
     },
+    /// Lease one task to a subagent and print the brief to give it.
+    Delegate {
+        /// The task id or a unique prefix of it.
+        task: String,
+    },
     /// Record that a task cannot be finished as written.
     Block {
         /// The task id or a unique prefix of it.
@@ -401,6 +406,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
+        Cmd::Delegate { task } => cmd::delegate::delegate(&task),
         Cmd::Block { task, reason } => lifecycle::block(&task, &reason),
         Cmd::Note { kind, text } => lifecycle::note(kind, &text.join(" ")),
         Cmd::Amend { reason, change, unlock } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
@@ -535,6 +541,8 @@ enum HookTarget {
     Stop,
     Status,
     View,
+    LeaseBind,
+    LeaseEnd,
 }
 
 impl HookTarget {
@@ -546,6 +554,8 @@ impl HookTarget {
             Self::Stop => Some(HookEvent::Stop),
             Self::Status => Some(HookEvent::Status),
             Self::View => Some(HookEvent::View),
+            Self::LeaseBind => Some(HookEvent::LeaseBind),
+            Self::LeaseEnd => Some(HookEvent::LeaseEnd),
         }
     }
 }
@@ -557,6 +567,8 @@ enum HookEvent {
     Stop,
     Status,
     View,
+    LeaseBind,
+    LeaseEnd,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

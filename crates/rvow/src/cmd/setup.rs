@@ -78,6 +78,8 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
             (Harness::Claude, HookEvent::PreToolUse) => hooks::claude_pre_tool_use(&p, &input),
             (Harness::Claude, HookEvent::SessionStart) => hooks::claude_session_start(&p, &home, &input),
             (Harness::Claude, HookEvent::Stop) => hooks::claude_stop(&p, &home, &input),
+            (Harness::Claude, HookEvent::LeaseBind) => hooks::claude_lease_bind(&p, &input),
+            (Harness::Claude, HookEvent::LeaseEnd) => hooks::claude_lease_end(&p, &input),
             (Harness::Claude, HookEvent::View) => view::view(&p, &home, &cwd),
             (Harness::Claude, HookEvent::Status) => Ok(hooks::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s }))),
         }

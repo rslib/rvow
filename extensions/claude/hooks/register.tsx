@@ -40,7 +40,14 @@ const BIN = INSTALLED_BIN.startsWith('__') ? 'rvow' : INSTALLED_BIN
 const MAX_BLOCKS = 8
 const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*)$/
 
-type Event = 'pre-tool-use' | 'session-start' | 'stop' | 'status' | 'view'
+type Event =
+  | 'pre-tool-use'
+  | 'session-start'
+  | 'stop'
+  | 'status'
+  | 'view'
+  | 'lease-bind'
+  | 'lease-end'
 
 let blocks = 0
 let warned = false
@@ -385,7 +392,11 @@ export const register: Register = (on) => {
   on('tool.call', async ($, e, next) => {
     if (!CHECKED.test(e.tool)) return next(e)
     const { tool, tool_use_id, agentId, consent, ...args } = e as Record<string, unknown>
-    const out = await hook($, 'pre-tool-use', { tool_name: tool, tool_input: args })
+    const out = await hook($, 'pre-tool-use', {
+      tool_name: tool,
+      tool_input: args,
+      agent_id: typeof agentId === 'string' ? agentId : undefined,
+    })
     const decision = out?.hookSpecificOutput
     if (decision?.permissionDecision === 'deny') {
       return { deny: String(decision.permissionDecisionReason) }
@@ -393,6 +404,22 @@ export const register: Register = (on) => {
     const ran = await next(e)
     if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
     return ran
+  })
+
+  // A subagent whose prompt starts with the `lease:` line of `rvow delegate` is bound to that lease, so
+  // the hook can judge its edits by the leased task. Other prompts never start rvow.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (started.agentId && /^\s*lease:\s*TSK-/m.test(e.prompt)) {
+      await hook($, 'lease-bind', { agent_id: started.agentId, prompt: e.prompt })
+    }
+    return started
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const result = await next(e)
+    await hook($, 'lease-end', { agent_id: e.agent_id })
+    return result
   })
 
   // The brief goes with each prompt whose brief changed, not with session start: startup never waits

@@ -15,6 +15,7 @@ use crate::error::Result;
 use crate::fingerprint;
 use crate::gate::cache::CACHE_FILE;
 use crate::git;
+use crate::lease::{self, LEASE_FILE};
 use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
@@ -324,11 +325,36 @@ fn secret_denial(cwd: &Path, file: &str) -> Option<String> {
     })
 }
 
-/// Why `file` must not be read or written: it is the gate's cache file.
+/// Why `file` must not be read or written: it is the gate's cache file or the lease file.
 fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<String> {
     let target = key(&real_path(Path::new(file), cwd));
-    (target == key(&real_path(&project.root.join(CACHE_FILE), cwd)))
-        .then(|| format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"))
+    let is = |name: &str| target == key(&real_path(&project.root.join(name), cwd));
+    if is(CACHE_FILE) {
+        return Some(format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
+    }
+    is(LEASE_FILE).then(|| format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"))
+}
+
+/// Why a subagent that holds a lease must not edit `file`: it lies outside the
+/// files of the task leased to it.
+fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Result<Option<String>> {
+    let Ok(home) = crate::store::home_dir() else { return Ok(None) };
+    let Some(lease) = lease::holder(project, &home, cwd, agent_id, crate::ledger::now_ms())? else {
+        return Ok(None);
+    };
+    let top = git::toplevel(cwd)?;
+    let target = key(&real_path(Path::new(file), cwd));
+    let Some(rel) = target.strip_prefix(&format!("{}/", key(&real_path(&top, cwd)))) else {
+        return Ok(None);
+    };
+    if fingerprint::globset(&lease.files).is_ok_and(|set| set.is_match(rel)) {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{rel} is outside the files of {task}, the task leased to this agent; edit only {files}, or run rvow block {task} --reason \"...\" if the task needs it",
+        task = lease.task,
+        files = lease.files.join(", ")
+    )))
 }
 
 /// Claude Code `PreToolUse`: a deny response, or `None` to allow.
@@ -355,8 +381,14 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
             Some(r) => Some(r),
             None if writes_files(tool) => {
                 let mut found = None;
+                let agent = input.get("agent_id").and_then(Value::as_str);
                 for f in &files {
                     found = edit_denial(project, &git::toplevel(&cwd)?, &cwd, f)?;
+                    if found.is_none()
+                        && let Some(agent) = agent
+                    {
+                        found = lease_denial(project, &cwd, agent, f)?;
+                    }
                     if found.is_some() {
                         break;
                     }
@@ -373,6 +405,24 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
             "permissionDecisionReason": format!("rvow: {r}"),
         }})
     }))
+}
+
+/// The Claude mod's `agent.spawn`: binds the new subagent to the lease that its
+/// prompt names. Prints nothing for a prompt without a marker.
+pub fn claude_lease_bind(project: &Project, input: &Value) -> Result<Option<Value>> {
+    let text = |k: &str| input.get(k).and_then(Value::as_str);
+    let (Some(agent), Some(task)) = (text("agent_id"), text("prompt").and_then(lease::marker)) else {
+        return Ok(None);
+    };
+    Ok(Some(json!({"bound": lease::bind(project, &task, agent)?, "task": task})))
+}
+
+/// The Claude mod's `SubagentStop`: ends the lease that the stopping subagent holds.
+pub fn claude_lease_end(project: &Project, input: &Value) -> Result<Option<Value>> {
+    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
+        lease::end(project, agent)?;
+    }
+    Ok(None)
 }
 
 /// Claude Code `SessionStart`: the brief as added context, or `None` when the

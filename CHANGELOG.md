@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow delegate` to lease one task to a subagent.
+  The Claude mod binds the subagent to the lease, and the hook then denies its edits outside the files of that task.
 - Add a signed cache to `rvow gate --rerun` that skips a task when an earlier clean pass had the same key.
   Use `--no-cache` to run every task, and see `docs/settings.md` for `rerun_cache`, `cache_with_links` and `tools`.
 - Add `max_age:` and `depends_on:` task fields for the gate cache.

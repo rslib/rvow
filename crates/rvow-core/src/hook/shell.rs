@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::change::LEDGER;
 use crate::gate::cache::CACHE_FILE;
+use crate::lease::LEASE_FILE;
 use crate::store::IDS_FILE;
 
 const SEPARATORS: &[char] = &[';', '&', '|', '(', ')', '`', '\n'];
@@ -479,6 +480,10 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
         w.iter().any(|x| x.ends_with(".git") || x.ends_with(".git/")) && w.iter().any(|x| x.to_lowercase().starts_with("hooks"));
     if writes && (lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir) {
         return Some(".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
+    }
+    let names_lease = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == LEASE_FILE);
+    if names_lease && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+        return Some(format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"));
     }
     let names_cache = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == CACHE_FILE);
     let only_rvow_first = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");

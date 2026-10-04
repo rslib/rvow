@@ -83,6 +83,20 @@ A scoped `setup` or `checks` entry runs only when a task that runs or a changed 
 When the cache answers every task, the gate makes no worktree and runs no `setup`.
 [docs/settings.md](settings.md) lists the keys that tune the cache.
 
+## Subagents and leases
+
+A subagent meets the same rules as the main agent, but it does not know which task is its own.
+`rvow delegate <task>` records a lease for one task and prints a short brief.
+The first line of the brief is `lease: <task id>`, so put the brief at the start of the subagent's prompt.
+The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
+From then on the hook denies that subagent's edits of files outside the task's `files:`, and the reason names the task.
+A lease ends when its task is proved or blocked, when the subagent stops or after 4 hours.
+The lease file is closed to agents, like the gate cache.
+
+Two limits stay.
+A subagent without the mod is unbound, so it meets the usual rules.
+The hook sees files and not what a shell command writes, so a lease scopes the edit tools only.
+
 ## The pre-push gate
 
 `rvow install` adds a pre-push hook that runs `rvow gate --strict --rerun`.
