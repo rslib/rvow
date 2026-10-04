@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::change::LEDGER;
+use crate::gate::cache::CACHE_FILE;
 use crate::store::IDS_FILE;
 
 const SEPARATORS: &[char] = &[';', '&', '|', '(', ')', '`', '\n'];
@@ -474,6 +475,11 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
         w.iter().any(|x| x.ends_with(".git") || x.ends_with(".git/")) && w.iter().any(|x| x.to_lowercase().starts_with("hooks"));
     if lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir {
         return Some(".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
+    }
+    let names_cache = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == CACHE_FILE);
+    let only_rvow_first = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");
+    if names_cache && !only_rvow_first {
+        return Some(format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
     }
     let names_rvow_file = w.iter().any(|x| {
         let b = base_name(x);

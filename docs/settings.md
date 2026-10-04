@@ -38,6 +38,7 @@ checks = ["cargo test --locked"]
 | `setup` | Commands the gate rerun runs before verification | no |
 | `rerun_env` | Environment pairs applied when the gate reruns a task | no |
 | `rerun_links` | Git-ignored directories of the repository, by repo-relative name, that the rerun worktree links in (default none) | no |
+| `tools` | Executables whose content is part of the gate cache key, by name on `PATH` or by path | no |
 | `env` / `env_vars` | Extra commands and variables captured in the proof environment | no |
 | `interview_cap` | The most questions one clarify round asks, 1 to 3, default 3 | no |
 | `require_signature` | When true, a confirm only decides when its ssh signature is valid | no |
@@ -61,6 +62,13 @@ A tracked name, an absolute name or a name with `..` is refused, and the error n
 A listed directory that does not exist is skipped.
 A verify command can write through a link into the real directory, so list only directories that a verify command may change.
 `rerun_links` is not part of the vow, so changing it is not drift.
+
+## Tools in the cache key
+
+The gate cache skips a task whose inputs did not change.
+A compiler or container runtime that changes under the same project files can change a result, so list it in `tools`.
+Each entry is a name on `PATH` or a path; the cache key holds the sha256 of the file after links are resolved.
+A tool that is missing makes the task uncacheable, so the gate runs it.
 
 A clean checkout never contains the user's `machine`, `signing_key` or `agent`.
 Send those through the environment or a separate global file instead.

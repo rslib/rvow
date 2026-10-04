@@ -47,6 +47,8 @@ pub struct File {
     pub rerun_env: Option<BTreeMap<String, String>>,
     /// Ignored repo directories that the rerun worktree links in.
     pub rerun_links: Option<Vec<String>>,
+    /// Executables whose content is part of a rerun cache key.
+    pub tools: Option<Vec<String>>,
     pub env: Option<Vec<String>>,
     pub env_vars: Option<Vec<String>>,
     /// Global only: a name for this computer.
@@ -224,6 +226,17 @@ pub fn rerun_links(project: &Project, home: &Path) -> Result<Vec<String>> {
         Mode::Repo => File::default(),
     };
     Ok(local.rerun_links.or(global.rerun_links).unwrap_or_default())
+}
+
+/// The `tools` key, merged like `rerun_links` and kept out of `Config` for the
+/// same reason: it names this machine's binaries, not the vow.
+pub fn tools(project: &Project, home: &Path) -> Result<Vec<String>> {
+    let local = read_file(&project.root.join(CONFIG_FILE))?;
+    let global = match project.meta.mode {
+        Mode::Home => read_file(&home.join(CONFIG_FILE))?,
+        Mode::Repo => File::default(),
+    };
+    Ok(local.tools.or(global.tools).unwrap_or_default())
 }
 
 impl Config {

@@ -14,6 +14,7 @@ use crate::proof::{self, Active, Now};
 use crate::runner;
 use crate::store::Project;
 
+pub mod cache;
 mod check;
 mod rerun;
 mod signature;

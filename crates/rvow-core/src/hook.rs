@@ -13,6 +13,7 @@ use crate::config::{self, ENFORCEMENT};
 use crate::drift;
 use crate::error::Result;
 use crate::fingerprint;
+use crate::gate::cache::CACHE_FILE;
 use crate::git;
 use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
@@ -322,6 +323,13 @@ fn secret_denial(cwd: &Path, file: &str) -> Option<String> {
     })
 }
 
+/// Why `file` must not be read or written: it is the gate's cache file.
+fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<String> {
+    let target = key(&real_path(Path::new(file), cwd));
+    (target == key(&real_path(&project.root.join(CACHE_FILE), cwd)))
+        .then(|| format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"))
+}
+
 /// Claude Code `PreToolUse`: a deny response, or `None` to allow.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
@@ -341,7 +349,7 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         }
     } else {
         let files = file_args(&args);
-        let secret = files.iter().find_map(|f| secret_denial(&cwd, f));
+        let secret = files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| cache_denial(project, &cwd, f)));
         match secret {
             Some(r) => Some(r),
             None if writes_files(tool) => {
