@@ -410,7 +410,13 @@ export const register: Register = (on) => {
   // same cap for the mod's own block.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    const reason = (await hook($, 'stop', {}))?.reason
+    // The CLI gives each reason once per session and lets subagents stop, so it needs these fields.
+    const who = {
+      session_id: e.session_id,
+      agent_id: e.agent_id,
+      stop_hook_active: e.stop_hook_active,
+    }
+    const reason = (await hook($, 'stop', who))?.reason
     if (typeof reason !== 'string' || !reason || blocks >= MAX_BLOCKS) {
       blocks = 0
       return result

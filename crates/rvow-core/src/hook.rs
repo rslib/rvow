@@ -434,7 +434,11 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
         }
     }
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
-    for c in &queue {
+    let mut stale = false;
+    // Only the newest accepted change is the agent's current plan; older changes on the branch are
+    // enforced by the pre-push gate, and nagging about them each time hides the plan that matters.
+    let newest = queue.iter().max_by_key(|c| c.vow().map_or(0, |e| e.time));
+    for c in queue.iter().filter(|c| newest.is_some_and(|n| std::ptr::eq(*c, n))) {
         let changed = changed_since_vow(&top, c);
         for t in &c.loaded.tasks {
             let s = proof::state(c, t, &now)?;
@@ -451,16 +455,18 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
             {
                 continue;
             }
+            if matches!(s, State::Stale(_) | State::Flaky) {
+                stale = true;
+                continue;
+            }
             let id = t.id.to_string();
-            return Ok(Some(match s {
-                State::Stale(_) | State::Flaky => {
-                    format!("{id} is {}: run rvow prove --stale", s.name())
-                }
-                _ => format!("{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written"),
-            }));
+            return Ok(Some(format!(
+                "{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written"
+            )));
         }
     }
-    Ok(None)
+    // One fixed text for every stale task, so it is given once and not once for each task.
+    Ok(stale.then(|| "some tasks have stale proofs; run rvow prove --stale before you push".to_string()))
 }
 
 /// The files that differ from the vow's base commit, committed or not, or
@@ -820,6 +826,19 @@ mod tests {
         std::fs::write(repo.join("out.txt"), "ok").unwrap();
         let out = claude_stop(&p, &home, &input).unwrap().unwrap();
         assert!(out["reason"].as_str().unwrap().contains(&task), "{out}");
+    }
+
+    #[test]
+    fn stop_gives_one_fixed_reason_for_stale_tasks() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let input = json!({"cwd": repo.to_str().unwrap()});
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        std::fs::write(repo.join("out.txt"), "ok changed").unwrap();
+        let reason = claude_stop(&p, &home, &input).unwrap().unwrap()["reason"].as_str().unwrap().to_string();
+        assert!(reason.contains("stale") && reason.contains("rvow prove --stale"), "{reason}");
+        assert!(!reason.contains(&task), "a stale task must not put its id in the reason, or each task is a new reason: {reason}");
     }
 
     #[test]

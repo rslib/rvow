@@ -1044,8 +1044,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_before_settle", async (event, ctx) => {
+    // The CLI gives each reason once per session, so it needs the session id.
+    const who = { session_id: ctx.sessionManager?.getSessionId?.() };
     const reason = (
-      await hook("stop", ctx.cwd, {}, BOUND_MS, false, undefined, enforcementOff(ctx))
+      await hook("stop", ctx.cwd, who, BOUND_MS, false, undefined, enforcementOff(ctx))
     )?.reason;
     if (typeof reason !== "string" || !reason) {
       continues = 0;
