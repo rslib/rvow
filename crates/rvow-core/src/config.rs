@@ -10,6 +10,9 @@ use crate::error::{Error, Result};
 use crate::store::{CONFIG_FILE, Mode, Project};
 use crate::tasks::parse_duration;
 
+/// How long a rerun pass answers for a task: 168 hours.
+pub const DEFAULT_CACHE_AGE: Duration = Duration::from_secs(168 * 3600);
+
 /// Maximum UTF-8 bytes in project context or one artifact's rules.
 pub const AUTHORING_BYTES: usize = 2000;
 
@@ -33,6 +36,31 @@ impl Rules {
     }
 }
 
+/// One `setup` or `checks` entry: a plain command that always runs, or a
+/// command with `files` globs that runs only when a rerun task or a changed
+/// file of the branch matches one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum Step {
+    Plain(String),
+    Scoped { run: String, files: Vec<String> },
+}
+
+impl Step {
+    pub fn run(&self) -> &str {
+        match self {
+            Step::Plain(run) | Step::Scoped { run, .. } => run,
+        }
+    }
+
+    pub fn files(&self) -> Option<&[String]> {
+        match self {
+            Step::Plain(_) => None,
+            Step::Scoped { files, .. } => Some(files),
+        }
+    }
+}
+
 /// One config file as written. Every key is optional.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -42,13 +70,17 @@ pub struct File {
     pub inputs: Option<Vec<String>>,
     pub test_globs: Option<Vec<String>>,
     pub protect_infra: Option<Vec<String>>,
-    pub checks: Option<Vec<String>>,
-    pub setup: Option<Vec<String>>,
+    pub checks: Option<Vec<Step>>,
+    pub setup: Option<Vec<Step>>,
     pub rerun_env: Option<BTreeMap<String, String>>,
     /// Ignored repo directories that the rerun worktree links in.
     pub rerun_links: Option<Vec<String>>,
     /// Executables whose content is part of a rerun cache key.
     pub tools: Option<Vec<String>>,
+    /// How long a cached rerun pass stays valid, such as "24h", or "off".
+    pub rerun_cache: Option<String>,
+    /// Keep the rerun cache on when `rerun_links` is set.
+    pub cache_with_links: Option<bool>,
     pub env: Option<Vec<String>>,
     pub env_vars: Option<Vec<String>>,
     /// Global only: a name for this computer.
@@ -77,8 +109,8 @@ pub struct Config {
     pub inputs: Vec<String>,
     pub test_globs: Vec<String>,
     pub protect_infra: Vec<String>,
-    pub checks: Vec<String>,
-    pub setup: Vec<String>,
+    pub checks: Vec<Step>,
+    pub setup: Vec<Step>,
     pub rerun_env: BTreeMap<String, String>,
     pub env: Vec<String>,
     pub env_vars: Vec<String>,
@@ -237,6 +269,40 @@ pub fn tools(project: &Project, home: &Path) -> Result<Vec<String>> {
         Mode::Repo => File::default(),
     };
     Ok(local.tools.or(global.tools).unwrap_or_default())
+}
+
+/// How the gate rerun uses its cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachePolicy {
+    pub off: bool,
+    pub max_age: Duration,
+    pub with_links: bool,
+}
+
+/// The `rerun_cache` and `cache_with_links` keys, merged like `tools`. They
+/// stay out of `Config` because they tune this machine's cache, not the vow.
+pub fn cache_policy(project: &Project, home: &Path) -> Result<CachePolicy> {
+    let local = read_file(&project.root.join(CONFIG_FILE))?;
+    let global = match project.meta.mode {
+        Mode::Home => read_file(&home.join(CONFIG_FILE))?,
+        Mode::Repo => File::default(),
+    };
+    let value = local.rerun_cache.or(global.rerun_cache);
+    let (off, max_age) = match value.as_deref() {
+        None => (false, DEFAULT_CACHE_AGE),
+        Some("off") => (true, DEFAULT_CACHE_AGE),
+        Some(text) => {
+            let age = parse_duration(text).ok_or_else(|| {
+                Error::new(
+                    "config",
+                    format!("rerun_cache {text:?} is not a duration or \"off\""),
+                    "write a value such as 24h, 90m or \"off\"",
+                )
+            })?;
+            (false, age)
+        }
+    };
+    Ok(CachePolicy { off, max_age, with_links: local.cache_with_links.or(global.cache_with_links).unwrap_or(false) })
 }
 
 impl Config {

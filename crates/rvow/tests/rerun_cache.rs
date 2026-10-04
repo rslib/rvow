@@ -446,3 +446,292 @@ fn cache_protect_an_unrelated_file_next_to_the_cache_is_allowed() {
     assert_eq!(fx.hook("Write", json!({"file_path": other})), None);
     assert_eq!(fx.bash(&format!("echo x > {}", other.display())), None);
 }
+
+// The gate: skip cached tasks, report them, force a full rerun.
+
+struct Gx {
+    root: PathBuf,
+    task: String,
+    count: PathBuf,
+}
+
+impl Drop for Gx {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Gx {
+    /// A repository with one accepted, committed and proved task whose verify command logs each run.
+    fn new(name: &str, verify_ok: bool) -> Gx {
+        Gx::with(name, verify_ok, "")
+    }
+
+    /// Like `new`, with `extra` task lines such as `  max_age: 1s\n`.
+    fn with(name: &str, verify_ok: bool, extra: &str) -> Gx {
+        let root = std::env::temp_dir().join(format!("rvow-cache-gate-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("repo/src")).unwrap();
+        let mut gx = Gx { root: root.canonicalize().unwrap(), task: String::new(), count: PathBuf::new() };
+        gx.count = gx.root.join("count");
+        let repo = gx.root.join("repo");
+        let run = |args: &[&str]| assert!(git_command(&repo).args(args).status().unwrap().success(), "git {args:?}");
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("src/a.txt"), "a").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        gx.rvow(&["init"]);
+        let out = gx.rvow(&["new", "--spec", "Out"]);
+        let dir = PathBuf::from(out.lines().find_map(|l| l.strip_prefix("path: ")).unwrap());
+        let check = if verify_ok { "grep -q ok out.txt" } else { "false" };
+        std::fs::write(
+            dir.join("tasks.md"),
+            format!(
+                "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: {check} && echo run >> {} && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt, src/**\n{extra}",
+                gx.count.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("specs/out.md"),
+            "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+        )
+        .unwrap();
+        let id = out.lines().find_map(|l| l.strip_prefix("created: ")).unwrap().to_string();
+        gx.rvow(&["accept", &id, "--yes"]);
+        let active = gx.rvow(&["path", &id]);
+        let tasks =
+            std::fs::read_to_string(PathBuf::from(active.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().trim()).join("tasks.md"))
+                .unwrap();
+        gx.task = tasks.lines().find_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).unwrap();
+        gx.commit("out.txt", if verify_ok { "ok" } else { "no" });
+        let _ = std::fs::remove_file(&gx.count);
+        gx
+    }
+
+    fn cmd(&self) -> Command {
+        let mut c = Command::new(RVOW);
+        c.current_dir(self.root.join("repo"))
+            .env("HOME", self.root.join("home"))
+            .env("RVOW_HOME", self.root.join("rh"))
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t");
+        c
+    }
+
+    fn rvow(&self, args: &[&str]) -> String {
+        let out = self.cmd().args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn gate(&self, extra: &[&str]) -> String {
+        let mut args = vec!["gate", "--rerun"];
+        args.extend(extra);
+        self.rvow(&args)
+    }
+
+    fn commit(&self, file: &str, text: &str) {
+        std::fs::write(self.root.join("repo").join(file), text).unwrap();
+        let run = |args: &[&str]| assert!(git_command(&self.root.join("repo")).args(args).status().unwrap().success(), "git {args:?}");
+        run(&["add", file]);
+        run(&["commit", "-q", "-m", "change"]);
+    }
+
+    fn runs(&self) -> usize {
+        std::fs::read_to_string(&self.count).map_or(0, |t| t.lines().count())
+    }
+
+    fn proved(&self) {
+        self.rvow(&["prove", &self.task]);
+        let _ = std::fs::remove_file(&self.count);
+    }
+}
+
+#[test]
+fn cache_gate_second_rerun_skips_an_unchanged_task_and_reports_it() {
+    let gx = Gx::new("skip", true);
+    gx.proved();
+    let first = gx.gate(&[]);
+    assert!(first.contains("passed: true"), "{first}");
+    assert_eq!(gx.runs(), 1, "{first}");
+    assert!(!first.contains("cached"), "{first}");
+    let second = gx.gate(&[]);
+    assert!(second.contains("passed: true") && second.contains("cached[1]") && second.contains(&gx.task), "{second}");
+    assert_eq!(gx.runs(), 1, "the verify command ran again: {second}");
+}
+
+#[test]
+fn cache_gate_a_one_byte_edit_reruns_the_task() {
+    let gx = Gx::new("edit", true);
+    gx.proved();
+    gx.gate(&[]);
+    gx.commit("src/a.txt", "b");
+    gx.rvow(&["prove", &gx.task]);
+    let _ = std::fs::remove_file(&gx.count);
+    let out = gx.gate(&[]);
+    assert_eq!(gx.runs(), 1, "{out}");
+    assert!(!out.contains("cached"), "{out}");
+}
+
+#[test]
+fn cache_gate_no_cache_and_out_run_every_task() {
+    let gx = Gx::new("force", true);
+    gx.proved();
+    gx.gate(&[]);
+    assert_eq!(gx.runs(), 1);
+    let forced = gx.gate(&["--no-cache"]);
+    assert_eq!(gx.runs(), 2, "{forced}");
+    assert!(!forced.contains("cached"), "{forced}");
+    let runs = gx.root.join("runs.jsonl");
+    let bundled = gx.gate(&["--out", runs.to_str().unwrap()]);
+    assert_eq!(gx.runs(), 3, "{bundled}");
+    assert!(!bundled.contains("cached"), "{bundled}");
+    assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn cache_gate_a_failing_task_leaves_no_entry() {
+    let gx = Gx::new("fail", false);
+    let out = gx.gate(&[]);
+    assert!(out.contains("failed on rerun"), "{out}");
+    let cache = gx.root.join("rh");
+    let entries: usize = walk(&cache).iter().filter(|p| p.ends_with(CACHE_FILE)).count();
+    assert_eq!(entries, 0, "a failure wrote a cache file");
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+// Age and linked build output.
+
+impl Gx {
+    fn global_config(&self, text: &str) {
+        std::fs::create_dir_all(self.root.join("rh")).unwrap();
+        std::fs::write(self.root.join("rh/config.toml"), text).unwrap();
+    }
+}
+
+fn pause() {
+    std::thread::sleep(std::time::Duration::from_millis(1300));
+}
+
+#[test]
+fn cache_age_default_is_168_hours() {
+    let f = Fixture::new("age-default", "");
+    let policy = config::cache_policy(&f.project, &f.home).unwrap();
+    assert_eq!(policy.max_age.as_secs(), 168 * 3600);
+    assert!(!policy.off && !policy.with_links);
+    f.put("TSK-abc123", "k1");
+    let cache = Cache::open(&f.project, &f.home).unwrap();
+    let age = |hours: u64| {
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let now = since.as_millis() as u64 + hours * HOUR;
+        cache.lookup("TSK-abc123", "k1", now, policy.max_age.as_millis() as u64).is_some()
+    };
+    assert!(age(167) && !age(169));
+}
+
+#[test]
+fn cache_age_a_task_max_age_expires_the_entry() {
+    let gx = Gx::with("age-task", true, "  max_age: 1s\n");
+    gx.proved();
+    gx.gate(&[]);
+    pause();
+    let out = gx.gate(&[]);
+    assert_eq!(gx.runs(), 2, "{out}");
+    assert!(!out.contains("cached"), "{out}");
+}
+
+#[test]
+fn cache_age_the_rerun_cache_setting_applies_when_the_task_has_none() {
+    let gx = Gx::new("age-setting", true);
+    gx.global_config("rerun_cache = \"1s\"\n");
+    gx.proved();
+    gx.gate(&[]);
+    pause();
+    gx.gate(&[]);
+    assert_eq!(gx.runs(), 2);
+    let kept = Gx::with("age-task-wins", true, "  max_age: 24h\n");
+    kept.global_config("rerun_cache = \"1s\"\n");
+    kept.proved();
+    kept.gate(&[]);
+    pause();
+    let out = kept.gate(&[]);
+    assert_eq!(kept.runs(), 1, "{out}");
+}
+
+#[test]
+fn cache_age_off_runs_every_task_and_a_bad_value_is_an_error() {
+    let gx = Gx::new("age-off", true);
+    gx.global_config("rerun_cache = \"off\"\n");
+    gx.proved();
+    gx.gate(&[]);
+    gx.gate(&[]);
+    assert_eq!(gx.runs(), 2);
+    gx.global_config("rerun_cache = \"soon\"\n");
+    let out = gx.gate(&[]);
+    assert!(out.contains("rerun_cache"), "{out}");
+}
+
+#[test]
+fn cache_age_rerun_links_turn_the_cache_off_unless_opted_in() {
+    let gx = Gx::new("links", true);
+    gx.global_config("rerun_links = [\"build\"]\n");
+    gx.proved();
+    gx.gate(&[]);
+    let out = gx.gate(&[]);
+    assert_eq!(gx.runs(), 2, "{out}");
+    assert!(out.contains("rerun_links") && out.contains("cache is off"), "{out}");
+
+    gx.global_config("rerun_links = [\"build\"]\ncache_with_links = true\n");
+    gx.gate(&[]);
+    let cached = gx.gate(&[]);
+    assert_eq!(gx.runs(), 3, "one run to fill the cache, then a hit: {cached}");
+    assert!(cached.contains("cached[1]"), "{cached}");
+}
+
+#[test]
+fn cache_age_task_field_must_be_a_duration() {
+    let (tasks, diags) = parse_tasks("- TSK-abc123 Work\n  covers: REQ-abc123\n  verify: true\n  files: a\n  max_age: soon\n");
+    assert_eq!(tasks.len(), 1);
+    assert!(diags.iter().any(|d| d.message.contains("max_age")), "{diags:?}");
+    let (tasks, diags) = parse_tasks("- TSK-abc123 Work\n  covers: REQ-abc123\n  verify: true\n  files: a\n  max_age: 24h\n");
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(tasks[0].max_age, Some(std::time::Duration::from_secs(86400)));
+}
+
+#[test]
+fn cache_age_changing_a_task_max_age_is_not_drift() {
+    let gx = Gx::new("age-drift", true);
+    gx.proved();
+    let id = gx
+        .rvow(&["ls"])
+        .lines()
+        .find_map(|l| l.split(|c: char| !c.is_alphanumeric() && c != '-').find(|w| w.starts_with("CHG-")).map(String::from))
+        .unwrap();
+    let located = gx.rvow(&["path", &id]);
+    let tasks = PathBuf::from(located.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().trim()).join("tasks.md");
+    let text = std::fs::read_to_string(&tasks).unwrap();
+    std::fs::write(&tasks, format!("{}  max_age: 2h\n", text.trim_end().to_string() + "\n")).unwrap();
+    let status = gx.rvow(&["status"]);
+    assert!(!status.contains("drift"), "{status}");
+    assert!(status.contains("proved"), "{status}");
+}

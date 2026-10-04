@@ -103,11 +103,12 @@ pub fn prove_stale() -> Result<Reply> {
     Ok(r)
 }
 
-pub fn gate(opts: Options) -> Result<Reply> {
+pub fn gate(opts: Options, no_cache: bool) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     let out = opts.out.clone();
-    let g = gate::gate(&p, &home, &cwd()?, opts, &mut std::io::stderr())?;
+    let run = if no_cache { gate::gate_uncached } else { gate::gate };
+    let g = run(&p, &home, &cwd()?, opts, &mut std::io::stderr())?;
     if let Some(path) = out {
         write_runs(&path, &g.runs)?;
     }
@@ -116,6 +117,9 @@ pub fn gate(opts: Options) -> Result<Reply> {
     for (task, ms) in &g.timings {
         r.line(format!("rerun {task}: {ms} ms"));
         rows.push(obj! { "task" => task, "ms" => ms });
+    }
+    for task in &g.cached {
+        r.line(format!("cached {task}: an earlier clean pass has the same key"));
     }
     for w in &g.warnings {
         r.line(format!("warning: {w}"));
@@ -135,6 +139,9 @@ pub fn gate(opts: Options) -> Result<Reply> {
     }
     r.set("passed", r.ok);
     r.set("changes", g.changes);
+    if !g.cached.is_empty() {
+        r.set("cached", g.cached);
+    }
     if !rows.is_empty() {
         r.table("reruns", rows, "");
     }

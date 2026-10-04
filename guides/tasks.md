@@ -10,6 +10,8 @@ Write `tasks.md` as a list of tasks. The order in the file is the work order.
 - `files:` the paths the task may touch. Required. Write `**` only when the task truly touches everything.
 - `baseline: pass` only when the command is expected to pass before the work starts.
 - `timeout:` such as `90s`, `20m` or `1h`, only when the config default is too short.
+- `max_age:` such as `24h`, only when a cached rerun pass of this task should expire sooner than the config default.
+- `depends_on:` task ids of the same change whose cache key joins this task's key, only when a change in another task's scope can break this one.
 - Use placeholder ids `TSK-new1`, `TSK-new2` and so on. rvow mints real ids at accept.
 
 ## The verify command

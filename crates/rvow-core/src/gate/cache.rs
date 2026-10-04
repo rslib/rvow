@@ -262,3 +262,44 @@ pub fn cache_key(
     ]);
     Ok(Some(sha256_hex(value.to_string().as_bytes())))
 }
+
+/// The final key of every task: its own key, plus the final key of each task
+/// it `depends_on`. A task whose own key, a dependency, or the chain is not
+/// usable (unknown id, cycle, uncacheable) gets `None`.
+pub fn dependent_keys(tasks: &[Task], own: &BTreeMap<String, Option<String>>) -> BTreeMap<String, Option<String>> {
+    fn visit(
+        id: &str,
+        tasks: &[Task],
+        own: &BTreeMap<String, Option<String>>,
+        done: &mut BTreeMap<String, Option<String>>,
+        stack: &mut Vec<String>,
+    ) -> Option<String> {
+        if let Some(key) = done.get(id) {
+            return key.clone();
+        }
+        if stack.iter().any(|s| s == id) {
+            return None;
+        }
+        let task = tasks.iter().find(|t| t.id.to_string() == id)?;
+        let base = own.get(id).cloned().flatten();
+        stack.push(id.to_string());
+        let deps: Vec<Option<String>> = task.depends_on.iter().map(|d| visit(&d.to_string(), tasks, own, done, stack)).collect();
+        stack.pop();
+        let key = base.and_then(|base| {
+            if deps.is_empty() {
+                return Some(base);
+            }
+            let deps: Option<Vec<String>> = deps.into_iter().collect();
+            Some(sha256_hex(serde_json::json!([base, deps?]).to_string().as_bytes()))
+        });
+        done.insert(id.to_string(), key.clone());
+        key
+    }
+    let mut done = BTreeMap::new();
+    for t in tasks {
+        let id = t.id.to_string();
+        visit(&id, tasks, own, &mut done, &mut Vec::new());
+        done.entry(id).or_insert(None);
+    }
+    done
+}

@@ -287,7 +287,7 @@ pub fn mint_placeholders(project: &Project, lock: &Lock, change: &ChangeDir, loa
         .deltas
         .iter()
         .flat_map(|(_, f)| f.deltas.iter().map(|d| &d.req.id))
-        .chain(loaded.tasks.iter().flat_map(|t| std::iter::once(&t.id).chain(&t.covers)));
+        .chain(loaded.tasks.iter().flat_map(|t| std::iter::once(&t.id).chain(&t.covers).chain(&t.depends_on)));
     for r in all_refs {
         if matches!(r, Ref::Placeholder { .. }) && seen.insert(r.clone()) {
             placeholders.push(r.clone());

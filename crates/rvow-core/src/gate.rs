@@ -20,7 +20,7 @@ mod rerun;
 mod signature;
 
 use check::check_scope;
-use rerun::{Worktree, prove_data, rerun_archived};
+use rerun::{Lazy, Scope, prove_data, rerun_archived};
 
 #[cfg(test)]
 use crate::change::Stage;
@@ -47,6 +47,8 @@ pub struct Report {
     /// each carries the data a `rvow prove` event would, plus the change and
     /// project that route it back on ingest.
     pub runs: Vec<crate::ledger::Run>,
+    /// Tasks that the cache answered without a run.
+    pub cached: Vec<String>,
     pub changes: usize,
 }
 
@@ -66,7 +68,12 @@ pub struct Options {
 
 /// Checks the active changes of the current branch.
 pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, echo)
+    gate_for(project, home, cwd, opts, None, true, echo)
+}
+
+/// Like `gate`, but a rerun runs every task and ignores the cache.
+pub fn gate_uncached(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
+    gate_for(project, home, cwd, opts, None, false, echo)
 }
 
 fn gate_for(
@@ -75,6 +82,7 @@ fn gate_for(
     cwd: &Path,
     opts: Options,
     target: Option<&crate::id::Id>,
+    use_cache: bool,
     echo: &mut dyn Write,
 ) -> Result<Report> {
     let top = git::toplevel(cwd)?;
@@ -116,55 +124,127 @@ fn gate_for(
         check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
     }
 
-    let tree = if opts.rerun { Some(Worktree::add(&top, &config::rerun_links(project, home)?)?) } else { None };
-    let run_dir = tree.as_ref().map_or(top.clone(), |t| t.path.clone());
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
+    let mut run_dir = top.clone();
+    let scope;
+    let _keep_tree;
     if opts.rerun {
-        for cmd in &config.setup {
-            let _ = writeln!(echo, "setup: {cmd}");
-            let o = runner::run(cmd, &run_dir, &env, config.timeout(), echo)?;
-            if !o.passed() {
-                r.failures.push(format!("setup command failed: {cmd}"));
-                return Ok(r);
+        let policy = config::cache_policy(project, home)?;
+        let links = config::rerun_links(project, home)?;
+        let linked = !links.is_empty() && !policy.with_links;
+        if use_cache && opts.out.is_none() && linked {
+            r.warnings.push("the rerun cache is off because rerun_links links build output; set cache_with_links = true to keep it".into());
+        }
+        let mut cache =
+            if !use_cache || opts.out.is_some() || policy.off || linked { None } else { Some(cache::Cache::open(project, home)?) };
+        if let Some(cache) = &cache {
+            r.warnings.extend(cache.warnings().iter().cloned());
+        }
+        let mut plan = Vec::new();
+        for c in &queue {
+            let mut own = std::collections::BTreeMap::new();
+            if cache.is_some() {
+                for t in &c.loaded.tasks {
+                    let reqs = proof::covered(t, &c.loaded, &living);
+                    let key = cache::cache_key(project, home, &top, &config, t, &reqs, &now.env).unwrap_or_else(|e| {
+                        r.warnings.push(format!("{} is not cached: {}", t.id, e.message));
+                        None
+                    });
+                    own.insert(t.id.to_string(), key);
+                }
+            }
+            let keys = cache::dependent_keys(&c.loaded.tasks, &own);
+            for t in &c.loaded.tasks {
+                let key = keys.get(&t.id.to_string()).cloned().flatten();
+                if cache.is_some() && key.is_none() && own.get(&t.id.to_string()).is_some_and(Option::is_some) {
+                    r.warnings
+                        .push(format!("{} is not cached: its depends_on names an unknown task, a cycle or an uncacheable task", t.id));
+                }
+                let max_age = t.max_age.unwrap_or(policy.max_age).as_millis() as u64;
+                let hit = match (&cache, &key) {
+                    (Some(cache), Some(key)) => cache.lookup(&t.id.to_string(), key, crate::ledger::now_ms(), max_age),
+                    _ => None,
+                };
+                plan.push((c, t, key, hit));
             }
         }
-        let run_projection = match &opts.out {
-            Some(_) => Some({
+        let misses: Vec<&crate::tasks::Task> = plan.iter().filter(|p| p.3.is_none()).map(|p| p.1).collect();
+        scope = Scope::new(&top, &config.base, &misses)?;
+        let mut setup = Vec::new();
+        for step in &config.setup {
+            if scope.wants(step)? {
+                setup.push(step.run().to_string());
+            }
+        }
+        let mut lazy = Lazy::new(&top, links, setup, config.timeout(), &env);
+        if plan.is_empty() && lazy.dir(&mut r, echo)?.is_none() {
+            return Ok(r);
+        }
+        let out_dir = match &opts.out {
+            Some(_) => match lazy.dir(&mut r, echo)? {
+                Some(dir) => Some(dir),
+                None => return Ok(r),
+            },
+            None => None,
+        };
+        let run_projection = match &out_dir {
+            Some(dir) => {
                 let folder = project
                     .root
                     .strip_prefix(home)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| project.root.to_string_lossy().into_owned());
-                let run_now = Now { top: &run_dir, config: &config, env: fingerprint::env_with(&run_dir, &config, &env)?, living: &living };
-                (folder, run_now)
-            }),
+                let run_now = Now { top: dir, config: &config, env: fingerprint::env_with(dir, &config, &env)?, living: &living };
+                Some((folder, run_now))
+            }
             None => None,
         };
-        for c in &queue {
-            for t in &c.loaded.tasks {
-                let inputs = run_projection.as_ref().map(|(_, now)| now.inputs(t)).transpose()?;
-                let cmd = t.verify.as_deref().unwrap_or("");
-                let _ = writeln!(echo, "rerun {}: {cmd}", t.id);
-                let o = runner::run(cmd, &run_dir, &env, t.timeout.unwrap_or(config.timeout()), echo)?;
-                r.timings.push((t.id.to_string(), o.duration_ms));
-                if let (Some((folder, run_now)), Some(inputs)) = (&run_projection, &inputs) {
-                    r.runs.push(Run { project: folder.clone(), change: c.dir.id.to_string(), data: prove_data(c, t, &o, run_now, inputs) });
-                }
-                if !(o.passed() && o.tests_run != Some(0)) {
-                    let why = if o.timed_out {
-                        "timed out".to_string()
-                    } else if o.passed() {
-                        "ran 0 tests".to_string()
-                    } else {
-                        format!("exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
-                    };
-                    r.failures.push(format!("{} failed on rerun ({why}): {cmd}", t.id));
-                }
+        for (c, t, key, hit) in &plan {
+            let id = t.id.to_string();
+            if let Some(hit) = hit {
+                let _ = writeln!(echo, "cached {id}: passed {} ms for this key", hit.duration_ms);
+                r.cached.push(id);
+                continue;
+            }
+            let Some(dir) = lazy.dir(&mut r, echo)? else { return Ok(r) };
+            let inputs = run_projection.as_ref().map(|(_, now)| now.inputs(t)).transpose()?;
+            let cmd = t.verify.as_deref().unwrap_or("");
+            let _ = writeln!(echo, "rerun {id}: {cmd}");
+            let o = runner::run(cmd, &dir, &env, t.timeout.unwrap_or(config.timeout()), echo)?;
+            r.timings.push((id.clone(), o.duration_ms));
+            if let (Some(cache), Some(key)) = (&mut cache, key) {
+                let lock = project.lock()?;
+                cache.record_pass(&lock, &id, key, &o, &proof::machine(&config).to_string())?;
+            }
+            if let (Some((folder, run_now)), Some(inputs)) = (&run_projection, &inputs) {
+                r.runs.push(Run { project: folder.clone(), change: c.dir.id.to_string(), data: prove_data(c, t, &o, run_now, inputs) });
+            }
+            if !(o.passed() && o.tests_run != Some(0)) {
+                let why = if o.timed_out {
+                    "timed out".to_string()
+                } else if o.passed() {
+                    "ran 0 tests".to_string()
+                } else {
+                    format!("exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
+                };
+                r.failures.push(format!("{id} failed on rerun ({why}): {cmd}"));
             }
         }
-        rerun_archived(project, &top, &run_dir, &env, &config, &mut r, echo)?;
+        rerun_archived(project, &top, &mut lazy, &env, &config, &mut r, echo)?;
+        if lazy.failed() {
+            return Ok(r);
+        }
+        run_dir = lazy.current();
+        _keep_tree = Some(lazy);
+    } else {
+        scope = Scope::new(&top, &config.base, &[])?;
+        _keep_tree = None;
     }
-    for cmd in &config.checks {
+    for step in &config.checks {
+        if !scope.wants(step)? {
+            continue;
+        }
+        let cmd = step.run();
         let _ = writeln!(echo, "check: {cmd}");
         let o = runner::run(cmd, &run_dir, &env, config.timeout(), echo)?;
         if !o.passed() {
@@ -176,7 +256,7 @@ fn gate_for(
 /// Checks repository integrity and scope while requiring proofs only for the
 /// selected change, so other unfinished changes can remain on the branch.
 pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Result<Report> {
-    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), &mut std::io::sink())
+    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, &mut std::io::sink())
 }
 
 #[cfg(test)]

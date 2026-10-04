@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use super::Report;
 use crate::change::{self, Stage};
-use crate::config;
+use crate::config::{self, Step};
 use crate::error::{Error, Result};
 use crate::fingerprint::{self, globset};
 use crate::git;
@@ -102,6 +102,92 @@ impl Drop for Worktree {
     }
 }
 
+/// What decides whether a scoped `setup` or `checks` entry runs: the tasks
+/// that will run, and the files that the branch changed.
+pub(super) struct Scope {
+    head: Vec<String>,
+    tasks: Vec<globset::GlobSet>,
+    changed: Option<Vec<String>>,
+}
+
+impl Scope {
+    pub(super) fn new(top: &Path, base: &str, misses: &[&Task]) -> Result<Scope> {
+        let head = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"])?.lines().map(String::from).collect();
+        let tasks = misses.iter().map(|t| globset(&t.files)).collect::<Result<Vec<_>>>()?;
+        let changed =
+            base_ref(top, base).and_then(|b| git::run(top, &["merge-base", "HEAD", &b]).ok()).and_then(|mb| changed_files(top, &mb).ok());
+        Ok(Scope { head, tasks, changed })
+    }
+
+    /// A plain entry always runs. A scoped entry runs when a task that runs
+    /// shares a file with its globs, or a changed file matches one of them. An
+    /// unknown base counts as a match, so nothing is skipped by mistake.
+    pub(super) fn wants(&self, step: &Step) -> Result<bool> {
+        let Some(files) = step.files() else { return Ok(true) };
+        let set = globset(files)?;
+        if self.head.iter().any(|f| set.is_match(f) && self.tasks.iter().any(|t| t.is_match(f))) {
+            return Ok(true);
+        }
+        Ok(self.changed.as_ref().is_none_or(|changed| changed.iter().any(|f| set.is_match(f))))
+    }
+}
+
+/// The rerun worktree, made on first use together with the setup commands, so
+/// a gate that every cached task answers creates neither.
+pub(super) struct Lazy<'a> {
+    pub(super) top: &'a Path,
+    pub(super) links: Vec<String>,
+    pub(super) setup: Vec<String>,
+    pub(super) timeout: std::time::Duration,
+    pub(super) env: &'a [(String, String)],
+    tree: Option<Worktree>,
+    failed: bool,
+}
+
+impl<'a> Lazy<'a> {
+    pub(super) fn new(
+        top: &'a Path,
+        links: Vec<String>,
+        setup: Vec<String>,
+        timeout: std::time::Duration,
+        env: &'a [(String, String)],
+    ) -> Lazy<'a> {
+        Lazy { top, links, setup, timeout, env, tree: None, failed: false }
+    }
+
+    /// The tree to run in, or `None` when a setup command failed, which is
+    /// already in the report.
+    pub(super) fn dir(&mut self, r: &mut Report, echo: &mut dyn Write) -> Result<Option<PathBuf>> {
+        if self.failed {
+            return Ok(None);
+        }
+        if let Some(tree) = &self.tree {
+            return Ok(Some(tree.path.clone()));
+        }
+        let tree = Worktree::add(self.top, &self.links)?;
+        let dir = tree.path.clone();
+        self.tree = Some(tree);
+        for cmd in &self.setup {
+            let _ = writeln!(echo, "setup: {cmd}");
+            if !runner::run(cmd, &dir, self.env, self.timeout, echo)?.passed() {
+                r.failures.push(format!("setup command failed: {cmd}"));
+                self.failed = true;
+                return Ok(None);
+            }
+        }
+        Ok(Some(dir))
+    }
+
+    pub(super) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// The tree if one was made, else the repository itself.
+    pub(super) fn current(&self) -> PathBuf {
+        self.tree.as_ref().map_or_else(|| self.top.to_path_buf(), |t| t.path.clone())
+    }
+}
+
 pub(super) fn base_ref(top: &Path, base: &str) -> Option<String> {
     [format!("refs/remotes/origin/{base}"), format!("refs/heads/{base}")]
         .into_iter()
@@ -156,7 +242,7 @@ fn invocation() -> String {
 pub(super) fn rerun_archived(
     project: &Project,
     top: &Path,
-    run_dir: &Path,
+    lazy: &mut Lazy,
     env: &[(String, String)],
     config: &config::Config,
     r: &mut Report,
@@ -189,8 +275,9 @@ pub(super) fn rerun_archived(
             if !touched.iter().any(|f| set.is_match(f)) {
                 continue;
             }
+            let Some(run_dir) = lazy.dir(r, echo)? else { return Ok(()) };
             let _ = writeln!(echo, "rerun archived {}: {cmd}", t.id);
-            let o = runner::run(cmd, run_dir, env, t.timeout.unwrap_or(config.timeout()), echo)?;
+            let o = runner::run(cmd, &run_dir, env, t.timeout.unwrap_or(config.timeout()), echo)?;
             r.timings.push((t.id.to_string(), o.duration_ms));
             if !(o.passed() && o.tests_run != Some(0)) {
                 let why = if o.timed_out {

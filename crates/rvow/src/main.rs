@@ -280,6 +280,9 @@ enum Cmd {
         /// Run every verify command again in a clean worktree of HEAD.
         #[arg(long)]
         rerun: bool,
+        /// With --rerun, run every task even when an earlier clean pass has the same key.
+        #[arg(long, requires = "rerun")]
+        no_cache: bool,
         /// Write each rerun result to this file, for `rvow ingest` to read.
         #[arg(long, value_name = "FILE", requires = "runner")]
         out: Option<PathBuf>,
@@ -408,8 +411,8 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Prove { .. } => prove::prove_stale(),
         Cmd::Status { all, json } => read::status(all, json),
         Cmd::Bundle { out } => prove::bundle(&out),
-        Cmd::Gate { strict: _, rerun: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
-        Cmd::Gate { strict, rerun, out, bundle: None } => prove::gate(Options { strict, rerun, out }),
+        Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
+        Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
         Cmd::Ingest { file } => cmd::ingest::ingest(&file),
         Cmd::Archive { change } => lifecycle::archive(&change),
         Cmd::Drop { change, reason } => lifecycle::drop_change(&change, &reason),

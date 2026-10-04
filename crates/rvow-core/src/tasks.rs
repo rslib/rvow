@@ -19,6 +19,10 @@ pub struct Task {
     pub files: Vec<String>,
     pub baseline_pass: bool,
     pub timeout: Option<Duration>,
+    /// How long a cached rerun pass of this task stays valid; not part of the vow.
+    pub max_age: Option<Duration>,
+    /// Tasks of the same change whose cache key is part of this task's key; not part of the vow.
+    pub depends_on: Vec<Ref>,
     pub line: usize,
 }
 
@@ -63,6 +67,8 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                         files: Vec::new(),
                         baseline_pass: false,
                         timeout: None,
+                        max_age: None,
+                        depends_on: Vec::new(),
                         line: n,
                     });
                     seen_fields.clear();
@@ -102,12 +108,28 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                     diags.push(Diagnostic::new(Rule::TaskField, n, format!("timeout: {value:?} is not a duration such as 90s, 20m or 1h")))
                 }
             },
+            "depends_on" => {
+                for item in split_list(value) {
+                    match item.parse::<Ref>() {
+                        Ok(r) if r.kind() == Kind::Tsk => task.depends_on.push(r),
+                        _ => diags.push(Diagnostic::new(Rule::IdForm, n, format!("depends_on: {item:?} is not a task id"))),
+                    }
+                }
+            }
+            "max_age" => match parse_duration(value) {
+                Some(d) => task.max_age = Some(d),
+                None => {
+                    diags.push(Diagnostic::new(Rule::TaskField, n, format!("max_age: {value:?} is not a duration such as 90s, 20m or 24h")))
+                }
+            },
             "baseline" => diags.push(Diagnostic::new(Rule::TaskField, n, "baseline: takes only the value pass")),
             _ => {
                 diags.push(Diagnostic::new(
                     Rule::TaskField,
                     n,
-                    format!("unknown or empty field {key}:, expected covers, verify, mutants, files, baseline or timeout"),
+                    format!(
+                        "unknown or empty field {key}:, expected covers, verify, mutants, files, baseline, timeout, max_age or depends_on"
+                    ),
                 ));
                 continue;
             }

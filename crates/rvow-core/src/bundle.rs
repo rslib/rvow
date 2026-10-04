@@ -113,8 +113,8 @@ pub fn export(project: &store::Project, home: &Path, cwd: &Path) -> Result<Bundl
             ));
         }
     }
-    for command in config.env.iter().chain(&config.setup).chain(&config.checks) {
-        if runner::mask(command, None, "__bundle__") != *command {
+    for command in config.env.iter().map(String::as_str).chain(config.setup.iter().chain(&config.checks).map(|s| s.run())) {
+        if runner::mask(command, None, "__bundle__") != command {
             return Err(Error::new(
                 "bundle-secret",
                 "a configured command contains an embedded credential",
@@ -176,7 +176,8 @@ pub fn verify(bundle: &Bundle, cwd: &Path, echo: &mut dyn Write) -> Result<Verif
     let overrides: Vec<_> = cfg.rerun_env.clone().into_iter().collect();
     let mut result = Verification { runs: Vec::new(), failures: Vec::new() };
     let mut setup_failure = None;
-    for cmd in &cfg.setup {
+    for step in &cfg.setup {
+        let cmd = step.run();
         let outcome = runner::run(cmd, &top, &overrides, cfg.timeout(), echo)?;
         if !outcome.passed() {
             result.failures.push(format!("setup failed: {cmd}"));
@@ -242,7 +243,8 @@ pub fn verify(bundle: &Bundle, cwd: &Path, echo: &mut dyn Write) -> Result<Verif
         }
     }
     if setup_failure.is_none() {
-        for cmd in &cfg.checks {
+        for step in &cfg.checks {
+            let cmd = step.run();
             if !runner::run(cmd, &top, &overrides, cfg.timeout(), echo)?.passed() {
                 result.failures.push(format!("check failed: {cmd}"));
             }
