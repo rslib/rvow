@@ -4,11 +4,15 @@ use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::store::{self, Project};
 
+pub mod delegate;
+pub mod export;
+pub mod ingest;
 pub mod lifecycle;
 pub mod plan;
 pub mod prove;
 pub mod read;
 pub mod setup;
+pub mod stats;
 
 /// The current branch for empty-state text, or `detached HEAD`.
 pub fn branch_label() -> String {

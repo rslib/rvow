@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::change::{self, CapSpec, ChangeDir, Loaded, Stage};
 use crate::error::{Error, Result};
 use crate::id::{Id, Kind, Ref};
-use crate::ledger;
+use crate::ledger::{self, Event};
 use crate::proof::find_requirement;
 use crate::spec::Requirement;
 use crate::store::Project;
@@ -159,7 +159,76 @@ fn proof_history(change: &std::path::Path, id: &Id) -> String {
         let machine = e.data.get("run").and_then(|r| r.get("machine")).and_then(|v| v.as_str()).unwrap_or("unknown");
         let _ = writeln!(out, "  {verdict}, {tests}, {ms} ms, {machine}");
     }
+    env_diffs(&mut out, &runs);
     out
+}
+
+fn env_diffs(out: &mut String, runs: &[&Event]) {
+    for (i, newest) in runs.iter().enumerate().rev() {
+        let passed = newest.data.get("proved").and_then(|v| v.as_bool()) == Some(true);
+        if let Some(older) = runs[..i]
+            .iter()
+            .rev()
+            .find(|older| (older.data.get("proved").and_then(|v| v.as_bool()) == Some(true)) != passed && same_target(newest, older))
+        {
+            let (pass, fail) = if passed { (*newest, *older) } else { (*older, *newest) };
+            let (penv, fenv) = (env_fields(pass), env_fields(fail));
+            let keys: std::collections::BTreeSet<_> = penv.keys().chain(fenv.keys()).collect();
+            let parts: Vec<_> = keys
+                .into_iter()
+                .filter(|k| penv.get(*k) != fenv.get(*k))
+                .map(|k| {
+                    let value = |env: &BTreeMap<String, String>| {
+                        let raw = env.get(k).map(String::as_str).unwrap_or("<absent>");
+                        if k.strip_prefix("var ").is_some_and(crate::runner::names_secret) { "<masked>".into() } else { sanitize_env(raw) }
+                    };
+                    format!("{}: passed {}, failed {}", sanitize_env(k), value(&penv), value(&fenv))
+                })
+                .collect();
+            if !parts.is_empty() {
+                let _ = writeln!(out, "  env differs on: {}", parts.join(", "));
+            }
+            return;
+        }
+    }
+}
+
+fn same_target(a: &Event, b: &Event) -> bool {
+    let fields = ["task_hash", "requirements", "verify", "inputs"];
+    if fields.iter().all(|k| a.data.contains_key(*k) && b.data.contains_key(*k)) {
+        return fields.iter().all(|k| a.data.get(*k) == b.data.get(*k));
+    }
+    // Legacy synthetic runs have no target fields, so only their key can bind them.
+    fields.iter().all(|k| !a.data.contains_key(*k) && !b.data.contains_key(*k))
+        && a.data.get("key").is_some_and(|key| !key.is_null() && Some(key) == b.data.get("key"))
+}
+
+fn sanitize_env(value: &str) -> String {
+    crate::runner::mask(value, std::env::var("HOME").ok().as_deref(), "")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(256)
+        .collect()
+}
+
+fn env_fields(e: &Event) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    let Some(env) = e.data.get("env") else { return fields };
+    for group in ["commands", "vars"] {
+        if let Some(values) = env.get(group).and_then(|v| v.as_object()) {
+            for (key, value) in values {
+                let name = if group == "vars" { format!("var {key}") } else { key.clone() };
+                let value = value.as_str().unwrap_or("");
+                fields.insert(name, value.into());
+            }
+        }
+    }
+    for key in ["os", "arch"] {
+        if let Some(value) = env.get(key).and_then(|v| v.as_str()) {
+            fields.insert(key.into(), value.into());
+        }
+    }
+    fields
 }
 
 fn show_change(dir: &ChangeDir, living: &[CapSpec]) -> Result<String> {
@@ -312,6 +381,27 @@ mod tests {
         assert_eq!(lines.len(), 10, "{out}");
         assert_eq!(lines[0], "  proved, 3 tests, 111 ms, laptop", "{out}");
         assert!(!out.contains("failed"), "{out}");
+    }
+
+    #[test]
+    fn show_notes_env_fields_that_differ_between_pass_and_fail() {
+        let (_t, p, c) = fixture();
+        let lock = p.lock().unwrap();
+        let mut failed = serde_json::Map::new();
+        failed.insert("task".into(), "TSK-x7k2q4".into());
+        failed.insert("proved".into(), false.into());
+        failed.insert("key".into(), "k".into());
+        failed.insert("env".into(), serde_json::json!({ "commands": { "rustc --version": "rustc 1.80" } }));
+        ledger::append(&c.path.join(change::LEDGER), &lock, Ev::Prove, failed).unwrap();
+        let mut passed = serde_json::Map::new();
+        passed.insert("task".into(), "TSK-x7k2q4".into());
+        passed.insert("proved".into(), true.into());
+        passed.insert("key".into(), "k".into());
+        passed.insert("env".into(), serde_json::json!({ "commands": { "rustc --version": "rustc 1.82" } }));
+        ledger::append(&c.path.join(change::LEDGER), &lock, Ev::Prove, passed).unwrap();
+        drop(lock);
+        let out = show(&p, "TSK-x7k2q4").unwrap();
+        assert!(out.contains("env differs on: rustc --version: passed rustc 1.82, failed rustc 1.80"), "{out}");
     }
 
     #[test]

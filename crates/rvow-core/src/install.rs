@@ -9,7 +9,15 @@ use crate::error::{Error, Result};
 use crate::git;
 use crate::vow::sha256_hex;
 
-pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow.ts");
+pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow/index.ts");
+const PI_MODULES: [(&str, &str); 6] = [
+    ("formats.ts", include_str!("../../../extensions/pi/rvow/formats.ts")),
+    ("prompts.ts", include_str!("../../../extensions/pi/rvow/prompts.ts")),
+    ("types.ts", include_str!("../../../extensions/pi/rvow/types.ts")),
+    ("tools.ts", include_str!("../../../extensions/pi/rvow/tools.ts")),
+    ("typed-tools.ts", include_str!("../../../extensions/pi/rvow/typed-tools.ts")),
+    ("refresh.ts", include_str!("../../../extensions/pi/rvow/refresh.ts")),
+];
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
 const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.tsx");
@@ -19,7 +27,8 @@ const MOD_TYPES: &str = include_str!("../../../extensions/claude/types/index.d.t
 pub const MARKETPLACE_DIR: &str = "claude-plugin";
 const MARK: &str = "rvow-managed sha256:";
 const PRE_PUSH_MARK: &str = "# rvow pre-push gate";
-const TOOLS: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*";
+pub(crate) const PRE_PUSH_RECORD: &str = "rvow-pre-push-installed";
+const TOOLS: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -32,6 +41,35 @@ pub enum Outcome {
         path: PathBuf,
         line: String,
     },
+}
+
+/// The pi agent folder: `PI_CODING_AGENT_DIR` when set (pi honours it), else
+/// `<home>/.pi/agent`.
+pub fn pi_dir(home: Option<&Path>) -> Option<PathBuf> {
+    std::env::var_os("PI_CODING_AGENT_DIR").filter(|d| !d.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| h.join(".pi/agent")))
+}
+
+/// `text` as one shell word in single quotes; a single quote inside becomes `'\''`.
+pub(crate) fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The first single-quoted shell word of `text` and the rest after it, the
+/// inverse of `shell_quote`.
+pub(crate) fn shell_unquote_prefix(text: &str) -> Option<(String, &str)> {
+    let mut rest = text.strip_prefix('\'')?;
+    let mut word = String::new();
+    loop {
+        let (chunk, after) = rest.split_once('\'')?;
+        word.push_str(chunk);
+        match after.strip_prefix("\\''") {
+            Some(more) => {
+                word.push('\'');
+                rest = more;
+            }
+            None => return Some((word, after)),
+        }
+    }
 }
 
 /// Writes `body` with a marker line holding its hash. An existing file is
@@ -61,16 +99,21 @@ fn write_managed(path: &Path, body: &str, comment: &str) -> Result<Outcome> {
 /// stay first, so the marker follows it as an HTML comment.
 pub fn skill(claude_dir: &Path, text: &str) -> Result<Outcome> {
     let path = claude_dir.join("skills/rvow/SKILL.md");
-    let (front, body) = split_front_matter(text);
-    let marked_body = format!("<!-- {MARK}{} -->\n{body}", sha256_hex(body.as_bytes()));
-    let full = format!("{front}{marked_body}");
+    let full = marked_skill(text);
     if let Ok(old) = std::fs::read_to_string(&path) {
         if old == full {
             return Ok(Outcome::Unchanged(path));
         }
-        let (_, old_body) = split_front_matter(&old);
+        let (old_front, old_body) = split_front_matter(&old);
         let unedited = old_body.split_once('\n').is_some_and(|(first, rest)| {
-            first.split_once(MARK).is_some_and(|(_, h)| h.trim_end_matches(" -->").trim() == sha256_hex(rest.as_bytes()))
+            if let Some(hash) = first.strip_prefix("<!-- rvow-managed skill-sha256:").and_then(|s| s.strip_suffix(" -->")) {
+                hash == sha256_hex(format!("{old_front}{rest}").as_bytes())
+            } else {
+                // Legacy markers did not cover front matter, so only matching front matter is safe to refresh.
+                old_front == split_front_matter(text).0
+                    && first.strip_prefix("<!-- rvow-managed sha256:").and_then(|s| s.strip_suffix(" -->"))
+                        == Some(sha256_hex(rest.as_bytes()).as_str())
+            }
         });
         if !unedited {
             return Ok(Outcome::KeptEdit(path));
@@ -81,6 +124,24 @@ pub fn skill(claude_dir: &Path, text: &str) -> Result<Outcome> {
     }
     std::fs::write(&path, full).map_err(|e| Error::io(&path, e))?;
     Ok(Outcome::Written(path))
+}
+
+fn marked_skill(text: &str) -> String {
+    let (front, body) = split_front_matter(text);
+    format!("{front}<!-- rvow-managed skill-sha256:{} -->\n{body}", sha256_hex(text.as_bytes()))
+}
+
+/// Compares an installed skill with the current rendered text, including legacy body-only markers.
+pub fn skill_is_current(installed: &str, text: &str) -> bool {
+    if installed == marked_skill(text) {
+        return true;
+    }
+    let (front, body) = split_front_matter(text);
+    installed == format!("{front}<!-- {MARK}{} -->\n{body}", sha256_hex(body.as_bytes()))
+}
+
+fn json_string(text: &str) -> String {
+    Value::String(text.to_string()).to_string()
 }
 
 fn pretty(value: &Value) -> Result<String> {
@@ -101,7 +162,7 @@ fn split_front_matter(text: &str) -> (&str, &str) {
 /// binary path filled in and the rendered skill `skill` inside. rvow owns this folder, so every
 /// file is rewritten to match.
 pub fn claude_mod(dir: &Path, rvow: &Path, skill: &str) -> Result<Outcome> {
-    let register = MOD_REGISTER.replace("'__RVOW_BIN__'", &format!("{:?}", rvow.display().to_string()));
+    let register = MOD_REGISTER.replace("'__RVOW_BIN__'", &json_string(&rvow.display().to_string()));
     let modules: String = MOD_MODULES.iter().map(|(_, src)| *src).collect();
     let version = format!(
         "{}+{}",
@@ -190,14 +251,6 @@ fn run_claude(claude: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn names(json: &str, key: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<Value>>(json)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|v| v.get(key).and_then(Value::as_str).map(String::from))
-        .collect()
-}
-
 /// Registers the marketplace in `dir` with Claude Code and installs or updates
 /// the rvow plugin from it. Each step is skipped or turned into an update when
 /// it already holds, so a repeated install is safe. Returns what it did.
@@ -228,9 +281,15 @@ pub fn register_claude_mod(claude: &Path, dir: &Path) -> Result<Vec<String>> {
         }
     }
     let plugins = run_claude(claude, &["plugin", "list", "--json"])?;
-    if names(&plugins, "id").iter().any(|n| n == "rvow@rvow") {
+    let listed: Vec<Value> = serde_json::from_str(&plugins).unwrap_or_default();
+    let ours = listed.iter().find(|v| v.get("id").and_then(Value::as_str) == Some("rvow@rvow"));
+    if let Some(ours) = ours {
         run_claude(claude, &["plugin", "update", "rvow@rvow"])?;
         done.push("updated the rvow plugin; restart Claude Code to load it".into());
+        if ours.get("enabled").and_then(Value::as_bool) == Some(false) {
+            run_claude(claude, &["plugin", "enable", "rvow@rvow"])?;
+            done.push("enabled the rvow plugin, which was disabled; run /reload-plugins in Claude Code".into());
+        }
     } else {
         run_claude(claude, &["plugin", "install", "rvow@rvow"])?;
         done.push("installed the rvow plugin; restart Claude Code to load it".into());
@@ -239,14 +298,97 @@ pub fn register_claude_mod(claude: &Path, dir: &Path) -> Result<Vec<String>> {
 }
 
 pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
-    write_managed(&pi_dir.join("extensions/rvow.ts"), PI_EXTENSION, "//")
+    let legacy = pi_dir.join("extensions/rvow.ts");
+    match std::fs::read_to_string(&legacy) {
+        Ok(old) => {
+            let unedited = old.split_once('\n').is_some_and(|(first, rest)| {
+                first.strip_prefix("// rvow-managed sha256:").is_some_and(|hash| hash == sha256_hex(rest.as_bytes()))
+            });
+            if !unedited {
+                return Ok(Outcome::KeptEdit(legacy));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(&legacy, e)),
+    }
+    let dir = pi_dir.join("extensions/rvow");
+    let files: Vec<_> = std::iter::once(("index.ts", PI_EXTENSION)).chain(PI_MODULES).collect();
+    for (name, _) in &files {
+        let path = dir.join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(old) => {
+                let unedited = old.split_once('\n').is_some_and(|(first, rest)| {
+                    first.strip_prefix("// rvow-managed sha256:").is_some_and(|hash| hash == sha256_hex(rest.as_bytes()))
+                });
+                if !unedited {
+                    return Ok(Outcome::KeptEdit(path));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(&path, e)),
+        }
+    }
+    let mut changed = false;
+    for (name, body) in files {
+        match write_managed(&dir.join(name), body, "//")? {
+            Outcome::KeptEdit(path) => return Ok(Outcome::KeptEdit(path)),
+            Outcome::Written(_) => changed = true,
+            _ => {}
+        }
+    }
+    match std::fs::remove_file(&legacy) {
+        Ok(()) => changed = true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(&legacy, e)),
+    }
+    Ok(if changed { Outcome::Written(dir) } else { Outcome::Unchanged(dir) })
+}
+
+/// A settings hook command that runs `rvow hook claude <event>` or the neutral `rvow hook <event>`.
+/// The installed rvow files that no longer match what this binary would write:
+/// the skill, the mod's files and the pi extension files. An edited file
+/// counts too, since `rvow install` keeps edits and the user decides. A file
+/// that is not installed is not listed.
+pub fn stale_managed_files(claude_dir: &Path, rvow_home: &Path, pi_dir: Option<&Path>, skill_text: &str) -> Vec<PathBuf> {
+    let mut stale = Vec::new();
+    let mut check = |path: PathBuf, current: &dyn Fn(&str) -> bool| {
+        if std::fs::read_to_string(&path).is_ok_and(|installed| !current(&installed)) {
+            stale.push(path);
+        }
+    };
+    check(claude_dir.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
+    let plugin = rvow_home.join(MARKETPLACE_DIR).join("plugins/rvow");
+    check(plugin.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
+    check(plugin.join("hooks/hooks.json"), &|t| t == MOD_HOOKS_JSON);
+    check(plugin.join("types/index.d.ts"), &|t| t == MOD_TYPES);
+    for (name, src) in MOD_MODULES {
+        check(plugin.join("hooks").join(name), &|t| t == src);
+    }
+    check(plugin.join("hooks/register.tsx"), &|t| {
+        // The installed copy holds the binary path where the template holds the placeholder.
+        let literal = t.lines().find_map(|l| l.split_once("const INSTALLED_BIN = ").map(|(_, v)| v.trim().to_string()));
+        literal.is_some_and(|bin| t == MOD_REGISTER.replace("'__RVOW_BIN__'", &bin))
+    });
+    if let Some(pi) = pi_dir {
+        let dir = pi.join("extensions/rvow");
+        for (name, body) in std::iter::once(("index.ts", PI_EXTENSION)).chain(PI_MODULES) {
+            check(dir.join(name), &|t| t == format!("// {MARK}{}\n{body}", sha256_hex(body.as_bytes())));
+        }
+    }
+    stale
+}
+
+fn is_rvow_command(command: &str) -> bool {
+    command.contains("hook claude")
+        || (command.contains("rvow")
+            && ["pre-tool-use", "session-start", "stop", "status", "view"].iter().any(|e| command.contains(&format!(" hook {e}"))))
 }
 
 fn is_rvow_entry(entry: &Value) -> bool {
     entry
         .get("hooks")
         .and_then(Value::as_array)
-        .is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.contains("hook claude"))))
+        .is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(is_rvow_command)))
 }
 
 /// Merges the rvow hooks into a Claude Code settings file, replacing earlier
@@ -263,9 +405,9 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
             .map_err(|e| Error::new("settings", format!("{}: {e}", path.display()), "fix the JSON, then run rvow install again"))?,
         _ => json!({}),
     };
-    let bin = rvow.display().to_string();
+    let bin = shell_quote(&rvow.display().to_string());
     let entry = |matcher: Option<&str>, event: &str| {
-        let hook = json!({"type": "command", "command": format!("'{bin}' hook claude {event}")});
+        let hook = json!({"type": "command", "command": format!("{bin} hook claude {event}")});
         match matcher {
             Some(m) => json!({"matcher": m, "hooks": [hook]}),
             None => json!({"hooks": [hook]}),
@@ -273,15 +415,29 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
     };
     let wanted =
         [("PreToolUse", entry(Some(TOOLS), "pre-tool-use")), ("SessionStart", entry(None, "session-start")), ("Stop", entry(None, "stop"))];
-    let root = settings.as_object_mut().ok_or_else(|| Error::new("settings", "settings is not a JSON object", "fix the file"))?;
-    let hooks = root
-        .entry("hooks")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| Error::new("settings", "\"hooks\" is not an object", "fix the file"))?;
+    let root = settings.as_object_mut().ok_or_else(|| {
+        Error::new(
+            "settings",
+            format!("{}: the top level is not a JSON object", path.display()),
+            format!("replace the contents of {} with {{}}, then run `rvow install` again", path.display()),
+        )
+    })?;
+    let hooks = root.entry("hooks").or_insert_with(|| json!({})).as_object_mut().ok_or_else(|| {
+        Error::new(
+            "settings",
+            format!("{}: \"hooks\" is not an object", path.display()),
+            format!("delete the \"hooks\" key in {}, then run `rvow install` again", path.display()),
+        )
+    })?;
     for (event, e) in wanted {
         let list = hooks.entry(event).or_insert_with(|| json!([]));
-        let arr = list.as_array_mut().ok_or_else(|| Error::new("settings", format!("hooks.{event} is not a list"), "fix the file"))?;
+        let arr = list.as_array_mut().ok_or_else(|| {
+            Error::new(
+                "settings",
+                format!("{}: hooks.{event} is not a list", path.display()),
+                format!("delete the \"{event}\" key under \"hooks\" in {}, then run `rvow install` again", path.display()),
+            )
+        })?;
         arr.retain(|x| !is_rvow_entry(x));
         arr.push(e);
     }
@@ -306,9 +462,9 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
 /// since install, so a binary the agent rebuilt cannot pass the gate.
 pub fn pre_push_script(rvow: &Path) -> Result<String> {
     let bytes = std::fs::read(rvow).map_err(|e| Error::io(rvow, e))?;
-    let bin = rvow.display();
+    let bin = shell_quote(&rvow.display().to_string());
     Ok(format!(
-        "#!/bin/sh\n{PRE_PUSH_MARK}, written by rvow install\nrvow='{bin}'\nwant={}\nhave=$(shasum -a 256 \"$rvow\" | cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then\n  echo \"rvow: $rvow changed since rvow install; run rvow install again\" >&2\n  exit 1\nfi\nexec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \"$rvow\" gate --strict --rerun\n",
+        "#!/bin/sh\n{PRE_PUSH_MARK}, written by rvow install\nrvow={bin}\nwant={}\nhave=$(shasum -a 256 \"$rvow\" | cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then\n  echo \"rvow: $rvow changed since rvow install; run rvow install again\" >&2\n  exit 1\nfi\nexec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \"$rvow\" gate --strict --rerun\n",
         sha256_hex(&bytes)
     ))
 }
@@ -316,18 +472,27 @@ pub fn pre_push_script(rvow: &Path) -> Result<String> {
 /// Writes `.git/hooks/pre-push` when no other hook manager owns it.
 pub fn pre_push(top: &Path, rvow: &Path) -> Result<Outcome> {
     let script = pre_push_script(rvow)?;
+    let common = git::run(top, &["rev-parse", "--git-common-dir"])?;
+    let hooks = top.join(common).join("hooks");
+    std::fs::create_dir_all(&hooks).map_err(|e| Error::io(&hooks, e))?;
+    let record = hooks.join(PRE_PUSH_RECORD);
+    let recorded = format!("{PRE_PUSH_MARK}\nsha256:{}\n", sha256_hex(&std::fs::read(rvow).map_err(|e| Error::io(rvow, e))?));
+    if !std::fs::read_to_string(&record).is_ok_and(|text| text == recorded) {
+        std::fs::write(&record, recorded).map_err(|e| Error::io(&record, e))?;
+    }
     if let Ok(dir) = git::run(top, &["config", "--get", "core.hooksPath"])
         && !dir.is_empty()
     {
-        return Ok(Outcome::AddLine { path: top.join(&dir).join("pre-push"), line: format!("'{}' gate --strict --rerun", rvow.display()) });
+        return Ok(Outcome::AddLine {
+            path: top.join(&dir).join("pre-push"),
+            line: format!("{} gate --strict --rerun", shell_quote(&rvow.display().to_string())),
+        });
     }
-    let common = git::run(top, &["rev-parse", "--git-common-dir"])?;
-    let hooks = top.join(common).join("hooks");
     let path = hooks.join("pre-push");
     match std::fs::read_to_string(&path) {
         Ok(old) if old == script => return Ok(Outcome::Unchanged(path)),
         Ok(old) if !old.contains(PRE_PUSH_MARK) => {
-            return Ok(Outcome::AddLine { path, line: format!("'{}' gate --strict --rerun", rvow.display()) });
+            return Ok(Outcome::AddLine { path, line: format!("{} gate --strict --rerun", shell_quote(&rvow.display().to_string())) });
         }
         _ => {}
     }
@@ -454,6 +619,15 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(calls.contains(&format!("plugin marketplace add {}", dir.display())), "{calls}");
         assert!(calls.contains("plugin update rvow@rvow"), "{calls}");
+
+        std::fs::write(
+            &fake,
+            std::fs::read_to_string(&fake).unwrap().replace("{\"id\":\"rvow@rvow\"}", "{\"id\":\"rvow@rvow\",\"enabled\":false}"),
+        )
+        .unwrap();
+        let off = register_claude_mod(&fake, &dir).unwrap();
+        assert!(off[2].starts_with("enabled the rvow plugin"), "{off:?}");
+        assert!(std::fs::read_to_string(&log).unwrap().contains("plugin enable rvow@rvow"));
 
         let moved = tmp.0.join("new-home-market");
         let third = register_claude_mod(&fake, &moved).unwrap();

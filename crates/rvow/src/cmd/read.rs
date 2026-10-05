@@ -115,6 +115,43 @@ fn home_next(r: &mut Reply, v: &serde_json::Value) {
     }
 }
 
+pub fn dashboard() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let v = view::dashboard(&p, &home, &cwd()?)?;
+    let mut r = Reply::new();
+    let branch = v["branch"].as_str().unwrap_or("detached");
+    r.set("branch", branch);
+    r.line(format!("branch {branch}"));
+    home_changes(&mut r, &v);
+    r.line(format!("changes: {} active", list(&v["changes"]).len()));
+    for (name, fields) in [
+        ("specs", vec!["id", "capability", "title"]),
+        ("backlog", vec!["id", "branch", "title"]),
+        ("archive", vec!["id", "outcome", "title"]),
+    ] {
+        let entries = list(&v[name]);
+        r.set(name, Node::from(serde_json::Value::Array(entries.clone())));
+        r.line(format!("{name}: {}", entries.len()));
+        for entry in entries {
+            r.line(format!("  {}", fields.iter().map(|field| text(&entry[field])).collect::<Vec<_>>().join(" ")));
+        }
+    }
+    let mut rows = Vec::new();
+    for c in list(&v["changes"]) {
+        for t in list(&c["tasks"]) {
+            r.line(format!("  {} {} {}", text(&t["id"]), text(&t["state"]), text(&t["title"])));
+            rows.push(Node::Obj(
+                obj! { "id" => text(&t["id"]), "change" => text(&c["id"]), "state" => text(&t["state"]), "title" => text(&t["title"]) },
+            ));
+        }
+    }
+    r.line(format!("tasks: {}", rows.len()));
+    r.set("tasks", Node::List(rows));
+    home_next(&mut r, &v);
+    Ok(r)
+}
+
 pub fn ls() -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
@@ -180,16 +217,38 @@ pub fn spec_list() -> Result<Reply> {
     Ok(r)
 }
 
-pub fn guide(artifact: Artifact) -> Reply {
-    Reply::lines(
-        match artifact {
-            Artifact::Proposal => guide::PROPOSAL,
-            Artifact::Spec => guide::SPEC,
-            Artifact::Tasks => guide::TASKS,
-            Artifact::Design => guide::DESIGN,
+pub fn guide(artifact: Artifact) -> Result<Reply> {
+    let builtin = match artifact {
+        Artifact::Proposal => guide::PROPOSAL,
+        Artifact::Spec => guide::SPEC,
+        Artifact::Tasks => guide::TASKS,
+        Artifact::Design => guide::DESIGN,
+    };
+    let at = cwd()?;
+    if rvow_core::git::toplevel(&at).is_err() {
+        return Ok(Reply::lines(builtin.to_owned()));
+    }
+    let home = store::home_dir()?;
+    let p = match store::find(&at, &home) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Ok(Reply::lines(builtin.to_owned())),
+        Err(e) if e.code == "no-commit" => return Ok(Reply::lines(builtin.to_owned())),
+        Err(e) => return Err(e),
+    };
+    let config = rvow_core::config::load(&p, &home)?;
+    let rule = match artifact {
+        Artifact::Proposal => config.rules.proposal.as_deref(),
+        Artifact::Spec => config.rules.spec.as_deref(),
+        Artifact::Tasks => config.rules.tasks.as_deref(),
+        Artifact::Design => config.rules.design.as_deref(),
+    };
+    let mut text = builtin.trim_end().to_owned();
+    for (heading, extra) in [("Project context", Some(config.context.as_str())), ("Artifact rules", rule)] {
+        if let Some(extra) = extra.filter(|text| !text.trim().is_empty()) {
+            text.push_str(&format!("\n\n## {heading}\n\n{extra}"));
         }
-        .to_owned(),
-    )
+    }
+    Ok(Reply::lines(text))
 }
 
 pub fn brief() -> Result<Reply> {

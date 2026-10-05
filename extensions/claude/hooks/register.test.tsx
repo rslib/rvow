@@ -1,6 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine, Mounted } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
+import { decisionPrompt, REFINE_STEPS } from './format'
 import { band, cmd, PLACED, pane, procResult } from './testkit'
 
 const CHANGE = {
@@ -645,3 +646,14 @@ for (const [name, view] of [
     await show(name, await mount($, 72), 72)
   })
 }
+
+test('the accept prompt never doubles a period', () => {
+  const prompt = decisionPrompt(['accept', 'CHG-x'], 'next: TSK-abc Do it.\n')
+  expect(prompt).toContain('Do it.')
+  expect(prompt).not.toContain('..')
+})
+
+test('the refine steps say what the guides rule out', () => {
+  expect(REFINE_STEPS).toContain('cut anything the guides rule out')
+  expect(REFINE_STEPS).not.toContain('tighten')
+})

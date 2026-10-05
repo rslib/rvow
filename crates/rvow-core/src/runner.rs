@@ -35,11 +35,19 @@ impl Outcome {
 }
 
 /// Counts tests from runner summaries: libtest `test result:` lines (one per
-/// test binary, summed) and the final pytest `=== N passed ... ===` line.
+/// test binary, summed), the final pytest `=== N passed ... ===` line, nextest
+/// `Summary [` lines and jest `Tests:` lines (each run summed) and go test
+/// package lines (`[no tests to run]` and `[no test files]` count as zero).
+/// Nextest, jest and go lines count only where the tool prints them: a line
+/// that a test prints itself is indented, or too far indented, and is ignored.
 #[derive(Debug, Default)]
 struct TestCount {
     libtest: Option<u64>,
     pytest: Option<u64>,
+    nextest: Option<u64>,
+    jest: Option<u64>,
+    go_empty: u64,
+    go_real: u64,
 }
 
 fn count_before(line: &str, words: &[&str]) -> u64 {
@@ -47,20 +55,47 @@ fn count_before(line: &str, words: &[&str]) -> u64 {
     tokens.windows(2).filter(|w| words.contains(&w[1])).filter_map(|w| w[0].parse::<u64>().ok()).sum()
 }
 
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
 impl TestCount {
     fn feed(&mut self, line: &str) {
         let t = line.trim();
         if t.starts_with("test result:") {
             *self.libtest.get_or_insert(0) += count_before(t, &["passed", "failed"]);
-        } else if t.starts_with('=') && t.ends_with('=') && t.contains(" in ") {
+            return;
+        }
+        if t.starts_with('=') && t.ends_with('=') && t.contains(" in ") {
             if t.contains("no tests ran") {
                 self.pytest = Some(0);
-            } else {
-                let n = count_before(t, &["passed", "failed", "error", "errors", "xfailed", "xpassed"]);
-                if n > 0 {
-                    self.pytest = Some(n);
-                }
+                return;
             }
+            let n = count_before(t, &["passed", "failed", "error", "errors", "xfailed", "xpassed"]);
+            if n > 0 {
+                self.pytest = Some(n);
+            }
+            return;
+        }
+        if t.starts_with("Summary [") && indent(line) <= 6 && t.contains(" run:") && t.contains("passed") {
+            // nextest: "Summary [ 0.002s] 12 tests run: 12 passed, 0 skipped".
+            *self.nextest.get_or_insert(0) += count_before(t, &["tests", "test"]);
+            return;
+        }
+        if line.starts_with("Tests:") && t.contains("total") {
+            // jest: "Tests:       1 failed, 12 passed, 13 total".
+            *self.jest.get_or_insert(0) += count_before(t, &["total"]);
+            return;
+        }
+        if line.starts_with("ok  \t") {
+            // go test: "ok  \tpkg\t0.1s", with a marker when nothing ran.
+            if t.contains("[no tests to run]") {
+                self.go_empty += 1;
+            } else {
+                self.go_real += 1;
+            }
+        } else if line.starts_with("?   \t") && line.contains("[no test files]") {
+            self.go_empty += 1;
         }
     }
 
@@ -68,13 +103,41 @@ impl TestCount {
         if cmd.contains("pytest") && exit == Some(5) {
             return Some(0);
         }
-        self.libtest.or(self.pytest)
+        let go = (self.go_empty > 0 && self.go_real == 0).then_some(0);
+        self.libtest.or(self.pytest).or(self.nextest).or(self.jest).or(go)
     }
 }
 
 /// Masks secrets and personal paths in one output line.
 pub fn mask(line: &str, home: Option<&str>, repo: &str) -> String {
-    let mut line = line.to_string();
+    let mut masker = TailMask::default();
+    line.split('\n').map(|line| masker.line(line, home, repo)).collect::<Vec<_>>().join("\n")
+}
+
+#[derive(Default)]
+struct TailMask {
+    private_key: bool,
+}
+
+impl TailMask {
+    fn line(&mut self, line: &str, home: Option<&str>, repo: &str) -> String {
+        if line.contains("-----BEGIN ") && line.contains("PRIVATE KEY-----") {
+            self.private_key = true;
+            return "-----BEGIN PRIVATE KEY-----".into();
+        }
+        if self.private_key {
+            if line.contains("-----END ") && line.contains("PRIVATE KEY-----") {
+                self.private_key = false;
+                return "-----END PRIVATE KEY-----".into();
+            }
+            return "<masked>".into();
+        }
+        mask_line(line, home, repo)
+    }
+}
+
+fn mask_line(line: &str, home: Option<&str>, repo: &str) -> String {
+    let mut line = mask_url_credentials(line);
     if !repo.is_empty() {
         line = line.replace(repo, "<repo>");
     }
@@ -110,7 +173,7 @@ pub fn mask(line: &str, home: Option<&str>, repo: &str) -> String {
     out
 }
 
-fn names_secret(name: &str) -> bool {
+pub(crate) fn names_secret(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     SECRET_NAMES.iter().any(|s| upper.contains(s))
 }
@@ -129,10 +192,31 @@ fn mask_token(tok: &str) -> String {
     let secret = PREFIXES.iter().any(|p| tok.starts_with(p) && tok.len() > p.len() + 8)
         || (tok.starts_with("eyJ") && tok.matches('.').count() == 2)
         || (tok.len() >= 32
-            && tok.chars().all(|c| c.is_ascii_alphanumeric() || "+/=_-".contains(c))
-            && tok.chars().any(|c| c.is_ascii_digit())
-            && tok.chars().any(|c| c.is_ascii_alphabetic()));
+            && !tok.contains('/')
+            && !(matches!(tok.len(), 40 | 64) && tok.chars().all(|c| c.is_ascii_hexdigit()))
+            && tok.chars().all(|c| c.is_ascii_alphanumeric() || "+/=_-".contains(c)));
     if secret { "<masked>".into() } else { tok.into() }
+}
+
+fn mask_url_credentials(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find("://") {
+        let end = start + 3;
+        out.push_str(&rest[..end]);
+        rest = &rest[end..];
+        let authority_end = rest.find(|c: char| c.is_whitespace() || "/?#\"'".contains(c)).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        if let Some(at) = authority.rfind('@') {
+            out.push_str("<masked>@");
+            out.push_str(&authority[at + 1..]);
+        } else {
+            out.push_str(authority);
+        }
+        rest = &rest[authority_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(unix)]
@@ -179,10 +263,11 @@ pub fn run(cmd: &str, cwd: &Path, env: &[(String, String)], timeout: Duration, e
     let repo = cwd.display().to_string();
     let mut count = TestCount::default();
     let mut tail = VecDeque::with_capacity(TAIL_LINES + 1);
+    let mut masker = TailMask::default();
     let mut take = |line: String, echo: &mut dyn Write| {
         let _ = writeln!(echo, "{line}");
         count.feed(&line);
-        tail.push_back(mask(&line, home.as_deref(), &repo));
+        tail.push_back(masker.line(&line, home.as_deref(), &repo));
         if tail.len() > TAIL_LINES {
             tail.pop_front();
         }
@@ -279,6 +364,16 @@ mod tests {
     }
 
     #[test]
+    fn counts_nextest_jest_and_go() {
+        let nextest = quiet("echo '     Summary [   0.002s] 12 tests run: 12 passed, 0 skipped'", Duration::from_secs(10));
+        assert_eq!(nextest.tests_run, Some(12), "nextest counts its tests");
+        let jest = quiet("echo 'Tests:       1 failed, 12 passed, 13 total'", Duration::from_secs(10));
+        assert_eq!(jest.tests_run, Some(13), "jest counts its total");
+        let go = quiet("echo 'ok  \texample \t0.006s [no tests to run]'", Duration::from_secs(10));
+        assert_eq!(go.tests_run, Some(0), "go with no tests to run is zero");
+    }
+
+    #[test]
     fn masks_secrets_and_paths() {
         let m = |s: &str| mask(s, Some("/Users/me"), "/Users/me/code/r");
         assert_eq!(m("GITHUB_TOKEN=abc123 ok"), "GITHUB_TOKEN=<masked> ok");
@@ -289,9 +384,14 @@ mod tests {
         assert_eq!(m("token ghp_ABCDEFGHIJKLMNOP1234"), "token <masked>");
         assert_eq!(m("AKIAABCDEFGHIJKLMNOP"), "<masked>");
         assert_eq!(m("eyJhbGc.eyJzdWI.sig"), "<masked>");
-        assert_eq!(m("blob 0123456789abcdef0123456789abcdef01234567"), "blob <masked>");
+        assert_eq!(m("blob 0123456789abcdef0123456789abcdef0123456z"), "blob <masked>");
         assert_eq!(m("at /Users/me/code/r/src/a.rs:3"), "at <repo>/src/a.rs:3");
         assert_eq!(m("cache /Users/me/.cargo"), "cache ~/.cargo");
         assert_eq!(m("test result: ok. 3 passed"), "test result: ok. 3 passed");
+        // A multi-line PEM private key block: the header stays, the key bodies are masked.
+        let pem = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7VJ\n-----END PRIVATE KEY-----";
+        let out = m(pem);
+        assert!(out.contains("BEGIN PRIVATE KEY") && out.contains("END PRIVATE KEY"), "{out}");
+        assert!(!out.contains("MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7VJ"), "key body leaked: {out}");
     }
 }

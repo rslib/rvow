@@ -62,17 +62,18 @@ export function decisionPrompt(argv: string[], out: string): string | null {
   if (verb === 'archive') return `I archived ${id}. The change is closed.`
   if (verb === 'accept') {
     const next = out.split('\n').find((l) => l.startsWith('next:'))
-    return `I accepted ${id}.${next ? ` ${next}.` : ''} Continue with it.`
+    const trimmed = next?.endsWith('.') ? next.slice(0, -1) : next
+    return `I accepted ${id}.${trimmed ? ` ${trimmed}.` : ''} Continue with it.`
   }
   const ids = [...new Set(`${argv.join(' ')}\n${out}`.match(/AMD-[\w-]+/g) ?? [])].join(', ')
   if (argv.includes('--accept')) return `I accepted the plan edit ${ids}. Continue the tasks.`
   if (argv.includes('--reject'))
-    return `I rejected the plan edit ${ids}. Undo it, or amend it again with a different change.`
+    return `I rejected the plan edit ${ids}. Undo it, or amend it again with a different edit.`
   return null
 }
 
 export const REFINE_STEPS =
-  'Follow `rvow guide proposal`, `rvow guide spec` and `rvow guide tasks`. Ask me about open points with the rvow_ask tool before changing scope. Then tighten the proposal and tasks so `rvow check` passes, and tell me what changed.'
+  'Follow `rvow guide proposal`, `rvow guide spec` and `rvow guide tasks`. Ask me about open points with the rvow_ask tool before changing scope. Then cut anything the guides rule out of the proposal and tasks so `rvow check` passes, and tell me what changed.'
 
 /** The prompt that asks the agent to refine one plan, or several one at a time. */
 export function refinePrompt(plans: RvowPlan[]): string {

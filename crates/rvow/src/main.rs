@@ -13,8 +13,9 @@ mod cmd;
 mod doc_commands;
 mod output;
 mod skill;
+mod w18;
 
-use cmd::{lifecycle, plan, prove, read, setup};
+use cmd::{export, lifecycle, plan, prove, read, setup};
 use output::Reply;
 
 const DESCRIPTION: &str = "Hold a coding agent to an accepted plan.";
@@ -44,7 +45,11 @@ enum Cmd {
         in_repo: bool,
     },
     /// Repair this repository's rvow tree: record its roots and remote, and move a home tree to its remote path.
-    Rebind,
+    Rebind {
+        /// Read a git filter-repo commit map to find a rewritten repository.
+        #[arg(long, value_name = "FILE")]
+        commit_map: Option<PathBuf>,
+    },
     /// Create a change in backlog/.
     New {
         /// The change title.
@@ -68,6 +73,12 @@ enum Cmd {
     Review {
         /// The change id or a unique prefix of it.
         change: String,
+        /// Build fresh-context advisory evidence without running checks.
+        #[arg(long, conflicts_with = "record")]
+        packet: bool,
+        /// Record advisory JSON findings against the current packet identity.
+        #[arg(long)]
+        record: Option<PathBuf>,
     },
     /// List every change with its stage, branch and title.
     Ls,
@@ -94,6 +105,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ImportCmd,
     },
+    /// Write rvow's specs and changes as an OpenSpec tree, one way.
+    Export {
+        #[command(subcommand)]
+        cmd: ExportCmd,
+    },
     /// Print the short guide for writing one plan artifact.
     Guide {
         #[arg(value_enum)]
@@ -104,6 +120,8 @@ enum Cmd {
         /// The change id or a unique prefix of it, default every active change on this branch.
         change: Option<String>,
     },
+    /// Print the shared dashboard with living specs and branch tasks.
+    View,
     /// Print the short generated brief for this branch.
     Brief,
     /// Install the skill, the Claude Code hooks, the pi extension and the pre-push gate.
@@ -129,7 +147,7 @@ enum Cmd {
     Clarify {
         /// The change id; default: every open change on this branch.
         change: Option<String>,
-        /// Print the next round (at most 4) as JSON: question, options, recommended first.
+        /// Print the next round (at most interview_cap questions, default 3) as JSON: question, options, recommended first.
         #[arg(long)]
         json: bool,
     },
@@ -146,10 +164,22 @@ enum Cmd {
     },
     /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
     Hook {
+        /// The neutral event, or claude followed by its event for older callers.
         #[arg(value_enum)]
-        harness: Harness,
+        target: HookTarget,
         #[arg(value_enum)]
-        event: HookEvent,
+        event: Option<HookEvent>,
+    },
+    /// Show how often the hooks denied or blocked in the last days.
+    Stats {
+        /// How many days back to count.
+        #[arg(long, default_value_t = 7)]
+        days: u64,
+    },
+    /// Lease one task to a subagent and print the brief to give it.
+    Delegate {
+        /// The task id or a unique prefix of it.
+        task: String,
     },
     /// Record that a task cannot be finished as written.
     Block {
@@ -193,6 +223,12 @@ enum Cmd {
         /// Decide every pending amendment; pass the digest that the list printed.
         #[arg(long, value_name = "DIGEST", conflicts_with = "ids")]
         all: Option<String>,
+        /// Sign the decision with the global signing_key.
+        #[arg(long, requires = "signer", requires = "decision")]
+        sign: bool,
+        /// Explicit principal in the allowed-signers file.
+        #[arg(long, requires = "sign", value_name = "IDENTITY")]
+        signer: Option<String>,
     },
     /// Run a task's stored verify command and record the proof.
     #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
@@ -241,7 +277,13 @@ enum Cmd {
         /// A REQ id or a unique prefix of it.
         id: String,
     },
+    /// Export accepted verification data for a CI checkout without the home store.
+    Bundle {
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
     /// Check the active changes of this branch.
+    #[command(group(clap::ArgGroup::new("runner").args(["rerun", "bundle"])))]
     Gate {
         /// Fail on stale and flaky proofs too.
         #[arg(long)]
@@ -249,6 +291,21 @@ enum Cmd {
         /// Run every verify command again in a clean worktree of HEAD.
         #[arg(long)]
         rerun: bool,
+        /// With --rerun, run every task even when an earlier clean pass has the same key.
+        #[arg(long, requires = "rerun")]
+        no_cache: bool,
+        /// Write each rerun result to this file, for `rvow ingest` to read.
+        #[arg(long, value_name = "FILE", requires = "runner")]
+        out: Option<PathBuf>,
+        /// Execute an accepted verification bundle without accessing the home store.
+        #[arg(long, value_name = "FILE", conflicts_with = "rerun")]
+        bundle: Option<PathBuf>,
+    },
+    /// Add proofs that a `gate --out` file carried to the ledger of the
+    /// project each run names.
+    Ingest {
+        /// The run file that `gate --out` wrote.
+        file: PathBuf,
     },
 }
 
@@ -256,6 +313,19 @@ enum Cmd {
 enum SpecCmd {
     /// List each capability with its requirement ids and titles.
     List,
+}
+
+#[derive(Subcommand)]
+enum ExportCmd {
+    /// Write an OpenSpec tree under <dir>/openspec; never overwrites.
+    Openspec {
+        /// The target folder; default: ./openspec-export.
+        #[arg(long)]
+        to: Option<PathBuf>,
+        /// Print what would be written and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -309,33 +379,54 @@ fn reset_sigpipe() {
 fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
     let result = match cmd {
         Cmd::Init { in_repo } => setup::init(in_repo),
-        Cmd::Rebind => setup::rebind(),
+        Cmd::Rebind { commit_map } => setup::rebind(commit_map.as_deref()),
         Cmd::New { title, spec } => plan::new(&title.join(" "), !spec),
         Cmd::Validate => plan::validate(),
         Cmd::Accept { change, .. } => lifecycle::accept(&change).map(Reply::done),
-        Cmd::Review { change } => plan::review(&change),
+        Cmd::Review { change, packet, record } => plan::review(&change, packet, record.as_deref()),
         Cmd::Ls => read::ls(),
         Cmd::Path { id } => read::path(&id),
         Cmd::Show { id, full } => read::show(&id, full),
         Cmd::Spec { cmd: SpecCmd::List } => read::spec_list(),
         Cmd::Import { cmd: ImportCmd::Openspec { from, dry_run } } => plan::import_openspec(from, dry_run),
-        Cmd::Guide { artifact } => Ok(read::guide(artifact)),
+        Cmd::Export { cmd: ExportCmd::Openspec { to, dry_run } } => export::export_openspec(to, dry_run),
+        Cmd::Guide { artifact } => read::guide(artifact),
         Cmd::Ids { change } => plan::ids(change.as_deref()),
+        Cmd::View => read::dashboard(),
         Cmd::Brief => read::brief(),
-        Cmd::Hook { harness, event } => return setup::hook(harness, event),
+        Cmd::Hook { target, event } => {
+            let event = match (target, event) {
+                (HookTarget::Claude, Some(event)) => Some(event),
+                (target, None) => target.event(),
+                _ => None,
+            };
+            return match event {
+                Some(event) => setup::hook(Harness::Claude, event),
+                None => {
+                    usage_error(clap::Error::raw(clap::error::ErrorKind::InvalidValue, "use rvow hook <event> or rvow hook claude <event>"))
+                }
+            };
+        }
         Cmd::Install { claude, scope } => setup::install(claude, scope),
         Cmd::Check { change } => plan::check(change.as_deref()),
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
+        Cmd::Stats { days } => cmd::stats::stats(days),
+        Cmd::Delegate { task } => cmd::delegate::delegate(&task),
         Cmd::Block { task, reason } => lifecycle::block(&task, &reason),
         Cmd::Note { kind, text } => lifecycle::note(kind, &text.join(" ")),
         Cmd::Amend { reason, change, unlock } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
-        Cmd::Confirm { ids, accept, reject, all } => lifecycle::confirm(&ids, accept, reject, all.as_deref()).map(Reply::done),
+        Cmd::Confirm { ids, accept, reject, all, sign, signer } => {
+            lifecycle::confirm(&ids, accept, reject, all.as_deref(), sign, signer.as_deref()).map(Reply::done)
+        }
         Cmd::Prove { task: Some(t), .. } => prove::prove(&t),
         Cmd::Prove { .. } => prove::prove_stale(),
         Cmd::Status { all, json } => read::status(all, json),
-        Cmd::Gate { strict, rerun } => prove::gate(Options { strict, rerun }),
+        Cmd::Bundle { out } => prove::bundle(&out),
+        Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
+        Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
+        Cmd::Ingest { file } => cmd::ingest::ingest(&file),
         Cmd::Archive { change } => lifecycle::archive(&change),
         Cmd::Drop { change, reason } => lifecycle::drop_change(&change, &reason),
         Cmd::Supersede { old, by, reason } => lifecycle::supersede(&old, &by, &reason),
@@ -354,7 +445,7 @@ fn finish(result: Result<Reply>, toon: bool) -> ExitCode {
         }
         Err(e) => {
             if toon {
-                println!("{}", output::error(&e.message, vec![e.fix]));
+                println!("{}", output::error(&e.message, vec![e.fix], e.code));
             } else {
                 println!("error[{}]: {}", e.code, e.message);
                 println!("  fix: {}", e.fix);
@@ -384,7 +475,7 @@ fn usage_error(e: clap::Error) -> ExitCode {
         let mut help = usage_tips(&rendered);
         help.push(cmd.render_usage().to_string().replace("Usage: ", "usage: "));
         help.push(valid);
-        println!("{}", output::error(&message, help));
+        println!("{}", output::error(&message, help, "usage"));
     } else {
         println!("{}", rendered.trim_end());
         println!("{valid}");
@@ -450,12 +541,41 @@ enum Harness {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum HookTarget {
+    Claude,
+    PreToolUse,
+    SessionStart,
+    Stop,
+    Status,
+    View,
+    LeaseBind,
+    LeaseEnd,
+}
+
+impl HookTarget {
+    fn event(self) -> Option<HookEvent> {
+        match self {
+            Self::Claude => None,
+            Self::PreToolUse => Some(HookEvent::PreToolUse),
+            Self::SessionStart => Some(HookEvent::SessionStart),
+            Self::Stop => Some(HookEvent::Stop),
+            Self::Status => Some(HookEvent::Status),
+            Self::View => Some(HookEvent::View),
+            Self::LeaseBind => Some(HookEvent::LeaseBind),
+            Self::LeaseEnd => Some(HookEvent::LeaseEnd),
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum HookEvent {
     PreToolUse,
     SessionStart,
     Stop,
     Status,
     View,
+    LeaseBind,
+    LeaseEnd,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

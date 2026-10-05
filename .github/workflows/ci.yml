@@ -80,6 +80,13 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.invalid
           git config --global init.defaultBranch trunk
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/package-lock.json
+      - name: The pi audit tests shell out to tsc and node
+        run: npm --prefix extensions ci
       - run: cargo test --all-targets --locked
 
   quickstart:
@@ -102,6 +109,8 @@ jobs:
       - run: .github/scripts/quickstart.sh
       - name: rvow install writes the skill, the hooks and the gate
         run: .github/scripts/install.sh
+      - name: A second gate rerun is answered from the cache
+        run: .github/scripts/rerun_cache.sh
 
   extensions:
     name: Extensions

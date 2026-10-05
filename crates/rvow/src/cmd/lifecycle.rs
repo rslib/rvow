@@ -143,7 +143,7 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
     Ok(true)
 }
 
-pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) -> Result<bool> {
+pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>, sign: bool, signer: Option<&str>) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     if !accept && !reject {
@@ -153,7 +153,30 @@ pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) ->
         return list_pending(&p, ids);
     }
     let decision = if accept { amend::Decision::Accept } else { amend::Decision::Reject };
-    let decided = amend::confirm(&p, ids, decision, all).inspect_err(|e| {
+    let cfg = rvow_core::config::load(&p, &home)?;
+    if cfg.require_signature && !sign {
+        return Err(Error::new(
+            "signature",
+            format!("{} requires a signed confirmation", p.root.display()),
+            "add --sign --signer <identity> to the decision",
+        ));
+    }
+    let signing = if sign {
+        let key = cfg.signing_key.as_deref().ok_or_else(|| {
+            Error::new(
+                "signing-key",
+                "no global signing_key is configured",
+                format!("set signing_key in {}", home.join(store::CONFIG_FILE).display()),
+            )
+        })?;
+        let signer = signer
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| Error::new("signer", "a signed decision needs a signer identity", "pass --signer <identity>"))?;
+        Some(amend::Signing { key: std::path::Path::new(key), signer })
+    } else {
+        None
+    };
+    let decided = amend::confirm_signed(&p, ids, decision, all, signing).inspect_err(|e| {
         if e.code == "digest" {
             let _ = list_pending(&p, &[]);
         }
@@ -166,7 +189,7 @@ pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>) ->
         if accept {
             "next: the plan edit stands; continue the tasks"
         } else {
-            "next: undo the rejected plan edit, or amend it again with a different change"
+            "next: undo the rejected plan edit, or amend it again with a different edit"
         }
     );
     Ok(true)

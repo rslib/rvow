@@ -41,9 +41,18 @@ fn state_json(s: &State) -> (String, Vec<&'static str>) {
     }
 }
 
-/// The view, or `None` when the branch has neither an active change nor a plan
-/// waiting for accept.
+/// The shared view, or `None` when the project has no visible state.
 pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>> {
+    let state = dashboard(project, home, cwd)?;
+    if ["changes", "backlog", "archive", "specs"].iter().all(|key| state[key].as_array().is_none_or(Vec::is_empty)) {
+        Ok(None)
+    } else {
+        Ok(Some(state))
+    }
+}
+
+/// The shared dashboard, including explicit empty lists and living specs.
+pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     let top = git::toplevel(cwd)?;
     let branch = git::branch(&top)?;
     let (living, _) = change::load_living(project)?;
@@ -101,9 +110,14 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
     }
     archive.sort_by(|a, b| b.0.cmp(&a.0));
     let archive: Vec<Value> = archive.into_iter().take(ARCHIVE_SHOWN).map(|(_, v)| v).collect();
-    if queue.is_empty() && backlog.is_empty() && archive.is_empty() {
-        return Ok(None);
-    }
+    let specs: Vec<Value> = living
+        .iter()
+        .flat_map(|(cap, spec)| {
+            spec.requirements
+                .iter()
+                .map(move |req| json!({"id": req.id.to_string(), "capability": cap, "title": req.title, "deprecated": req.deprecated}))
+        })
+        .collect();
 
     let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
@@ -148,8 +162,9 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
             "state": state_json(&s).0,
         })
     });
-    Ok(Some(json!({
+    Ok(json!({
         "branch": branch,
+        "specs": specs,
         "changes": changes,
         "plans": plans,
         "backlog": backlog,
@@ -162,7 +177,7 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
             "blocked": blocked,
             "plans": plans.len(),
         },
-    })))
+    }))
 }
 
 #[cfg(test)]

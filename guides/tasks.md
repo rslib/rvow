@@ -10,11 +10,13 @@ Write `tasks.md` as a list of tasks. The order in the file is the work order.
 - `files:` the paths the task may touch. Required. Write `**` only when the task truly touches everything.
 - `baseline: pass` only when the command is expected to pass before the work starts.
 - `timeout:` such as `90s`, `20m` or `1h`, only when the config default is too short.
+- `max_age:` such as `24h`, only when a cached rerun pass of this task should expire sooner than the config default.
+- `depends_on:` task ids of the same change whose cache key joins this task's key, only when a change in another task's scope can break this one.
 - Use placeholder ids `TSK-new1`, `TSK-new2` and so on. rvow mints real ids at accept.
 
 ## The verify command
 
-- It must fail before the work and pass after. Run it before you write the code, and see it fail for the reason that the task fixes.
+- It must fail before the work and pass after. Run it before you write the code, and see it fail for the reason that the task fixes. The one exception is `baseline: pass`, a guard that must stay green.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists. Write the test first if it does not.
 - Do not use `true`, `echo` or a build alone as the check. Run the test that covers the behavior.
 - Each task lands its own tests. Do not defer tests to a final task.

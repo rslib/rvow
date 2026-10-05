@@ -1,0 +1,35 @@
+{
+  "branch": "trunk",
+  "specs": [],
+  "changes": [],
+  "plans": [
+    {
+      "id": "CHG-tsax6m",
+      "title": "Demo change",
+      "branch": "trunk",
+      "here": true,
+      "tasks": 0,
+      "questions": 0,
+      "issues": 0,
+      "ready": false,
+      "path": "/private/tmp/claude-501/ext-r/rh/local/repo/backlog/CHG-tsax6m-demo-change"
+    }
+  ],
+  "backlog": [
+    {
+      "id": "CHG-tsax6m",
+      "title": "Demo change",
+      "branch": "trunk",
+      "here": true,
+      "tasks": 0,
+      "questions": 0,
+      "issues": 0,
+      "ready": false,
+      "path": "/private/tmp/claude-501/ext-r/rh/local/repo/backlog/CHG-tsax6m-demo-change"
+    }
+  ],
+  "archive": [],
+  "questions": [],
+  "next": null,
+  "needs_you": { "amendments": 0, "questions": 0, "blocked": 0, "plans": 1 }
+}

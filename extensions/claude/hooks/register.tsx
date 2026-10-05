@@ -38,9 +38,16 @@ const detailsAtom = atom({ plugin: 'rvow', key: 'details' } as const, [])
 const INSTALLED_BIN = '__RVOW_BIN__'
 const BIN = INSTALLED_BIN.startsWith('__') ? 'rvow' : INSTALLED_BIN
 const MAX_BLOCKS = 8
-const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*)$/
+const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*)$/
 
-type Event = 'pre-tool-use' | 'session-start' | 'stop' | 'status' | 'view'
+type Event =
+  | 'pre-tool-use'
+  | 'session-start'
+  | 'stop'
+  | 'status'
+  | 'view'
+  | 'lease-bind'
+  | 'lease-end'
 
 let blocks = 0
 let warned = false
@@ -341,6 +348,10 @@ async function ask($: EngineInterface): Promise<string> {
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
+    // A new session (startup, clear, resume) has no brief yet, no warning shown, no blocks in a row.
+    sentBrief = ''
+    warned = false
+    blocks = 0
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
@@ -366,7 +377,7 @@ export const register: Register = (on) => {
     await $.tool.register({
       name: 'rvow_ask',
       description:
-        'Ask the user the open questions of the rvow plan on this branch, one round of at most 4, and record the answers. Use it instead of asking in chat.',
+        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Ask in chat only when it is missing.',
     })
     later($, () => refresh($))
     return started
@@ -381,7 +392,11 @@ export const register: Register = (on) => {
   on('tool.call', async ($, e, next) => {
     if (!CHECKED.test(e.tool)) return next(e)
     const { tool, tool_use_id, agentId, consent, ...args } = e as Record<string, unknown>
-    const out = await hook($, 'pre-tool-use', { tool_name: tool, tool_input: args })
+    const out = await hook($, 'pre-tool-use', {
+      tool_name: tool,
+      tool_input: args,
+      agent_id: typeof agentId === 'string' ? agentId : undefined,
+    })
     const decision = out?.hookSpecificOutput
     if (decision?.permissionDecision === 'deny') {
       return { deny: String(decision.permissionDecisionReason) }
@@ -389,6 +404,22 @@ export const register: Register = (on) => {
     const ran = await next(e)
     if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
     return ran
+  })
+
+  // A subagent whose prompt starts with the `lease:` line of `rvow delegate` is bound to that lease, so
+  // the hook can judge its edits by the leased task. Other prompts never start rvow.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (started.agentId && /^\s*lease:\s*TSK-/m.test(e.prompt)) {
+      await hook($, 'lease-bind', { agent_id: started.agentId, prompt: e.prompt })
+    }
+    return started
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const result = await next(e)
+    await hook($, 'lease-end', { agent_id: e.agent_id })
+    return result
   })
 
   // The brief goes with each prompt whose brief changed, not with session start: startup never waits
@@ -406,7 +437,13 @@ export const register: Register = (on) => {
   // same cap for the mod's own block.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    const reason = (await hook($, 'stop', {}))?.reason
+    // The CLI gives each reason once per session and lets subagents stop, so it needs these fields.
+    const who = {
+      session_id: e.session_id,
+      agent_id: e.agent_id,
+      stop_hook_active: e.stop_hook_active,
+    }
+    const reason = (await hook($, 'stop', who))?.reason
     if (typeof reason !== 'string' || !reason || blocks >= MAX_BLOCKS) {
       blocks = 0
       return result

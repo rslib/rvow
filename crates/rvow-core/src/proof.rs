@@ -183,8 +183,24 @@ fn is_proved(e: &Event) -> bool {
     e.data.get("proved").and_then(Value::as_bool) == Some(true)
 }
 
-/// The state of `task` in `change`, from its latest proof or block.
+/// Compatibility state lookup using the project that owns the change path.
+/// Home-mode metadata determines the store home without environment lookup.
+/// Synthetic changes without metadata have no private policy. Repo-mode library
+/// callers should use state_for with their explicit home.
 pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
+    match crate::hardening::owned_context(&change.dir.path)? {
+        Some((project, home)) => state_for(&project, &home, change, task, now),
+        None => state_with_policy(change, task, now, None),
+    }
+}
+
+/// State lookup with explicit private storage context. No ambient home lookup.
+pub fn state_for(project: &Project, home: &Path, change: &Active, task: &Task, now: &Now) -> Result<State> {
+    let policy = crate::hardening::task_policy_digest(project, home, task)?;
+    state_with_policy(change, task, now, policy.as_deref())
+}
+
+fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&str>) -> Result<State> {
     let id = task.id.to_string();
     let mine: Vec<&Event> =
         change.events.iter().filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id).collect();
@@ -212,6 +228,9 @@ pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
     if str_of(last, "inputs") != now.inputs(task)?.hash {
         reasons.push("inputs-changed");
     }
+    if last.data.get("private_policy").and_then(Value::as_str) != policy {
+        reasons.push("private-policy-changed");
+    }
     if str_of(last, "env_key") != now.env.key() {
         reasons.push("env-changed");
     }
@@ -224,17 +243,39 @@ pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
     })
 }
 
-/// The first task on the branch that still needs work, in queue order.
+/// The task on the branch to work on next: missing or failed work of the newest change first, then stale work.
 pub fn next<'a>(queue: &[&'a Active], now: &Now) -> Result<Option<(&'a Active, &'a Task, State)>> {
-    for change in queue {
+    next_with(queue, now, None)
+}
+
+/// Queue lookup with explicit private storage context.
+pub fn next_for<'a>(project: &Project, home: &Path, queue: &[&'a Active], now: &Now) -> Result<Option<(&'a Active, &'a Task, State)>> {
+    next_with(queue, now, Some((project, home)))
+}
+
+fn next_with<'a>(queue: &[&'a Active], now: &Now, context: Option<(&Project, &Path)>) -> Result<Option<(&'a Active, &'a Task, State)>> {
+    // The newest accepted change comes first, and a missing or failed task beats a stale one, so a
+    // finished change that went stale does not hide the work in progress.
+    let mut order: Vec<&'a Active> = queue.to_vec();
+    order.sort_by_key(|c| std::cmp::Reverse(c.vow().map_or(0, |e| e.time)));
+    let mut stale = None;
+    for change in order {
         for task in &change.loaded.tasks {
-            let s = state(change, task, now)?;
-            if s.open() {
-                return Ok(Some((change, task, s)));
+            let s = match context {
+                Some((project, home)) => state_for(project, home, change, task, now)?,
+                None => state(change, task, now)?,
+            };
+            if !s.open() {
+                continue;
             }
+            if matches!(s, State::Stale(_) | State::Flaky) {
+                stale.get_or_insert((change, task, s));
+                continue;
+            }
+            return Ok(Some((change, task, s)));
         }
     }
-    Ok(None)
+    Ok(stale)
 }
 
 /// A task in full: id, title, command, scope and the text of what it covers.
@@ -286,10 +327,21 @@ pub fn machine(config: &Config) -> Value {
     })
 }
 
+/// The proof agent, with an invocation override before the configured name.
+pub fn agent(config: &Config) -> String {
+    std::env::var("RVOW_AGENT")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| config.agent.clone())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 pub struct Proved {
     pub change: Id,
     pub task: Ref,
     pub outcome: Outcome,
+    pub mutants: Option<Outcome>,
+    pub private_check: Option<crate::hardening::PrivateResult>,
     pub proved: bool,
     pub event: String,
     /// The same failure repeated, so a block is worth considering.
@@ -318,6 +370,22 @@ pub fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, 
         .ok_or_else(|| Error::new("task", "task vanished", "run rvow status"))
 }
 
+/// Shared identity for local and portable runs. Without private policy this
+/// retains the original four-element proof key byte-for-byte.
+pub(crate) fn run_key(
+    task_hash: &str,
+    requirements: &BTreeMap<String, String>,
+    inputs: &str,
+    env_key: &str,
+    private_policy: Option<&str>,
+) -> String {
+    let value = match private_policy {
+        Some(digest) => json!([task_hash, requirements, inputs, env_key, digest]),
+        None => json!([task_hash, requirements, inputs, env_key]),
+    };
+    sha256_hex(value.to_string().as_bytes())
+}
+
 /// Runs a task's stored verify command and records the proof.
 pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut dyn Write) -> Result<Proved> {
     let top = git::toplevel(cwd)?;
@@ -337,18 +405,37 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let cmd = task.verify_command()?;
     let started = ledger::now_ms();
     let outcome = runner::run(cmd, &top, &[], task.timeout.unwrap_or(config.timeout()), echo)?;
-    let proved = outcome.passed() && outcome.tests_run != Some(0);
+    let mutants = task
+        .mutants
+        .as_deref()
+        .map(|command| runner::run(command, &top, &[], task.timeout.unwrap_or(config.timeout()), echo))
+        .transpose()?;
+    let private_check = crate::hardening::run_private(project, home, &top, task, task.timeout.unwrap_or(config.timeout()))?;
+    let private_policy = private_check.as_ref().map(|c| c.digest.clone());
+    let proved = outcome.passed()
+        && outcome.tests_run != Some(0)
+        && mutants.as_ref().is_none_or(Outcome::passed)
+        && private_check.as_ref().is_none_or(|c| c.passed);
 
     let thash = task_hash(task);
     let reqs = covered(task, &change.loaded, &living);
     let env_key = now.env.key();
-    let key = sha256_hex(json!([thash, reqs, inputs.hash, env_key]).to_string().as_bytes());
+    let key = run_key(&thash, &reqs, &inputs.hash, &env_key, private_policy.as_deref());
     let mut data = Map::new();
     data.insert("task".into(), task.id.to_string().into());
     data.insert("task_hash".into(), thash.into());
     data.insert("requirements".into(), json!(reqs));
     data.insert("verify".into(), cmd.into());
     data.insert("proved".into(), proved.into());
+    if let Some(check) = &mutants {
+        let mut value = json!(check);
+        value["passed"] = check.passed().into();
+        data.insert("mutants".into(), value);
+    }
+    if let Some(check) = &private_check {
+        data.insert("private_check".into(), json!(check));
+        data.insert("private_policy".into(), json!(private_policy));
+    }
     data.insert("exit".into(), json!(outcome.exit));
     data.insert("timed_out".into(), outcome.timed_out.into());
     data.insert("tests_run".into(), json!(outcome.tests_run));
@@ -369,9 +456,10 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
             "invocation": invocation_id()?,
             "rvow": env!("CARGO_PKG_VERSION"),
             "machine": machine(&config),
-            "agent": std::env::var("RVOW_AGENT").unwrap_or_else(|_| "unknown".into()),
+            "agent": agent(&config),
             "head": git::run(&top, &["rev-parse", "HEAD"]).unwrap_or_default(),
             "branch": git::branch(&top).ok().flatten(),
+            "ci": fingerprint::ci(),
         }),
     );
     let ledger_path = change.dir.path.join(LEDGER);
@@ -389,11 +477,13 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let changes = active(project, &living)?;
     let branch = change_branch(&changes, &change.dir.id);
     let queue = on_branch(&changes, &branch);
-    let next = next(&queue, &now)?.map(|(c, t, s)| format!("[{}] {}", s.name(), render_task(t, &c.loaded, &living)));
+    let next = next_for(project, home, &queue, &now)?.map(|(c, t, s)| format!("[{}] {}", s.name(), render_task(t, &c.loaded, &living)));
     Ok(Proved {
         change: change.dir.id.clone(),
         task: task.id.clone(),
         outcome,
+        mutants,
+        private_check,
         proved,
         event: event.hash,
         looping,
@@ -443,7 +533,7 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
         }
         let mut tasks = Vec::new();
         for t in &c.loaded.tasks {
-            tasks.push(TaskLine { task: t.id.clone(), title: t.title.clone(), state: state(c, t, &now)? });
+            tasks.push(TaskLine { task: t.id.clone(), title: t.title.clone(), state: state_for(project, home, c, t, &now)? });
         }
         out.push(ChangeStatus {
             id: c.dir.id.clone(),
@@ -470,7 +560,7 @@ pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<Str
     let mut out = Vec::new();
     for c in on_branch(&changes, &branch) {
         for t in &c.loaded.tasks {
-            if matches!(state(c, t, &now)?, State::Stale(_)) {
+            if matches!(state_for(project, home, c, t, &now)?, State::Stale(_)) {
                 out.push(t.id.to_string());
             }
         }

@@ -17,6 +17,74 @@ use crate::tasks::Task;
 const MAX_LINES: usize = 25;
 const MAX_CHARS: usize = 1500;
 const DECISIONS: usize = 3;
+const RULES: &str = "rules: rvow accept and confirm belong to the user; stay inside files:; use rvow block if a task cannot pass.\n";
+const PLANNING_RULES: &str = "rules: only the user runs rvow accept; ask with rvow_ask; write the plan files only\n";
+
+/// A planning brief starts with `plan `; no task exists there, so the task rules would mislead.
+fn rules_for(text: &str) -> &'static str {
+    if text.starts_with("plan ") { PLANNING_RULES } else { RULES }
+}
+
+fn short_line(line: &str) -> String {
+    if line.len() <= 240 {
+        return line.to_string();
+    }
+    let mut bytes = 0;
+    let head: String = line
+        .chars()
+        .take_while(|ch| {
+            bytes += ch.len_utf8();
+            bytes <= 237
+        })
+        .collect();
+    format!("{head}...")
+}
+
+/// Adds a warning without losing the brief's next step or exceeding its final budget.
+pub fn with_warning(text: &str, warning: &str) -> String {
+    let clean: String = warning.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect();
+    let warning = short_line(&clean);
+    let combined = format!("{warning}\n{text}");
+    if fits(&combined) {
+        return combined;
+    }
+    let next = text.lines().rfind(|line| line.starts_with("next:")).map(short_line).unwrap_or_default();
+    format!("{warning}\n{next}\nmore: rvow status\n{}", rules_for(text))
+}
+
+fn bounded(text: String) -> String {
+    if text.is_empty() {
+        return text;
+    }
+    let rules = rules_for(&text);
+    let all = format!("{text}{rules}");
+    if fits(&all) {
+        return all;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let next = lines.iter().rposition(|line| line.starts_with("next:")).unwrap_or(lines.len());
+    let end = lines[next..].iter().position(|line| line.starts_with("plan ")).map_or(lines.len(), |n| next + n);
+    let mut tail = lines[next..end].join("\n");
+    if !tail.is_empty() {
+        tail.push('\n');
+    }
+    let suffix = format!("brief: truncated\nmore: rvow status\n{rules}");
+    if !fits(&format!("{tail}{suffix}")) {
+        tail = lines.get(next).map(|line| format!("{}\n", short_line(line))).unwrap_or_default();
+        if let Some(task) = lines.get(next).and_then(|line| line.split_whitespace().nth(1)).filter(|id| id.starts_with("TSK-")) {
+            tail.push_str(&format!("more: rvow show {task}\n"));
+        }
+    }
+    let mut prefix = String::new();
+    for line in &lines[..next] {
+        let line = short_line(line);
+        if fits(&format!("{prefix}{line}\n{tail}{suffix}")) {
+            prefix.push_str(&line);
+            prefix.push('\n');
+        }
+    }
+    format!("{prefix}{tail}{suffix}")
+}
 
 // The subtype key is `note`, since a data key `kind` would clash with the event's own `kind`.
 fn note_text(change: &Active, kind: &str) -> Vec<(u64, String)> {
@@ -62,11 +130,19 @@ fn planning(project: &Project, cwd: &Path) -> Result<String> {
     let mut out = String::new();
     for r in crate::plan::check(project, cwd, None)?.into_iter().filter(|r| r.change.stage == crate::change::Stage::Backlog) {
         let id = &r.change.id;
-        out.push_str(&format!(
-            "plan {id} waits for accept: {} open questions, {} checks that cannot run\n",
-            r.questions.len(),
-            r.missing.len()
-        ));
+        let mut counters = Vec::new();
+        match r.questions.len() {
+            0 => {}
+            1 => counters.push("1 open question".to_string()),
+            n => counters.push(format!("{n} open questions")),
+        }
+        match r.missing.len() {
+            0 => {}
+            1 => counters.push("1 check that cannot run".to_string()),
+            n => counters.push(format!("{n} checks that cannot run")),
+        }
+        let counters = if counters.is_empty() { String::new() } else { format!(": {}", counters.join(", ")) };
+        out.push_str(&format!("plan {id} waits for accept{counters}\n"));
         let next = if !r.questions.is_empty() {
             "next: ask the open questions with the rvow_ask tool, or ask in chat and record each answer with rvow answer <ref> \"<choice>\""
         } else if r.blocking() {
@@ -91,11 +167,14 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
             return Ok(String::new());
         }
         let ids: Vec<String> = changes.iter().map(|c| c.dir.id.to_string()).collect();
-        return Ok(format!("HEAD is detached; active changes: {}; check out a branch\n", ids.join(", ")));
+        return Ok(bounded(format!(
+            "HEAD is detached; active changes: {}; check out a branch\nnext: check out a branch\n",
+            ids.join(", ")
+        )));
     };
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        return planning(project, cwd);
+        return planning(project, cwd).map(bounded);
     }
     let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
@@ -119,8 +198,12 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
         }
     }
     let names = ["proved", "stale", "flaky", "failed", "blocked", "missing"];
-    let parts: Vec<String> = names.iter().zip(counts).map(|(n, c)| format!("{c} {n}")).collect();
-    out.push_str(&format!("tasks: {}\n", parts.join(", ")));
+    let parts: Vec<String> = names.iter().zip(counts).filter(|(_, c)| *c > 0).map(|(n, c)| format!("{c} {n}")).collect();
+    if parts.is_empty() {
+        out.push_str("tasks: every task is proved or blocked\n");
+    } else {
+        out.push_str(&format!("tasks: {}\n", parts.join(", ")));
+    }
 
     let mut decisions: Vec<(u64, String)> = queue.iter().flat_map(|c| note_text(c, "decision")).collect();
     decisions.sort();
@@ -140,7 +223,29 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
         }
         None => out.push_str("next: every task on this branch is proved or blocked\n"),
     }
-    Ok(out)
+    Ok(bounded(out))
+}
+
+/// The brief for a subagent that holds a lease. The first line is the marker
+/// that the Claude mod reads to bind the subagent.
+pub fn delegate_brief(d: &crate::lease::Delegation) -> String {
+    let l = &d.lease;
+    format!(
+        "lease: {task}\n\
+         You hold one task of {change}: {title}\n\
+         Edit only: {files}\n\
+         Prove it with: {verify}\n\
+         Rules:\n\
+         - The hook denies edits outside those files and names this task.\n\
+         - When done run `rvow prove {task}`. If it cannot pass as written run `rvow block {task} --reason \"...\"`.\n\
+         - rvow accept and confirm belong to the user.\n\
+         - A terminal tool gets a private socket (`tmux -L <name>`). Never run a bare tmux or kill-server.\n",
+        task = l.task,
+        change = l.change,
+        title = d.title,
+        files = l.files.join(", "),
+        verify = d.verify,
+    )
 }
 
 #[cfg(test)]
@@ -171,7 +276,7 @@ mod tests {
         let b = brief(&p, &home, &repo).unwrap();
         let lines: Vec<&str> = b.lines().collect();
         assert!(lines[0].ends_with(" Out"), "{b}");
-        assert_eq!(lines[1], "tasks: 0 proved, 0 stale, 0 flaky, 0 failed, 0 blocked, 1 missing");
+        assert_eq!(lines[1], "tasks: 1 missing");
         assert!(!b.contains("choice 1"));
         assert!(b.contains("decision: choice 4") && b.contains("decision: choice 2"));
         assert!(b.contains("handoff: pick up here"));
@@ -183,7 +288,10 @@ mod tests {
         proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
         let b = brief(&p, &home, &repo).unwrap();
         assert!(b.contains("1 proved"), "{b}");
-        assert!(b.ends_with("next: every task on this branch is proved or blocked\n"));
+        assert!(b.contains("next: every task on this branch is proved or blocked\n"));
+        assert!(
+            b.ends_with("rules: rvow accept and confirm belong to the user; stay inside files:; use rvow block if a task cannot pass.\n")
+        );
     }
 
     #[test]
@@ -209,7 +317,7 @@ mod tests {
         let text = std::fs::read_to_string(&prop).unwrap();
         std::fs::write(&prop, text + "[NEEDS CLARIFICATION: Which? | recommended: this]\n").unwrap();
         let b = brief(&p, &home, &repo).unwrap();
-        assert!(b.contains(&format!("plan {} waits for accept: 1 open questions", c.id)), "{b}");
+        assert!(b.contains(&format!("plan {} waits for accept: 1 open question", c.id)), "{b}");
         assert!(b.contains("rvow_ask"), "{b}");
     }
 

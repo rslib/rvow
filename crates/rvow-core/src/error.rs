@@ -17,16 +17,20 @@ impl Error {
     }
 
     pub fn io(path: &std::path::Path, err: std::io::Error) -> Error {
-        Error::new("io", format!("{}: {err}", path.display()), "check that the path exists and is writable")
+        Error::new(
+            "io",
+            format!("{}: {err}", path.display()),
+            format!(
+                "check that {} exists and that you can read and write it ({:?}), then run the command again",
+                path.display(),
+                err.kind()
+            ),
+        )
     }
 
     /// A state that the code ruled out, reported instead of a panic.
     pub fn internal(what: impl std::fmt::Display) -> Error {
-        Error::new(
-            "internal",
-            what.to_string(),
-            "run the command again; if it fails again, open an issue at https://github.com/rslib/rvow/issues with this message",
-        )
+        Error::new("internal", what.to_string(), "run the command again; if it fails again, report this message to the user")
     }
 
     pub fn random<const N: usize>() -> Result<[u8; N]> {

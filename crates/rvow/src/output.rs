@@ -85,9 +85,9 @@ impl Reply {
     }
 }
 
-/// An error record for the agent: `error:`, then one `help:` line or `help[N]:`.
-pub fn error(message: &str, mut help: Vec<String>) -> String {
-    let mut value = obj! { "error" => message };
+/// An error record for the agent: `error:`, `code:`, then one `help:` line or `help[N]:`.
+pub fn error(message: &str, mut help: Vec<String>, code: &str) -> String {
+    let mut value = obj! { "error" => message, "code" => code };
     match help.len() {
         0 => {}
         1 => value.push(("help".to_owned(), help.remove(0).into())),
@@ -113,10 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn errors_print_one_help_line_or_a_list() {
-        assert_eq!(error("bad", vec![]), "error: bad");
-        assert_eq!(error("bad", vec!["run rvow init".into()]), "error: bad\nhelp: run rvow init");
-        assert_eq!(error("x: y", vec!["a".into(), "b".into()]), "error: \"x: y\"\nhelp[2]:\n  a\n  b");
+    fn errors_print_code_one_help_line_or_a_list() {
+        assert_eq!(error("bad", vec![], "usage"), "error: bad\ncode: usage");
+        assert_eq!(error("bad", vec!["run rvow init".into()], "io"), "error: bad\ncode: io\nhelp: run rvow init");
+        assert_eq!(error("x: y", vec!["a".into(), "b".into()], "drift"), "error: \"x: y\"\ncode: drift\nhelp[2]:\n  a\n  b");
     }
 
     #[test]
