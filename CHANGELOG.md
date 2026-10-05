@@ -7,12 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make the brief name missing or failed work of the newest change before a stale task of an older change.
 - Make the Stop hook give each reason once per session, and let subagent stops and stops during a rebase, merge or cherry-pick pass.
 - Let the hook allow read-only shell commands on the enforcement files and the git hooks folder, and text that only names a protected action.
 - Shorten the plan-changed message to three items and a count.
 
 ### Added
 
+- Add `rvow stats` to show how often each hook denied a tool call or blocked a stop, by rule, with no command text or path stored.
 - Add `rvow delegate` to lease one task to a subagent.
   The Claude mod binds the subagent to the lease, and the hook then denies its edits outside the files of that task.
 - Add a signed cache to `rvow gate --rerun` that skips a task when an earlier clean pass had the same key.

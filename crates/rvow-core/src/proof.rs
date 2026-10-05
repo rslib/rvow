@@ -243,7 +243,7 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     })
 }
 
-/// The first task on the branch that still needs work, in queue order.
+/// The task on the branch to work on next: missing or failed work of the newest change first, then stale work.
 pub fn next<'a>(queue: &[&'a Active], now: &Now) -> Result<Option<(&'a Active, &'a Task, State)>> {
     next_with(queue, now, None)
 }
@@ -254,18 +254,28 @@ pub fn next_for<'a>(project: &Project, home: &Path, queue: &[&'a Active], now: &
 }
 
 fn next_with<'a>(queue: &[&'a Active], now: &Now, context: Option<(&Project, &Path)>) -> Result<Option<(&'a Active, &'a Task, State)>> {
-    for change in queue {
+    // The newest accepted change comes first, and a missing or failed task beats a stale one, so a
+    // finished change that went stale does not hide the work in progress.
+    let mut order: Vec<&'a Active> = queue.to_vec();
+    order.sort_by_key(|c| std::cmp::Reverse(c.vow().map_or(0, |e| e.time)));
+    let mut stale = None;
+    for change in order {
         for task in &change.loaded.tasks {
             let s = match context {
                 Some((project, home)) => state_for(project, home, change, task, now)?,
                 None => state(change, task, now)?,
             };
-            if s.open() {
-                return Ok(Some((change, task, s)));
+            if !s.open() {
+                continue;
             }
+            if matches!(s, State::Stale(_) | State::Flaky) {
+                stale.get_or_insert((change, task, s));
+                continue;
+            }
+            return Ok(Some((change, task, s)));
         }
     }
-    Ok(None)
+    Ok(stale)
 }
 
 /// A task in full: id, title, command, scope and the text of what it covers.

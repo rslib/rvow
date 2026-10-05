@@ -32,6 +32,7 @@ pub mod review;
 pub mod runner;
 pub mod show;
 pub mod spec;
+pub mod stats;
 pub mod store;
 pub mod tasks;
 pub mod view;

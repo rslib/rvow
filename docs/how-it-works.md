@@ -97,6 +97,16 @@ Two limits stay.
 A subagent without the mod is unbound, so it meets the usual rules.
 The hook sees files and not what a shell command writes, so a lease scopes the edit tools only.
 
+## Measuring the hooks
+
+The hooks should help and stay quiet, so rvow counts what they do.
+Each denial and each stop is one line in `hook-stats.jsonl` in the project folder.
+A line holds the time, the hook, the outcome, the session id and, for a denial, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
+It never holds a command or a path.
+`rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops.
+Use it to find the rule that fires most before you change any rule.
+Agents cannot read or write the stats file.
+
 ## The pre-push gate
 
 `rvow install` adds a pre-push hook that runs `rvow gate --strict --rerun`.

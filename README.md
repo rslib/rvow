@@ -76,6 +76,7 @@ It keeps a file that you edited and says so.
 
 - `rvow install` adds the skill, the Claude Code mod, the pi extension and the pre-push gate.
 - `rvow delegate <task>` leases one task to a subagent and prints the brief to give it.
+- `rvow stats` shows how often each hook denied or blocked in the last days.
 - `rvow guide proposal` prints the short guide for writing a plan artifact. The other artifacts are `spec`, `tasks` and `design`.
 - `rvow --help` and `rvow <command> --help` are the command reference.
 - [docs/settings.md](docs/settings.md) lists every setting and the global-only keys.

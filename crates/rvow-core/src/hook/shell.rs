@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use crate::change::LEDGER;
 use crate::gate::cache::CACHE_FILE;
 use crate::lease::LEASE_FILE;
+use crate::stats::STATS_FILE;
+
+use super::rule::{Denial, Rule, denial};
 use crate::store::IDS_FILE;
 
 const SEPARATORS: &[char] = &[';', '&', '|', '(', ')', '`', '\n'];
@@ -344,7 +347,7 @@ fn owner_command(sub: &str) -> String {
 }
 
 /// The subcommand of an `rvow` or `cargo run` call that the user owns.
-fn rvow_denial(inv: &[String]) -> Option<String> {
+fn rvow_denial(inv: &[String]) -> Option<Denial> {
     let name = base_name(&inv[0]);
     let args: &[String] = if name == "rvow" {
         &inv[1..]
@@ -353,16 +356,20 @@ fn rvow_denial(inv: &[String]) -> Option<String> {
         &inv[run + 1..]
     } else if inv[0].starts_with('$') {
         // A command named by a variable that is not known here.
-        return inv[1..].iter().any(|w| matches!(w.as_str(), "accept" | "confirm")).then(|| owner_command("accept"));
+        return inv[1..]
+            .iter()
+            .any(|w| matches!(w.as_str(), "accept" | "confirm"))
+            .then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") });
     } else if is_interpreter(name) {
-        return inv[1..].iter().any(|w| mentions_accept(w)).then(|| owner_command("accept"));
+        return inv[1..].iter().any(|w| mentions_accept(w)).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") });
     } else {
         return None;
     };
     let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
     match sub.as_str() {
-        "accept" | "confirm" => Some(owner_command(sub)),
-        "ingest" => Some(
+        "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        "ingest" => denial(
+            Rule::OwnerCommand,
             "rvow ingest records proofs from a CI file and belongs to the user; ask the user to run `! rvow ingest <file>`, or run `rvow prove <task>` to prove it here"
                 .into(),
         ),
@@ -412,17 +419,19 @@ fn git_subcommand(args: &[String]) -> Option<(&str, &[String])> {
     None
 }
 
-fn git_denial(inv: &[String]) -> Option<String> {
+fn git_denial(inv: &[String]) -> Option<Denial> {
     if base_name(&inv[0]) != "git" {
         return None;
     }
     let args = &inv[1..];
     if args.iter().any(|w| w.starts_with("--no-v") && "--no-verify".starts_with(w.as_str())) {
-        return Some("--no-verify skips the hooks that check the plan; run git commit and git push without it".into());
+        return denial(Rule::GitHooks, "--no-verify skips the hooks that check the plan; run git commit and git push without it".into());
     }
     let (sub, rest) = git_subcommand(args)?;
-    (sub == "commit" && commit_skips_hooks(rest))
-        .then(|| "git commit -n skips the hooks that check the plan; run git commit without -n".into())
+    (sub == "commit" && commit_skips_hooks(rest)).then(|| Denial {
+        rule: Rule::GitHooks,
+        reason: "git commit -n skips the hooks that check the plan; run git commit without -n".into(),
+    })
 }
 
 fn decodes_text(inv: &[String]) -> bool {
@@ -443,7 +452,7 @@ fn runs_given_text(inv: &[String]) -> bool {
 }
 
 /// Why a Bash command must not run, or `None`.
-pub fn bash_denial(cmd: &str) -> Option<String> {
+pub fn bash_rule(cmd: &str) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     if let Some(reason) = invs.iter().find_map(|inv| rvow_denial(inv)) {
@@ -453,7 +462,8 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
     let rvow_answer = w.iter().any(|x| base_name(x) == "rvow") && w.iter().any(|x| x == "answer");
     let via_dialog = w.windows(2).any(|p| p[0] == "--via" && p[1] == "dialog") || w.iter().any(|x| x == "--via=dialog");
     if rvow_answer && via_dialog {
-        return Some(
+        return denial(
+            Rule::OwnerCommand,
             "only the rvow_ask tool records an answer as given in a dialog; run `rvow answer <ref> \"<choice>\"` to record a chat answer"
                 .into(),
         );
@@ -462,7 +472,7 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
         return Some(reason);
     }
     if invs.iter().any(|inv| decodes_text(inv)) && invs.iter().any(|inv| runs_given_text(inv)) {
-        return Some(
+        return denial(Rule::OwnerCommand,
             "decoding text into a shell hides what runs; write the command out in the Bash call, and ask the user to run `! rvow accept <id>` if it is an accept"
                 .into(),
         );
@@ -474,21 +484,31 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
         || w.iter().any(|x| is_assignment(x) && x.to_lowercase().contains("core.hookspath"))
         || (writes && (lower.contains("core.hookspath") || joined.contains("core.hookspath")) && w.iter().any(|x| x.ends_with("config")))
     {
-        return Some("core.hooksPath decides which hooks run; changing it is for the user. If the plan needs it, run rvow block <task> --reason \"...\"".into());
+        return denial(Rule::GitHooks, "core.hooksPath decides which hooks run; changing it is for the user. If the plan needs it, run rvow block <task> --reason \"...\"".into());
     }
     let in_git_dir =
         w.iter().any(|x| x.ends_with(".git") || x.ends_with(".git/")) && w.iter().any(|x| x.to_lowercase().starts_with("hooks"));
     if writes && (lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir) {
-        return Some(".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
+        return denial(Rule::GitHooks, ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
+    }
+    let names_stats = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == STATS_FILE);
+    if names_stats && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+        return denial(
+            Rule::StatsFile,
+            format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
+        );
     }
     let names_lease = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == LEASE_FILE);
     if names_lease && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
-        return Some(format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"));
+        return denial(
+            Rule::LeaseFile,
+            format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
+        );
     }
     let names_cache = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == CACHE_FILE);
     let only_rvow_first = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");
     if names_cache && !only_rvow_first {
-        return Some(format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
+        return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
     }
     let names_rvow_file = w.iter().any(|x| {
         let b = base_name(x);
@@ -496,17 +516,25 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
     });
     let only_rvow = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");
     if names_rvow_file && !only_rvow {
-        return Some(format!(
-            "{LEDGER} and {IDS_FILE} are written only by rvow; run `rvow show <change>` to read the plan or `rvow note` to record something"
-        ));
+        return denial(
+            Rule::Ledger,
+            format!(
+                "{LEDGER} and {IDS_FILE} are written only by rvow; run `rvow show <change>` to read the plan or `rvow note` to record something"
+            ),
+        );
     }
     None
+}
+
+/// Why a Bash command must not run, or `None`.
+pub fn bash_denial(cmd: &str) -> Option<String> {
+    bash_rule(cmd).map(|d| d.reason)
 }
 
 /// Why running a script that `cmd` names must not happen: the file holds an
 /// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
 /// same command writes first cannot be read yet; that stays a known gap.
-pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {
+pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
@@ -534,12 +562,20 @@ pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {
         };
         let first = text.lines().next().unwrap_or("");
         let foreign = is_interpreter(name) || INTERPRETERS.iter().any(|i| first.starts_with("#!") && first.contains(i));
-        let inner = if foreign { mentions_accept(&text).then(|| owner_command("accept")) } else { bash_denial(&text) };
+        let inner = if foreign {
+            mentions_accept(&text).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") })
+        } else {
+            bash_rule(&text)
+        };
         if let Some(inner) = inner {
-            return Some(format!("{file} holds a command the user owns, so it does not run from here: {inner}"));
+            return denial(inner.rule, format!("{file} holds a command the user owns, so it does not run from here: {}", inner.reason));
         }
     }
     None
+}
+
+pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {
+    script_rule(cmd, cwd).map(|d| d.reason)
 }
 
 const WRITERS: &[&str] = &["rm", "mv", "cp", "tee", "sed", "perl", "python", "python3", "chmod", "ln", "truncate", "dd", "install"];
@@ -616,30 +652,42 @@ fn names_path(sh: &Shell, cmd: &str, path: &Path) -> bool {
 
 /// Why a Bash command that names an enforcement file must not run: a write to
 /// one of them could switch rvow off.
-pub(super) fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<String> {
+pub(super) fn bash_enforcement_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     let named = paths.iter().find(|p| names_path(&sh, cmd, p))?;
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     let writes = writes_files(&invs, cmd);
-    writes.then(|| {
+    if !writes {
+        return None;
+    }
+    denial(
+        Rule::EnforcementFile,
         format!(
             "{} enforces rvow; changing it is for the user. If the plan needs it, run `rvow block <task> --reason \"...\"`",
             named.display()
-        )
-    })
+        ),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<String> {
+    bash_enforcement_rule(cmd, paths).map(|d| d.reason)
 }
 
 /// Why a Bash command that names a secret path (the hidden checks) must not
 /// run: the implementing agent may not read or write them.
-pub(super) fn bash_secret_denial(cmd: &str, paths: &[PathBuf]) -> Option<String> {
+pub(super) fn bash_secret_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     let joined = sh.words.join(" ");
     let named = paths.iter().find(|p| {
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         names_path(&sh, cmd, p) || (!name.is_empty() && (cmd.contains(&name) || joined.contains(&name)))
     })?;
-    Some(format!(
-        "{} holds checks that stay hidden from the implementing agent; do not read or write them. If the plan needs them, run `rvow block <task> --reason \"...\"`",
-        named.display()
-    ))
+    denial(
+        Rule::HiddenChecks,
+        format!(
+            "{} holds checks that stay hidden from the implementing agent; do not read or write them. If the plan needs them, run `rvow block <task> --reason \"...\"`",
+            named.display()
+        ),
+    )
 }

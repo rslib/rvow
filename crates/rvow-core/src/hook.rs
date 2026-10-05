@@ -18,12 +18,19 @@ use crate::git;
 use crate::lease::{self, LEASE_FILE};
 use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
+use crate::stats::{self, Hook, Outcome, STATS_FILE};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 
+mod rule;
 mod shell;
 mod stop_state;
-pub use shell::{bash_denial, script_denial};
-use shell::{bash_enforcement_denial, bash_secret_denial};
+pub use rule::{Denial, Rule};
+#[cfg(test)]
+use shell::bash_enforcement_denial;
+pub use shell::{bash_denial, bash_rule, script_denial, script_rule};
+use shell::{bash_enforcement_rule, bash_secret_rule};
+
+use rule::denial;
 
 /// The absolute, symlink-free form of `path`, also when the file does not
 /// exist yet: the nearest existing ancestor is resolved and the rest appended.
@@ -145,15 +152,18 @@ fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Why an edit of `file` must not happen, or `None`.
-fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Option<String>> {
+fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Option<Denial>> {
     let target = key(&real_path(Path::new(file), cwd));
     let trust = signers_path(project, top);
     for p in enforcement_paths(trust.as_deref()) {
         let p = key(&real_path(&p, cwd));
         if target == p || target.starts_with(&format!("{p}/")) {
-            return Ok(Some(format!(
-                "{p} enforces rvow; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
-            )));
+            return Ok(denial(
+                Rule::EnforcementFile,
+                format!(
+                    "{p} enforces rvow; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
+                ),
+            ));
         }
     }
     let root = key(&real_path(&project.root, cwd));
@@ -166,18 +176,28 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
             || name == crate::record::RECORD_FILE
             || target.starts_with(&format!("{root}/objects/")))
     {
-        return Ok(Some(format!(
-            "{name} is written only by rvow; run `rvow show <change>` to read it, or `rvow amend --reason \"...\"` to change the plan"
-        )));
+        return Ok(denial(
+            Rule::Ledger,
+            format!(
+                "{name} is written only by rvow; run `rvow show <change>` to read it, or `rvow amend --reason \"...\"` to change the plan"
+            ),
+        ));
     }
     if target.starts_with(&format!("{root}/archive/")) {
-        return Ok(Some("an archived change is history and does not change; run `rvow new \"<title>\"` to start a new change".into()));
+        return Ok(denial(
+            Rule::History,
+            "an archived change is history and does not change; run `rvow new \"<title>\"` to start a new change".into(),
+        ));
     }
     if target.starts_with(&format!("{root}/specs/")) {
-        return Ok(Some("living specs change only through a change and rvow archive; run rvow guide spec to see how".into()));
+        return Ok(denial(
+            Rule::History,
+            "living specs change only through a change and rvow archive; run rvow guide spec to see how".into(),
+        ));
     }
     if target.starts_with(&format!("{top_key}/.git/")) {
-        return Ok(Some(
+        return Ok(denial(
+            Rule::GitHooks,
             ".git/ is not edited by hand; the hooks there run the gate. Use git commands, and run rvow install for the hooks".into(),
         ));
     }
@@ -187,28 +207,40 @@ fn edit_denial(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<
     if !target.starts_with(&format!("{root}/"))
         && let Some(id) = unaccepted_plan(project, top)?
     {
-        return Ok(Some(format!(
-            "the plan {id} is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept {id} (or ! rvow accept {id}) before you edit code"
-        )));
+        return Ok(denial(
+            Rule::UnacceptedPlan,
+            format!(
+                "the plan {id} is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept {id} (or ! rvow accept {id}) before you edit code"
+            ),
+        ));
     }
     if ENFORCEMENT.iter().any(|e| key(Path::new(e)) == rel) {
-        return Ok(Some(format!(
-            "{rel} configures the hooks that enforce the plan; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
-        )));
+        return Ok(denial(
+            Rule::EnforcementFile,
+            format!(
+                "{rel} configures the hooks that enforce the plan; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
+            ),
+        ));
     }
     if protected(project, top)?.contains(rel) && !unlocked(project, top, rel)? {
-        return Ok(Some(format!(
-            "{rel} is a protected test or test setup file; to change it, run rvow amend --unlock {rel} --reason \"...\" and ask the user to confirm"
-        )));
+        return Ok(denial(
+            Rule::ProtectedTest,
+            format!(
+                "{rel} is a protected test or test setup file; to change it, run rvow amend --unlock {rel} --reason \"...\" and ask the user to confirm"
+            ),
+        ));
     }
     if !target.starts_with(&format!("{root}/"))
         && let Some(files) = active_scope(project, top)?
         && !files.is_match(rel)
         && git::run(top, &["check-ignore", "-q", "--", rel]).is_err()
     {
-        return Ok(Some(format!(
-            "{rel} is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm"
-        )));
+        return Ok(denial(
+            Rule::OutsideScope,
+            format!(
+                "{rel} is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm"
+            ),
+        ));
     }
     Ok(None)
 }
@@ -313,31 +345,47 @@ pub(crate) fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String
 }
 
 /// Why `file` must not be read or written: it is inside the hidden checks.
-fn secret_denial(cwd: &Path, file: &str) -> Option<String> {
+fn secret_denial(cwd: &Path, file: &str) -> Option<Denial> {
     let target = key(&real_path(Path::new(file), cwd));
     secret_paths().into_iter().find_map(|p| {
         let p = key(&real_path(&p, cwd));
-        (target == p || target.starts_with(&format!("{p}/"))).then(|| {
+        if !(target == p || target.starts_with(&format!("{p}/"))) {
+            return None;
+        }
+        denial(
+            Rule::HiddenChecks,
             format!(
                 "{p} holds checks that stay hidden from the implementing agent; do not read or write them. If the plan needs them, run `rvow block <task> --reason \"...\"`"
-            )
-        })
+            ),
+        )
     })
 }
 
 /// Why `file` must not be read or written: it is the gate's cache file or the lease file.
-fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<String> {
+fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
     let target = key(&real_path(Path::new(file), cwd));
     let is = |name: &str| target == key(&real_path(&project.root.join(name), cwd));
     if is(CACHE_FILE) {
-        return Some(format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
+        return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
     }
-    is(LEASE_FILE).then(|| format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"))
+    if is(STATS_FILE) {
+        return denial(
+            Rule::StatsFile,
+            format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
+        );
+    }
+    if is(LEASE_FILE) {
+        return denial(
+            Rule::LeaseFile,
+            format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
+        );
+    }
+    None
 }
 
 /// Why a subagent that holds a lease must not edit `file`: it lies outside the
 /// files of the task leased to it.
-fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Result<Option<String>> {
+fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Result<Option<Denial>> {
     let Ok(home) = crate::store::home_dir() else { return Ok(None) };
     let Some(lease) = lease::holder(project, &home, cwd, agent_id, crate::ledger::now_ms())? else {
         return Ok(None);
@@ -350,59 +398,65 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
     if fingerprint::globset(&lease.files).is_ok_and(|set| set.is_match(rel)) {
         return Ok(None);
     }
-    Ok(Some(format!(
-        "{rel} is outside the files of {task}, the task leased to this agent; edit only {files}, or run rvow block {task} --reason \"...\" if the task needs it",
-        task = lease.task,
-        files = lease.files.join(", ")
-    )))
+    Ok(denial(
+        Rule::LeaseScope,
+        format!(
+            "{rel} is outside the files of {task}, the task leased to this agent; edit only {files}, or run rvow block {task} --reason \"...\" if the task needs it",
+            task = lease.task,
+            files = lease.files.join(", ")
+        ),
+    ))
+}
+
+/// The rule and the reason that deny a tool call, or `None` to allow it.
+pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<Denial>> {
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    if tool == "Bash" {
+        let Some(c) = args.get("command").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let top = git::toplevel(&cwd).ok();
+        let trust = top.as_deref().and_then(|t| signers_path(project, t));
+        return Ok(bash_rule(c)
+            .or_else(|| script_rule(c, &cwd))
+            .or_else(|| bash_secret_rule(c, &secret_paths()))
+            .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref()))));
+    }
+    let files = file_args(&args);
+    if let Some(found) = files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| cache_denial(project, &cwd, f))) {
+        return Ok(Some(found));
+    }
+    if !writes_files(tool) {
+        return Ok(None);
+    }
+    let agent = input.get("agent_id").and_then(Value::as_str);
+    for f in &files {
+        let mut found = edit_rule(project, &git::toplevel(&cwd)?, &cwd, f)?;
+        if found.is_none()
+            && let Some(agent) = agent
+        {
+            found = lease_denial(project, &cwd, agent, f)?;
+        }
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    Ok(None)
 }
 
 /// Claude Code `PreToolUse`: a deny response, or `None` to allow.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
-    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
-    let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
-    let reason = if tool == "Bash" {
-        match args.get("command").and_then(Value::as_str) {
-            Some(c) => {
-                let top = git::toplevel(&cwd).ok();
-                let trust = top.as_deref().and_then(|t| signers_path(project, t));
-                bash_denial(c)
-                    .or_else(|| script_denial(c, &cwd))
-                    .or_else(|| bash_secret_denial(c, &secret_paths()))
-                    .or_else(|| bash_enforcement_denial(c, &enforcement_paths(trust.as_deref())))
-            }
-            None => None,
-        }
-    } else {
-        let files = file_args(&args);
-        let secret = files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| cache_denial(project, &cwd, f)));
-        match secret {
-            Some(r) => Some(r),
-            None if writes_files(tool) => {
-                let mut found = None;
-                let agent = input.get("agent_id").and_then(Value::as_str);
-                for f in &files {
-                    found = edit_denial(project, &git::toplevel(&cwd)?, &cwd, f)?;
-                    if found.is_none()
-                        && let Some(agent) = agent
-                    {
-                        found = lease_denial(project, &cwd, agent, f)?;
-                    }
-                    if found.is_some() {
-                        break;
-                    }
-                }
-                found
-            }
-            None => None,
-        }
-    };
-    Ok(reason.map(|r| {
+    let denial = pre_tool_use_denial(project, input)?;
+    if let Some(d) = &denial {
+        stats::record(project, Hook::PreToolUse, Outcome::Deny, Some(d.rule), input.get("session_id").and_then(Value::as_str));
+    }
+    Ok(denial.map(|d| {
         json!({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": format!("rvow: {r}"),
+            "permissionDecisionReason": format!("rvow: {}", d.reason),
         }})
     }))
 }
@@ -579,6 +633,13 @@ pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
 
 /// Claude Code `Stop`: a block response, or `None` to let the agent stop.
 pub fn claude_stop(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
+    let out = stop_decision(project, home, input)?;
+    let outcome = if out.is_some() { Outcome::Block } else { Outcome::Pass };
+    stats::record(project, Hook::Stop, outcome, None, input.get("session_id").and_then(Value::as_str));
+    Ok(out)
+}
+
+fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let flag = |k: &str| input.get(k).and_then(Value::as_bool).unwrap_or(false);
     if input.get("agent_id").is_some() || flag("stop_hook_active") {

@@ -12,6 +12,7 @@ pub mod plan;
 pub mod prove;
 pub mod read;
 pub mod setup;
+pub mod stats;
 
 /// The current branch for empty-state text, or `detached HEAD`.
 pub fn branch_label() -> String {
