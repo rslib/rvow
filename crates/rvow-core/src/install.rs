@@ -285,14 +285,14 @@ pub fn register_claude_mod(claude: &Path, dir: &Path) -> Result<Vec<String>> {
     let ours = listed.iter().find(|v| v.get("id").and_then(Value::as_str) == Some("rvow@rvow"));
     if let Some(ours) = ours {
         run_claude(claude, &["plugin", "update", "rvow@rvow"])?;
-        done.push("updated the rvow plugin; restart Claude Code to load it".into());
+        done.push("updated the rvow plugin; run /reload-plugins in Claude Code, or restart it, to load it".into());
         if ours.get("enabled").and_then(Value::as_bool) == Some(false) {
             run_claude(claude, &["plugin", "enable", "rvow@rvow"])?;
             done.push("enabled the rvow plugin, which was disabled; run /reload-plugins in Claude Code".into());
         }
     } else {
         run_claude(claude, &["plugin", "install", "rvow@rvow"])?;
-        done.push("installed the rvow plugin; restart Claude Code to load it".into());
+        done.push("installed the rvow plugin; run /reload-plugins in Claude Code, or restart it, to load it".into());
     }
     Ok(done)
 }

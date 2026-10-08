@@ -219,6 +219,14 @@ Each one is caught later by the gate, or needs a person.
   The hook sees files and not the test blocks inside a Rust file, so the edit is found afterwards as weaken drift.
 - **Leases cover the Claude mod only.**
   A pi subagent is a separate process and is not bound yet, and a subagent without the mod is unbound.
+- **Session events are recorded from the docs and this session.**
+  Claude Code names five `SessionStart` sources: `startup`, `resume`, `clear`, `compact` and `fork` (a fork reported `resume` before v2.1.214).
+  The mod resets its brief state on `session.start`, which covers startup, resume, clear and fork, and on a `session.compact` that stands, so the next prompt carries the brief again after the summary replaced it.
+  A skipped, `precompute` or subagent compaction leaves the brief alone.
+  The Claude Code docs say that edits of settings hooks are normally picked up by a file watcher, and they do not say that hooks are read once at start.
+  The mod is a plugin and not a settings hook, so `/reload-plugins` is what loads a new install.
+- **A subagent's tool calls reach the same hooks.**
+  `PreToolUse` fires for them with `agent_id` and `agent_type`, which is how a lease binds the subagent.
 - **The shell hook reads text.**
   A command that names the hidden checks folder is denied even when the name sits inside a string, because the secret is the point.
 
