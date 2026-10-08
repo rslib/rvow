@@ -20,6 +20,7 @@ use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
 use crate::stats::{self, Hook, Outcome, STATS_FILE};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
+use crate::yolo::{self, Tier, YOLO_FILE};
 
 mod rule;
 mod shell;
@@ -29,7 +30,7 @@ pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
 pub use shell::{bash_denial, bash_rule, script_denial, script_rule};
-use shell::{bash_enforcement_rule, bash_secret_rule, prove_args};
+use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args};
 
 use rule::denial;
 
@@ -375,6 +376,9 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
             format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
         );
     }
+    if is(YOLO_FILE) {
+        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+    }
     if is(LEASE_FILE) {
         return denial(
             Rule::LeaseFile,
@@ -477,11 +481,21 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
 /// `BACKSTOP` denials in a row the next one is a question for the user.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let session = input.get("session_id").and_then(Value::as_str);
+    let tier = yolo::active(project).map(|on| on.tier);
     let found = pre_tool_use_denial(project, input)?;
-    if let Some(d) = found.as_ref().filter(|d| d.rule.mode() == Mode::Audit) {
+    // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
+    let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
+    let mode = |d: &Denial| {
+        if tier >= Some(Tier::Auto) && d.rule == Rule::OwnerCommand && command.is_some_and(only_accept_or_confirm) {
+            Mode::Audit
+        } else {
+            d.rule.mode_in(tier)
+        }
+    };
+    if let Some(d) = found.as_ref().filter(|d| mode(d) == Mode::Audit) {
         stats::record(project, Hook::PreToolUse, Outcome::Audit, Some(d.rule), session);
     }
-    let Some(d) = found.filter(|d| d.rule.mode() == Mode::Enforce) else {
+    let Some(d) = found.filter(|d| mode(d) == Mode::Enforce) else {
         if let Some(s) = session {
             streak::reset(project, s);
         }
@@ -535,7 +549,11 @@ pub fn claude_lease_end(project: &Project, input: &Value) -> Result<Option<Value
 /// branch has no active change.
 pub fn claude_session_start(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let text = brief::brief(project, home, &cwd)?;
+    let mut text = brief::brief(project, home, &cwd)?;
+    if let Some(on) = yolo::active(project) {
+        let warning = format!("rvow: yolo {} is on and ends by itself; the hooks relax, the gate still checks at push", on.tier.name());
+        text = brief::with_warning(&text, &warning);
+    }
     Ok((!text.is_empty()).then(|| {
         json!({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -637,6 +655,15 @@ fn changed_since_vow(top: &Path, c: &proof::Active) -> Option<Vec<String>> {
 /// One line for a status bar: proved tasks, drift and pending amendments of
 /// the branch's active changes, or `None` when the branch has none.
 pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
+    let line = status_line_inner(project, home, cwd)?;
+    Ok(match (line, yolo::active(project)) {
+        (line, None) => line,
+        (Some(line), Some(on)) => Some(format!("{line} [yolo {}]", on.tier.name())),
+        (None, Some(on)) => Some(format!("rvow [yolo {}]", on.tier.name())),
+    })
+}
+
+fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
     let top = git::toplevel(cwd)?;
     let Some(branch) = git::branch(&top)? else {
         return Ok(None);
@@ -695,6 +722,9 @@ fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let flag = |k: &str| input.get(k).and_then(Value::as_bool).unwrap_or(false);
     if input.get("agent_id").is_some() || flag("stop_hook_active") {
+        return Ok(None);
+    }
+    if yolo::active(project).is_some_and(|on| on.tier == Tier::Bypass) {
         return Ok(None);
     }
     let session = input.get("session_id").and_then(Value::as_str);

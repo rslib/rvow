@@ -12,6 +12,7 @@ use crate::change::LEDGER;
 use crate::gate::cache::CACHE_FILE;
 use crate::lease::LEASE_FILE;
 use crate::stats::STATS_FILE;
+use crate::yolo::YOLO_FILE;
 
 use super::rule::{Denial, Rule, denial};
 use crate::store::IDS_FILE;
@@ -368,6 +369,10 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
     let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
     match sub.as_str() {
         "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        "yolo" => denial(
+            Rule::YoloFile,
+            "rvow yolo relaxes the hooks and belongs to the user; ask the user to run `! rvow yolo <tier>`".into(),
+        ),
         "ingest" => denial(
             Rule::OwnerCommand,
             "rvow ingest records proofs from a CI file and belongs to the user; ask the user to run `! rvow ingest <file>`, or run `rvow prove <task>` to prove it here"
@@ -499,6 +504,10 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
             format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
         );
     }
+    let names_yolo = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == YOLO_FILE);
+    if names_yolo && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+    }
     let names_lease = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == LEASE_FILE);
     if names_lease && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
         return denial(
@@ -525,6 +534,20 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
         );
     }
     None
+}
+
+/// True when every `rvow` call in `cmd` that the user owns is an `accept` or a `confirm`, and the command
+/// holds no other owner-only call. The `auto` tier lets such a command run.
+pub(super) fn only_accept_or_confirm(cmd: &str) -> bool {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let subs: Vec<&str> = sh
+        .commands
+        .iter()
+        .flat_map(|seg| invocations(seg))
+        .filter(|inv| base_name(&inv[0]) == "rvow")
+        .filter_map(|inv| inv[1..].iter().find(|w| !w.starts_with('-')).map(String::as_str))
+        .collect();
+    !subs.is_empty() && subs.iter().all(|s| matches!(*s, "accept" | "confirm" | "status" | "ls" | "show" | "check" | "validate" | "prove"))
 }
 
 /// What each `rvow prove` in `cmd` is given: the task words and flags after `prove`.

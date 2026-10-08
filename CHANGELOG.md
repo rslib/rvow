@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Audit an edit outside every task scope and an edit of a protected test instead of denying it. The hook counts it, and the gate still blocks the branch.
+- Ask the user after 3 denials in a row in one session, instead of denying a fourth time.
+- Tell the agent when an accept, a confirm or an archive that the user ran fails, with the command and the reason.
+- Treat a change of a task title as free drift.
+- Let a subagent that holds a lease prove only its own task.
 - Make the brief name missing or failed work of the newest change before a stale task of an older change.
 - Make the Stop hook give each reason once per session, and let subagent stops and stops during a rebase, merge or cherry-pick pass.
 - Let the hook allow read-only shell commands on the enforcement files and the git hooks folder, and text that only names a protected action.
@@ -14,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add the tools `rvow_accept`, `rvow_confirm` and `rvow_yolo` to the Claude mod and the pi extension.
+  The user answers a dialog before anything is accepted, confirmed or switched on, and a failure comes back to the agent with its reason.
+- Add `rvow yolo`, and `/rvow-yolo` in the Claude mod and pi, for the user to relax the hooks for a while, in three tiers: `audit`, `auto` and `bypass`.
+  It ends by itself after 2 hours by default and at most 24, the status line and brief show it, and the gate still checks at push.
 - Add `rvow stats` to show how often each hook denied a tool call or blocked a stop, by rule, with no command text or path stored.
 - Add `rvow delegate` to lease one task to a subagent.
   The Claude mod binds the subagent to the lease, and the hook then denies its edits outside the files of that task.

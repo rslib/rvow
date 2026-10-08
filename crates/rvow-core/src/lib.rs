@@ -37,3 +37,4 @@ pub mod store;
 pub mod tasks;
 pub mod view;
 pub mod vow;
+pub mod yolo;
