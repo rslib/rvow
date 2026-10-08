@@ -927,6 +927,26 @@ export default function (pi: ExtensionAPI) {
     return { handled: true };
   }
 
+  // A subagent runs in a session of its own that loads this extension, so it can bind itself: when its
+  // first prompt starts with the `lease:` line of `rvow delegate`, the hook then judges its edits and
+  // its `rvow prove` by the leased task, as it does for a bound Claude subagent.
+  let leaseAgent: string | undefined;
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (leaseAgent || !/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
+    const id = ctx.sessionManager?.getSessionId?.();
+    if (!id) return;
+    const out = await hook(
+      "lease-bind",
+      ctx.cwd,
+      { agent_id: id, prompt: event.prompt },
+      FAST_MS,
+      false,
+      undefined,
+      enforcementOff(ctx),
+    );
+    if (out?.bound === true) leaseAgent = id;
+  });
+
   pi.on("tool_call", async (event, ctx) => {
     const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
     if (typeof input.path === "string" && input.file_path === undefined)
@@ -940,6 +960,7 @@ export default function (pi: ExtensionAPI) {
           tool_name: name,
           tool_input: input,
           session_id: ctx.sessionManager?.getSessionId?.(),
+          agent_id: leaseAgent,
         },
         FAST_MS,
         false,
@@ -1005,7 +1026,7 @@ export default function (pi: ExtensionAPI) {
       stopRefresh = refreshLoop(() => (S.dock ? refresh(ctx) : Promise.resolve()));
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     epoch++;
     background.abort();
     stopRefresh();
@@ -1019,6 +1040,11 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setWidget("rvow-dock", undefined);
       ctx.ui.setWidget("rvow", undefined);
       ctx.ui.setStatus("rvow", undefined);
+    }
+    if (leaseAgent) {
+      const id = leaseAgent;
+      leaseAgent = undefined;
+      await hook("lease-end", ctx.cwd, { agent_id: id }, FAST_MS);
     }
   });
 
@@ -1053,7 +1079,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_before_settle", async (event, ctx) => {
     // The CLI gives each reason once per session, so it needs the session id.
-    const who = { session_id: ctx.sessionManager?.getSessionId?.() };
+    const who = { session_id: ctx.sessionManager?.getSessionId?.(), agent_id: leaseAgent };
     const reason = (
       await hook("stop", ctx.cwd, who, BOUND_MS, false, undefined, enforcementOff(ctx))
     )?.reason;

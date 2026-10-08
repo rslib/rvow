@@ -89,6 +89,7 @@ A subagent meets the same rules as the main agent, but it does not know which ta
 `rvow delegate <task>` records a lease for one task and prints a short brief.
 The first line of the brief is `lease: <task id>`, so put the brief at the start of the subagent's prompt.
 The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
+In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from the first prompt of that session and binds the session id.
 From then on the hook denies that subagent's edits of files outside the task's `files:`, and the reason names the task.
 It also denies an `rvow prove` of any other task or `rvow prove --stale`, so one subagent cannot prove another's work.
 A lease ends when its task is proved or blocked, when the subagent stops or after 4 hours.
@@ -217,8 +218,10 @@ Each one is caught later by the gate, or needs a person.
   A change to it is caught as weaken drift, in repository mode and in the global file.
 - **A subagent can edit a protected test block.**
   The hook sees files and not the test blocks inside a Rust file, so the edit is found afterwards as weaken drift.
-- **Leases cover the Claude mod only.**
-  A pi subagent is a separate process and is not bound yet, and a subagent without the mod is unbound.
+- **A lease needs the rvow hooks in the subagent.**
+  A Claude subagent is bound by the mod, and a pi subagent binds itself when its session loads the rvow extension, which is the default of `pi-subagents`.
+  A subagent that opts out (`extensions: false` or `isolated: true` in pi, or no mod in Claude Code) meets no rvow hook at all, so the lease does not apply and only the gate checks its work.
+  The hook also judges only the edit tools and `rvow prove`, since it sees files and not what a shell command writes.
 - **Session events are recorded from the docs and this session.**
   Claude Code names five `SessionStart` sources: `startup`, `resume`, `clear`, `compact` and `fork` (a fork reported `resume` before v2.1.214).
   The mod resets its brief state on `session.start`, which covers startup, resume, clear and fork, and on a `session.compact` that stands, so the next prompt carries the brief again after the summary replaced it.

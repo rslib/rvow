@@ -47,6 +47,7 @@ export type ToolOutput =
   | { kind: "failure"; code: number; error: string; stdout: string; cliCode?: string };
 
 export type HookOutput = Partial<Omit<View, "changes">> & {
+  bound?: unknown;
   changes?: Change[];
   plans?: Plan[];
   status?: unknown;

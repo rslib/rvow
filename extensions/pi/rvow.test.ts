@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -28,8 +28,10 @@ echo "$*" >> "$RVOW_FAKE/argv"
 case "$1 $2 $3" in
   "hook claude view") [ -f "$RVOW_FAKE/fail-view" ] && exit 1; [ -f "$RVOW_FAKE/slow-view" ] && sleep 0.5; cat "$RVOW_FAKE/view.json" 2>/dev/null; true ;;
   "hook claude status") cat "$RVOW_FAKE/status.json" 2>/dev/null ;;
-  "hook claude pre-tool-use") cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
-  "hook claude stop") cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
+  "hook claude pre-tool-use") cat > "$RVOW_FAKE/pre.in"; cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
+  "hook claude stop") cat > "$RVOW_FAKE/stop.in"; cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
+  "hook claude lease-bind") cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" 2>/dev/null ;;
+  "hook claude lease-end") cat > "$RVOW_FAKE/end.in" ;;
   "hook claude "*) ;;
   *)
     case "$1" in
@@ -126,6 +128,7 @@ type Files = Partial<
     | "review.txt"
     | "slow"
     | "slow-view"
+    | "bind.json"
     | "fail-view"
     | "fail-accept"
     | "clarify.json"
@@ -198,7 +201,7 @@ function setup(files: Files, ui: Ui = {}) {
     cwd: home,
     hasUI,
     mode: ui.mode ?? (hasUI ? "tui" : "print"),
-    sessionManager: { getEntries: () => entries },
+    sessionManager: { getEntries: () => entries, getSessionId: () => "pi-sess" },
     ui: {
       notify: (...args: unknown[]) => void calls.push({ kind: "notify", args }),
       confirm: rec("confirm", ui.confirm ?? true),
@@ -264,6 +267,10 @@ function setup(files: Files, ui: Ui = {}) {
     return command("rvow-status");
   };
   const write = (name: keyof Files, text: string) => writeFileSync(join(home, name), text);
+  const sent = (name: string) => {
+    const file = join(home, name);
+    return existsSync(file) ? JSON.parse(readFileSync(file, "utf8") || "null") : undefined;
+  };
   const widget = (key: string) => {
     const call = calls.filter((c) => c.kind === "widget" && c.args[0] === key).at(-1);
     const f = call?.args[1];
@@ -309,6 +316,7 @@ function setup(files: Files, ui: Ui = {}) {
     users,
     statuses,
     argv,
+    sent,
     command,
     fire,
     lastFactory,
@@ -1039,6 +1047,46 @@ test("tool_call asks the user when the hook asks, and a no keeps the call blocke
     block: true,
     reason: "rvow: allow it?",
   });
+});
+
+test("a subagent session whose prompt starts with a lease line binds itself and is judged by it", async () => {
+  const bound = json({ bound: true, task: "TSK-abc123" });
+  const t = setup({ "bind.json": bound });
+  const event = { toolName: "bash", input: { command: "ls" } };
+
+  await t.fire("tool_call", event);
+  assert.equal(t.sent("pre.in").agent_id, undefined, "a session with no lease line is not bound");
+
+  await t.fire("before_agent_start", { prompt: "lease: TSK-abc123\nYou hold one task." });
+  assert.deepEqual(t.sent("bind.in").agent_id, "pi-sess");
+  assert.match(t.sent("bind.in").prompt, /^lease: TSK-abc123/);
+
+  await t.fire("tool_call", event);
+  assert.equal(t.sent("pre.in").agent_id, "pi-sess");
+  assert.equal(t.sent("pre.in").session_id, "pi-sess");
+
+  await t.fire("agent_before_settle", { entries: [] });
+  assert.equal(
+    t.sent("stop.in").agent_id,
+    "pi-sess",
+    "a bound subagent's stop passes like a Claude subagent's",
+  );
+
+  await t.fire("session_shutdown");
+  assert.equal(t.sent("end.in").agent_id, "pi-sess", "the lease ends with the session");
+});
+
+test("a prompt without a lease line, or a bind the hook refuses, leaves the session unbound", async () => {
+  const plain = setup({ "bind.json": json({ bound: true }) });
+  await plain.fire("before_agent_start", { prompt: "Read README.md and summarize it." });
+  assert.equal(plain.sent("bind.in"), undefined);
+
+  const refused = setup({ "bind.json": json({ bound: false, task: "TSK-zzzzzz" }) });
+  await refused.fire("before_agent_start", { prompt: "lease: TSK-zzzzzz\nGo." });
+  await refused.fire("tool_call", { toolName: "bash", input: { command: "ls" } });
+  assert.equal(refused.sent("pre.in").agent_id, undefined);
+  await refused.fire("session_shutdown");
+  assert.equal(refused.sent("end.in"), undefined, "nothing was bound, so nothing ends");
 });
 
 test("the stop gate continues 8 times, then lets the agent stop", async () => {
