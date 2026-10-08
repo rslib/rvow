@@ -151,7 +151,7 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
         return Err(Error::new(
             "stage",
             format!("{} is in {}, not in backlog", change.id, change.stage.name()),
-            "only a backlog change can be accepted",
+            "only a backlog change can be accepted; run rvow ls to find one",
         ));
     }
     let top = git::toplevel(cwd)?;

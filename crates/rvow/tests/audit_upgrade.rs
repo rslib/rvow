@@ -29,6 +29,7 @@ impl Fixture {
             .env("CLAUDE_CONFIG_DIR", self.0.join(".claude"))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("XDG_DATA_HOME", self.0.join("data"))
+            .env("PI_CODING_AGENT_DIR", self.0.join("pi"))
             .env_remove("RVOW_AGENT")
             .stdin(Stdio::null())
             .output()
@@ -133,4 +134,46 @@ fn audit_upgrade_session_start_warns_for_stale_and_edited_skills() {
     let out = f.cli(&["hook", "claude", "session-start"]);
     assert!(out.status.success());
     assert!(!String::from_utf8_lossy(&out.stdout).contains("run rvow install"));
+}
+
+fn files_under(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn audit_upgrade_a_second_install_refreshes_every_managed_file_of_an_older_one() {
+    let f = Fixture::new("whole");
+    std::fs::create_dir_all(f.0.join("pi")).unwrap();
+    assert!(f.cli(&["install"]).status.success());
+    let (claude, store, pi) = (f.0.join(".claude"), f.0.join("store"), f.0.join("pi"));
+    let plugin = store.join("claude-plugin/plugins/rvow");
+    let skill_text = std::fs::read_to_string(plugin.join("skills/rvow/SKILL.md")).unwrap();
+    let stale = || install::stale_managed_files(&claude, &store, Some(&pi), &skill_text);
+    assert_eq!(stale(), Vec::<PathBuf>::new(), "a fresh install is current");
+
+    // The files an older binary wrote: the mod's files hold other text, the others carry a valid marker for it.
+    let mut managed = Vec::new();
+    files_under(&plugin, &mut managed);
+    managed.retain(|p| !p.ends_with("plugin.json"));
+    for path in &managed {
+        std::fs::write(path, "old\n").unwrap();
+    }
+    let mut pi_files = Vec::new();
+    files_under(&pi.join("extensions/rvow"), &mut pi_files);
+    assert!(!pi_files.is_empty(), "the pi extension is installed");
+    for path in &pi_files {
+        std::fs::write(path, format!("// rvow-managed sha256:{}\nold\n", sha256_hex(b"old\n"))).unwrap();
+    }
+    assert_eq!(stale().len(), managed.len() + pi_files.len(), "{:?}", stale());
+
+    assert!(f.cli(&["install"]).status.success());
+    assert_eq!(stale(), Vec::<PathBuf>::new(), "the second install refreshed every file");
+    assert!(std::fs::read_to_string(plugin.join("hooks/register.tsx")).unwrap().contains("INSTALLED_BIN"));
 }
