@@ -1,4 +1,4 @@
-// Fails when the installed pi or Claude Code differs from the version the types were pinned to.
+// Fails in CI, and only warns elsewhere, when the installed pi or Claude Code differs from the version the types were pinned to.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -27,10 +27,12 @@ for (const [cmd, pinned, fix] of checks) {
   const have = installed(cmd);
   if (!have) console.log(`drift: ${cmd} not installed, skipping`);
   else if (have !== pinned) {
-    console.error(
-      `drift: ${cmd} ${have} is installed but the types are pinned to ${pinned}; ${fix}`,
-    );
-    failed = true;
+    const text = `drift: ${cmd} ${have} is installed but the types are pinned to ${pinned}; ${fix}`;
+    // A local auto-update must not block a push; only CI, which installs the pin, fails.
+    if (process.env.CI) {
+      console.error(text);
+      failed = true;
+    } else console.warn(`warning: ${text}`);
   } else console.log(`drift: ${cmd} ${have} ok`);
 }
 process.exit(failed ? 1 : 0);
