@@ -31,7 +31,25 @@ pub enum Rule {
     History,
 }
 
+/// What a rule does when it fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The call is denied.
+    Enforce,
+    /// The call goes through and the hit is counted. The gate still catches it as drift or scope.
+    Audit,
+}
+
 impl Rule {
+    /// Tampering with rvow itself is enforced, and so is a lease that the user chose. Scope and protected tests
+    /// are audited: the gate checks them.
+    pub fn mode(self) -> Mode {
+        match self {
+            Rule::OutsideScope | Rule::ProtectedTest => Mode::Audit,
+            _ => Mode::Enforce,
+        }
+    }
+
     pub const ALL: [Rule; 13] = [
         Rule::OwnerCommand,
         Rule::GitHooks,

@@ -936,15 +936,23 @@ export default function (pi: ExtensionAPI) {
       await hook(
         "pre-tool-use",
         ctx.cwd,
-        { tool_name: name, tool_input: input },
+        {
+          tool_name: name,
+          tool_input: input,
+          session_id: ctx.sessionManager?.getSessionId?.(),
+        },
         FAST_MS,
         false,
         undefined,
         enforcementOff(ctx),
       )
     )?.hookSpecificOutput;
-    if (out?.permissionDecision === "deny") {
-      return { block: true, reason: String(out.permissionDecisionReason ?? "rvow: denied") };
+    const reason = String(out?.permissionDecisionReason ?? "rvow: denied");
+    if (out?.permissionDecision === "deny") return { block: true, reason };
+    // After repeated denials rvow asks the user once; without a person to ask, the call stays denied.
+    if (out?.permissionDecision === "ask") {
+      const allowed = ctx.hasUI && (await ctx.ui.confirm("rvow", reason).catch(() => false));
+      if (!allowed) return { block: true, reason };
     }
   });
 

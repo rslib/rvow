@@ -104,7 +104,8 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
             ));
         }
         if old.title != new.title {
-            out.push(changed(Class::Confirm, format!("{id} title changed"), &old.title, &new.title));
+            // The title only names the task; verify, covers and files hold what it must do.
+            out.push(changed(Class::Free, format!("{id} title changed"), &old.title, &new.title));
         }
         if old.covers != new.covers {
             let list = |t: &Task| t.covers.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
@@ -313,8 +314,8 @@ mod tests {
             [
                 (Class::Weaken, format!("{task} verify changed")),
                 (Class::Confirm, "proposal changed".to_string()),
-                (Class::Confirm, format!("{task} title changed")),
                 (Class::Confirm, "TSK-new2 added with files **".to_string()),
+                (Class::Free, format!("{task} title changed")),
                 (Class::Free, "TSK-new1 added with files out.txt".to_string()),
             ]
         );

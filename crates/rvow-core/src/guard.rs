@@ -217,13 +217,14 @@ mod tests {
             "tool_name": "Edit",
             "tool_input": {"file_path": "tests/t.sh"},
         });
-        assert!(crate::hook::claude_pre_tool_use(&p, &input).unwrap().is_some());
+        // The rule finds it; the hook only audits this rule, and the gate catches the edit.
+        assert!(crate::hook::pre_tool_use_denial(&p, &input).unwrap().is_some());
         let src = serde_json::json!({
             "cwd": repo.to_str().unwrap(),
             "tool_name": "Edit",
             "tool_input": {"file_path": "src/lib.rs"},
         });
-        assert_eq!(crate::hook::claude_pre_tool_use(&p, &src).unwrap(), None);
+        assert_eq!(crate::hook::pre_tool_use_denial(&p, &src).unwrap(), None);
     }
 
     #[test]

@@ -206,12 +206,13 @@ fn stop_plan_changed_message_lists_three_items_and_a_count() {
     let reason = fx.stop(json!({})).unwrap();
     assert!(reason.contains("the plan changed"), "{reason}");
     assert!(reason.contains("; and ") && reason.contains(" more)"), "{reason}");
-    assert!(reason.contains("title changed; and 2 more)"), "{reason}");
+    assert!(reason.contains("covers changed; and 1 more)"), "{reason}");
 
     std::fs::write(&proposal, proposal_text).unwrap();
     std::fs::write(&tasks, original.replace("Write ok", "Write it")).unwrap();
-    let one = fx.stop(json!({})).unwrap();
-    assert!(one.contains("title changed") && !one.contains("more"), "{one}");
+    // A title change is free drift, so it is not a reason to hold the stop.
+    let one = fx.stop(json!({})).unwrap_or_default();
+    assert!(!one.contains("the plan changed"), "{one}");
 }
 
 #[test]

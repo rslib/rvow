@@ -996,6 +996,26 @@ test("tool_call blocks when the hook denies and passes otherwise", async () => {
   assert.equal(await setup({}).fire("tool_call", event), undefined);
 });
 
+test("tool_call asks the user when the hook asks, and a no keeps the call blocked", async () => {
+  const ask = json({
+    hookSpecificOutput: { permissionDecision: "ask", permissionDecisionReason: "rvow: allow it?" },
+  });
+  const event = { toolName: "bash", input: { command: "ls" } };
+
+  const yes = setup({ "pre.json": ask }, { confirm: true });
+  assert.equal(await yes.fire("tool_call", event), undefined);
+  assert.equal(yes.calls.find((c) => c.kind === "confirm")?.args[1], "rvow: allow it?");
+
+  const no = setup({ "pre.json": ask }, { confirm: false });
+  assert.deepEqual(await no.fire("tool_call", event), { block: true, reason: "rvow: allow it?" });
+
+  const nobody = setup({ "pre.json": ask }, { hasUI: false });
+  assert.deepEqual(await nobody.fire("tool_call", event), {
+    block: true,
+    reason: "rvow: allow it?",
+  });
+});
+
 test("the stop gate continues 8 times, then lets the agent stop", async () => {
   const t = setup({ "stop.json": json({ reason: "tasks are open" }) });
   const results: unknown[] = [];

@@ -404,6 +404,12 @@ export const register: Register = (on) => {
     if (decision?.permissionDecision === 'deny') {
       return { deny: String(decision.permissionDecisionReason) }
     }
+    // After repeated denials rvow asks the user once; no answer leaves the call denied.
+    if (decision?.permissionDecision === 'ask') {
+      const reason = String(decision.permissionDecisionReason)
+      const answer = await $.ui.ask(reason, ['Allow', 'Deny']).catch(() => 'Deny')
+      if (answer !== 'Allow') return { deny: reason }
+    }
     const ran = await next(e)
     if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
     return ran

@@ -280,6 +280,7 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     let claude = fx.home().join(".claude/settings.json");
 
     let mut reasons: Vec<(String, String)> = Vec::new();
+    let mut edit_reasons: Vec<(String, String)> = Vec::new();
     let mut edit = |what: &str, file: &Path| {
         let r = fx.write(file).unwrap_or_else(|| panic!("{what} was allowed"));
         reasons.push((what.to_string(), r));
@@ -291,8 +292,14 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     edit("living spec", &project_root.join("specs/cap/spec.md"));
     edit("git dir", &fx.repo().join(".git/hooks/pre-push"));
     edit("hooks config", &fx.repo().join(".claude/settings.json"));
-    edit("protected test", &fx.repo().join("tests/t.sh"));
-    edit("outside scope", &fx.repo().join("docs/readme.md"));
+    // These two rules are in audit mode, so the hook lets the call through; the finding still holds the text.
+    for (what, file) in [("protected test", "tests/t.sh"), ("outside scope", "docs/readme.md")] {
+        let project = store::find(&fx.repo(), &fx.rvow_home()).unwrap().unwrap();
+        let payload = json!({"cwd": fx.repo(), "tool_name": "Write", "tool_input": {"file_path": fx.repo().join(file)}});
+        let found = rvow_core::hook::pre_tool_use_denial(&project, &payload).unwrap();
+        assert_eq!(fx.write(&fx.repo().join(file)), None, "{what} is audited, not denied");
+        edit_reasons.push((what.to_string(), found.unwrap_or_else(|| panic!("{what} was not found")).reason));
+    }
     edit("hidden check", &fx.rvow_home().join("hidden-checks/x.sh"));
 
     let bash = [
@@ -333,14 +340,16 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     std::fs::write(fx.repo().join("out.txt"), "touched").unwrap();
     reasons.push(("open task".into(), stop(&fx)));
     let active = std::fs::read_dir(project_root.join("active")).unwrap().next().unwrap().unwrap().path();
-    let tasks = active.join("tasks.md");
-    let text = std::fs::read_to_string(&tasks).unwrap();
-    std::fs::write(&tasks, text.replace("Write ok", "Write it")).unwrap();
+    // A title change is free drift; a proposal change needs the user's confirm.
+    let proposal = active.join("proposal.md");
+    let text = std::fs::read_to_string(&proposal).unwrap();
+    std::fs::write(&proposal, format!("{text}\nOne more thing.\n")).unwrap();
     let drift = stop(&fx);
     assert!(drift.contains("/rvow-confirm"), "{drift}");
     reasons.push(("drift".into(), drift));
     let _ = id;
 
+    reasons.extend(edit_reasons);
     for (what, reason) in &reasons {
         let text = reason.strip_prefix("rvow: ").unwrap_or(reason);
         assert!(!text.starts_with("rvow: "), "{what}: doubled prefix: {reason}");

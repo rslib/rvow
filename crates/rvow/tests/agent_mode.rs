@@ -286,6 +286,23 @@ fn scope_a_bound_subagent_edits_inside_its_lease_and_is_denied_outside() {
 }
 
 #[test]
+fn scope_a_bound_subagent_proves_only_its_own_task() {
+    let (fx, code, docs) = Fx::two("scope-prove");
+    fx.rvow(&["delegate", &code]);
+    assert!(lease::bind(&fx.project(), &code, "a1").unwrap());
+    let bash = |cmd: &str, agent: Option<&str>| fx.hook("Bash", serde_json::json!({"command": cmd}), agent);
+
+    assert_eq!(bash(&format!("rvow prove {code}"), Some("a1")), None, "its own task");
+    assert_eq!(bash(&format!("rvow prove {code} 2>&1 | tail -5"), Some("a1")), None, "with a pipe");
+    for cmd in [format!("rvow prove {docs}"), "rvow prove --stale".to_string(), format!("rvow prove {code}; rvow prove {docs}")] {
+        let reason = bash(&cmd, Some("a1")).unwrap_or_else(|| panic!("allowed: {cmd}"));
+        assert!(reason.contains(&code) && reason.contains("rvow prove"), "{cmd}: {reason}");
+    }
+    assert_eq!(bash(&format!("rvow prove {docs}"), None), None, "the main agent proves any task");
+    assert_eq!(bash(&format!("rvow prove {docs}"), Some("a2")), None, "another subagent has no lease");
+}
+
+#[test]
 fn scope_the_lease_stops_applying_when_the_task_is_proved() {
     let (fx, code, _docs) = Fx::two("scope-ends");
     fx.rvow(&["delegate", &code]);

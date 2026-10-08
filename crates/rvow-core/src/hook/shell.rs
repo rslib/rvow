@@ -527,6 +527,18 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
     None
 }
 
+/// What each `rvow prove` in `cmd` is given: the task words and flags after `prove`.
+pub(super) fn prove_args(cmd: &str) -> Vec<Vec<String>> {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let calls = sh.commands.iter().flat_map(|seg| invocations(seg)).filter(|inv| base_name(&inv[0]) == "rvow");
+    calls
+        .filter_map(|inv| {
+            let at = inv.iter().position(|w| w == "prove")?;
+            Some(inv[at + 1..].iter().filter(|w| !matches!(w.as_str(), "--toon" | "--human")).cloned().collect())
+        })
+        .collect()
+}
+
 /// Why a Bash command must not run, or `None`.
 pub fn bash_denial(cmd: &str) -> Option<String> {
     bash_rule(cmd).map(|d| d.reason)
