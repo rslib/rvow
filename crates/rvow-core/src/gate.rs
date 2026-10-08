@@ -20,7 +20,7 @@ mod rerun;
 mod signature;
 
 use check::check_scope;
-use rerun::{Lazy, Scope, prove_data, rerun_archived};
+use rerun::{Archived, Lazy, Scope, prove_data, rerun_archived};
 
 #[cfg(test)]
 use crate::change::Stage;
@@ -230,7 +230,8 @@ fn gate_for(
                 r.failures.push(format!("{id} failed on rerun ({why}): {cmd}"));
             }
         }
-        rerun_archived(project, &top, &mut lazy, &env, &config, &mut r, echo)?;
+        let archived = Archived { project, home, now: &now, env: &env, max_age: policy.max_age };
+        rerun_archived(&archived, &mut lazy, &mut cache, &mut r, echo)?;
         if lazy.failed() {
             return Ok(r);
         }
@@ -308,6 +309,31 @@ mod tests {
         assert!(!r.passed(), "archived regressions must block: {r:?}");
         assert_eq!(r.archived.len(), 1, "{r:?}");
         assert!(r.archived[0].contains(&task) && r.archived[0].contains("failed on rerun"), "{r:?}");
+    }
+
+    #[test]
+    fn an_archived_task_is_not_rerun_while_its_files_are_unchanged() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "out"]);
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let id = proof::active(&p, &change::load_living(&p).unwrap().0).unwrap()[0].dir.id.to_string();
+        crate::archive::archive(&p, &home, &repo, &id).unwrap();
+
+        // A feature branch touches the archived task's file but keeps it valid.
+        git(&repo, &["checkout", "-q", "-b", "feat/next"]);
+        std::fs::write(repo.join("out.txt"), "ok ok").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "touch"]);
+
+        let opts = Options { strict: true, rerun: true, out: None };
+        let first = run_gate(&p, &home, &repo, opts.clone());
+        assert!(first.timings.iter().any(|(t, _)| t == &task), "the first gate runs it: {first:?}");
+        let second = run_gate(&p, &home, &repo, opts);
+        assert!(second.cached.contains(&task), "the second gate answers from the cache: {second:?}");
+        assert!(second.timings.iter().all(|(t, _)| t != &task), "{second:?}");
     }
 
     #[test]
