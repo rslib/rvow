@@ -110,6 +110,38 @@ After 3 denials in a row in one session, the next one is a question to you inste
 Any call that goes through ends the streak.
 Without a session id or without a person to ask, the call stays denied.
 
+## Yolo: relax the hooks for a while
+
+`! rvow yolo <tier> [--for 2h]` relaxes the hooks for a while. In the Claude mod and in pi, type `/rvow-yolo <tier> [30m]` instead, and the agent is told once.
+The default length is 2 hours and the longest is 24.
+It ends by itself, and `! rvow yolo off` ends it at once.
+Only you can switch it: an agent cannot run `rvow yolo` in a shell or write its file, in any tier.
+
+| Tier | What changes |
+|------|--------------|
+| `audit` | An edit before the plan is accepted, and a subagent edit outside its lease, are audited and not denied. Tampering stays denied. |
+| `auto` | Also lets the agent run `rvow accept` and `rvow confirm`. `rvow ingest` and a faked dialog answer stay denied. |
+| `bypass` | Every hook only audits, and a stop is never held back. |
+
+The status line shows `[yolo <tier>]` and the brief says so once.
+`rvow stats` counts what each tier let through.
+The gate is not relaxed: it still checks proofs, drift and scope at push.
+
+## Tools for the agent
+
+A slash command is for you, and a tool is for the agent.
+Both the Claude mod and the pi extension give the agent these tools:
+
+- `rvow_accept` asks you to accept a ready plan. You read the review and the checklist in a dialog, and nothing is accepted unless you say yes.
+- `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
+- `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
+- `rvow_ask`, `rvow_view` and `rvow_prove` read the open questions, the dashboard and prove a task.
+
+The tool runs the command itself, so the hook that denies `rvow accept` in a shell does not stand in its way.
+Your answer in the dialog is the decision.
+When the command fails, the tool result holds its own words, such as `code: not-ready`, so the agent knows why.
+When you run a decision yourself, with `/rvow-accept` or the dock, and it fails, the agent gets a message that names the command and the reason.
+
 ## Measuring the hooks
 
 The hooks should help and stay quiet, so rvow counts what they do.
