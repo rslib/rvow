@@ -42,10 +42,10 @@ import {
   tabCounts,
   tabSpans,
 } from "./formats.ts";
-import { decisionPrompt, refinePrompt } from "./prompts.ts";
+import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
 import { BIN, FAST_MS, run, SLOW_MS } from "./tools.ts";
-import { registerTypedTools } from "./typed-tools.ts";
+import { registerTypedTools, yoloArgs } from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
 const MAX_CONTINUES = 8;
@@ -1129,6 +1129,10 @@ export default function (pi: ExtensionAPI) {
       const verb = accept ? "accept" : "reject";
       const r = await run(["confirm", id, `--${verb}`], ctx.cwd, "", SLOW_MS);
       if (r?.code === 0) decided[verb].push(id);
+      else if (r)
+        pi.sendUserMessage(failedPrompt(["confirm", id, `--${verb}`], r.out), {
+          deliverAs: "followUp",
+        });
       ctx.ui.notify(
         r?.out.trim() || `${id}: ${accept ? "accepted" : "rejected"}`,
         r?.code === 0 ? "info" : "error",
@@ -1158,7 +1162,7 @@ export default function (pi: ExtensionAPI) {
   function userCommand(
     name: string,
     description: string,
-    body: (ctx: ExtensionContext, arg: string) => Promise<void>,
+    body: (ctx: ExtensionContext, arg: string, all: string) => Promise<void>,
   ) {
     pi.registerCommand(name, {
       description,
@@ -1167,7 +1171,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`Run \`rvow ${name.slice(5)}\` in a terminal.`, "warning");
           return;
         }
-        await body(ctx, args.trim().split(/\s+/)[0] ?? "");
+        await body(ctx, args.trim().split(/\s+/)[0] ?? "", args.trim());
       },
     });
   }
@@ -1201,7 +1205,12 @@ export default function (pi: ExtensionAPI) {
         r.out.trim() || `rvow ${argv.join(" ")}: done`,
         r.code === 0 ? "info" : "error",
       );
-      const prompt = r.code === 0 ? decisionPrompt(argv, r.out) : null;
+      const prompt =
+        r.code === 0
+          ? decisionPrompt(argv, r.out)
+          : argv[0] === "yolo"
+            ? null
+            : failedPrompt(argv, r.out);
       if (prompt) pi.sendUserMessage(prompt, { deliverAs: "followUp" });
     }
     await refresh(ctx);
@@ -1213,6 +1222,7 @@ export default function (pi: ExtensionAPI) {
     if (!r) return;
     if (r.code !== 0) {
       ctx.ui.notify(r.out.trim(), "error");
+      pi.sendUserMessage(failedPrompt(["review", id], r.out), { deliverAs: "followUp" });
       return r;
     }
     if (!(await ctx.ui.confirm(`rvow ${id}`, `${r.out.trim()}\n\nAccept ${id}?`))) return;
@@ -1235,6 +1245,23 @@ export default function (pi: ExtensionAPI) {
     const id = await pick(ctx, arg);
     if (id) await acceptPlan(ctx, id);
   });
+
+  userCommand(
+    "rvow-yolo",
+    "Relax the hooks for a while: audit|auto|bypass [30m|2h], off, or nothing to see it",
+    async (ctx, _first, all) => {
+      const [tier, length] = all.split(/\s+/).filter(Boolean);
+      let argv: string[];
+      try {
+        argv = yoloArgs({ ...(tier ? { tier } : {}), ...(length ? { for: length } : {}) }).filter(
+          (word) => word !== "--toon",
+        );
+      } catch (error) {
+        return ctx.ui.notify(`${(error as Error).message}; try /rvow-yolo auto 30m`, "info");
+      }
+      await decide(ctx, argv);
+    },
+  );
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");

@@ -4,6 +4,47 @@ import type { ToolOutput, View } from "./types.ts";
 
 export type ViewInput = { target?: "view" | "status" | "show"; id?: string };
 export type ProofInput = { task: string };
+export type AcceptInput = { change: string };
+export type ConfirmInput = { decision?: "accept" | "reject" };
+
+export const ACCEPT_DESCRIPTION =
+  "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
+export const CONFIRM_DESCRIPTION =
+  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. The result tells you what happened, and when it failed it says why.";
+
+export function acceptArgs(input: unknown): string {
+  const value = closed(input, ["change"]);
+  if (typeof value.change !== "string" || !/^CHG-[a-z0-9]+$/.test(value.change))
+    throw new Error("rvow: change must be a complete CHG id");
+  return value.change;
+}
+
+export function confirmDecision(input: unknown): "accept" | "reject" | undefined {
+  const value = closed(input, ["decision"]);
+  if (value.decision !== undefined && value.decision !== "accept" && value.decision !== "reject")
+    throw new Error("rvow: decision must be accept or reject");
+  return value.decision;
+}
+
+export type YoloInput = { tier?: "audit" | "auto" | "bypass" | "off"; for?: string };
+
+/** What each yolo tier changes, as the user reads it in the dialog and the model reads it in the tool text. */
+export const YOLO_TIERS = {
+  audit: "edits go through before the plan is accepted or outside a task, and are only counted",
+  auto: "also lets the agent run rvow accept and rvow confirm",
+  bypass: "every hook only audits and a stop is never held back",
+} as const;
+
+export const YOLO_DESCRIPTION = [
+  "Show or change rvow's yolo mode, which relaxes the hooks for a while. Call it with no tier to see what is on.",
+  "A tier needs the user to allow it in a dialog, and the user may refuse.",
+  `audit: ${YOLO_TIERS.audit}.`,
+  `auto: ${YOLO_TIERS.auto}.`,
+  `bypass: ${YOLO_TIERS.bypass}.`,
+  "off ends it at once and needs no dialog. A tier ends by itself after 2 hours, or after `for` (such as 30m or 4h, at most 24h).",
+  "The gate still checks everything at push, and tampering with the ledger, the enforcement files or the hidden checks stays denied below bypass.",
+  "Do not use it to get around one denial; run rvow block with a reason instead.",
+].join(" ");
 
 export const VIEW_KEYS = [
   "branch",
@@ -43,6 +84,22 @@ export function proofArgs(input: unknown): string[] {
   if (typeof value.task !== "string" || !/^TSK-[a-z0-9]+$/.test(value.task))
     throw new Error("rvow: prove needs a complete TSK id");
   return ["prove", value.task, "--toon"];
+}
+
+export function yoloArgs(input: unknown): string[] {
+  const value = closed(input, ["tier", "for"]);
+  const { tier, for: length } = value;
+  if (tier === undefined) {
+    if (length !== undefined) throw new Error("rvow: for needs a tier");
+    return ["yolo", "--toon"];
+  }
+  if (typeof tier !== "string" || !["audit", "auto", "bypass", "off"].includes(tier))
+    throw new Error("rvow: tier must be audit, auto, bypass or off");
+  if (length === undefined) return ["yolo", tier, "--toon"];
+  if (tier === "off") throw new Error("rvow: off takes no length");
+  if (typeof length !== "string" || !/^[1-9][0-9]*[smh]$/.test(length))
+    throw new Error("rvow: for must look like 30m or 2h");
+  return ["yolo", tier, "--for", length, "--toon"];
 }
 
 export function serialQueue() {
@@ -87,6 +144,13 @@ function parseOutput(args: string[], code: number, stdout: string): ToolOutput {
         duration_ms: Number(ms),
         event,
       };
+  } else if (code === 0 && ["accept", "confirm", "review"].includes(args[0] ?? "")) {
+    return { kind: "decision", code, text: stdout };
+  } else if (code === 0 && args[0] === "yolo") {
+    const tier = scalar(stdout, "tier");
+    const minutes = scalar(stdout, "minutes");
+    if (typeof tier === "string")
+      return { kind: "yolo", code, tier, ...(typeof minutes === "number" ? { minutes } : {}) };
   } else if (code === 0 && args[0] === "show") {
     return { kind: "artifact-text", code, id: args[1] ?? "", text: stdout };
   } else if (code === 0) {
@@ -117,7 +181,12 @@ const outputSchema = {
   type: "object",
   required: ["kind", "code"],
   properties: {
-    kind: { type: "string", enum: ["view", "status", "artifact-text", "proof", "failure"] },
+    kind: {
+      type: "string",
+      enum: ["view", "status", "artifact-text", "proof", "yolo", "decision", "failure"],
+    },
+    tier: { type: "string" },
+    minutes: { type: "integer" },
     code: { type: "integer" },
     data: { anyOf: [{ type: "object" }, { type: "null" }] },
     id: { type: "string" },
@@ -189,6 +258,101 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     execute: async (_id, params, signal, _update, ctx) => {
       const args = proofArgs(params);
       return queue(() => result(args, ctx.cwd, signal, 30 * 60_000));
+    },
+  });
+  // These two tools are the agent's way to the user's decisions. The user answers in a dialog, the tool
+  // runs the CLI itself, and a failure comes back as the tool's error with the CLI's own words.
+  const text = (value: Awaited<ReturnType<typeof result>>) =>
+    value.details.kind === "decision" ? value.details.text : "";
+  const declined = (why: string) => ({
+    content: [{ type: "text" as const, text: why }],
+    details: { kind: "failure" as const, code: 1, error: "declined", stdout: "" },
+  });
+  pi.registerTool({
+    name: "rvow_accept",
+    label: "rvow accept",
+    outputSchema,
+    description: ACCEPT_DESCRIPTION,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["change"],
+      properties: { change: { type: "string", pattern: "^CHG-[a-z0-9]+$" } },
+    } as ToolDefinition["parameters"],
+    execute: async (_id, params, signal, _update, ctx) => {
+      const change = acceptArgs(params);
+      if (!ctx.hasUI) throw new Error("rvow: only the user can accept, and no one is here to ask");
+      const review = await queue(() => result(["review", change], ctx.cwd, signal, SLOW_MS));
+      if (review.details.kind !== "decision") return review;
+      const yes = await ctx.ui.confirm(
+        `rvow ${change}`,
+        `${text(review).trim()}\n\nAccept ${change}?`,
+      );
+      if (!yes) return declined(`The user did not accept ${change}; it stays a plan.`);
+      return queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, 10 * 60_000));
+    },
+  });
+  pi.registerTool({
+    name: "rvow_confirm",
+    label: "rvow confirm",
+    outputSchema,
+    description: CONFIRM_DESCRIPTION,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: { decision: { type: "string", enum: ["accept", "reject"] } },
+    } as ToolDefinition["parameters"],
+    execute: async (_id, params, signal, _update, ctx) => {
+      const decision = confirmDecision(params);
+      const list = await queue(() => result(["confirm"], ctx.cwd, signal, SLOW_MS));
+      const digest = /^digest (\S+)$/m.exec(text(list))?.[1];
+      if (decision === undefined || list.details.kind !== "decision" || !digest) return list;
+      if (!ctx.hasUI) throw new Error("rvow: only the user can decide, and no one is here to ask");
+      const yes = await ctx.ui.confirm(
+        "rvow confirm",
+        `${text(list).trim()}\n\n${decision === "accept" ? "Accept" : "Reject"} all of these?`,
+      );
+      if (!yes) return declined("The user did not decide, so the plan edits are still pending.");
+      return queue(() =>
+        result(["confirm", `--${decision}`, "--all", digest], ctx.cwd, signal, SLOW_MS),
+      );
+    },
+  });
+  // Only the user's answer in the dialog switches a tier on. The tool runs the CLI itself, since the
+  // hook refuses an agent that runs `rvow yolo` in a shell.
+  pi.registerTool({
+    name: "rvow_yolo",
+    label: "rvow yolo",
+    outputSchema,
+    description: YOLO_DESCRIPTION,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        tier: { type: "string", enum: ["audit", "auto", "bypass", "off"] },
+        for: { type: "string", pattern: "^[1-9][0-9]*[smh]$" },
+      },
+    } as ToolDefinition["parameters"],
+    execute: async (_id, params, signal, _update, ctx) => {
+      const args = yoloArgs(params);
+      const tier = args[1];
+      if (tier && tier !== "off" && !tier.startsWith("--")) {
+        const length = args[2] === "--for" ? args[3] : "2h";
+        if (!ctx.hasUI)
+          throw new Error("rvow: only the user can switch yolo on, and no one is here to ask");
+        const allowed = await ctx.ui.confirm(
+          "rvow yolo",
+          `The agent asks to turn on yolo ${tier} for ${length}: ${YOLO_TIERS[tier as keyof typeof YOLO_TIERS]}. The gate still checks at push. Allow it?`,
+        );
+        if (!allowed)
+          return {
+            content: [
+              { type: "text" as const, text: "The user declined, so yolo stays as it was." },
+            ],
+            details: { kind: "failure" as const, code: 1, error: "declined", stdout: "" },
+          };
+      }
+      return queue(() => result(args, ctx.cwd, signal, SLOW_MS));
     },
   });
 }

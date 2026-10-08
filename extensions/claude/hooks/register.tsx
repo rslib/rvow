@@ -4,17 +4,26 @@ import { atom, read, update } from 'claude-code'
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
 import {
   ACCENT,
+  ACCEPT,
+  ACCEPT_DESCRIPTION,
+  ACCEPT_SCHEMA,
   ASK,
   type Asked,
   BADGE,
   BRANCH,
   blocker,
+  CONFIRM,
+  CONFIRM_DESCRIPTION,
+  CONFIRM_SCHEMA,
   cut,
   DRIFT,
   decisionPrompt,
   EDIT_HINT,
+  failedPrompt,
+  failedText,
   firstTab,
   ID,
+  isDecision,
   MARKS,
   MAX_LINES,
   OPEN,
@@ -24,6 +33,11 @@ import {
   RULE,
   refinePrompt,
   TABS,
+  YOLO,
+  YOLO_DESCRIPTION,
+  YOLO_SCHEMA,
+  YOLO_TIERS,
+  yoloArgv,
 } from './format'
 
 const viewAtom = atom({ plugin: 'rvow', key: 'view' } as const, null)
@@ -164,6 +178,15 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
   }
 }
 
+/** Runs `rvow <argv>` for a tool and returns its words, so a failure reaches the agent in the tool result. */
+async function tellOut($: EngineInterface, argv: string[]) {
+  const cwd = await $.session.cwd()
+  const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
+  const out = ran.stdout.trim() || ran.stderr.trim()
+  await refresh($)
+  return { ok: ran.exitCode === 0, out }
+}
+
 async function waiting($: EngineInterface) {
   await refresh($)
   return (await read($, viewAtom))?.backlog.filter((x) => x.here && x.ready) ?? []
@@ -178,7 +201,16 @@ function list(ps: { id: string; title: string }[]) {
 /** A pane press: runs rvow, keeps the outcome's short form as the notice, then refreshes. */
 async function act($: EngineInterface, argv: string[]) {
   await update($, noticeAtom, () => ({ tone: 'busy', text: `running rvow ${argv.join(' ')}` }))
-  await settle($, await rvow($, argv))
+  const r = await rvow($, argv)
+  await settle($, r)
+  tellAgentOfFailure($, argv, r)
+}
+
+/** A decision that failed is not silent for the agent: it is told what failed and why. */
+function tellAgentOfFailure($: EngineInterface, argv: string[], r: RvowNotice) {
+  if (r.tone === 'fail' && isDecision(argv)) {
+    later($, async () => queue($, failedPrompt(argv, r.text)))
+  }
 }
 
 /** Keeps the short form of an outcome as the notice, then refreshes. */
@@ -280,6 +312,7 @@ async function decide($: EngineInterface, listing: string, verb: 'accept' | 'rej
     return
   }
   await settle($, r)
+  tellAgentOfFailure($, ['confirm', `--${verb}`, '--all', digest], r)
 }
 
 async function userOnly(
@@ -296,6 +329,7 @@ async function userOnly(
   const prompt = r.tone === 'ok' ? decisionPrompt(argv, r.text) : null
   // The engine refuses a submit made while this hook still holds the command.
   if (prompt) later($, async () => queue($, prompt))
+  tellAgentOfFailure($, argv, r)
   return { text: r.text }
 }
 
@@ -373,6 +407,11 @@ export const register: Register = (on) => {
       description: 'Archive an rvow change whose tasks are all proved: <CHG-id>',
     })
     await $.command.register({
+      name: 'rvow-yolo',
+      description:
+        'Relax the hooks for a while: audit|auto|bypass [30m|2h], off, or nothing to see it',
+    })
+    await $.command.register({
       name: 'rvow-status',
       description: 'Show the rvow state of this branch in a pane',
     })
@@ -381,8 +420,83 @@ export const register: Register = (on) => {
       description:
         'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Ask in chat only when it is missing.',
     })
+    await $.tool.register({
+      name: 'rvow_accept',
+      description: ACCEPT_DESCRIPTION,
+      inputSchema: ACCEPT_SCHEMA,
+    })
+    await $.tool.register({
+      name: 'rvow_confirm',
+      description: CONFIRM_DESCRIPTION,
+      inputSchema: CONFIRM_SCHEMA,
+    })
+    await $.tool.register({
+      name: 'rvow_yolo',
+      description: YOLO_DESCRIPTION,
+      inputSchema: YOLO_SCHEMA,
+    })
     later($, () => refresh($))
     return started
+  })
+
+  // The agent may ask for a tier. Only the user's answer in the dialog switches one on, and the tool
+  // runs the CLI itself, since the hook refuses an agent that runs `rvow yolo` in a shell.
+  on('tool.call', { tool: YOLO }, async ($, e) => {
+    const { tool, tool_use_id, agentId, consent, ...input } = e as Record<string, unknown>
+    const argv = yoloArgv(input)
+    if (typeof argv === 'string') return { result: argv }
+    const tier = argv[1]
+    if (tier && tier !== 'off') {
+      const length = argv[3] ?? '2h'
+      const question = `The agent asks to turn on yolo ${tier} for ${length}: ${YOLO_TIERS[tier as keyof typeof YOLO_TIERS]}. The gate still checks at push. Allow it?`
+      const answer = await $.ui.ask(question, ['Allow', 'Deny']).catch(() => 'Deny')
+      if (answer !== 'Allow') return { result: 'The user declined, so yolo stays as it was.' }
+    }
+    const cwd = await $.session.cwd()
+    const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
+    await refresh($)
+    return { result: ran.stdout || ran.stderr }
+  })
+
+  // These tools are the agent's way to the user's decisions. The user answers in a dialog, the tool runs
+  // the CLI itself, and the result carries the failure text, so the agent is never left guessing.
+  on('tool.call', { tool: ACCEPT }, async ($, e) => {
+    const change = (e as Record<string, unknown>).change
+    if (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change)) {
+      return { result: 'rvow: change must be a complete CHG id' }
+    }
+    const review = await tellOut($, ['review', change])
+    if (!review.ok) return { result: failedText(['review', change], review.out) }
+    const answer = await $.ui
+      .ask(`${review.out}\n\nAccept ${change}?`, ['Accept', 'Not now'])
+      .catch(() => 'Not now')
+    if (answer !== 'Accept')
+      return { result: `The user did not accept ${change}; it stays a plan.` }
+    const done = await tellOut($, ['accept', change, '--yes'])
+    return { result: done.ok ? done.out : failedText(['accept', change], done.out) }
+  })
+
+  on('tool.call', { tool: CONFIRM }, async ($, e) => {
+    const decision = (e as Record<string, unknown>).decision
+    if (decision !== undefined && decision !== 'accept' && decision !== 'reject') {
+      return { result: 'rvow: decision must be accept or reject' }
+    }
+    const listing = await tellOut($, ['confirm'])
+    if (!listing.ok) return { result: failedText(['confirm'], listing.out) }
+    if (decision === undefined) return { result: listing.out }
+    const digest = /^digest (\S+)$/m.exec(listing.out)?.[1]
+    if (!digest) return { result: listing.out || 'There are no pending plan edits.' }
+    const answer = await $.ui
+      .ask(`${listing.out}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} all of these?`, [
+        'Yes',
+        'No',
+      ])
+      .catch(() => 'No')
+    if (answer !== 'Yes')
+      return { result: 'The user did not decide, so the plan edits are still pending.' }
+    const argv = ['confirm', `--${decision}`, '--all', digest]
+    const done = await tellOut($, argv)
+    return { result: done.ok ? done.out : failedText(argv, done.out) }
   })
 
   on('tool.call', { tool: ASK }, async ($) => {
@@ -508,6 +622,13 @@ export const register: Register = (on) => {
     await putReview($, (m) => ({ ...m, [p.id]: true }))
     await $.ui.open({ ...OPEN, focus: true, closeOnEscape: true })
     return {}
+  })
+
+  on('command.run', { command: 'rvow-yolo' }, async ($, e) => {
+    const [tier, length] = e.args.trim().split(/\s+/).filter(Boolean)
+    const argv = yoloArgv({ ...(tier ? { tier } : {}), ...(length ? { for: length } : {}) })
+    if (typeof argv === 'string') return { text: `${argv}; try /rvow-yolo auto 30m` }
+    return userOnly($, e.origin, 'rvow-yolo', argv)
   })
 
   on('command.run', { command: 'rvow-archive' }, async ($, e) => {

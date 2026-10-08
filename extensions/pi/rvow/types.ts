@@ -42,6 +42,8 @@ export type ToolOutput =
       duration_ms: number;
       event: string;
     }
+  | { kind: "yolo"; code: number; tier: string; minutes?: number }
+  | { kind: "decision"; code: number; text: string }
   | { kind: "failure"; code: number; error: string; stdout: string; cliCode?: string };
 
 export type HookOutput = Partial<Omit<View, "changes">> & {

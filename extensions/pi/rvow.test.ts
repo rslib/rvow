@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-tui";
 import {
   decisionPrompt as modDecision,
+  failedPrompt as modFailed,
   refinePrompt as modRefine,
   REFINE_STEPS as modSteps,
 } from "../claude/hooks/format.ts";
@@ -36,7 +37,7 @@ case "$1 $2 $3" in
       show) [ -f "$RVOW_FAKE/slow" ] && sleep 0.4; if [ -f "$RVOW_FAKE/show-$2.txt" ]; then cat "$RVOW_FAKE/show-$2.txt"; else echo "$2"; echo "shown $2"; fi ;;
       clarify) cat "$RVOW_FAKE/clarify.json" ;;
       confirm) if [ $# -eq 1 ]; then cat "$RVOW_FAKE/confirm.txt"; else echo "ran $*"; fi ;;
-      accept) echo "accepted"; echo "next: TSK-1 first"; ;;
+      accept) if [ -f "$RVOW_FAKE/fail-accept" ]; then echo "error: CHG-a has no passing check"; echo "code: not-ready"; exit 1; fi; echo "accepted"; echo "next: TSK-1 first"; ;;
       *) echo "ran $*" ;;
     esac ;;
 esac
@@ -126,6 +127,7 @@ type Files = Partial<
     | "slow"
     | "slow-view"
     | "fail-view"
+    | "fail-accept"
     | "clarify.json"
     | "confirm.txt"
     | `show-${string}.txt`,
@@ -539,6 +541,20 @@ test("a on a ready plan asks to confirm, then runs rvow accept and tells the age
   assert.deepEqual(t.users(), ["I accepted CHG-a. next: TSK-1 first. Continue with it."]);
   assert.equal(t.opened(), 2, "the pane reopens after the action");
   assert.equal(modDecision(["accept", "CHG-a"], "accepted\nnext: TSK-1 first\n"), t.users()[0]);
+});
+
+test("an accept that fails tells the agent what failed and why", async () => {
+  const t = setup({
+    "view.json": json(WAITING({ id: "CHG-a", title: "A" })),
+    "review.txt": "the checklist",
+    "fail-accept": "1",
+  });
+  await t.status((p) => press(p, "a"));
+  assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
+  assert.deepEqual(t.users(), [
+    modFailed(["accept", "CHG-a"], "error: CHG-a has no passing check\ncode: not-ready\n"),
+  ]);
+  assert.match(t.users()[0] ?? "", /code: not-ready/);
 });
 
 test("a declined confirm runs no accept and says nothing to the agent", async () => {
@@ -979,6 +995,15 @@ test("the shared prompt strings equal the Claude mod's", () => {
     ]) {
       assert.equal(m.decisionPrompt(argv, out), modDecision(argv, out), argv.join(" "));
     }
+    const failure = "error: CHG-a has no task\ncode: not-ready\nhelp: add a task";
+    assert.equal(
+      m.failedPrompt(["accept", "CHG-a"], failure),
+      modFailed(["accept", "CHG-a"], failure),
+    );
+    assert.match(
+      m.failedPrompt(["accept", "CHG-a"], failure),
+      /failed:\nerror: CHG-a has no task\ncode: not-ready\nhelp: add a task\nFix what it names/,
+    );
   });
 });
 
@@ -1039,12 +1064,12 @@ test("rvow-confirm tells the agent what the user decided", async () => {
 
 test("the pi extension registers its commands and tool", () => {
   const t = setup({});
-  for (const c of ["status", "confirm", "review", "accept", "archive"])
+  for (const c of ["status", "confirm", "review", "accept", "archive", "yolo"])
     assert.ok(t.commands.has(`rvow-${c}`), c);
   assert.deepEqual(t.tools, ["rvow_ask"]);
 });
 
-for (const name of ["rvow-review", "rvow-accept", "rvow-archive"]) {
+for (const name of ["rvow-review", "rvow-accept", "rvow-archive", "rvow-yolo"]) {
   test(`${name} refuses without a UI and runs nothing`, async () => {
     const t = setup({}, { hasUI: false });
     await t.command(name, "CHG-a");
@@ -1111,6 +1136,30 @@ test("rvow-accept confirmed runs rvow accept with the id and tells the agent", a
   assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
   assert.ok(t.notes().includes("accepted\nnext: TSK-1 first"));
   assert.deepEqual(t.users(), ["I accepted CHG-a. next: TSK-1 first. Continue with it."]);
+});
+
+test("rvow-yolo switches a tier on, tells the agent, and refuses what it cannot parse", async () => {
+  const t = setup({});
+  await t.command("rvow-yolo", "auto 30m");
+  assert.deepEqual(
+    t.argv().filter((l) => l.startsWith("yolo")),
+    ["yolo auto --for 30m"],
+  );
+  assert.match(t.users()[0] ?? "", /I switched on yolo auto: also lets the agent run rvow accept/);
+  assert.equal(modDecision(["yolo", "auto", "--for", "30m"], "tier: auto"), t.users()[0]);
+
+  await t.command("rvow-yolo", "off");
+  assert.equal(t.users().at(-1), "I switched yolo off. The usual rules apply again.");
+
+  const before = t.argv().length;
+  await t.command("rvow-yolo", "root");
+  await t.command("rvow-yolo", "off 2h");
+  assert.equal(t.argv().length, before, "a bad tier or length runs nothing");
+  assert.match(t.notes().join(), /try \/rvow-yolo auto 30m/);
+
+  const status = t.users().length;
+  await t.command("rvow-yolo");
+  assert.equal(t.users().length, status, "the status says nothing to the agent");
 });
 
 test("rvow-archive needs an id, then archives it", async () => {

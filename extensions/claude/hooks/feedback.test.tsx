@@ -53,11 +53,22 @@ test('a plain listing queues nothing', async ($, on) => {
   expect(prompts).toEqual([])
 })
 
-test('a failed run queues nothing', async ($, on) => {
-  const prompts = fake(on, 1, 'error: refused\n')
+test('a failed run tells the agent what failed and why', async ($, on) => {
+  const prompts = fake(on, 1, 'error: refused\ncode: not-ready\n')
   on('ui.toast', async () => ({ value: undefined }))
   await run($, 'rvow-accept', 'CHG-1')
   await run($, 'rvow-confirm', 'accept AMD-a')
   await run($, 'rvow-archive', 'CHG-1')
+  expect(prompts).toHaveLength(3)
+  expect(prompts[0]).toContain('I tried `rvow accept CHG-1` and it failed:')
+  expect(prompts[1]).toContain('I tried `rvow confirm --accept AMD-a` and it failed:')
+  expect(prompts[2]).toContain('I tried `rvow archive CHG-1` and it failed:')
+  for (const p of prompts) expect(p).toContain('error: refused\ncode: not-ready')
+})
+
+test('a listing that fails is not a decision, so the agent is not told', async ($, on) => {
+  const prompts = fake(on, 1, 'error: no project\n')
+  on('ui.toast', async () => ({ value: undefined }))
+  await run($, 'rvow-confirm', '')
   expect(prompts).toEqual([])
 })
