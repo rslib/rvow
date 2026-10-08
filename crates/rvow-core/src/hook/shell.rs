@@ -488,7 +488,8 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
     }
     let in_git_dir =
         w.iter().any(|x| x.ends_with(".git") || x.ends_with(".git/")) && w.iter().any(|x| x.to_lowercase().starts_with("hooks"));
-    if writes && (lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir) {
+    // Running or reading a hook while a writer such as `tee` targets another file is fine.
+    if writes_to(&invs, cmd, |x| x.to_lowercase().contains(".git/hooks")) || (writes && in_git_dir) {
         return denial(Rule::GitHooks, ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
     }
     let names_stats = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == STATS_FILE);
@@ -581,9 +582,10 @@ pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {
 const WRITERS: &[&str] = &["rm", "mv", "cp", "tee", "sed", "perl", "python", "python3", "chmod", "ln", "truncate", "dd", "install"];
 const CONFIG_WRITE_FLAGS: &[&str] = &["--unset", "--unset-all", "--add", "--replace-all", "-e", "--edit"];
 
-/// True when `cmd` redirects output to a file; `2>&1` and `>/dev/null` do not count.
-fn redirects_to_file(cmd: &str) -> bool {
+/// The files `cmd` redirects output to; `2>&1` and `>/dev/null` are not files.
+fn redirect_targets(cmd: &str) -> Vec<String> {
     let chars: Vec<char> = cmd.chars().collect();
+    let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i] != '>' {
@@ -606,22 +608,28 @@ fn redirects_to_file(cmd: &str) -> bool {
         }
         let target: String = chars[j..].iter().take_while(|c| !c.is_whitespace() && !SEPARATORS.contains(c)).collect();
         if target != "/dev/null" {
-            return true;
+            found.push(target);
         }
         i = j.max(i + 1);
     }
-    false
+    found
+}
+
+/// A writer such as `rm` or `sed -i`.
+fn is_writer(inv: &[String]) -> bool {
+    let name = base_name(&inv[0]);
+    WRITERS.contains(&name)
+        && (name != "sed" || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
 }
 
 /// A command that changes files: a writer such as `rm` or `sed -i`, or a redirect to a file.
 fn writes_files(invs: &[&[String]], cmd: &str) -> bool {
-    redirects_to_file(cmd)
-        || invs.iter().any(|inv| {
-            let name = base_name(&inv[0]);
-            WRITERS.contains(&name)
-                && (name != "sed"
-                    || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
-        })
+    !redirect_targets(cmd).is_empty() || invs.iter().any(|inv| is_writer(inv))
+}
+
+/// A command that changes a file `hit` accepts: a redirect to it, or an argument of a writer.
+fn writes_to(invs: &[&[String]], cmd: &str, hit: impl Fn(&str) -> bool) -> bool {
+    redirect_targets(cmd).iter().any(|t| hit(t)) || invs.iter().any(|inv| is_writer(inv) && inv[1..].iter().any(|w| hit(w)))
 }
 
 /// A `git` call that sets or removes `core.hooksPath`; reading it is fine.

@@ -217,12 +217,25 @@ fn stop_plan_changed_message_lists_three_items_and_a_count() {
 #[test]
 fn shell_reads_of_the_hooks_folder_are_allowed_and_writes_are_not() {
     let fx = Fx::new("hooks-dir");
-    for command in ["ls .git/hooks", "cat .git/hooks/pre-push", "ls .git/hooks 2>&1 | head -5", "grep -n rvow .git/hooks/pre-push"] {
+    for command in [
+        "ls .git/hooks",
+        "cat .git/hooks/pre-push",
+        "ls .git/hooks 2>&1 | head -5",
+        "grep -n rvow .git/hooks/pre-push",
+        // Running the hook while a writer targets another file.
+        ".git/hooks/pre-push origin url 2>&1 | tee out.log",
+        ".git/hooks/pre-push origin url > out.log 2>&1",
+    ] {
         assert_eq!(fx.bash(command), None, "{command}");
     }
-    for command in
-        ["echo x >> .git/hooks/pre-push", "rm .git/hooks/pre-push", "sed -i s/a/b/ .git/hooks/pre-push", "chmod -x .git/hooks/pre-push"]
-    {
+    for command in [
+        "echo x >> .git/hooks/pre-push",
+        "rm .git/hooks/pre-push",
+        "sed -i s/a/b/ .git/hooks/pre-push",
+        "chmod -x .git/hooks/pre-push",
+        "echo x | tee .git/hooks/pre-push",
+        "cp /tmp/copy .git/hooks/pre-push",
+    ] {
         let reason = fx.bash(command).unwrap_or_else(|| panic!("allowed: {command}"));
         assert!(reason.contains("rvow install"), "{command}: {reason}");
     }
