@@ -55,6 +55,8 @@ const STDERR_LINES = 20
 const FOLD_LINES = 8
 /** The last brief sent to the model; a prompt carries the brief only when it changed. */
 let sentBrief = ''
+/** A tool call carries no session id, so the last prompt's id goes with `pre-tool-use`. */
+let sessionId: string | undefined
 const BRIEF_WAIT_MS = 5_000
 
 /** Runs `work` after the current event returns, so the session never waits for rvow. */
@@ -395,6 +397,7 @@ export const register: Register = (on) => {
     const out = await hook($, 'pre-tool-use', {
       tool_name: tool,
       tool_input: args,
+      session_id: sessionId,
       agent_id: typeof agentId === 'string' ? agentId : undefined,
     })
     const decision = out?.hookSpecificOutput
@@ -425,6 +428,7 @@ export const register: Register = (on) => {
   // The brief goes with each prompt whose brief changed, not with session start: startup never waits
   // for rvow, and the model learns of an accept, a confirm or an archive the user ran.
   on('classic.UserPromptSubmit', async ($, e, next) => {
+    sessionId = e.session_id
     const result = await next(e)
     const out = await Promise.race([hook($, 'session-start', {}), $.clock.sleep(BRIEF_WAIT_MS)])
     const text = out?.hookSpecificOutput?.additionalContext
