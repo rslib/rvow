@@ -383,6 +383,14 @@ async function ask($: EngineInterface): Promise<string> {
 }
 
 export const register: Register = (on) => {
+  // A compaction that stands folds the brief into a summary, so the next prompt carries it again.
+  // A skipped one, a subagent's own and a `precompute` install nothing and leave the brief alone.
+  on('session.compact', async (_$, e, next) => {
+    const out = await next(e)
+    if (out.messages && !e.agentId && e.trigger !== 'precompute') sentBrief = ''
+    return out
+  })
+
   on('session.start', async ($, e, next) => {
     // A new session (startup, clear, resume) has no brief yet, no warning shown, no blocks in a row.
     sentBrief = ''
