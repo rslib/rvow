@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Allow commands that only read the ledger, the ids and the stats, lease, yolo and cache files, and text that only names the hidden checks, such as an `echo` or a commit message.
 - Audit an edit outside every task scope and an edit of a protected test instead of denying it. The hook counts it, and the gate still blocks the branch.
 - Ask the user after 3 denials in a row in one session, instead of denying a fourth time.
 - Tell the agent when an accept, a confirm or an archive that the user ran fails, with the command and the reason.
@@ -19,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add the `rerun_skip` setting, which leaves named archived tasks to CI on a push, and a warning from `rvow check` for a task whose `files:` cover more than 40 tracked files.
 - Add the tools `rvow_accept`, `rvow_confirm` and `rvow_yolo` to the Claude mod and the pi extension.
   The user answers a dialog before anything is accepted, confirmed or switched on, and a failure comes back to the agent with its reason.
 - Add `rvow yolo`, and `/rvow-yolo` in the Claude mod and pi, for the user to relax the hooks for a while, in three tiers: `audit`, `auto` and `bypass`.

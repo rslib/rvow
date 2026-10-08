@@ -7,7 +7,7 @@ Write `tasks.md` as a list of tasks. The order in the file is the work order.
 - Title: one line that says what the task delivers.
 - `covers:` the requirement ids that the task delivers. Write ids only. Do not restate requirement text, because the spec holds it. A small change needs no `covers:`.
 - `verify:` the command that proves the task. Required.
-- `files:` the paths the task may touch. Required. Write `**` only when the task truly touches everything.
+- `files:` the paths the task may touch. Required. Write `**` only when the task truly touches everything. Name the files the task changes: a proof goes stale when any file in its scope changes, and `rvow check` warns about a scope that covers more than 40 tracked files.
 - `baseline: pass` only when the command is expected to pass before the work starts.
 - `timeout:` such as `90s`, `20m` or `1h`, only when the config default is too short.
 - `max_age:` such as `24h`, only when a cached rerun pass of this task should expire sooner than the config default.

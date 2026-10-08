@@ -230,8 +230,9 @@ Each one is caught later by the gate, or needs a person.
   The mod is a plugin and not a settings hook, so `/reload-plugins` is what loads a new install.
 - **A subagent's tool calls reach the same hooks.**
   `PreToolUse` fires for them with `agent_id` and `agent_type`, which is how a lease binds the subagent.
-- **The shell hook reads text.**
-  A command that names the hidden checks folder is denied even when the name sits inside a string, because the secret is the point.
+- **The shell hook reads text, and it reads in two ways.**
+  A command that only reads the ledger, the ids, the stats, lease, yolo or cache file is allowed, and so is a command that only prints text that names the hidden checks, such as an `echo` or a commit message.
+  A command that can write those files, or that reads the hidden checks, is denied, even when the name sits inside a string passed to an interpreter such as `python`, because the hook cannot tell a string from a path there.
 
 ## What we measured
 
