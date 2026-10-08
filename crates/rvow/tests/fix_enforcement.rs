@@ -311,7 +311,7 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
         "git commit -qn -m x",
         "git config core.hooksPath /tmp/x",
         "rm .git/hooks/pre-push",
-        "cat ids.jsonl",
+        "echo x >> ids.jsonl",
         "echo aGk= | base64 -d | sh",
     ];
     for command in bash {
@@ -403,7 +403,7 @@ fn command_text_bypasses_are_denied_and_lookalikes_are_allowed() {
         "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooks\"\"Path GIT_CONFIG_VALUE_0=/tmp git push",
         "cd .git && rm -r hooks",
         "rvow ingest run.jsonl",
-        "cat ledger.jsonl",
+        "echo x >> ledger.jsonl",
         "echo '{}' >> ~/.local/share/rvow/x/active/c/ledger.jsonl",
     ];
     for command in denied {

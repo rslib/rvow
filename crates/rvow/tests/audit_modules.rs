@@ -58,7 +58,7 @@ fn audit_modules_shell_keeps_quotes_heredocs_and_denials() {
         "cargo run -- confirm AMD-x",
         "git commit -n -m x",
         "rvow answer CHG-x:proposal.md:3 yes --via=dialog",
-        "cat ledger.jsonl",
+        "echo x >> ledger.jsonl",
     ] {
         assert!(hook::bash_denial(command).is_some(), "{command}");
     }

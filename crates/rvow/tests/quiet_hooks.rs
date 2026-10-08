@@ -288,3 +288,34 @@ fn shell_text_that_names_a_protected_action_is_allowed() {
         assert!(fx.bash(command).is_some(), "allowed: {command}");
     }
 }
+
+#[test]
+fn shell_reads_of_the_state_files_and_text_that_names_the_secret_folder_are_allowed() {
+    let fx = Fx::new("state-reads");
+    let root = fx.change.parent().unwrap().parent().unwrap().to_path_buf();
+    let state = ["ledger.jsonl", "ids.jsonl", "hook-stats.jsonl", "leases.jsonl", "rerun-cache.jsonl", "yolo.json"];
+    for name in state {
+        let file = root.join(name);
+        for command in
+            [format!("cat {}", file.display()), format!("grep x {} | head -3", file.display()), format!("ls -l {} 2>&1", file.display())]
+        {
+            assert_eq!(fx.bash(&command), None, "{command}");
+        }
+        for command in
+            [format!("echo x >> {}", file.display()), format!("rm {}", file.display()), format!("cat a | tee {}", file.display())]
+        {
+            assert!(fx.bash(&command).is_some(), "allowed: {command}");
+        }
+    }
+    let secret = fx.root.join("rh/hidden-checks/x.sh");
+    for command in
+        [format!("git commit -m \"never read {}\"", secret.display()), format!("echo \"the checks live in {}\"", secret.display())]
+    {
+        assert_eq!(fx.bash(&command), None, "{command}");
+    }
+    for command in
+        [format!("cat {}", secret.display()), format!("echo $(cat {})", secret.display()), format!("echo x > {}", secret.display())]
+    {
+        assert!(fx.bash(&command).is_some(), "allowed: {command}");
+    }
+}

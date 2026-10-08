@@ -455,7 +455,11 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
     }
     let files = file_args(&args);
-    if let Some(found) = files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| cache_denial(project, &cwd, f))) {
+    // The hidden checks are closed to every tool. The stats, lease, yolo and cache files are only closed to writes.
+    let writer = writes_files(tool);
+    if let Some(found) =
+        files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten()))
+    {
         return Ok(Some(found));
     }
     if !writes_files(tool) {
@@ -801,7 +805,7 @@ mod tests {
             "git -c core.hooksPath=/dev/null push",
             "git config core.hooksPath /tmp/none",
             "echo '{}' >> ~/.local/share/rvow/x/active/c/ledger.jsonl",
-            "cat ids.jsonl",
+            "echo x >> ids.jsonl",
             "rm .git/hooks/pre-push",
             "rvow answer CHG-x:proposal.md:3 yes --via dialog",
             "rvow answer CHG-x:proposal.md:3 yes --via=dialog",

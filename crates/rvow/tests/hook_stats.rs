@@ -141,9 +141,9 @@ fn rules_shell_denials_name_their_family() {
         ("git push --no-verify", Rule::GitHooks),
         ("git config core.hooksPath /tmp/x", Rule::GitHooks),
         ("rm .git/hooks/pre-push", Rule::GitHooks),
-        ("cat ledger.jsonl", Rule::Ledger),
-        ("cat rerun-cache.jsonl", Rule::CacheFile),
-        ("cat leases.jsonl", Rule::LeaseFile),
+        ("echo x >> ledger.jsonl", Rule::Ledger),
+        ("echo x >> rerun-cache.jsonl", Rule::CacheFile),
+        ("echo x >> leases.jsonl", Rule::LeaseFile),
     ] {
         let d = hook::bash_rule(command).unwrap_or_else(|| panic!("allowed: {command}"));
         assert_eq!(d.rule, rule, "{command}: {}", d.reason);
@@ -165,7 +165,7 @@ fn rules_edit_denials_name_their_family() {
     assert_eq!(rule_of(fx.edit(root.join("archive/done/x.md")), "an archived change"), Rule::History);
     assert_eq!(rule_of(fx.edit(root.join("specs/x.md")), "a living spec"), Rule::History);
     assert_eq!(rule_of(fx.edit(root.join("rerun-cache.jsonl")), "the cache file"), Rule::CacheFile);
-    assert_eq!(rule_of(fx.denial("Read", json!({"file_path": root.join("leases.jsonl")})), "the lease file"), Rule::LeaseFile);
+    assert_eq!(rule_of(fx.denial("Write", json!({"file_path": root.join("leases.jsonl")})), "the lease file"), Rule::LeaseFile);
 
     assert_eq!(fx.edit(repo.join("src/a.txt")), None, "a file of the task is allowed");
     assert_eq!(fx.denial("Read", json!({"file_path": repo.join("docs/a.md")})), None, "a read is allowed");
@@ -262,15 +262,16 @@ fn stats_record_no_command_text_and_no_path() {
 }
 
 #[test]
-fn stats_record_the_stats_file_is_closed_to_agents() {
+fn stats_record_the_stats_file_is_closed_to_writes() {
     let fx = Fx::new("rec-closed", true);
     let file = fx.project().root.join(rvow_core::stats::STATS_FILE);
-    for tool in ["Read", "Edit", "Write"] {
+    for tool in ["Edit", "Write"] {
         let d = fx.denial(tool, json!({"file_path": file})).unwrap_or_else(|| panic!("{tool} allowed"));
         assert_eq!(d.rule, Rule::StatsFile, "{}", d.reason);
         assert!(d.reason.contains("rvow stats"), "{}", d.reason);
     }
-    for command in [format!("echo x >> {}", file.display()), format!("cat {}", file.display()), format!("rm {}", file.display())] {
+    assert!(fx.denial("Read", json!({"file_path": file})).is_none(), "reading the counts is harmless");
+    for command in [format!("echo x >> {}", file.display()), format!("rm {}", file.display())] {
         let d = hook::bash_rule(&command).unwrap_or_else(|| panic!("allowed: {command}"));
         assert_eq!(d.rule, Rule::StatsFile, "{command}: {}", d.reason);
     }

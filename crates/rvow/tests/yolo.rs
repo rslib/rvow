@@ -151,7 +151,7 @@ fn tiers_the_bypass_tier_audits_everything_but_the_switch_itself() {
     assert_eq!(fx.call("Write", json!({"file_path": switch})).as_deref(), Some("deny"));
     assert_eq!(fx.bash("rvow yolo off").as_deref(), Some("deny"));
     assert_eq!(fx.bash(&format!("echo x > {}", switch.display())).as_deref(), Some("deny"));
-    assert_eq!(fx.bash("cat yolo.json").as_deref(), Some("deny"));
+    assert_eq!(fx.bash(&format!("cat {}", switch.display())), None, "reading the tier is harmless");
     assert!(switch.exists(), "the agent could not remove it");
 }
 

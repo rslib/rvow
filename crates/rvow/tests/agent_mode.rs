@@ -315,17 +315,23 @@ fn scope_the_lease_stops_applying_when_the_task_is_proved() {
 }
 
 #[test]
-fn scope_the_lease_file_is_closed_to_every_tool() {
+fn scope_the_lease_file_is_closed_to_writes_and_open_to_reads() {
     let (fx, code, _docs) = Fx::two("scope-file");
     fx.rvow(&["delegate", &code]);
     let file = fx.project().root.join(LEASE_FILE);
-    for tool in ["Read", "Edit", "Write"] {
+    for tool in ["Edit", "Write"] {
         let reason = fx.hook(tool, serde_json::json!({"file_path": file}), None).unwrap_or_else(|| panic!("{tool} allowed"));
         assert!(reason.contains(LEASE_FILE) && reason.contains("rvow delegate"), "{reason}");
     }
-    for command in [format!("echo x >> {}", file.display()), format!("cat {}", file.display()), format!("rm {}", file.display())] {
+    for command in [format!("echo x >> {}", file.display()), format!("rm {}", file.display()), format!("sed -i s/a/b/ {}", file.display())]
+    {
         let reason = fx.hook("Bash", serde_json::json!({"command": command}), None).unwrap_or_else(|| panic!("allowed: {command}"));
         assert!(reason.contains(LEASE_FILE), "{reason}");
+    }
+    // Reading shows who holds which lease and nothing secret.
+    assert_eq!(fx.hook("Read", serde_json::json!({"file_path": file}), None), None);
+    for command in [format!("cat {}", file.display()), format!("grep TSK {} | head -3", file.display())] {
+        assert_eq!(fx.hook("Bash", serde_json::json!({"command": command}), None), None, "{command}");
     }
 }
 
