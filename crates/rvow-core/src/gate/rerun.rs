@@ -244,6 +244,8 @@ pub(super) struct Archived<'a> {
     pub(super) now: &'a Now<'a>,
     pub(super) env: &'a [(String, String)],
     pub(super) max_age: std::time::Duration,
+    /// Ids or id prefixes of archived tasks that this machine does not rerun.
+    pub(super) skip: &'a [String],
 }
 
 /// Runs the verify commands of archived tasks whose `files` the branch touches.
@@ -295,6 +297,10 @@ pub(super) fn rerun_archived(
                 continue;
             }
             let id = t.id.to_string();
+            if ctx.skip.iter().any(|p| !p.is_empty() && id.starts_with(p.as_str())) {
+                r.warnings.push(format!("{id} was not rerun: rerun_skip in config.toml names it, so CI is the check for it"));
+                continue;
+            }
             let key = keys.get(&id).cloned().flatten();
             let max_age = t.max_age.unwrap_or(ctx.max_age).as_millis() as u64;
             if let (Some(cache), Some(key)) = (&*cache, &key)

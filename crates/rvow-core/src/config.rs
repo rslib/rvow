@@ -75,6 +75,8 @@ pub struct File {
     pub rerun_env: Option<BTreeMap<String, String>>,
     /// Ignored repo directories that the rerun worktree links in.
     pub rerun_links: Option<Vec<String>>,
+    /// Archived tasks, by id or a prefix of it, that a push does not rerun on this machine.
+    pub rerun_skip: Option<Vec<String>>,
     /// Executables whose content is part of a rerun cache key.
     pub tools: Option<Vec<String>>,
     /// How long a cached rerun pass stays valid, such as "24h", or "off".
@@ -258,6 +260,17 @@ pub fn rerun_links(project: &Project, home: &Path) -> Result<Vec<String>> {
         Mode::Repo => File::default(),
     };
     Ok(local.rerun_links.or(global.rerun_links).unwrap_or_default())
+}
+
+/// The `rerun_skip` key, merged like `rerun_links` and kept out of `Config` for the same reason: it
+/// says which archived tasks this machine leaves to CI, so it is not part of the vow.
+pub fn rerun_skip(project: &Project, home: &Path) -> Result<Vec<String>> {
+    let local = read_file(&project.root.join(CONFIG_FILE))?;
+    let global = match project.meta.mode {
+        Mode::Home => read_file(&home.join(CONFIG_FILE))?,
+        Mode::Repo => File::default(),
+    };
+    Ok(local.rerun_skip.or(global.rerun_skip).unwrap_or_default())
 }
 
 /// The `tools` key, merged like `rerun_links` and kept out of `Config` for the

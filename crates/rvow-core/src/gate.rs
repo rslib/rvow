@@ -230,7 +230,8 @@ fn gate_for(
                 r.failures.push(format!("{id} failed on rerun ({why}): {cmd}"));
             }
         }
-        let archived = Archived { project, home, now: &now, env: &env, max_age: policy.max_age };
+        let skip = config::rerun_skip(project, home)?;
+        let archived = Archived { project, home, now: &now, env: &env, max_age: policy.max_age, skip: &skip };
         rerun_archived(&archived, &mut lazy, &mut cache, &mut r, echo)?;
         if lazy.failed() {
             return Ok(r);
@@ -334,6 +335,31 @@ mod tests {
         let second = run_gate(&p, &home, &repo, opts);
         assert!(second.cached.contains(&task), "the second gate answers from the cache: {second:?}");
         assert!(second.timings.iter().all(|(t, _)| t != &task), "{second:?}");
+    }
+
+    #[test]
+    fn rerun_skip_leaves_a_named_archived_task_to_ci_and_says_so() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "out"]);
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let id = proof::active(&p, &change::load_living(&p).unwrap().0).unwrap()[0].dir.id.to_string();
+        crate::archive::archive(&p, &home, &repo, &id).unwrap();
+        git(&repo, &["checkout", "-q", "-b", "feat/next"]);
+        std::fs::write(repo.join("out.txt"), "bad").unwrap();
+        git(&repo, &["add", "out.txt"]);
+        git(&repo, &["commit", "-q", "-m", "break"]);
+        let opts = Options { strict: true, rerun: true, out: None };
+
+        let before = run_gate(&p, &home, &repo, opts.clone());
+        assert_eq!(before.archived.len(), 1, "without the setting the break is found: {before:?}");
+
+        std::fs::write(p.root.join("config.toml"), format!("rerun_skip = [\"{}\"]\n", &task[..8])).unwrap();
+        let after = run_gate(&p, &home, &repo, opts);
+        assert!(after.archived.is_empty() && after.timings.iter().all(|(t, _)| t != &task), "{after:?}");
+        assert!(after.warnings.iter().any(|w| w.contains(&task) && w.contains("rerun_skip")), "{after:?}");
     }
 
     #[test]

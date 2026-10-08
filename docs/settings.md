@@ -38,6 +38,7 @@ checks = ["cargo test --locked"]
 | `setup` | Commands the gate rerun runs before verification; an entry is a string or `{ run, files }` | no |
 | `rerun_env` | Environment pairs applied when the gate reruns a task | no |
 | `rerun_links` | Git-ignored directories of the repository, by repo-relative name, that the rerun worktree links in (default none) | no |
+| `rerun_skip` | Archived tasks, by id or a prefix of it, that a push does not rerun on this machine; the gate prints a warning that names each one (default none) | no |
 | `tools` | Executables whose content is part of the gate cache key, by name on `PATH` or by path | no |
 | `rerun_cache` | How long a cached rerun pass stays valid, such as `24h`, or `off`; default `168h` | no |
 | `cache_with_links` | Keep the rerun cache on when `rerun_links` is set; default false | no |
@@ -64,6 +65,7 @@ A tracked name, an absolute name or a name with `..` is refused, and the error n
 A listed directory that does not exist is skipped.
 A verify command can write through a link into the real directory, so list only directories that a verify command may change.
 `rerun_links` is not part of the vow, so changing it is not drift.
+The same holds for `rerun_skip`. Use it for an archived task that reruns the whole test suite, since pre-commit and CI already run the suite, and it would otherwise run again on every push that touches code.
 
 ## Scoping setup and checks to files
 
