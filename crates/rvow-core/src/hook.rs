@@ -667,7 +667,7 @@ mod tests {
     fn a_literal_glob_matches_a_casewise_edited_path_on_macos() {
         // `key` lowercases the edited path on macOS; the scope must do the same
         // to the vowed globs or a literal glob like SKILL.md.tmpl never matches.
-        let rel = "skills/rvow/skill.md.tmpl";
+        let rel = &key(Path::new("skills/rvow/SKILL.md.tmpl"));
         let globs = if cfg!(target_os = "macos") {
             vec!["skills/rvow/SKILL.md.tmpl".to_lowercase()]
         } else {
