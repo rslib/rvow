@@ -90,18 +90,31 @@ A subagent meets the same rules as the main agent, but it does not know which ta
 The first line of the brief is `lease: <task id>`, so put the brief at the start of the subagent's prompt.
 The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
 From then on the hook denies that subagent's edits of files outside the task's `files:`, and the reason names the task.
+It also denies an `rvow prove` of any other task or `rvow prove --stale`, so one subagent cannot prove another's work.
 A lease ends when its task is proved or blocked, when the subagent stops or after 4 hours.
 The lease file is closed to agents, like the gate cache.
 
 Two limits stay.
 A subagent without the mod is unbound, so it meets the usual rules.
-The hook sees files and not what a shell command writes, so a lease scopes the edit tools only.
+The hook sees files and not what a shell command writes, so a lease scopes the edit tools and `rvow prove` only.
+
+## What a hook denies and what it only counts
+
+A rule has a mode.
+Tampering is enforced: the ledger, the enforcement files, the hidden checks, the git hooks, the cache, lease and stats files, `rvow accept` and `rvow confirm`, and edits of archived changes and living specs.
+A lease that you chose with `rvow delegate` and an edit before the plan is accepted are enforced too.
+An edit outside the files of every task and an edit of a protected test are audited.
+The call goes through, `rvow stats` counts it, and the gate still blocks the branch: the first as a file outside every task scope and the second as weak drift that you must confirm.
+
+After 3 denials in a row in one session, the next one is a question to you instead of a denial.
+Any call that goes through ends the streak.
+Without a session id or without a person to ask, the call stays denied.
 
 ## Measuring the hooks
 
 The hooks should help and stay quiet, so rvow counts what they do.
 Each denial and each stop is one line in `hook-stats.jsonl` in the project folder.
-A line holds the time, the hook, the outcome, the session id and, for a denial, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
+A line holds the time, the hook, the outcome (deny, audit, ask, block or pass), the session id and, for a denial, an audit or an ask, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
 It never holds a command or a path.
 `rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops.
 Use it to find the rule that fires most before you change any rule.
@@ -154,6 +167,28 @@ It keeps history and flags tasks that lack a verify command, and it never writes
 The export is one way and never overwrites: it refuses a target that already holds an `openspec` folder, and `--dry-run` lists the files without writing them.
 Each requirement keeps its rvow id in an HTML comment, and the report names what the tree loses, such as ledgers, proofs and vow hashes.
 A re-import reads the text back exactly, and it does not read the id comment or the deprecated marker, so a deprecated requirement comes back as an ordinary one with a new id.
+
+## Known limits
+
+These are accepted for now.
+Each one is caught later by the gate, or needs a person.
+
+- **The accept and confirm deny reads text.**
+  It follows `sh -c`, `eval`, wrappers, variables and scripts on disk.
+  It does not follow a name built at run time, a git alias or a script written in the same command.
+  `require_signature` is the real boundary, and it is off by default.
+- **Hardware signing keys are untested.**
+  The tests sign with a software key. A hardware key (`ed25519-sk`) has not been used yet.
+- **A timeout stops rvow and not its child.**
+  The pi tool `rvow_prove` ends the rvow process after its timeout, and the verify command that rvow started can keep running.
+- **`config.toml` has no edit deny.**
+  A change to it is caught as weaken drift, in repository mode and in the global file.
+- **A subagent can edit a protected test block.**
+  The hook sees files and not the test blocks inside a Rust file, so the edit is found afterwards as weaken drift.
+- **Leases cover the Claude mod only.**
+  A pi subagent is a separate process and is not bound yet, and a subagent without the mod is unbound.
+- **The shell hook reads text.**
+  A command that names the hidden checks folder is denied even when the name sits inside a string, because the secret is the point.
 
 ## What we measured
 
