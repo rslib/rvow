@@ -75,14 +75,14 @@ pub struct File {
     pub rerun_env: Option<BTreeMap<String, String>>,
     /// Ignored repo directories that the rerun worktree links in.
     pub rerun_links: Option<Vec<String>>,
-    /// Archived tasks, by id or a prefix of it, that a push does not rerun on this machine.
-    pub rerun_skip: Option<Vec<String>>,
     /// Executables whose content is part of a rerun cache key.
     pub tools: Option<Vec<String>>,
     /// How long a cached rerun pass stays valid, such as "24h", or "off".
     pub rerun_cache: Option<String>,
     /// Keep the rerun cache on when `rerun_links` is set.
     pub cache_with_links: Option<bool>,
+    /// Rerun a task in a clean checkout even when its proof is current and its files are committed.
+    pub rerun_proven: Option<bool>,
     pub env: Option<Vec<String>>,
     pub env_vars: Option<Vec<String>>,
     /// Global only: a name for this computer.
@@ -262,17 +262,6 @@ pub fn rerun_links(project: &Project, home: &Path) -> Result<Vec<String>> {
     Ok(local.rerun_links.or(global.rerun_links).unwrap_or_default())
 }
 
-/// The `rerun_skip` key, merged like `rerun_links` and kept out of `Config` for the same reason: it
-/// says which archived tasks this machine leaves to CI, so it is not part of the vow.
-pub fn rerun_skip(project: &Project, home: &Path) -> Result<Vec<String>> {
-    let local = read_file(&project.root.join(CONFIG_FILE))?;
-    let global = match project.meta.mode {
-        Mode::Home => read_file(&home.join(CONFIG_FILE))?,
-        Mode::Repo => File::default(),
-    };
-    Ok(local.rerun_skip.or(global.rerun_skip).unwrap_or_default())
-}
-
 /// The `tools` key, merged like `rerun_links` and kept out of `Config` for the
 /// same reason: it names this machine's binaries, not the vow.
 pub fn tools(project: &Project, home: &Path) -> Result<Vec<String>> {
@@ -290,6 +279,8 @@ pub struct CachePolicy {
     pub off: bool,
     pub max_age: Duration,
     pub with_links: bool,
+    /// When true, a proven task reruns too; by default its current proof is trusted.
+    pub rerun_proven: bool,
 }
 
 /// The `rerun_cache` and `cache_with_links` keys, merged like `tools`. They
@@ -315,7 +306,12 @@ pub fn cache_policy(project: &Project, home: &Path) -> Result<CachePolicy> {
             (false, age)
         }
     };
-    Ok(CachePolicy { off, max_age, with_links: local.cache_with_links.or(global.cache_with_links).unwrap_or(false) })
+    Ok(CachePolicy {
+        off,
+        max_age,
+        with_links: local.cache_with_links.or(global.cache_with_links).unwrap_or(false),
+        rerun_proven: local.rerun_proven.or(global.rerun_proven).unwrap_or(false),
+    })
 }
 
 impl Config {

@@ -506,6 +506,7 @@ impl Gx {
         gx.task = tasks.lines().find_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).unwrap();
         gx.commit("out.txt", if verify_ok { "ok" } else { "no" });
         let _ = std::fs::remove_file(&gx.count);
+        gx.global_config("");
         gx
     }
 
@@ -625,7 +626,8 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 impl Gx {
     fn global_config(&self, text: &str) {
         std::fs::create_dir_all(self.root.join("rh")).unwrap();
-        std::fs::write(self.root.join("rh/config.toml"), text).unwrap();
+        // These tests are about the cache, so a proven task reruns here.
+        std::fs::write(self.root.join("rh/config.toml"), format!("rerun_proven = true\n{text}")).unwrap();
     }
 }
 

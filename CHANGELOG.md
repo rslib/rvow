@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Stop rerunning a task on a push when its proof is current and its files are committed, and never rerun the tasks of an archived change. Set `rerun_proven = true` to rerun proven tasks.
 - Allow commands that only read the ledger, the ids and the stats, lease, yolo and cache files, and text that only names the hidden checks, such as an `echo` or a commit message.
 - Audit an edit outside every task scope and an edit of a protected test instead of denying it. The hook counts it, and the gate still blocks the branch.
 - Ask the user after 3 denials in a row in one session, instead of denying a fourth time.
@@ -20,8 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
-- Add the `rerun_skip` setting, which leaves named archived tasks to CI on a push, and a warning from `rvow check` for a task whose `files:` cover more than 40 tracked files.
-- Add the tools `rvow_accept`, `rvow_confirm` and `rvow_yolo` to the Claude mod and the pi extension.
+- Add a warning from `rvow check` for a task whose `files:` cover more than 40 tracked files.
+- Add the tools `rvow_accept`, `rvow_archive`, `rvow_confirm` and `rvow_yolo` to the Claude mod and the pi extension.
   The user answers a dialog before anything is accepted, confirmed or switched on, and a failure comes back to the agent with its reason.
 - Add `rvow yolo`, and `/rvow-yolo` in the Claude mod and pi, for the user to relax the hooks for a while, in three tiers: `audit`, `auto` and `bypass`.
   It ends by itself after 2 hours by default and at most 24, the status line and brief show it, and the gate still checks at push.
@@ -60,7 +61,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Add `rvow prove --stale` to prove every stale task on the branch in one run.
 - Add `rvow status --all` to show every active change and `rvow status --json` to print the view that the harness UIs draw.
 - Add `rvow gate --rerun` to run every verify command again in a clean worktree of HEAD, and `rvow gate --strict` to fail on stale and flaky proofs.
-  The rerun also covers the tasks of archived changes on the branch.
 - Add `rvow confirm --sign` to sign a decision with your ssh key, and the `require_signature` setting to accept only signed decisions.
 - Add `rvow review --packet` to build advisory evidence for a reviewer with fresh context, and `rvow review --record` to store the reviewer's findings.
 - Add `rvow rebind --commit-map` to find a repository that `git filter-repo` rewrote.

@@ -118,6 +118,9 @@ pub fn gate(opts: Options, no_cache: bool) -> Result<Reply> {
         r.line(format!("rerun {task}: {ms} ms"));
         rows.push(obj! { "task" => task, "ms" => ms });
     }
+    for task in &g.proven {
+        r.line(format!("proven {task}: its proof is current and its files are committed, so it is not run again"));
+    }
     for task in &g.cached {
         r.line(format!("cached {task}: an earlier clean pass has the same key"));
     }
@@ -127,20 +130,20 @@ pub fn gate(opts: Options, no_cache: bool) -> Result<Reply> {
     for f in &g.failures {
         r.line(format!("fail: {f}"));
     }
-    for failure in &g.archived {
-        r.line(format!("fail archived: {failure}"));
-    }
     r.ok = g.passed();
     if r.ok {
         r.line(format!("gate passed ({} active changes on this branch)", g.changes));
     } else {
-        r.line(format!("gate failed: {} problems", g.failures.len() + g.archived.len()));
+        r.line(format!("gate failed: {} problems", g.failures.len()));
         r.help("Run `rvow status` to see each task's state");
     }
     r.set("passed", r.ok);
     r.set("changes", g.changes);
     if !g.cached.is_empty() {
         r.set("cached", g.cached);
+    }
+    if !g.proven.is_empty() {
+        r.set("proven", g.proven);
     }
     if !rows.is_empty() {
         r.table("reruns", rows, "");
@@ -150,9 +153,6 @@ pub fn gate(opts: Options, no_cache: bool) -> Result<Reply> {
     }
     if !g.failures.is_empty() {
         r.set("failures", g.failures);
-    }
-    if !g.archived.is_empty() {
-        r.set("archived", g.archived);
     }
     Ok(r)
 }

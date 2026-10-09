@@ -55,7 +55,7 @@ impl Fx {
         fx.rvow(&["init"]);
         std::fs::write(
             fx.root.join("rh/config.toml"),
-            format!("base = \"base0\"\n{}", config.replace("$LOG", &fx.log.display().to_string())),
+            format!("base = \"base0\"\nrerun_proven = true\n{}", config.replace("$LOG", &fx.log.display().to_string())),
         )
         .unwrap();
         let out = fx.rvow(&["new", "--spec", "Out"]);

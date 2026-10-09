@@ -4,14 +4,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::Report;
-use crate::change::{self, Stage};
 use crate::config::Step;
 use crate::error::{Error, Result};
 use crate::fingerprint::{self, globset};
 use crate::git;
 use crate::proof::{self, Active, Now};
 use crate::runner;
-use crate::store::Project;
 use crate::tasks::Task;
 use crate::vow::sha256_hex;
 
@@ -236,99 +234,4 @@ pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, i
 
 fn invocation() -> String {
     Error::random::<8>().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).unwrap_or_default()
-}
-/// What `rerun_archived` needs besides the tree and the report.
-pub(super) struct Archived<'a> {
-    pub(super) project: &'a Project,
-    pub(super) home: &'a Path,
-    pub(super) now: &'a Now<'a>,
-    pub(super) env: &'a [(String, String)],
-    pub(super) max_age: std::time::Duration,
-    /// Ids or id prefixes of archived tasks that this machine does not rerun.
-    pub(super) skip: &'a [String],
-}
-
-/// Runs the verify commands of archived tasks whose `files` the branch touches.
-/// A task whose key is in the cache is not run again. Failures block the gate
-/// and remain separate in its output.
-pub(super) fn rerun_archived(
-    ctx: &Archived,
-    lazy: &mut Lazy,
-    cache: &mut Option<super::cache::Cache>,
-    r: &mut Report,
-    echo: &mut dyn Write,
-) -> Result<()> {
-    let (project, top, config) = (ctx.project, ctx.now.top, ctx.now.config);
-    let Some(base) = base_ref(top, &config.base) else {
-        r.failures.push(format!("neither origin/{} nor {} exists; set base in config.toml", config.base, config.base));
-        return Ok(());
-    };
-    let mb = git::run(top, &["merge-base", "HEAD", &base])?;
-    let touched = changed_files(top, &mb)?;
-    let (all, _) = change::list(project)?;
-    for d in all.iter().filter(|d| d.stage == Stage::Done) {
-        let loaded = match change::load(&d.path, &[]) {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                r.failures.push(format!("archived change {} cannot be loaded, so its tasks were not rerun: {}", d.id, e.message));
-                continue;
-            }
-        };
-        // A glob that matches nothing at HEAD (a deleted file) leaves the task uncached and says nothing.
-        let mut own = std::collections::BTreeMap::new();
-        if cache.is_some() {
-            for t in &loaded.tasks {
-                let reqs = proof::covered(t, &loaded, ctx.now.living);
-                let key = super::cache::cache_key(project, ctx.home, top, config, t, &reqs, &ctx.now.env).ok().flatten();
-                own.insert(t.id.to_string(), key);
-            }
-        }
-        let keys = super::cache::dependent_keys(&loaded.tasks, &own);
-        for t in &loaded.tasks {
-            let Some(cmd) = t.verify.as_deref() else { continue };
-            let set = match globset(&t.files) {
-                Ok(set) => set,
-                Err(e) => {
-                    r.failures.push(format!("archived task {} of {} has a bad files glob, so it was not rerun: {}", t.id, d.id, e.message));
-                    continue;
-                }
-            };
-            if !touched.iter().any(|f| set.is_match(f)) {
-                continue;
-            }
-            let id = t.id.to_string();
-            if ctx.skip.iter().any(|p| !p.is_empty() && id.starts_with(p.as_str())) {
-                r.warnings.push(format!("{id} was not rerun: rerun_skip in config.toml names it, so CI is the check for it"));
-                continue;
-            }
-            let key = keys.get(&id).cloned().flatten();
-            let max_age = t.max_age.unwrap_or(ctx.max_age).as_millis() as u64;
-            if let (Some(cache), Some(key)) = (&*cache, &key)
-                && let Some(hit) = cache.lookup(&id, key, crate::ledger::now_ms(), max_age)
-            {
-                let _ = writeln!(echo, "cached {id}: passed {} ms for this key", hit.duration_ms);
-                r.cached.push(id);
-                continue;
-            }
-            let Some(run_dir) = lazy.dir(r, echo)? else { return Ok(()) };
-            let _ = writeln!(echo, "rerun archived {}: {cmd}", t.id);
-            let o = runner::run(cmd, &run_dir, ctx.env, t.timeout.unwrap_or(config.timeout()), echo)?;
-            r.timings.push((id.clone(), o.duration_ms));
-            if let (Some(cache), Some(key)) = (cache.as_mut(), &key) {
-                let lock = project.lock()?;
-                cache.record_pass(&lock, &id, key, &o, &proof::machine(config).to_string())?;
-            }
-            if !(o.passed() && o.tests_run != Some(0)) {
-                let why = if o.timed_out {
-                    "timed out".to_string()
-                } else if o.passed() {
-                    "ran 0 tests".to_string()
-                } else {
-                    format!("exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
-                };
-                r.archived.push(format!("{} failed on rerun ({why}): {cmd}", t.id));
-            }
-        }
-    }
-    Ok(())
 }
