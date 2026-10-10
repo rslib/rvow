@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs the gate rerun three times in a throwaway repository and home and checks that the
-# second run is answered from the cache and a changed file runs the task again. Needs `rvow` on PATH.
+# Checks in a throwaway repository and home that a proved and committed task is trusted and not run, and,
+# with `rerun_proven = true`, that the second gate rerun is answered from the cache and a changed file runs
+# the task again. Needs `rvow` on PATH.
 set -euo pipefail
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -42,6 +43,14 @@ ci_git commit -q -m out
 rvow prove "$task" > /dev/null
 rm -f "$tmp/count"
 runs() { if [ -f "$tmp/count" ]; then wc -l < "$tmp/count" | tr -d ' '; else echo 0; fi; }
+
+trusted=$(rvow gate --rerun --toon)
+echo "$trusted" | grep -q 'passed: true'
+echo "$trusted" | grep -Fq 'proven[1]'
+[ "$(runs)" = 0 ]
+
+# The rest tests the cache, so a proven task reruns too.
+echo 'rerun_proven = true' > "$RVOW_HOME/config.toml"
 
 first=$(rvow gate --rerun --toon)
 echo "$first" | grep -q 'passed: true'
