@@ -121,6 +121,33 @@ export const YOLO = 'mcp__rvow__rvow_yolo'
 export const ACCEPT = 'mcp__rvow__rvow_accept'
 export const CONFIRM = 'mcp__rvow__rvow_confirm'
 
+export const ARCHIVE = 'mcp__rvow__rvow_archive'
+export const ARCHIVE_DESCRIPTION =
+  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.'
+export const ARCHIVE_SCHEMA = {
+  type: 'object',
+  required: ['change'],
+  properties: { change: { type: 'string', pattern: '^CHG-[a-z0-9]+$' } },
+  additionalProperties: false,
+}
+
+/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+export function archiveBlockers(
+  change: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] } | undefined,
+  id: string,
+): string | null {
+  if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`
+  if (change.tasks.length === 0)
+    return `rvow: ${id} has no task, so there is nothing proved to archive`
+  const open = change.tasks.filter((t) => t.state !== 'proved').map((t) => `${t.id} is ${t.state}`)
+  if (open.length > 0)
+    return `rvow: ${id} is not ready to archive: ${open.join(', ')}; prove them first`
+  if (change.pending.length > 0) {
+    return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`
+  }
+  return null
+}
+
 export const ACCEPT_DESCRIPTION =
   'Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.'
 export const CONFIRM_DESCRIPTION =

@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { ACCEPT, CONFIRM, failedText } from './format'
+import { ACCEPT, ARCHIVE, archiveBlockers, CONFIRM, failedText } from './format'
 import { procResult } from './testkit'
 
 const LIST = 'AMD-a1 weaken T1 verify changed\ndigest abc123\n'
@@ -98,4 +98,56 @@ test('the failure text names the command and keeps its own words', () => {
   expect(failedText(['accept', 'CHG-a'], 'error: x\n\ncode: y\n')).toBe(
     'rvow accept CHG-a failed:\nerror: x\ncode: y',
   )
+})
+
+const view = (states: string[], pending = 0) =>
+  JSON.stringify({
+    changes: [
+      {
+        id: 'CHG-a1',
+        tasks: states.map((state, i) => ({ id: `TSK-${i}`, state })),
+        pending: Array.from({ length: pending }, () => ({ id: 'AMD-1' })),
+      },
+    ],
+  })
+const lines = (line: string, states: string[], pending = 0): [number, string] =>
+  line === 'hook claude view' ? [0, view(states, pending)] : [0, 'archived CHG-a1\n']
+
+test('rvow_archive asks only when every task is proved, and archives on a yes', async ($, on) => {
+  const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'proved']))
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(asked[0]).toContain('Every task of CHG-a1 is proved')
+  expect(ran.filter((l) => l.startsWith('archive'))).toEqual(['archive CHG-a1'])
+  expect(out).toContain('archived CHG-a1')
+})
+
+test('rvow_archive names what is missing and asks nothing when the change is not ready', async ($, on) => {
+  const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'stale']))
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(out).toContain('TSK-1 is stale')
+  expect(asked).toEqual([])
+  expect(ran.filter((l) => l.startsWith('archive'))).toEqual([])
+})
+
+test('rvow_archive waits for the user to decide a pending plan edit', async ($, on) => {
+  const { asked } = fake(on, 'Archive', (line) => lines(line, ['proved'], 1))
+  expect(JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))).toContain(
+    'pending plan edit',
+  )
+  expect(asked).toEqual([])
+})
+
+test('a refused or failed archive is reported to the agent', async ($, on) => {
+  const no = fake(on, 'Not yet', (line) => lines(line, ['proved']))
+  expect(JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))).toContain(
+    'stays active',
+  )
+  expect(no.ran.filter((l) => l.startsWith('archive'))).toEqual([])
+})
+
+test('archiveBlockers reads the state of one change', () => {
+  const ok = { id: 'CHG-a1', tasks: [{ id: 'TSK-1', state: 'proved' }], pending: [] }
+  expect(archiveBlockers(ok, 'CHG-a1')).toBeNull()
+  expect(archiveBlockers(undefined, 'CHG-a1')).toContain('not an active change')
+  expect(archiveBlockers({ ...ok, tasks: [] }, 'CHG-a1')).toContain('no task')
 })

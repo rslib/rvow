@@ -47,7 +47,7 @@ test("typed view and proof reject owner actions and open inputs", () => {
   assert.throws(() => viewArgs({ target: "status", id: "CHG-a" }));
   assert.deepEqual(
     [...registered().keys()],
-    ["rvow_view", "rvow_prove", "rvow_accept", "rvow_confirm", "rvow_yolo"],
+    ["rvow_view", "rvow_prove", "rvow_accept", "rvow_archive", "rvow_confirm", "rvow_yolo"],
   );
 });
 
@@ -120,6 +120,7 @@ test("installed folder loads every runtime module and named prompt exports", asy
   start({}, { cwd: home, hasUI: false, sessionManager: { getEntries: () => [] } });
   assert.deepEqual(tools.sort(), [
     "rvow_accept",
+    "rvow_archive",
     "rvow_ask",
     "rvow_confirm",
     "rvow_prove",

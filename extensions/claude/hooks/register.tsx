@@ -7,8 +7,12 @@ import {
   ACCEPT,
   ACCEPT_DESCRIPTION,
   ACCEPT_SCHEMA,
+  ARCHIVE,
+  ARCHIVE_DESCRIPTION,
+  ARCHIVE_SCHEMA,
   ASK,
   type Asked,
+  archiveBlockers,
   BADGE,
   BRANCH,
   blocker,
@@ -434,6 +438,11 @@ export const register: Register = (on) => {
       inputSchema: ACCEPT_SCHEMA,
     })
     await $.tool.register({
+      name: 'rvow_archive',
+      description: ARCHIVE_DESCRIPTION,
+      inputSchema: ARCHIVE_SCHEMA,
+    })
+    await $.tool.register({
       name: 'rvow_confirm',
       description: CONFIRM_DESCRIPTION,
       inputSchema: CONFIRM_SCHEMA,
@@ -482,6 +491,38 @@ export const register: Register = (on) => {
       return { result: `The user did not accept ${change}; it stays a plan.` }
     const done = await tellOut($, ['accept', change, '--yes'])
     return { result: done.ok ? done.out : failedText(['accept', change], done.out) }
+  })
+
+  on('tool.call', { tool: ARCHIVE }, async ($, e) => {
+    const change = (e as Record<string, unknown>).change
+    if (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change)) {
+      return { result: 'rvow: change must be a complete CHG id' }
+    }
+    const seen = await tellOut($, ['hook', 'claude', 'view'])
+    if (!seen.ok) return { result: failedText(['hook', 'claude', 'view'], seen.out) }
+    let view: {
+      changes?: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }[]
+    }
+    try {
+      view = JSON.parse(seen.out)
+    } catch {
+      return { result: 'rvow: cannot read the state of the branch' }
+    }
+    const blocked = archiveBlockers(
+      view.changes?.find((c) => c.id === change),
+      change,
+    )
+    if (blocked) return { result: blocked }
+    const answer = await $.ui
+      .ask(
+        `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
+        ['Archive', 'Not yet'],
+      )
+      .catch(() => 'Not yet')
+    if (answer !== 'Archive')
+      return { result: `The user did not archive ${change}; it stays active.` }
+    const done = await tellOut($, ['archive', change])
+    return { result: done.ok ? done.out : failedText(['archive', change], done.out) }
   })
 
   on('tool.call', { tool: CONFIRM }, async ($, e) => {

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { run } from "./rvow/tools.ts";
 import {
+  archiveBlockers,
   proofArgs,
   registerTypedTools,
   viewArgs,
@@ -299,4 +300,64 @@ test("rvow_confirm lists without a dialog and decides with one", async () => {
   const no = await yoloCall(value, { decision: "reject" }, { hasUI: true, answer: false });
   assert.deepEqual(seen, [["confirm"]]);
   assert.match(JSON.stringify(no.content), /still pending/);
+});
+
+const viewOf = (states: string[], pending = 0) =>
+  JSON.stringify({
+    branch: "main",
+    changes: [
+      {
+        id: "CHG-a1",
+        title: "T",
+        tasks: states.map((state, i) => ({ id: `TSK-${i}`, title: "t", state })),
+        pending: Array.from({ length: pending }, () => ({ id: "AMD-1", reason: "r" })),
+      },
+    ],
+    backlog: [],
+    archive: [],
+    questions: [],
+    next: null,
+    needs_you: { amendments: 0, questions: 0, blocked: 0, plans: 0 },
+  });
+
+test("rvow_archive asks only when every task is proved, and archives on a yes", async () => {
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    return args[0] === "hook"
+      ? { code: 0, out: viewOf(["proved", "proved"]) }
+      : { code: 0, out: "archived CHG-a1\n" };
+  });
+  const asked: string[] = [];
+  const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+  assert.match(asked[0] ?? "", /Every task of CHG-a1 is proved/);
+  assert.deepEqual(seen.at(-1), ["archive", "CHG-a1"]);
+  assert.equal((out.details as { kind: string }).kind, "decision");
+
+  seen.length = 0;
+  const no = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: false });
+  assert.deepEqual(seen, [["hook", "view"]]);
+  assert.match(JSON.stringify(no.content), /stays active/);
+  await assert.rejects(yoloCall(value, { change: "CHG-a1" }, { hasUI: false }), /no one is here/);
+});
+
+test("rvow_archive names what is missing and asks nothing", async () => {
+  for (const [states, pending, text] of [
+    [["proved", "stale"], 0, /TSK-1 is stale/],
+    [["proved"], 1, /pending plan edit/],
+  ] as const) {
+    const value = tool("rvow_archive", async () => ({
+      code: 0,
+      out: viewOf([...states], pending),
+    }));
+    const asked: string[] = [];
+    const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+    assert.match(JSON.stringify(out.content), text);
+    assert.deepEqual(asked, []);
+  }
+  assert.match(archiveBlockers(undefined, "CHG-x") ?? "", /not an active change/);
+  assert.equal(
+    archiveBlockers({ id: "CHG-a", tasks: [{ id: "T", state: "proved" }], pending: [] }, "CHG-a"),
+    null,
+  );
 });

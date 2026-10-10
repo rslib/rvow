@@ -5,10 +5,33 @@ import type { ToolOutput, View } from "./types.ts";
 export type ViewInput = { target?: "view" | "status" | "show"; id?: string };
 export type ProofInput = { task: string };
 export type AcceptInput = { change: string };
+export type ArchiveInput = { change: string };
 export type ConfirmInput = { decision?: "accept" | "reject" };
 
 export const ACCEPT_DESCRIPTION =
   "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
+export const ARCHIVE_DESCRIPTION =
+  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.";
+
+/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+export function archiveBlockers(
+  found: { id: string; tasks?: { id: string; state?: string }[]; pending?: unknown[] } | undefined,
+  id: string,
+): string | null {
+  const change = found && { id: found.id, tasks: found.tasks ?? [], pending: found.pending ?? [] };
+  if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`;
+  if (change.tasks.length === 0)
+    return `rvow: ${id} has no task, so there is nothing proved to archive`;
+  const open = change.tasks
+    .filter((t) => t.state !== "proved")
+    .map((t) => `${t.id} is ${t.state ?? "unknown"}`);
+  if (open.length > 0)
+    return `rvow: ${id} is not ready to archive: ${open.join(", ")}; prove them first`;
+  if (change.pending.length > 0)
+    return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`;
+  return null;
+}
+
 export const CONFIRM_DESCRIPTION =
   "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. The result tells you what happened, and when it failed it says why.";
 
@@ -144,7 +167,7 @@ function parseOutput(args: string[], code: number, stdout: string): ToolOutput {
         duration_ms: Number(ms),
         event,
       };
-  } else if (code === 0 && ["accept", "confirm", "review"].includes(args[0] ?? "")) {
+  } else if (code === 0 && ["accept", "confirm", "review", "archive"].includes(args[0] ?? "")) {
     return { kind: "decision", code, text: stdout };
   } else if (code === 0 && args[0] === "yolo") {
     const tier = scalar(stdout, "tier");
@@ -290,6 +313,39 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
       );
       if (!yes) return declined(`The user did not accept ${change}; it stays a plan.`);
       return queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, 10 * 60_000));
+    },
+  });
+  pi.registerTool({
+    name: "rvow_archive",
+    label: "rvow archive",
+    outputSchema,
+    description: ARCHIVE_DESCRIPTION,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["change"],
+      properties: { change: { type: "string", pattern: "^CHG-[a-z0-9]+$" } },
+    } as ToolDefinition["parameters"],
+    execute: async (_id, params, signal, _update, ctx) => {
+      const change = acceptArgs(params);
+      if (!ctx.hasUI) throw new Error("rvow: only the user can archive, and no one is here to ask");
+      const seen = await queue(() => result(["hook", "view"], ctx.cwd, signal, SLOW_MS));
+      if (seen.details.kind !== "view") return seen;
+      const blocked = archiveBlockers(
+        seen.details.data?.changes.find((c) => c.id === change),
+        change,
+      );
+      if (blocked)
+        return {
+          content: [{ type: "text" as const, text: blocked }],
+          details: { kind: "failure" as const, code: 1, error: blocked, stdout: "" },
+        };
+      const yes = await ctx.ui.confirm(
+        `rvow ${change}`,
+        `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
+      );
+      if (!yes) return declined(`The user did not archive ${change}; it stays active.`);
+      return queue(() => result(["archive", change], ctx.cwd, signal, SLOW_MS));
     },
   });
   pi.registerTool({
