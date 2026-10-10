@@ -71,14 +71,17 @@ It fails on unproved tasks, failed proofs, pending amendments, blocking drift an
 
 `rvow gate --rerun` goes further.
 It runs every verify command again in a clean worktree of HEAD, so a proof that depended on an uncommitted file or a local state fails.
-The rerun also covers tasks of archived changes on the branch, so a later change cannot break what an earlier change proved.
+The rerun skips a task whose proof is current and whose files are all committed: it was proved on this very content, so the state "proved" is what the push trusts.
+It runs the tasks that are not proved, or whose files changed since the proof.
+A task of an archived change is never rerun, because archiving needs every task proved and is a decision of the user.
+Set `rerun_proven = true` to rerun proven tasks as well.
 `rvow gate --out` writes the rerun results to a file, and `rvow ingest` adds them to the ledger of a home store.
 
 A rerun skips a task when an earlier clean pass has the same key.
 The key holds the content of the task's files at HEAD, the task and its requirements, the environment, the tools you list and the keys of the tasks it depends on.
 A rebase or an amend does not change the key, but a changed byte in scope does.
 The gate writes a pass only when the task ran tests, and signs each entry with a key that agents cannot read.
-`rvow gate --rerun --no-cache` runs every task, and so does `--out`.
+`rvow gate --rerun --no-cache` runs every task that is active on the branch, and so does `--out`.
 A scoped `setup` or `checks` entry runs only when a task that runs or a changed file matches it, so a Python change does not rebuild the C++ code.
 When the cache answers every task, the gate makes no worktree and runs no `setup`.
 [docs/settings.md](settings.md) lists the keys that tune the cache.
@@ -135,6 +138,7 @@ Both the Claude mod and the pi extension give the agent these tools:
 
 - `rvow_accept` asks you to accept a ready plan. You read the review and the checklist in a dialog, and nothing is accepted unless you say yes.
 - `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
+- `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved and no plan edit is pending, and it names what is missing otherwise. An archived change is trusted, and a push never reruns its tasks.
 - `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
 - `rvow_ask`, `rvow_view` and `rvow_prove` read the open questions, the dashboard and prove a task.
 
