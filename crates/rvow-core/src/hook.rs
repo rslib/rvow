@@ -29,7 +29,7 @@ mod streak;
 pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
-pub use shell::{bash_denial, bash_rule, script_denial, script_rule};
+pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
 use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args};
 
 use rule::denial;

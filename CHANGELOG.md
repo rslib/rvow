@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Trust a proof only when its seal checks and its verify programs match, and rerun a task whose scope holds an ignored file.
+  A proof from before seals existed reruns once.
+- Mark a task stale with `dependency-changed` when a file in a `depends_on:` task's scope changed since the dependent task's proof.
+- Seal the yolo switch.
+  A yolo file with no valid seal turns every tier off.
 - Stop rerunning a task on a push when its proof is current and its files are committed, and never rerun the tasks of an archived change. Set `rerun_proven = true` to rerun proven tasks.
 - Allow commands that only read the ledger, the ids and the stats, lease, yolo and cache files, and text that only names the hidden checks, such as an `echo` or a commit message.
 - Audit an edit outside every task scope and an edit of a protected test instead of denying it. The hook counts it, and the gate still blocks the branch.
@@ -21,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add a seal to each proof so a hand-written proof no longer counts.
+  The seal is an HMAC under the rerun cache key over the event kind, time, parents and data.
 - Print each task's `verify:`, `files:`, `baseline:` and `mutants:` in `rvow review`, and list a weak-check warning above the checklist.
   `rvow check` warns with the code `weak-verify` about a stub command and about `baseline: pass` on a command with no counted test runner.
 - Add a warning from `rvow check` for a task whose `files:` cover more than 40 tracked files.

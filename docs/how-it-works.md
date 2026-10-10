@@ -102,6 +102,33 @@ A scoped `setup` or `checks` entry runs only when a task that runs or a changed 
 When the cache answers every task, the gate makes no worktree and runs no `setup`.
 [docs/settings.md](settings.md) lists the keys that tune the cache.
 
+## Seals
+
+A ledger event is a line of text, so an agent that can write the file can write a proof.
+rvow seals each proof with an HMAC under the 32-byte key in the rvow home.
+The seal covers the event kind, its time, its parents and its data.
+The key is closed to agents, so a hand-written proof or a copied one fails the check.
+
+The gate trusts a proof only when its seal checks and the verify programs match.
+A proof also records the resolved path and the SHA-256 of each program that the verify command starts, such as `cargo` or `pytest`.
+A shell builtin is recorded as absent, so `test` and `echo` stay trusted.
+When a program resolves to another path or another content, the gate reruns the task and names it.
+
+A missing seal or a bad seal never fails the gate by itself.
+The task reruns and the gate warns with its id.
+A proof from before seals existed reruns once, and the cache answers it after that.
+
+The yolo switch is sealed in the same way.
+A yolo file without a valid seal turns every tier off.
+
+### Limits of the seal
+
+- The seal is as strong as the hook that hides the key.
+  The hook reads text, so code that builds the key path at run time can still read the key.
+- A deleted tail of the ledger is not detected.
+  The last sealed pass that stays is a real pass on the same inputs, so the risk is a hidden flaky failure and not a fake pass.
+- A fake tool in a folder that is already on `PATH` before the real one is not caught, because the rerun reads the same `PATH` as the proof.
+
 ## Subagents and leases
 
 A subagent meets the same rules as the main agent, but it does not know which task is its own.

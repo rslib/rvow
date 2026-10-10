@@ -202,3 +202,35 @@ fn tiers_show_in_the_status_line_and_the_brief() {
     let text = start["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
     assert!(text.contains("yolo auto is on") && text.contains("gate still checks"), "{text}");
 }
+
+// REQ-9916x0: the yolo switch is sealed; an unsealed one is off.
+
+#[test]
+fn yolo_seal_a_hand_written_file_is_off() {
+    let fx = Fx::new("seal-hand", true);
+    // A first switch creates the key; then the file is written by hand.
+    fx.rvow(&["yolo", "audit", "--for", "1h"]);
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let until = since.as_millis() as u64 + 3_600_000;
+    std::fs::write(fx.project().root.join(YOLO_FILE), format!("{{\"tier\":\"auto\",\"until\":{until}}}")).unwrap();
+    assert!(fx.rvow(&["yolo"]).contains("tier: off"), "a hand-written yolo file was on");
+    assert_eq!(fx.bash("rvow confirm --all abc123").as_deref(), Some("deny"), "the hook allowed a hand-written switch");
+}
+
+#[test]
+fn yolo_seal_the_user_switch_works() {
+    let fx = Fx::new("seal-user", true);
+    assert!(fx.rvow(&["yolo", "auto", "--for", "1h"]).contains("tier: auto"));
+    assert!(fx.rvow(&["yolo"]).contains("tier: auto"));
+}
+
+#[test]
+fn yolo_seal_an_edited_end_time_is_off() {
+    let fx = Fx::new("seal-edit", true);
+    fx.rvow(&["yolo", "auto", "--for", "1h"]);
+    let file = fx.project().root.join(YOLO_FILE);
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["until"] = (v["until"].as_u64().unwrap() + 3_600_000).into();
+    std::fs::write(&file, v.to_string()).unwrap();
+    assert!(fx.rvow(&["yolo"]).contains("tier: off"), "an edited end time was on");
+}

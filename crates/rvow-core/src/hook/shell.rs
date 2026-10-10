@@ -48,6 +48,13 @@ const WRAPPERS: &[&str] = &[
     "{",
 ];
 const DECLARATIONS: &[&str] = &["export", "declare", "local", "readonly", "typeset"];
+/// Shell builtins, whose `PATH` entry a shell does not use.
+const BUILTINS: &[&str] = &[
+    ":", ".", "[", "alias", "bg", "break", "builtin", "cd", "command", "continue", "declare", "dirs", "disown", "echo", "enable", "eval",
+    "exec", "exit", "export", "false", "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let", "local", "logout", "popd",
+    "printf", "pushd", "pwd", "read", "readonly", "return", "set", "shift", "source", "suspend", "test", "times", "trap", "true", "type",
+    "typeset", "ulimit", "umask", "unalias", "unset", "wait",
+];
 /// `git commit` options whose value is the next word.
 const COMMIT_VALUE_OPTIONS: &[&str] =
     &["--message", "--file", "--author", "--date", "--reuse-message", "--reedit-message", "--fixup", "--squash", "--template", "--cleanup"];
@@ -239,6 +246,25 @@ fn tokenize(text: &str) -> Tokens {
     }
     lx.end_command();
     lx.tokens
+}
+
+/// The program word that starts each simple command of `text`, with any
+/// assignment or declaration before it skipped. Only the commands the text
+/// starts directly are read; the code inside `sh -c` is not.
+pub fn programs(text: &str) -> Vec<String> {
+    tokenize(&without_heredocs(text))
+        .commands
+        .iter()
+        .filter_map(|seg| {
+            let start = seg.iter().position(|w| !is_assignment(w) && !DECLARATIONS.contains(&base_name(w)))?;
+            seg.get(start).cloned()
+        })
+        .collect()
+}
+
+/// Whether a shell runs `word` as a builtin, so its `PATH` entry does not matter.
+pub fn is_builtin(word: &str) -> bool {
+    BUILTINS.contains(&base_name(word))
 }
 
 fn expand_vars(word: &str, vars: &HashMap<String, String>) -> String {

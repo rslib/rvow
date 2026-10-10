@@ -234,6 +234,9 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     if str_of(last, "env_key") != now.env.key() {
         reasons.push("env-changed");
     }
+    if dependency_changed(change, task, last, now) {
+        reasons.push("dependency-changed");
+    }
     Ok(if !reasons.is_empty() {
         State::Stale(reasons)
     } else if flaky {
@@ -386,6 +389,47 @@ pub(crate) fn run_key(
     sha256_hex(value.to_string().as_bytes())
 }
 
+/// The programs a verify command starts directly, each with its resolved path
+/// and SHA-256. A shell builtin or a name that resolves to nothing is absent,
+/// so it must still be absent at the gate.
+pub fn verify_programs(cmd: &str) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    for word in crate::hook::programs(cmd) {
+        if crate::hook::is_builtin(&word) {
+            continue;
+        }
+        if let Some((path, hash)) = crate::gate::cache::tool_id(&word) {
+            out.insert(word, json!({ "path": path, "sha256": hash }));
+        }
+    }
+    out
+}
+
+/// The input hash of each `depends_on:` task at prove time, so a later change
+/// in a dependency's files stales the dependent. A task that cannot be
+/// resolved records `missing`, which only matches another missing one.
+pub fn dependency_inputs(tasks: &[Task], task: &Task, now: &Now) -> BTreeMap<String, String> {
+    task.depends_on
+        .iter()
+        .map(|d| {
+            let hash = tasks.iter().find(|t| t.id == *d).and_then(|t| now.inputs(t).ok()).map_or_else(|| "missing".to_string(), |i| i.hash);
+            (d.to_string(), hash)
+        })
+        .collect()
+}
+
+/// Whether a task named in `depends_on:` differs from the input hash its
+/// dependent's proof recorded. A task with no record counts as changed.
+fn dependency_changed(change: &Active, task: &Task, last: &Event, now: &Now) -> bool {
+    if task.depends_on.is_empty() {
+        return false;
+    }
+    let recorded: BTreeMap<String, String> =
+        last.data.get("depends").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let current = dependency_inputs(&change.loaded.tasks, task, now);
+    task.depends_on.iter().any(|d| recorded.get(&d.to_string()) != current.get(&d.to_string()))
+}
+
 /// Runs a task's stored verify command and records the proof.
 pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut dyn Write) -> Result<Proved> {
     let top = git::toplevel(cwd)?;
@@ -444,9 +488,11 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("tail".into(), json!(outcome.tail));
     data.insert("inputs".into(), inputs.hash.clone().into());
     data.insert("input_files".into(), inputs.files.into());
+    data.insert("depends".into(), json!(dependency_inputs(&change.loaded.tasks, task, &now)));
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
+    data.insert("programs".into(), json!(verify_programs(cmd)));
     if proved {
         data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
     }
@@ -465,7 +511,8 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let ledger_path = change.dir.path.join(LEDGER);
     let event = {
         let lock = project.lock()?;
-        ledger::append(&ledger_path, &lock, Kind::Prove, data)?
+        let key = crate::seal::key(home)?;
+        ledger::append_sealed(&ledger_path, &lock, Kind::Prove, data, Some(&key))?
     };
 
     let (events, _) = ledger::read(&ledger_path)?;

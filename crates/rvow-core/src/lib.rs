@@ -30,6 +30,7 @@ pub mod record;
 pub mod registry;
 pub mod review;
 pub mod runner;
+pub mod seal;
 pub mod show;
 pub mod spec;
 pub mod stats;

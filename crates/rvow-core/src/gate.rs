@@ -1,6 +1,7 @@
 //! `rvow gate`: the deterministic check behind the Stop hook, pre-push and
 //! archive.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -143,6 +144,8 @@ fn gate_for(
         // A task whose proof is current and whose files are all committed was proved on this very content,
         // so a push does not run it again. `--out` still reruns every task, since it records the runs.
         let uncommitted = if opts.out.is_none() && use_cache && !policy.rerun_proven { changed_files(&top, "HEAD").ok() } else { None };
+        // A proof is trusted only when its seal checks under the key in the rvow home.
+        let seal_key = if uncommitted.is_some() { crate::seal::read_key(home) } else { None };
         let mut plan = Vec::new();
         for c in &queue {
             let mut own = std::collections::BTreeMap::new();
@@ -170,8 +173,21 @@ fn gate_for(
                 };
                 let proven = match &uncommitted {
                     Some(dirty) => {
-                        proof::state(c, t, &now)? == proof::State::Proved
+                        let ignored = ignored_in_scope(&top, t, &links)?;
+                        let trusted = proof::state(c, t, &now)? == proof::State::Proved
                             && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
+                            && ignored.is_none();
+                        let sealed = seal_key.as_deref().is_some_and(|key| sealed_proof(c, &t.id.to_string(), key));
+                        let mismatch = if trusted && sealed { program_mismatch(c, t) } else { None };
+                        if trusted && !sealed {
+                            r.warnings.push(format!("{}: the newest proof has no valid seal, so it is rerun", t.id));
+                        } else if let Some(name) = &mismatch {
+                            r.warnings.push(format!("{}: the program {name} differs from the proof, so it is rerun", t.id));
+                        }
+                        if let Some(path) = &ignored {
+                            r.warnings.push(format!("{}: the ignored file {path} is in scope, so it is rerun", t.id));
+                        }
+                        trusted && sealed && mismatch.is_none()
                     }
                     None => false,
                 };
@@ -271,6 +287,62 @@ fn gate_for(
 /// selected change, so other unfinished changes can remain on the branch.
 pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Result<Report> {
     gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, &mut std::io::sink())
+}
+
+/// The first git-ignored file that matches `t`'s `files:` outside every
+/// `rerun_links` folder. The rerun worktree sees a linked folder, so a file
+/// there does not stop the trust.
+fn ignored_in_scope(top: &Path, t: &crate::tasks::Task, links: &[String]) -> Result<Option<String>> {
+    let set = fingerprint::globset(&t.files)?;
+    let listing = git::run(top, &["ls-files", "--others", "--ignored", "--exclude-standard"])?;
+    Ok(listing
+        .lines()
+        .map(String::from)
+        .find(|path| set.is_match(path) && !links.iter().any(|l| path == l || path.starts_with(&format!("{l}/")))))
+}
+
+/// The index of the newest Prove event of `id`, if any.
+fn newest_prove_at(c: &Active, id: &str) -> Option<usize> {
+    c.events
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, e)| e.kind == crate::ledger::Kind::Prove && e.data.get("task").and_then(|v| v.as_str()) == Some(id))
+        .map(|(i, _)| i)
+}
+
+/// The newest Prove event of `id`, if any.
+fn newest_prove<'a>(c: &'a Active, id: &str) -> Option<&'a crate::ledger::Event> {
+    newest_prove_at(c, id).map(|i| &c.events[i])
+}
+
+/// Whether the newest Prove event of `id` carries a seal that checks under
+/// `key` and was appended where it belongs. A copy of an old sealed line keeps
+/// its seal, so its parents must equal the heads of the events before it, as
+/// `append` computed them.
+fn sealed_proof(c: &Active, id: &str, key: &[u8]) -> bool {
+    let Some(index) = newest_prove_at(c, id) else { return false };
+    let event = &c.events[index];
+    event.parents == crate::ledger::heads(&c.events[..index]) && crate::seal::checks(key, event)
+}
+
+/// The first program of `t`'s verify command whose resolved path or content
+/// differs from the newest proof. A missing `programs` record counts as a
+/// mismatch, so a proof from before programs existed reruns.
+fn program_mismatch(c: &Active, t: &crate::tasks::Task) -> Option<String> {
+    let recorded: BTreeMap<String, serde_json::Value> = newest_prove(c, &t.id.to_string())
+        .and_then(|e| e.data.get("programs"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let current = proof::verify_programs(t.verify.as_deref().unwrap_or(""));
+    if recorded == current {
+        return None;
+    }
+    current
+        .iter()
+        .find(|(name, value)| recorded.get(*name) != Some(*value))
+        .map(|(name, _)| name.clone())
+        .or_else(|| recorded.keys().find(|name| !current.contains_key(*name)).cloned())
 }
 
 #[cfg(test)]

@@ -222,9 +222,11 @@ pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, i
     data.insert("tail".into(), serde_json::json!(o.tail));
     data.insert("inputs".into(), inputs.hash.clone().into());
     data.insert("input_files".into(), inputs.files.into());
+    data.insert("depends".into(), serde_json::json!(proof::dependency_inputs(&c.loaded.tasks, t, now)));
     data.insert("env".into(), serde_json::json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
+    data.insert("programs".into(), serde_json::json!(proof::verify_programs(t.verify.as_deref().unwrap_or(""))));
     data.insert(
         "run".into(),
         serde_json::json!({ "invocation": invocation(), "rvow": env!("CARGO_PKG_VERSION"), "machine": proof::machine(now.config), "agent": proof::agent(now.config), "head": git::run(now.top, &["rev-parse", "HEAD"]).unwrap_or_default(), "branch": git::branch(now.top).ok().flatten(), "ci": fingerprint::ci() }),
