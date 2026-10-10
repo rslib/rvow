@@ -13,6 +13,7 @@ pub mod prove;
 pub mod read;
 pub mod setup;
 pub mod stats;
+pub mod yolo;
 
 /// The current branch for empty-state text, or `detached HEAD`.
 pub fn branch_label() -> String {

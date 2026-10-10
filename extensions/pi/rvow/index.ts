@@ -42,10 +42,10 @@ import {
   tabCounts,
   tabSpans,
 } from "./formats.ts";
-import { decisionPrompt, refinePrompt } from "./prompts.ts";
+import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
 import { BIN, FAST_MS, run, SLOW_MS } from "./tools.ts";
-import { registerTypedTools } from "./typed-tools.ts";
+import { registerTypedTools, yoloArgs } from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
 const MAX_CONTINUES = 8;
@@ -927,6 +927,26 @@ export default function (pi: ExtensionAPI) {
     return { handled: true };
   }
 
+  // A subagent runs in a session of its own that loads this extension, so it can bind itself: when its
+  // first prompt starts with the `lease:` line of `rvow delegate`, the hook then judges its edits and
+  // its `rvow prove` by the leased task, as it does for a bound Claude subagent.
+  let leaseAgent: string | undefined;
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (leaseAgent || !/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
+    const id = ctx.sessionManager?.getSessionId?.();
+    if (!id) return;
+    const out = await hook(
+      "lease-bind",
+      ctx.cwd,
+      { agent_id: id, prompt: event.prompt },
+      FAST_MS,
+      false,
+      undefined,
+      enforcementOff(ctx),
+    );
+    if (out?.bound === true) leaseAgent = id;
+  });
+
   pi.on("tool_call", async (event, ctx) => {
     const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
     if (typeof input.path === "string" && input.file_path === undefined)
@@ -936,15 +956,24 @@ export default function (pi: ExtensionAPI) {
       await hook(
         "pre-tool-use",
         ctx.cwd,
-        { tool_name: name, tool_input: input },
+        {
+          tool_name: name,
+          tool_input: input,
+          session_id: ctx.sessionManager?.getSessionId?.(),
+          agent_id: leaseAgent,
+        },
         FAST_MS,
         false,
         undefined,
         enforcementOff(ctx),
       )
     )?.hookSpecificOutput;
-    if (out?.permissionDecision === "deny") {
-      return { block: true, reason: String(out.permissionDecisionReason ?? "rvow: denied") };
+    const reason = String(out?.permissionDecisionReason ?? "rvow: denied");
+    if (out?.permissionDecision === "deny") return { block: true, reason };
+    // After repeated denials rvow asks the user once; without a person to ask, the call stays denied.
+    if (out?.permissionDecision === "ask") {
+      const allowed = ctx.hasUI && (await ctx.ui.confirm("rvow", reason).catch(() => false));
+      if (!allowed) return { block: true, reason };
     }
   });
 
@@ -997,7 +1026,7 @@ export default function (pi: ExtensionAPI) {
       stopRefresh = refreshLoop(() => (S.dock ? refresh(ctx) : Promise.resolve()));
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     epoch++;
     background.abort();
     stopRefresh();
@@ -1011,6 +1040,11 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setWidget("rvow-dock", undefined);
       ctx.ui.setWidget("rvow", undefined);
       ctx.ui.setStatus("rvow", undefined);
+    }
+    if (leaseAgent) {
+      const id = leaseAgent;
+      leaseAgent = undefined;
+      await hook("lease-end", ctx.cwd, { agent_id: id }, FAST_MS);
     }
   });
 
@@ -1045,7 +1079,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_before_settle", async (event, ctx) => {
     // The CLI gives each reason once per session, so it needs the session id.
-    const who = { session_id: ctx.sessionManager?.getSessionId?.() };
+    const who = { session_id: ctx.sessionManager?.getSessionId?.(), agent_id: leaseAgent };
     const reason = (
       await hook("stop", ctx.cwd, who, BOUND_MS, false, undefined, enforcementOff(ctx))
     )?.reason;
@@ -1121,6 +1155,10 @@ export default function (pi: ExtensionAPI) {
       const verb = accept ? "accept" : "reject";
       const r = await run(["confirm", id, `--${verb}`], ctx.cwd, "", SLOW_MS);
       if (r?.code === 0) decided[verb].push(id);
+      else if (r)
+        pi.sendUserMessage(failedPrompt(["confirm", id, `--${verb}`], r.out), {
+          deliverAs: "followUp",
+        });
       ctx.ui.notify(
         r?.out.trim() || `${id}: ${accept ? "accepted" : "rejected"}`,
         r?.code === 0 ? "info" : "error",
@@ -1150,7 +1188,7 @@ export default function (pi: ExtensionAPI) {
   function userCommand(
     name: string,
     description: string,
-    body: (ctx: ExtensionContext, arg: string) => Promise<void>,
+    body: (ctx: ExtensionContext, arg: string, all: string) => Promise<void>,
   ) {
     pi.registerCommand(name, {
       description,
@@ -1159,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`Run \`rvow ${name.slice(5)}\` in a terminal.`, "warning");
           return;
         }
-        await body(ctx, args.trim().split(/\s+/)[0] ?? "");
+        await body(ctx, args.trim().split(/\s+/)[0] ?? "", args.trim());
       },
     });
   }
@@ -1193,7 +1231,12 @@ export default function (pi: ExtensionAPI) {
         r.out.trim() || `rvow ${argv.join(" ")}: done`,
         r.code === 0 ? "info" : "error",
       );
-      const prompt = r.code === 0 ? decisionPrompt(argv, r.out) : null;
+      const prompt =
+        r.code === 0
+          ? decisionPrompt(argv, r.out)
+          : argv[0] === "yolo"
+            ? null
+            : failedPrompt(argv, r.out);
       if (prompt) pi.sendUserMessage(prompt, { deliverAs: "followUp" });
     }
     await refresh(ctx);
@@ -1205,6 +1248,7 @@ export default function (pi: ExtensionAPI) {
     if (!r) return;
     if (r.code !== 0) {
       ctx.ui.notify(r.out.trim(), "error");
+      pi.sendUserMessage(failedPrompt(["review", id], r.out), { deliverAs: "followUp" });
       return r;
     }
     if (!(await ctx.ui.confirm(`rvow ${id}`, `${r.out.trim()}\n\nAccept ${id}?`))) return;
@@ -1227,6 +1271,23 @@ export default function (pi: ExtensionAPI) {
     const id = await pick(ctx, arg);
     if (id) await acceptPlan(ctx, id);
   });
+
+  userCommand(
+    "rvow-yolo",
+    "Relax the hooks for a while: audit|auto|bypass [30m|2h], off, or nothing to see it",
+    async (ctx, _first, all) => {
+      const [tier, length] = all.split(/\s+/).filter(Boolean);
+      let argv: string[];
+      try {
+        argv = yoloArgs({ ...(tier ? { tier } : {}), ...(length ? { for: length } : {}) }).filter(
+          (word) => word !== "--toon",
+        );
+      } catch (error) {
+        return ctx.ui.notify(`${(error as Error).message}; try /rvow-yolo auto 30m`, "info");
+      }
+      await decide(ctx, argv);
+    },
+  );
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");

@@ -188,41 +188,6 @@ fn ingest_of_an_empty_file_is_an_error() {
 }
 
 #[test]
-fn archived_corrupt_change_is_reported_and_the_rest_still_run() {
-    let f = Fixture::new("archived-corrupt", "");
-    let (a, a_task, _) = f.accept("First output", "out-a.txt", None, "");
-    f.prove_and_commit(&a_task, "out-a.txt");
-    let a_dir = f.archive(&a).path;
-    let (b, b_task, _) = f.accept("Second output", "out-b.txt", None, "");
-    f.prove_and_commit(&b_task, "out-b.txt");
-    f.archive(&b);
-    std::fs::remove_file(a_dir.join("proposal.md")).unwrap();
-    f.git(&["checkout", "-q", "-b", "regression"]);
-    std::fs::write(f.repo.join("out-b.txt"), "bad\n").unwrap();
-    f.git(&["add", "out-b.txt"]);
-    f.git(&["commit", "-q", "-m", "regression"]);
-    let report = f.rerun().unwrap();
-    assert!(!report.passed(), "{report:?}");
-    assert!(report.failures.iter().any(|x| x.contains(&a) && x.contains("cannot be loaded")), "{report:?}");
-    assert!(report.archived.iter().any(|x| x.contains(&b_task)), "the other change was not rerun: {report:?}");
-}
-
-#[test]
-fn archived_bad_files_glob_is_reported() {
-    let f = Fixture::new("archived-glob", "");
-    let (a, a_task, _) = f.accept("First output", "out-a.txt", None, "");
-    f.prove_and_commit(&a_task, "out-a.txt");
-    let a_dir = f.archive(&a).path;
-    let tasks = a_dir.join("tasks.md");
-    let text = std::fs::read_to_string(&tasks).unwrap().replace("files: out-a.txt", "files: [out-a.txt");
-    std::fs::write(&tasks, text).unwrap();
-    f.git(&["checkout", "-q", "-b", "regression"]);
-    let report = f.rerun().unwrap();
-    assert!(!report.passed(), "{report:?}");
-    assert!(report.failures.iter().any(|x| x.contains(&a_task) && x.contains("bad files glob")), "{report:?}");
-}
-
-#[test]
 fn proof_event_carries_machine_fields_that_stay_outside_the_key() {
     let f = Fixture::new("machine-fields", "");
     let (c, task, _) = f.accept("Write output", "out.txt", None, "");

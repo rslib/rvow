@@ -30,6 +30,10 @@ impl Hook {
 pub enum Outcome {
     /// A tool call was denied.
     Deny,
+    /// A rule in audit mode fired and the call went through.
+    Audit,
+    /// The backstop turned a denial into a question for the user.
+    Ask,
     /// A stop was held back with a reason.
     Block,
     /// A stop went through.
@@ -40,6 +44,8 @@ impl Outcome {
     fn name(self) -> &'static str {
         match self {
             Outcome::Deny => "deny",
+            Outcome::Audit => "audit",
+            Outcome::Ask => "ask",
             Outcome::Block => "block",
             Outcome::Pass => "pass",
         }
@@ -78,6 +84,10 @@ pub struct Counts {
     pub sessions: u64,
     /// Denials of tool calls, counted by rule name.
     pub denials: BTreeMap<String, u64>,
+    /// Calls that an audit-mode rule let through, counted by rule name.
+    pub audits: BTreeMap<String, u64>,
+    /// Denials that the backstop turned into a question.
+    pub asks: u64,
     pub stop_blocks: u64,
     pub stop_passes: u64,
 }
@@ -106,6 +116,8 @@ pub fn counts(project: &Project, days: u64, now: u64) -> Counts {
         sessions.extend(line.session);
         match (line.outcome.as_str(), line.rule) {
             ("deny", Some(rule)) => *out.denials.entry(rule).or_default() += 1,
+            ("audit", Some(rule)) => *out.audits.entry(rule).or_default() += 1,
+            ("ask", _) => out.asks += 1,
             ("block", _) => out.stop_blocks += 1,
             ("pass", _) => out.stop_passes += 1,
             _ => {}

@@ -31,6 +31,8 @@ pub enum Rule {
     Ledger,
     LedgerTail,
     ClarifyForm,
+    WideScope,
+    WeakVerify,
 }
 
 impl Rule {
@@ -45,7 +47,9 @@ impl Rule {
             | Rule::DesignInSpec
             | Rule::Size
             | Rule::LedgerTail
-            | Rule::ClarifyForm => Severity::Warning,
+            | Rule::ClarifyForm
+            | Rule::WideScope
+            | Rule::WeakVerify => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -74,6 +78,8 @@ impl Rule {
             Rule::Ledger => "ledger",
             Rule::LedgerTail => "ledger-tail",
             Rule::ClarifyForm => "clarify-form",
+            Rule::WideScope => "wide-scope",
+            Rule::WeakVerify => "weak-verify",
         }
     }
 
@@ -101,6 +107,10 @@ impl Rule {
             Rule::Ledger => "restore the ledger from git or a backup",
             Rule::LedgerTail => "none needed, the next write removes the partial line",
             Rule::ClarifyForm => "write [NEEDS CLARIFICATION: question | recommended: answer]",
+            Rule::WideScope => "list the files the task changes in files:, so a change elsewhere does not make its proof stale",
+            Rule::WeakVerify => {
+                "make the verify command run the check that fails today, and use a counted test runner when it sets baseline: pass"
+            }
         }
     }
 }

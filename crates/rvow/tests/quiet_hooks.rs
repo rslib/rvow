@@ -206,23 +206,37 @@ fn stop_plan_changed_message_lists_three_items_and_a_count() {
     let reason = fx.stop(json!({})).unwrap();
     assert!(reason.contains("the plan changed"), "{reason}");
     assert!(reason.contains("; and ") && reason.contains(" more)"), "{reason}");
-    assert!(reason.contains("title changed; and 2 more)"), "{reason}");
+    assert!(reason.contains("covers changed; and 1 more)"), "{reason}");
 
     std::fs::write(&proposal, proposal_text).unwrap();
     std::fs::write(&tasks, original.replace("Write ok", "Write it")).unwrap();
-    let one = fx.stop(json!({})).unwrap();
-    assert!(one.contains("title changed") && !one.contains("more"), "{one}");
+    // A title change is free drift, so it is not a reason to hold the stop.
+    let one = fx.stop(json!({})).unwrap_or_default();
+    assert!(!one.contains("the plan changed"), "{one}");
 }
 
 #[test]
 fn shell_reads_of_the_hooks_folder_are_allowed_and_writes_are_not() {
     let fx = Fx::new("hooks-dir");
-    for command in ["ls .git/hooks", "cat .git/hooks/pre-push", "ls .git/hooks 2>&1 | head -5", "grep -n rvow .git/hooks/pre-push"] {
+    for command in [
+        "ls .git/hooks",
+        "cat .git/hooks/pre-push",
+        "ls .git/hooks 2>&1 | head -5",
+        "grep -n rvow .git/hooks/pre-push",
+        // Running the hook while a writer targets another file.
+        ".git/hooks/pre-push origin url 2>&1 | tee out.log",
+        ".git/hooks/pre-push origin url > out.log 2>&1",
+    ] {
         assert_eq!(fx.bash(command), None, "{command}");
     }
-    for command in
-        ["echo x >> .git/hooks/pre-push", "rm .git/hooks/pre-push", "sed -i s/a/b/ .git/hooks/pre-push", "chmod -x .git/hooks/pre-push"]
-    {
+    for command in [
+        "echo x >> .git/hooks/pre-push",
+        "rm .git/hooks/pre-push",
+        "sed -i s/a/b/ .git/hooks/pre-push",
+        "chmod -x .git/hooks/pre-push",
+        "echo x | tee .git/hooks/pre-push",
+        "cp /tmp/copy .git/hooks/pre-push",
+    ] {
         let reason = fx.bash(command).unwrap_or_else(|| panic!("allowed: {command}"));
         assert!(reason.contains("rvow install"), "{command}: {reason}");
     }
@@ -272,5 +286,36 @@ fn shell_text_that_names_a_protected_action_is_allowed() {
         "bash <<EOF\ncat > .git/hooks/pre-push\nEOF",
     ] {
         assert!(fx.bash(command).is_some(), "allowed: {command}");
+    }
+}
+
+#[test]
+fn shell_reads_of_the_state_files_and_text_that_names_the_secret_folder_are_allowed() {
+    let fx = Fx::new("state-reads");
+    let root = fx.change.parent().unwrap().parent().unwrap().to_path_buf();
+    let state = ["ledger.jsonl", "ids.jsonl", "hook-stats.jsonl", "leases.jsonl", "rerun-cache.jsonl", "yolo.json"];
+    for name in state {
+        let file = root.join(name);
+        for command in
+            [format!("cat {}", file.display()), format!("grep x {} | head -3", file.display()), format!("ls -l {} 2>&1", file.display())]
+        {
+            assert_eq!(fx.bash(&command), None, "{command}");
+        }
+        for command in
+            [format!("echo x >> {}", file.display()), format!("rm {}", file.display()), format!("cat a | tee {}", file.display())]
+        {
+            assert!(fx.bash(&command).is_some(), "allowed: {command}");
+        }
+    }
+    let secret = fx.root.join("rh/hidden-checks/x.sh");
+    for command in
+        [format!("git commit -m \"never read {}\"", secret.display()), format!("echo \"the checks live in {}\"", secret.display())]
+    {
+        assert_eq!(fx.bash(&command), None, "{command}");
+    }
+    for command in
+        [format!("cat {}", secret.display()), format!("echo $(cat {})", secret.display()), format!("echo x > {}", secret.display())]
+    {
+        assert!(fx.bash(&command).is_some(), "allowed: {command}");
     }
 }

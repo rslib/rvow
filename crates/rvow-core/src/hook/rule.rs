@@ -19,6 +19,8 @@ pub enum Rule {
     LeaseFile,
     /// The hook stats file.
     StatsFile,
+    /// The yolo switch file.
+    YoloFile,
     /// A subagent's edit outside its leased task.
     LeaseScope,
     /// A protected test or test setup file.
@@ -31,8 +33,39 @@ pub enum Rule {
     History,
 }
 
+/// What a rule does when it fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The call is denied.
+    Enforce,
+    /// The call goes through and the hit is counted. The gate still catches it as drift or scope.
+    Audit,
+}
+
 impl Rule {
-    pub const ALL: [Rule; 13] = [
+    /// Tampering with rvow itself is enforced, and so is a lease that the user chose. Scope and protected tests
+    /// are audited: the gate checks them.
+    pub fn mode(self) -> Mode {
+        match self {
+            Rule::OutsideScope | Rule::ProtectedTest => Mode::Audit,
+            _ => Mode::Enforce,
+        }
+    }
+
+    /// The mode while the user has a yolo tier on. Only the switch file stays enforced in every tier,
+    /// since an agent that could write it could pick its own tier. Tampering stays enforced below `bypass`.
+    pub fn mode_in(self, tier: Option<crate::yolo::Tier>) -> Mode {
+        use crate::yolo::Tier;
+        match (self, tier) {
+            (Rule::YoloFile, _) => Mode::Enforce,
+            (_, None) => self.mode(),
+            (_, Some(Tier::Bypass)) => Mode::Audit,
+            (Rule::UnacceptedPlan | Rule::LeaseScope | Rule::OutsideScope | Rule::ProtectedTest, Some(_)) => Mode::Audit,
+            (_, Some(_)) => Mode::Enforce,
+        }
+    }
+
+    pub const ALL: [Rule; 14] = [
         Rule::OwnerCommand,
         Rule::GitHooks,
         Rule::Ledger,
@@ -41,6 +74,7 @@ impl Rule {
         Rule::CacheFile,
         Rule::LeaseFile,
         Rule::StatsFile,
+        Rule::YoloFile,
         Rule::LeaseScope,
         Rule::ProtectedTest,
         Rule::OutsideScope,
@@ -58,6 +92,7 @@ impl Rule {
             Rule::CacheFile => "cache-file",
             Rule::LeaseFile => "lease-file",
             Rule::StatsFile => "stats-file",
+            Rule::YoloFile => "yolo-file",
             Rule::LeaseScope => "lease-scope",
             Rule::ProtectedTest => "protected-test",
             Rule::OutsideScope => "outside-scope",

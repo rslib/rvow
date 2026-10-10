@@ -81,6 +81,7 @@ Update this section in the change that moves an area.
 ## Traps
 
 - `rvow` on `PATH` is the installed copy. A CLI change reaches the hooks only after `cargo install --path crates/rvow --locked`.
+- The pre-push gate reruns tasks in a clean worktree with no `extensions/node_modules`. Each contributor sets `rerun_links = ["extensions/node_modules"]` and `cache_with_links = true` in the project `config.toml` (see `docs/settings.md` for where it lives), or the push fails and the cache stays off. The Claude version pin only warns outside CI.
 - `PLAN.md` is git-ignored on purpose. Do not add it.
 - The global git ignore lists `AGENTS.md`, so `.gitignore` carries `!AGENTS.md`. Stage new files by name.
 

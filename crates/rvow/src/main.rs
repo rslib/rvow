@@ -176,6 +176,14 @@ enum Cmd {
         #[arg(long, default_value_t = 7)]
         days: u64,
     },
+    /// Relax the hooks for a while: audit, auto or bypass. Without a tier it shows what is on.
+    Yolo {
+        #[arg(value_enum)]
+        tier: Option<YoloTier>,
+        /// How long it stays on, such as 30m or 2h (default 2h, at most 24h).
+        #[arg(long = "for")]
+        length: Option<String>,
+    },
     /// Lease one task to a subagent and print the brief to give it.
     Delegate {
         /// The task id or a unique prefix of it.
@@ -414,6 +422,15 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
         Cmd::Stats { days } => cmd::stats::stats(days),
         Cmd::Delegate { task } => cmd::delegate::delegate(&task),
+        Cmd::Yolo { tier, length } => cmd::yolo::yolo(
+            tier.map(|t| match t {
+                YoloTier::Audit => Some(rvow_core::yolo::Tier::Audit),
+                YoloTier::Auto => Some(rvow_core::yolo::Tier::Auto),
+                YoloTier::Bypass => Some(rvow_core::yolo::Tier::Bypass),
+                YoloTier::Off => None,
+            }),
+            length.as_deref(),
+        ),
         Cmd::Block { task, reason } => lifecycle::block(&task, &reason),
         Cmd::Note { kind, text } => lifecycle::note(kind, &text.join(" ")),
         Cmd::Amend { reason, change, unlock } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
@@ -538,6 +555,18 @@ enum NoteArg {
 #[derive(Clone, Copy, ValueEnum)]
 enum Harness {
     Claude,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum YoloTier {
+    /// Every rule except tampering only audits.
+    Audit,
+    /// Also lets the agent run rvow accept and rvow confirm.
+    Auto,
+    /// Every hook only audits and a stop is never held back.
+    Bypass,
+    /// Switch it off.
+    Off,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

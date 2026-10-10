@@ -100,26 +100,24 @@ fn git_command(repo: &Path) -> Command {
 }
 
 #[test]
-fn audit_gate_archived_regressions_fail_without_an_active_change() {
+fn audit_gate_trusts_an_archived_change_and_leaves_no_worktree() {
     let fixture = Fixture::new("archived", "");
     let (change, task) = fixture.accept("out.txt");
     fixture.prove(&task);
     fixture.git(&["add", "out.txt"]);
     fixture.git(&["commit", "-q", "-m", "output"]);
     fixture.archive(&change).unwrap();
-    fixture.git(&["checkout", "-q", "-b", "regression"]);
-    std::fs::write(fixture.repo.join("out.txt"), "bad\n").unwrap();
+    fixture.git(&["checkout", "-q", "-b", "later"]);
+    std::fs::write(fixture.repo.join("out.txt"), "changed\n").unwrap();
     fixture.git(&["add", "out.txt"]);
-    fixture.git(&["commit", "-q", "-m", "regression"]);
+    fixture.git(&["commit", "-q", "-m", "later work"]);
     let report = fixture.gate(true);
-    assert!(!report.passed(), "{report:?}");
+    assert!(report.passed(), "an archived task is the user's finished decision: {report:?}");
     assert_eq!(report.changes, 0);
-    assert!(report.archived.iter().any(|failure| failure.contains(&task)), "{report:?}");
+    assert!(report.timings.is_empty(), "no archived task is rerun: {report:?}");
     for mode in ["--toon", "--human"] {
         let output = fixture.cli(&["gate", "--strict", "--rerun", mode]);
-        assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stdout));
-        let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains(&task) && text.contains("archived"), "{text}");
+        assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
     }
     let trees = git_command(&fixture.repo).args(["worktree", "list", "--porcelain"]).output().unwrap();
     assert_eq!(String::from_utf8(trees.stdout).unwrap().matches("worktree ").count(), 1);

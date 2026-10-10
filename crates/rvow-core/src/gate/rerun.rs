@@ -4,14 +4,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::Report;
-use crate::change::{self, Stage};
-use crate::config::{self, Step};
+use crate::config::Step;
 use crate::error::{Error, Result};
 use crate::fingerprint::{self, globset};
 use crate::git;
 use crate::proof::{self, Active, Now};
 use crate::runner;
-use crate::store::Project;
 use crate::tasks::Task;
 use crate::vow::sha256_hex;
 
@@ -236,60 +234,4 @@ pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, i
 
 fn invocation() -> String {
     Error::random::<8>().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).unwrap_or_default()
-}
-/// Runs the verify commands of archived tasks whose `files` the branch touches.
-/// Failures block the gate and remain separate in its output.
-pub(super) fn rerun_archived(
-    project: &Project,
-    top: &Path,
-    lazy: &mut Lazy,
-    env: &[(String, String)],
-    config: &config::Config,
-    r: &mut Report,
-    echo: &mut dyn Write,
-) -> Result<()> {
-    let Some(base) = base_ref(top, &config.base) else {
-        r.failures.push(format!("neither origin/{} nor {} exists; set base in config.toml", config.base, config.base));
-        return Ok(());
-    };
-    let mb = git::run(top, &["merge-base", "HEAD", &base])?;
-    let touched = changed_files(top, &mb)?;
-    let (all, _) = change::list(project)?;
-    for d in all.iter().filter(|d| d.stage == Stage::Done) {
-        let loaded = match change::load(&d.path, &[]) {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                r.failures.push(format!("archived change {} cannot be loaded, so its tasks were not rerun: {}", d.id, e.message));
-                continue;
-            }
-        };
-        for t in &loaded.tasks {
-            let Some(cmd) = t.verify.as_deref() else { continue };
-            let set = match globset(&t.files) {
-                Ok(set) => set,
-                Err(e) => {
-                    r.failures.push(format!("archived task {} of {} has a bad files glob, so it was not rerun: {}", t.id, d.id, e.message));
-                    continue;
-                }
-            };
-            if !touched.iter().any(|f| set.is_match(f)) {
-                continue;
-            }
-            let Some(run_dir) = lazy.dir(r, echo)? else { return Ok(()) };
-            let _ = writeln!(echo, "rerun archived {}: {cmd}", t.id);
-            let o = runner::run(cmd, &run_dir, env, t.timeout.unwrap_or(config.timeout()), echo)?;
-            r.timings.push((t.id.to_string(), o.duration_ms));
-            if !(o.passed() && o.tests_run != Some(0)) {
-                let why = if o.timed_out {
-                    "timed out".to_string()
-                } else if o.passed() {
-                    "ran 0 tests".to_string()
-                } else {
-                    format!("exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
-                };
-                r.archived.push(format!("{} failed on rerun ({why}): {cmd}", t.id));
-            }
-        }
-    }
-    Ok(())
 }

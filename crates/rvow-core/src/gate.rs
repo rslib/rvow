@@ -20,7 +20,7 @@ mod rerun;
 mod signature;
 
 use check::check_scope;
-use rerun::{Lazy, Scope, prove_data, rerun_archived};
+use rerun::{Lazy, Scope, changed_files, prove_data};
 
 #[cfg(test)]
 use crate::change::Stage;
@@ -41,20 +41,20 @@ pub struct Report {
     pub warnings: Vec<String>,
     /// Each rerun task and how long it took, so slow checks are visible.
     pub timings: Vec<(String, u64)>,
-    /// Archived verification failures, reported separately from active tasks.
-    pub archived: Vec<String>,
     /// The rerun results of the branch's tasks, when `--out` asked for them:
     /// each carries the data a `rvow prove` event would, plus the change and
     /// project that route it back on ingest.
     pub runs: Vec<crate::ledger::Run>,
     /// Tasks that the cache answered without a run.
     pub cached: Vec<String>,
+    /// Tasks left out of the rerun because their proof is current and their files are committed.
+    pub proven: Vec<String>,
     pub changes: usize,
 }
 
 impl Report {
     pub fn passed(&self) -> bool {
-        self.failures.is_empty() && self.archived.is_empty()
+        self.failures.is_empty()
     }
 }
 
@@ -140,6 +140,9 @@ fn gate_for(
         if let Some(cache) = &cache {
             r.warnings.extend(cache.warnings().iter().cloned());
         }
+        // A task whose proof is current and whose files are all committed was proved on this very content,
+        // so a push does not run it again. `--out` still reruns every task, since it records the runs.
+        let uncommitted = if opts.out.is_none() && use_cache && !policy.rerun_proven { changed_files(&top, "HEAD").ok() } else { None };
         let mut plan = Vec::new();
         for c in &queue {
             let mut own = std::collections::BTreeMap::new();
@@ -165,10 +168,17 @@ fn gate_for(
                     (Some(cache), Some(key)) => cache.lookup(&t.id.to_string(), key, crate::ledger::now_ms(), max_age),
                     _ => None,
                 };
-                plan.push((c, t, key, hit));
+                let proven = match &uncommitted {
+                    Some(dirty) => {
+                        proof::state(c, t, &now)? == proof::State::Proved
+                            && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
+                    }
+                    None => false,
+                };
+                plan.push((c, t, key, hit, proven));
             }
         }
-        let misses: Vec<&crate::tasks::Task> = plan.iter().filter(|p| p.3.is_none()).map(|p| p.1).collect();
+        let misses: Vec<&crate::tasks::Task> = plan.iter().filter(|p| p.3.is_none() && !p.4).map(|p| p.1).collect();
         scope = Scope::new(&top, &config.base, &misses)?;
         let mut setup = Vec::new();
         for step in &config.setup {
@@ -199,8 +209,13 @@ fn gate_for(
             }
             None => None,
         };
-        for (c, t, key, hit) in &plan {
+        for (c, t, key, hit, proven) in &plan {
             let id = t.id.to_string();
+            if *proven {
+                let _ = writeln!(echo, "proven {id}: its proof is current and its files are committed");
+                r.proven.push(id);
+                continue;
+            }
             if let Some(hit) = hit {
                 let _ = writeln!(echo, "cached {id}: passed {} ms for this key", hit.duration_ms);
                 r.cached.push(id);
@@ -230,7 +245,6 @@ fn gate_for(
                 r.failures.push(format!("{id} failed on rerun ({why}): {cmd}"));
             }
         }
-        rerun_archived(project, &top, &mut lazy, &env, &config, &mut r, echo)?;
         if lazy.failed() {
             return Ok(r);
         }
@@ -268,46 +282,6 @@ mod tests {
 
     fn run_gate(p: &Project, home: &Path, repo: &Path, opts: Options) -> Report {
         gate(p, home, repo, opts, &mut std::io::sink()).unwrap()
-    }
-
-    #[test]
-    fn rerun_archived_reports_a_regression_the_branch_caused() {
-        let (tmp, p, repo, task) = accepted();
-        let home = tmp.0.join("home");
-        std::fs::write(repo.join("out.txt"), "ok").unwrap();
-        git(&repo, &["add", "out.txt"]);
-        git(&repo, &["commit", "-q", "-m", "out"]);
-        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
-        let id = proof::active(&p, &change::load_living(&p).unwrap().0).unwrap()[0].dir.id.to_string();
-        crate::archive::archive(&p, &home, &repo, &id).unwrap();
-
-        // A later change on a feature branch off main touches more.txt only.
-        git(&repo, &["checkout", "-q", "-b", "feat/next"]);
-        let c = change::new(&p, "Next", "feat/next", false).unwrap();
-        std::fs::write(
-            c.path.join("tasks.md"),
-            "- TSK-new2 Write more\n  verify: grep -q ok more.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: more.txt, out.txt\n",
-        )
-        .unwrap();
-        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
-        crate::vow::commit(&p, prepared).unwrap();
-        std::fs::write(repo.join("more.txt"), "ok").unwrap();
-        git(&repo, &["add", "more.txt"]);
-        git(&repo, &["commit", "-q", "-m", "more"]);
-
-        // Nothing touched yet: the archived task is not rerun.
-        let opts = Options { strict: true, rerun: true, out: None };
-        let r = run_gate(&p, &home, &repo, opts.clone());
-        assert!(r.passed() && r.archived.is_empty(), "{r:?}");
-
-        // The feature branch edits out.txt in its scope but breaks the archived requirement.
-        std::fs::write(repo.join("out.txt"), "bad").unwrap();
-        git(&repo, &["add", "out.txt"]);
-        git(&repo, &["commit", "-q", "-m", "break"]);
-        let r = run_gate(&p, &home, &repo, opts);
-        assert!(!r.passed(), "archived regressions must block: {r:?}");
-        assert_eq!(r.archived.len(), 1, "{r:?}");
-        assert!(r.archived[0].contains(&task) && r.archived[0].contains("failed on rerun"), "{r:?}");
     }
 
     #[test]
@@ -360,9 +334,16 @@ mod tests {
         assert!(r.failures.iter().any(|f| f.contains("failed on rerun")), "{r:?}");
         git(&repo, &["add", "out.txt"]);
         git(&repo, &["commit", "-q", "-m", "out"]);
-        let r = run_gate(&p, &home, &repo, opts);
+        let r = run_gate(&p, &home, &repo, opts.clone());
         assert!(r.passed(), "{r:?}");
+        assert!(r.timings.is_empty() && r.proven == [task.clone()], "a proven task with committed files is trusted: {r:?}");
+
+        // A user who wants a clean-checkout run of proven tasks too asks for it.
+        std::fs::write(p.root.join("config.toml"), "rerun_proven = true\n").unwrap();
+        let r = run_gate(&p, &home, &repo, opts);
+        assert!(r.passed() && r.proven.is_empty(), "{r:?}");
         assert_eq!(r.timings.len(), 1);
+        std::fs::remove_file(p.root.join("config.toml")).unwrap();
         let list = git::run(&repo, &["worktree", "list"]).unwrap();
         assert_eq!(list.lines().count(), 1, "the rerun tree is removed");
 

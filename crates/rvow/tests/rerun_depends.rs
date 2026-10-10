@@ -54,6 +54,8 @@ impl Fx {
             assert!(git_command(&repo).args(&args).status().unwrap().success(), "git {args:?}");
         }
         fx.rvow(&["init"]);
+        // These tests are about the cache, so a proven task reruns here.
+        std::fs::write(fx.root.join("rh/config.toml"), "rerun_proven = true\n").unwrap();
         let out = fx.rvow(&["new", "--spec", "Out"]);
         let dir = PathBuf::from(out.lines().find_map(|l| l.strip_prefix("path: ")).unwrap());
         let task = |n: u32, title: &str, files: &str, extra: &str| {

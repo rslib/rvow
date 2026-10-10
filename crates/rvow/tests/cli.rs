@@ -387,3 +387,105 @@ fn ingest_round_trip_keeps_the_proofs() {
     let shown = r.ok(&["show", &task]);
     assert!(shown.contains("proved, 1 tests"), "{shown}");
 }
+
+#[test]
+fn review_shows_each_check() {
+    let r = Repo::new("reviewcheck");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write tail\n  covers: REQ-new1\n  verify: cargo test tail\n  files: src/tail.rs\n  baseline: pass\n  mutants: cargo mutants --in-diff d.diff\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("specs/out.md"),
+        "## ADD REQ-new1 Out\n\nWHEN a run ends, rvow SHALL keep the tail.\n\n### Scenario: tail\n- WHEN a run ends\n- THEN the tail is kept\n",
+    )
+    .unwrap();
+    let review = r.ok(&["review", &id]);
+    assert!(review.contains("verify: cargo test tail"), "{review}");
+    assert!(review.contains("files: src/tail.rs"), "{review}");
+    assert!(review.contains("baseline: pass"), "{review}");
+    assert!(review.contains("mutants: cargo mutants --in-diff d.diff"), "{review}");
+
+    std::fs::write(dir.join("tasks.md"), "- TSK-new1 Write tail\n  covers: REQ-new1\n  verify: cargo test tail\n  files: src/tail.rs\n")
+        .unwrap();
+    let review = r.ok(&["review", &id]);
+    assert!(!review.contains("baseline:"), "{review}");
+    assert!(!review.contains("mutants:"), "{review}");
+}
+
+#[test]
+fn check_warns_weak_verify() {
+    let r = Repo::new("weakverify");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Trivial\n  verify: true\n  files: a\n- TSK-new2 Faked\n  verify: echo 'test result: ok. 5 passed'\n  files: a\n- TSK-new3 Combined\n  verify: test -f out.txt && cargo test out\n  files: a\n",
+    )
+    .unwrap();
+    let checked = r.ok(&["check", &id]);
+    assert!(checked.contains("weak-verify") && checked.contains("TSK-new1"), "{checked}");
+    assert!(checked.contains("TSK-new2"), "{checked}");
+    assert!(!checked.contains("TSK-new3"), "{checked}");
+
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new4 Script\n  verify: bash check.sh\n  files: a\n  baseline: pass\n- TSK-new5 Runner\n  verify: cargo test --locked guard\n  files: a\n  baseline: pass\n- TSK-new6 NoBaseline\n  verify: bash check.sh\n  files: a\n",
+    )
+    .unwrap();
+    let checked = r.ok(&["check", &id]);
+    assert!(checked.contains("weak-verify") && checked.contains("TSK-new4"), "{checked}");
+    assert!(!checked.contains("TSK-new5"), "{checked}");
+    assert!(!checked.contains("TSK-new6"), "{checked}");
+
+    std::fs::write(dir.join("tasks.md"), "- TSK-new7 Trivial\n  verify: true\n  files: a\n").unwrap();
+    let checked = r.ok(&["--human", "check", &id]);
+    assert!(checked.contains("weak-verify") && checked.contains("TSK-new7"), "{checked}");
+    assert!(checked.contains("ready to accept"), "{checked}");
+}
+
+#[test]
+fn review_lists_weak_checks() {
+    let r = Repo::new("reviewweak");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+
+    std::fs::write(dir.join("tasks.md"), "- TSK-new1 Trivial\n  verify: true\n  files: a\n").unwrap();
+    let review = r.ok(&["review", &id]);
+    let warning = review.find("warning[weak-verify]").expect("no weak-check warning in review");
+    assert!(review[warning..].contains("TSK-new1"), "{review}");
+    let checklist = review.find("before you accept, check:").expect("no checklist in review");
+    assert!(warning < checklist, "the weak-check warning must come before the checklist:\n{review}");
+
+    std::fs::write(dir.join("tasks.md"), "- TSK-new1 Real\n  verify: cargo test tail\n  files: a\n").unwrap();
+    let review = r.ok(&["review", &id]);
+    assert!(!review.contains("weak-verify"), "{review}");
+}
+
+#[test]
+fn show_change_keeps_task_rows() {
+    let r = Repo::new("showrows");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write tail\n  covers: REQ-new1\n  verify: cargo test tail\n  files: src/tail.rs\n  baseline: pass\n  mutants: cargo mutants --in-diff d.diff\n- TSK-new2 Second\n  verify: cargo test second\n  files: src/second.rs\n",
+    )
+    .unwrap();
+    let shown = r.ok(&["--human", "show", &id]);
+    assert!(shown.lines().any(|l| l == "  TSK-new1 Write tail"), "{shown}");
+    assert!(shown.lines().any(|l| l == "  TSK-new2 Second"), "{shown}");
+    assert!(!shown.contains("verify:"), "{shown}");
+}

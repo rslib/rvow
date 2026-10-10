@@ -12,6 +12,7 @@ use crate::change::LEDGER;
 use crate::gate::cache::CACHE_FILE;
 use crate::lease::LEASE_FILE;
 use crate::stats::STATS_FILE;
+use crate::yolo::YOLO_FILE;
 
 use super::rule::{Denial, Rule, denial};
 use crate::store::IDS_FILE;
@@ -368,6 +369,10 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
     let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
     match sub.as_str() {
         "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        "yolo" => denial(
+            Rule::YoloFile,
+            "rvow yolo relaxes the hooks and belongs to the user; ask the user to run `! rvow yolo <tier>`".into(),
+        ),
         "ingest" => denial(
             Rule::OwnerCommand,
             "rvow ingest records proofs from a CI file and belongs to the user; ask the user to run `! rvow ingest <file>`, or run `rvow prove <task>` to prove it here"
@@ -451,6 +456,29 @@ fn runs_given_text(inv: &[String]) -> bool {
     is_shell(name) && (inv[1..].iter().all(|w| w.starts_with('-')) || inv[1..].iter().any(|w| w.contains("$(") || w.contains('`')))
 }
 
+/// Programs that only read their input and print. Reading the stats, lease, yolo, cache or ledger file
+/// is harmless; only a write can change what rvow trusts.
+const READERS: &[&str] = &[
+    "cat", "ls", "head", "tail", "grep", "rg", "wc", "stat", "file", "less", "more", "sort", "uniq", "cut", "tr", "nl", "column", "jq",
+    "diff", "cmp", "du", "pwd", "echo", "printf",
+];
+
+/// True when every command of the line only reads and none writes a file.
+fn only_reads(invs: &[&[String]], cmd: &str) -> bool {
+    !invs.is_empty() && !writes_files(invs, cmd) && invs.iter().all(|inv| READERS.contains(&base_name(&inv[0])))
+}
+
+/// True when the line only prints text: `echo`, `printf`, or a `git commit` or `git tag` message.
+fn only_text(invs: &[&[String]], cmd: &str) -> bool {
+    !invs.is_empty()
+        && !writes_files(invs, cmd)
+        && invs.iter().all(|inv| match base_name(&inv[0]) {
+            "echo" | "printf" => true,
+            "git" => git_subcommand(&inv[1..]).is_some_and(|(sub, _)| matches!(sub, "commit" | "tag")),
+            _ => false,
+        })
+}
+
 /// Why a Bash command must not run, or `None`.
 pub fn bash_rule(cmd: &str) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
@@ -488,18 +516,23 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
     }
     let in_git_dir =
         w.iter().any(|x| x.ends_with(".git") || x.ends_with(".git/")) && w.iter().any(|x| x.to_lowercase().starts_with("hooks"));
-    if writes && (lower.contains(".git/hooks") || joined.contains(".git/hooks") || in_git_dir) {
+    // Running or reading a hook while a writer such as `tee` targets another file is fine.
+    if writes_to(&invs, cmd, |x| x.to_lowercase().contains(".git/hooks")) || (writes && in_git_dir) {
         return denial(Rule::GitHooks, ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
     }
     let names_stats = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == STATS_FILE);
-    if names_stats && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+    if names_stats && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
         return denial(
             Rule::StatsFile,
             format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
         );
     }
+    let names_yolo = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == YOLO_FILE);
+    if names_yolo && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+    }
     let names_lease = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == LEASE_FILE);
-    if names_lease && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+    if names_lease && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
         return denial(
             Rule::LeaseFile,
             format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
@@ -507,7 +540,7 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
     }
     let names_cache = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == CACHE_FILE);
     let only_rvow_first = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");
-    if names_cache && !only_rvow_first {
+    if names_cache && !only_rvow_first && !only_reads(&invs, cmd) {
         return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
     }
     let names_rvow_file = w.iter().any(|x| {
@@ -515,7 +548,7 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
         !x.contains(char::is_whitespace) && (b == LEDGER || b == IDS_FILE)
     });
     let only_rvow = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");
-    if names_rvow_file && !only_rvow {
+    if names_rvow_file && !only_rvow && !only_reads(&invs, cmd) {
         return denial(
             Rule::Ledger,
             format!(
@@ -524,6 +557,32 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
         );
     }
     None
+}
+
+/// True when every `rvow` call in `cmd` that the user owns is an `accept` or a `confirm`, and the command
+/// holds no other owner-only call. The `auto` tier lets such a command run.
+pub(super) fn only_accept_or_confirm(cmd: &str) -> bool {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let subs: Vec<&str> = sh
+        .commands
+        .iter()
+        .flat_map(|seg| invocations(seg))
+        .filter(|inv| base_name(&inv[0]) == "rvow")
+        .filter_map(|inv| inv[1..].iter().find(|w| !w.starts_with('-')).map(String::as_str))
+        .collect();
+    !subs.is_empty() && subs.iter().all(|s| matches!(*s, "accept" | "confirm" | "status" | "ls" | "show" | "check" | "validate" | "prove"))
+}
+
+/// What each `rvow prove` in `cmd` is given: the task words and flags after `prove`.
+pub(super) fn prove_args(cmd: &str) -> Vec<Vec<String>> {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let calls = sh.commands.iter().flat_map(|seg| invocations(seg)).filter(|inv| base_name(&inv[0]) == "rvow");
+    calls
+        .filter_map(|inv| {
+            let at = inv.iter().position(|w| w == "prove")?;
+            Some(inv[at + 1..].iter().filter(|w| !matches!(w.as_str(), "--toon" | "--human")).cloned().collect())
+        })
+        .collect()
 }
 
 /// Why a Bash command must not run, or `None`.
@@ -581,9 +640,10 @@ pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {
 const WRITERS: &[&str] = &["rm", "mv", "cp", "tee", "sed", "perl", "python", "python3", "chmod", "ln", "truncate", "dd", "install"];
 const CONFIG_WRITE_FLAGS: &[&str] = &["--unset", "--unset-all", "--add", "--replace-all", "-e", "--edit"];
 
-/// True when `cmd` redirects output to a file; `2>&1` and `>/dev/null` do not count.
-fn redirects_to_file(cmd: &str) -> bool {
+/// The files `cmd` redirects output to; `2>&1` and `>/dev/null` are not files.
+fn redirect_targets(cmd: &str) -> Vec<String> {
     let chars: Vec<char> = cmd.chars().collect();
+    let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i] != '>' {
@@ -606,22 +666,28 @@ fn redirects_to_file(cmd: &str) -> bool {
         }
         let target: String = chars[j..].iter().take_while(|c| !c.is_whitespace() && !SEPARATORS.contains(c)).collect();
         if target != "/dev/null" {
-            return true;
+            found.push(target);
         }
         i = j.max(i + 1);
     }
-    false
+    found
+}
+
+/// A writer such as `rm` or `sed -i`.
+fn is_writer(inv: &[String]) -> bool {
+    let name = base_name(&inv[0]);
+    WRITERS.contains(&name)
+        && (name != "sed" || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
 }
 
 /// A command that changes files: a writer such as `rm` or `sed -i`, or a redirect to a file.
 fn writes_files(invs: &[&[String]], cmd: &str) -> bool {
-    redirects_to_file(cmd)
-        || invs.iter().any(|inv| {
-            let name = base_name(&inv[0]);
-            WRITERS.contains(&name)
-                && (name != "sed"
-                    || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
-        })
+    !redirect_targets(cmd).is_empty() || invs.iter().any(|inv| is_writer(inv))
+}
+
+/// A command that changes a file `hit` accepts: a redirect to it, or an argument of a writer.
+fn writes_to(invs: &[&[String]], cmd: &str, hit: impl Fn(&str) -> bool) -> bool {
+    redirect_targets(cmd).iter().any(|t| hit(t)) || invs.iter().any(|inv| is_writer(inv) && inv[1..].iter().any(|w| hit(w)))
 }
 
 /// A `git` call that sets or removes `core.hooksPath`; reading it is fine.
@@ -678,6 +744,11 @@ pub(super) fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<St
 /// run: the implementing agent may not read or write them.
 pub(super) fn bash_secret_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
+    let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
+    // Text that only names the folder reads nothing: an echo, or a commit or tag message.
+    if only_text(&invs, cmd) {
+        return None;
+    }
     let joined = sh.words.join(" ");
     let named = paths.iter().find(|p| {
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

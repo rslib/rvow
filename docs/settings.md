@@ -38,6 +38,7 @@ checks = ["cargo test --locked"]
 | `setup` | Commands the gate rerun runs before verification; an entry is a string or `{ run, files }` | no |
 | `rerun_env` | Environment pairs applied when the gate reruns a task | no |
 | `rerun_links` | Git-ignored directories of the repository, by repo-relative name, that the rerun worktree links in (default none) | no |
+| `rerun_proven` | Rerun a task in a clean checkout even when its proof is current and its files are committed (default false) | no |
 | `tools` | Executables whose content is part of the gate cache key, by name on `PATH` or by path | no |
 | `rerun_cache` | How long a cached rerun pass stays valid, such as `24h`, or `off`; default `168h` | no |
 | `cache_with_links` | Keep the rerun cache on when `rerun_links` is set; default false | no |
@@ -64,6 +65,7 @@ A tracked name, an absolute name or a name with `..` is refused, and the error n
 A listed directory that does not exist is skipped.
 A verify command can write through a link into the real directory, so list only directories that a verify command may change.
 `rerun_links` is not part of the vow, so changing it is not drift.
+The same holds for `rerun_proven`. By default a push trusts a task whose proof is current and whose files are all committed, because it was proved on that very content. A task of an archived change is never rerun, since archiving needs every task proved. Set `rerun_proven = true` when you want a clean-checkout run of proven tasks too.
 
 ## Scoping setup and checks to files
 
@@ -74,7 +76,7 @@ With a C++ entry scoped to `src/**` and a Python entry scoped to `python/**`, a 
 When the base branch is unknown, a table entry runs, so nothing is skipped by mistake.
 
 The gate makes its rerun worktree and runs `setup` only when something needs them.
-When the cache answers every task and no archived task reruns, it makes no worktree and runs no `setup`.
+When the cache or a current proof answers every task, it makes no worktree and runs no `setup`.
 The `checks` that remain then run in the repository itself.
 
 ## How long a cached pass lasts

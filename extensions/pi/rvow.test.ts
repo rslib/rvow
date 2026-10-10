@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-tui";
 import {
   decisionPrompt as modDecision,
+  failedPrompt as modFailed,
   refinePrompt as modRefine,
   REFINE_STEPS as modSteps,
 } from "../claude/hooks/format.ts";
@@ -27,8 +28,10 @@ echo "$*" >> "$RVOW_FAKE/argv"
 case "$1 $2 $3" in
   "hook claude view") [ -f "$RVOW_FAKE/fail-view" ] && exit 1; [ -f "$RVOW_FAKE/slow-view" ] && sleep 0.5; cat "$RVOW_FAKE/view.json" 2>/dev/null; true ;;
   "hook claude status") cat "$RVOW_FAKE/status.json" 2>/dev/null ;;
-  "hook claude pre-tool-use") cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
-  "hook claude stop") cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
+  "hook claude pre-tool-use") cat > "$RVOW_FAKE/pre.in"; cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
+  "hook claude stop") cat > "$RVOW_FAKE/stop.in"; cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
+  "hook claude lease-bind") cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" 2>/dev/null ;;
+  "hook claude lease-end") cat > "$RVOW_FAKE/end.in" ;;
   "hook claude "*) ;;
   *)
     case "$1" in
@@ -36,7 +39,7 @@ case "$1 $2 $3" in
       show) [ -f "$RVOW_FAKE/slow" ] && sleep 0.4; if [ -f "$RVOW_FAKE/show-$2.txt" ]; then cat "$RVOW_FAKE/show-$2.txt"; else echo "$2"; echo "shown $2"; fi ;;
       clarify) cat "$RVOW_FAKE/clarify.json" ;;
       confirm) if [ $# -eq 1 ]; then cat "$RVOW_FAKE/confirm.txt"; else echo "ran $*"; fi ;;
-      accept) echo "accepted"; echo "next: TSK-1 first"; ;;
+      accept) if [ -f "$RVOW_FAKE/fail-accept" ]; then echo "error: CHG-a has no passing check"; echo "code: not-ready"; exit 1; fi; echo "accepted"; echo "next: TSK-1 first"; ;;
       *) echo "ran $*" ;;
     esac ;;
 esac
@@ -125,7 +128,9 @@ type Files = Partial<
     | "review.txt"
     | "slow"
     | "slow-view"
+    | "bind.json"
     | "fail-view"
+    | "fail-accept"
     | "clarify.json"
     | "confirm.txt"
     | `show-${string}.txt`,
@@ -196,7 +201,7 @@ function setup(files: Files, ui: Ui = {}) {
     cwd: home,
     hasUI,
     mode: ui.mode ?? (hasUI ? "tui" : "print"),
-    sessionManager: { getEntries: () => entries },
+    sessionManager: { getEntries: () => entries, getSessionId: () => "pi-sess" },
     ui: {
       notify: (...args: unknown[]) => void calls.push({ kind: "notify", args }),
       confirm: rec("confirm", ui.confirm ?? true),
@@ -262,6 +267,10 @@ function setup(files: Files, ui: Ui = {}) {
     return command("rvow-status");
   };
   const write = (name: keyof Files, text: string) => writeFileSync(join(home, name), text);
+  const sent = (name: string) => {
+    const file = join(home, name);
+    return existsSync(file) ? JSON.parse(readFileSync(file, "utf8") || "null") : undefined;
+  };
   const widget = (key: string) => {
     const call = calls.filter((c) => c.kind === "widget" && c.args[0] === key).at(-1);
     const f = call?.args[1];
@@ -307,6 +316,7 @@ function setup(files: Files, ui: Ui = {}) {
     users,
     statuses,
     argv,
+    sent,
     command,
     fire,
     lastFactory,
@@ -539,6 +549,20 @@ test("a on a ready plan asks to confirm, then runs rvow accept and tells the age
   assert.deepEqual(t.users(), ["I accepted CHG-a. next: TSK-1 first. Continue with it."]);
   assert.equal(t.opened(), 2, "the pane reopens after the action");
   assert.equal(modDecision(["accept", "CHG-a"], "accepted\nnext: TSK-1 first\n"), t.users()[0]);
+});
+
+test("an accept that fails tells the agent what failed and why", async () => {
+  const t = setup({
+    "view.json": json(WAITING({ id: "CHG-a", title: "A" })),
+    "review.txt": "the checklist",
+    "fail-accept": "1",
+  });
+  await t.status((p) => press(p, "a"));
+  assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
+  assert.deepEqual(t.users(), [
+    modFailed(["accept", "CHG-a"], "error: CHG-a has no passing check\ncode: not-ready\n"),
+  ]);
+  assert.match(t.users()[0] ?? "", /code: not-ready/);
 });
 
 test("a declined confirm runs no accept and says nothing to the agent", async () => {
@@ -979,6 +1003,15 @@ test("the shared prompt strings equal the Claude mod's", () => {
     ]) {
       assert.equal(m.decisionPrompt(argv, out), modDecision(argv, out), argv.join(" "));
     }
+    const failure = "error: CHG-a has no task\ncode: not-ready\nhelp: add a task";
+    assert.equal(
+      m.failedPrompt(["accept", "CHG-a"], failure),
+      modFailed(["accept", "CHG-a"], failure),
+    );
+    assert.match(
+      m.failedPrompt(["accept", "CHG-a"], failure),
+      /failed:\nerror: CHG-a has no task\ncode: not-ready\nhelp: add a task\nFix what it names/,
+    );
   });
 });
 
@@ -994,6 +1027,66 @@ test("tool_call blocks when the hook denies and passes otherwise", async () => {
   const ok = setup({ "pre.json": json({ hookSpecificOutput: { permissionDecision: "allow" } }) });
   assert.equal(await ok.fire("tool_call", event), undefined);
   assert.equal(await setup({}).fire("tool_call", event), undefined);
+});
+
+test("tool_call asks the user when the hook asks, and a no keeps the call blocked", async () => {
+  const ask = json({
+    hookSpecificOutput: { permissionDecision: "ask", permissionDecisionReason: "rvow: allow it?" },
+  });
+  const event = { toolName: "bash", input: { command: "ls" } };
+
+  const yes = setup({ "pre.json": ask }, { confirm: true });
+  assert.equal(await yes.fire("tool_call", event), undefined);
+  assert.equal(yes.calls.find((c) => c.kind === "confirm")?.args[1], "rvow: allow it?");
+
+  const no = setup({ "pre.json": ask }, { confirm: false });
+  assert.deepEqual(await no.fire("tool_call", event), { block: true, reason: "rvow: allow it?" });
+
+  const nobody = setup({ "pre.json": ask }, { hasUI: false });
+  assert.deepEqual(await nobody.fire("tool_call", event), {
+    block: true,
+    reason: "rvow: allow it?",
+  });
+});
+
+test("a subagent session whose prompt starts with a lease line binds itself and is judged by it", async () => {
+  const bound = json({ bound: true, task: "TSK-abc123" });
+  const t = setup({ "bind.json": bound });
+  const event = { toolName: "bash", input: { command: "ls" } };
+
+  await t.fire("tool_call", event);
+  assert.equal(t.sent("pre.in").agent_id, undefined, "a session with no lease line is not bound");
+
+  await t.fire("before_agent_start", { prompt: "lease: TSK-abc123\nYou hold one task." });
+  assert.deepEqual(t.sent("bind.in").agent_id, "pi-sess");
+  assert.match(t.sent("bind.in").prompt, /^lease: TSK-abc123/);
+
+  await t.fire("tool_call", event);
+  assert.equal(t.sent("pre.in").agent_id, "pi-sess");
+  assert.equal(t.sent("pre.in").session_id, "pi-sess");
+
+  await t.fire("agent_before_settle", { entries: [] });
+  assert.equal(
+    t.sent("stop.in").agent_id,
+    "pi-sess",
+    "a bound subagent's stop passes like a Claude subagent's",
+  );
+
+  await t.fire("session_shutdown");
+  assert.equal(t.sent("end.in").agent_id, "pi-sess", "the lease ends with the session");
+});
+
+test("a prompt without a lease line, or a bind the hook refuses, leaves the session unbound", async () => {
+  const plain = setup({ "bind.json": json({ bound: true }) });
+  await plain.fire("before_agent_start", { prompt: "Read README.md and summarize it." });
+  assert.equal(plain.sent("bind.in"), undefined);
+
+  const refused = setup({ "bind.json": json({ bound: false, task: "TSK-zzzzzz" }) });
+  await refused.fire("before_agent_start", { prompt: "lease: TSK-zzzzzz\nGo." });
+  await refused.fire("tool_call", { toolName: "bash", input: { command: "ls" } });
+  assert.equal(refused.sent("pre.in").agent_id, undefined);
+  await refused.fire("session_shutdown");
+  assert.equal(refused.sent("end.in"), undefined, "nothing was bound, so nothing ends");
 });
 
 test("the stop gate continues 8 times, then lets the agent stop", async () => {
@@ -1019,12 +1112,12 @@ test("rvow-confirm tells the agent what the user decided", async () => {
 
 test("the pi extension registers its commands and tool", () => {
   const t = setup({});
-  for (const c of ["status", "confirm", "review", "accept", "archive"])
+  for (const c of ["status", "confirm", "review", "accept", "archive", "yolo"])
     assert.ok(t.commands.has(`rvow-${c}`), c);
   assert.deepEqual(t.tools, ["rvow_ask"]);
 });
 
-for (const name of ["rvow-review", "rvow-accept", "rvow-archive"]) {
+for (const name of ["rvow-review", "rvow-accept", "rvow-archive", "rvow-yolo"]) {
   test(`${name} refuses without a UI and runs nothing`, async () => {
     const t = setup({}, { hasUI: false });
     await t.command(name, "CHG-a");
@@ -1091,6 +1184,30 @@ test("rvow-accept confirmed runs rvow accept with the id and tells the agent", a
   assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
   assert.ok(t.notes().includes("accepted\nnext: TSK-1 first"));
   assert.deepEqual(t.users(), ["I accepted CHG-a. next: TSK-1 first. Continue with it."]);
+});
+
+test("rvow-yolo switches a tier on, tells the agent, and refuses what it cannot parse", async () => {
+  const t = setup({});
+  await t.command("rvow-yolo", "auto 30m");
+  assert.deepEqual(
+    t.argv().filter((l) => l.startsWith("yolo")),
+    ["yolo auto --for 30m"],
+  );
+  assert.match(t.users()[0] ?? "", /I switched on yolo auto: also lets the agent run rvow accept/);
+  assert.equal(modDecision(["yolo", "auto", "--for", "30m"], "tier: auto"), t.users()[0]);
+
+  await t.command("rvow-yolo", "off");
+  assert.equal(t.users().at(-1), "I switched yolo off. The usual rules apply again.");
+
+  const before = t.argv().length;
+  await t.command("rvow-yolo", "root");
+  await t.command("rvow-yolo", "off 2h");
+  assert.equal(t.argv().length, before, "a bad tier or length runs nothing");
+  assert.match(t.notes().join(), /try \/rvow-yolo auto 30m/);
+
+  const status = t.users().length;
+  await t.command("rvow-yolo");
+  assert.equal(t.users().length, status, "the status says nothing to the agent");
 });
 
 test("rvow-archive needs an id, then archives it", async () => {

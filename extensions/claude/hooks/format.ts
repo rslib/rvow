@@ -65,11 +65,39 @@ export function decisionPrompt(argv: string[], out: string): string | null {
     const trimmed = next?.endsWith('.') ? next.slice(0, -1) : next
     return `I accepted ${id}.${trimmed ? ` ${trimmed}.` : ''} Continue with it.`
   }
+  if (verb === 'yolo') {
+    if (id === 'off') return 'I switched yolo off. The usual rules apply again.'
+    if (id && id in YOLO_TIERS) {
+      return `I switched on yolo ${id}: ${YOLO_TIERS[id as keyof typeof YOLO_TIERS]}. It ends by itself, and the gate still checks at push.`
+    }
+    return null
+  }
   const ids = [...new Set(`${argv.join(' ')}\n${out}`.match(/AMD-[\w-]+/g) ?? [])].join(', ')
   if (argv.includes('--accept')) return `I accepted the plan edit ${ids}. Continue the tasks.`
   if (argv.includes('--reject'))
     return `I rejected the plan edit ${ids}. Undo it, or amend it again with a different edit.`
   return null
+}
+
+/** A command that only the user runs and that decides something, so a failure of it must reach the agent. */
+export function isDecision(argv: string[]): boolean {
+  const [verb] = argv
+  return (
+    verb === 'accept' ||
+    verb === 'archive' ||
+    (verb === 'confirm' && (argv.includes('--accept') || argv.includes('--reject')))
+  )
+}
+const FAILED_LINES = 12
+
+/** What the agent is told when a decision the user made could not be carried out. */
+export function failedPrompt(argv: string[], out: string): string {
+  const lines = out.split('\n').filter((l) => l.trim())
+  return [
+    `I tried \`rvow ${argv.join(' ')}\` and it failed:`,
+    ...lines.slice(0, FAILED_LINES),
+    'Fix what it names, then ask me to run it again.',
+  ].join('\n')
 }
 
 export const REFINE_STEPS =
@@ -89,6 +117,106 @@ export function refinePrompt(plans: RvowPlan[]): string {
 }
 
 export const ASK = 'mcp__rvow__rvow_ask'
+export const YOLO = 'mcp__rvow__rvow_yolo'
+export const ACCEPT = 'mcp__rvow__rvow_accept'
+export const CONFIRM = 'mcp__rvow__rvow_confirm'
+
+export const ARCHIVE = 'mcp__rvow__rvow_archive'
+export const ARCHIVE_DESCRIPTION =
+  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.'
+export const ARCHIVE_SCHEMA = {
+  type: 'object',
+  required: ['change'],
+  properties: { change: { type: 'string', pattern: '^CHG-[a-z0-9]+$' } },
+  additionalProperties: false,
+}
+
+/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+export function archiveBlockers(
+  change: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] } | undefined,
+  id: string,
+): string | null {
+  if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`
+  if (change.tasks.length === 0)
+    return `rvow: ${id} has no task, so there is nothing proved to archive`
+  const open = change.tasks.filter((t) => t.state !== 'proved').map((t) => `${t.id} is ${t.state}`)
+  if (open.length > 0)
+    return `rvow: ${id} is not ready to archive: ${open.join(', ')}; prove them first`
+  if (change.pending.length > 0) {
+    return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`
+  }
+  return null
+}
+
+export const ACCEPT_DESCRIPTION =
+  'Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.'
+export const CONFIRM_DESCRIPTION =
+  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. The result tells you what happened, and when it failed it says why.'
+export const ACCEPT_SCHEMA = {
+  type: 'object',
+  required: ['change'],
+  properties: { change: { type: 'string', pattern: '^CHG-[a-z0-9]+$' } },
+  additionalProperties: false,
+}
+export const CONFIRM_SCHEMA = {
+  type: 'object',
+  properties: { decision: { type: 'string', enum: ['accept', 'reject'] } },
+  additionalProperties: false,
+}
+
+/** What a failed command tells the agent inside a tool result: the command and its own words. */
+export function failedText(argv: string[], out: string): string {
+  return `rvow ${argv.join(' ')} failed:\n${out
+    .split('\n')
+    .filter((l) => l.trim())
+    .slice(0, 12)
+    .join('\n')}`
+}
+
+/** What each yolo tier changes, as the user reads it in the dialog and the model reads it in the tool text. */
+export const YOLO_TIERS = {
+  audit: 'edits go through before the plan is accepted or outside a task, and are only counted',
+  auto: 'also lets the agent run rvow accept and rvow confirm',
+  bypass: 'every hook only audits and a stop is never held back',
+} as const
+
+export const YOLO_DESCRIPTION = [
+  "Show or change rvow's yolo mode, which relaxes the hooks for a while. Call it with no tier to see what is on.",
+  'A tier needs the user to allow it in a dialog, and the user may refuse.',
+  `audit: ${YOLO_TIERS.audit}.`,
+  `auto: ${YOLO_TIERS.auto}.`,
+  `bypass: ${YOLO_TIERS.bypass}.`,
+  'off ends it at once and needs no dialog. A tier ends by itself after 2 hours, or after `for` (such as 30m or 4h, at most 24h).',
+  'The gate still checks everything at push, and tampering with the ledger, the enforcement files or the hidden checks stays denied below bypass.',
+  'Do not use it to get around one denial; run rvow block with a reason instead.',
+].join(' ')
+
+export const YOLO_SCHEMA = {
+  type: 'object',
+  properties: {
+    tier: { type: 'string', enum: ['audit', 'auto', 'bypass', 'off'] },
+    for: { type: 'string', pattern: '^[1-9][0-9]*[smh]$' },
+  },
+  additionalProperties: false,
+}
+
+/** The `rvow yolo` arguments for a tool call, or the reason that the call is refused. */
+export function yoloArgv(input: Record<string, unknown>): string[] | string {
+  const unknown = Object.keys(input).filter((k) => k !== 'tier' && k !== 'for')
+  if (unknown.length > 0)
+    return `rvow: unknown input ${unknown.join(', ')}; only tier and for are allowed`
+  const { tier, for: length } = input
+  if (tier === undefined) return length === undefined ? ['yolo'] : 'rvow: for needs a tier'
+  if (typeof tier !== 'string' || !['audit', 'auto', 'bypass', 'off'].includes(tier)) {
+    return 'rvow: tier must be audit, auto, bypass or off'
+  }
+  if (length === undefined) return ['yolo', tier]
+  if (tier === 'off') return 'rvow: off takes no length'
+  if (typeof length !== 'string' || !/^[1-9][0-9]*[smh]$/.test(length)) {
+    return 'rvow: for must look like 30m or 2h'
+  }
+  return ['yolo', tier, '--for', length]
+}
 export const EDIT_HINT = 'Edit the text each answer changes.'
 
 export type Asked = {

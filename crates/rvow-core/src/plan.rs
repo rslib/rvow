@@ -74,12 +74,94 @@ impl Report {
     }
 }
 
+/// A task whose `files:` match more than this many tracked files goes stale on most changes.
+const WIDE_FILES: usize = 40;
+
+/// A warning for each task whose scope covers a large part of the repository: its proof goes
+/// stale whenever any of those files changes, so the plan should name what the task changes.
+fn wide_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
+    let Ok(listing) = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]) else {
+        return Vec::new();
+    };
+    let files: Vec<&str> = listing.lines().collect();
+    tasks
+        .iter()
+        .filter_map(|t| {
+            let set = crate::fingerprint::globset(&t.files).ok()?;
+            let n = files.iter().filter(|f| set.is_match(f)).count();
+            (n > WIDE_FILES).then(|| {
+                let message =
+                    format!("{} covers {n} tracked files ({}); its proof goes stale when any of them changes", t.id, t.files.join(", "));
+                (change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::WideScope, t.line, message))
+            })
+        })
+        .collect()
+}
+
+/// Shell operators that make a verify command more than one program, so the
+/// single-program rules below do not apply.
+const OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", ">", "<", "`", "$(", "\\", "\n"];
+
+/// The whole verify command is a stub that runs no check: `true`, `:`, `exit 0`,
+/// one `echo` or one `test`.
+fn trivial_verify(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() || OPERATORS.iter().any(|op| cmd.contains(op)) {
+        return false;
+    }
+    let mut words = cmd.split_whitespace();
+    match words.next().unwrap_or("") {
+        "true" | ":" | "echo" | "test" | "[" => true,
+        "exit" => words.next() == Some("0") && words.next().is_none(),
+        _ => false,
+    }
+}
+
+/// The verify command runs a test runner whose output counts tests, so
+/// `baseline: pass` says more than "the command exited 0".
+fn counted_runner(cmd: &str) -> bool {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let pair = |a: &str, b: &str| words.windows(2).any(|w| w == [a, b]);
+    pair("cargo", "test") || pair("cargo", "nextest") || pair("go", "test") || words.contains(&"pytest") || words.contains(&"jest")
+}
+
+/// A warning for each task whose check proves nothing: a stub command, or a
+/// `baseline: pass` on a command with no counted test runner.
+fn weak_checks(tasks: &[Task]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for t in tasks {
+        let Some(cmd) = t.verify.as_deref() else {
+            continue;
+        };
+        let trivial = trivial_verify(cmd);
+        if !trivial && !(t.baseline_pass && !counted_runner(cmd)) {
+            continue;
+        }
+        let message = if trivial {
+            format!(
+                "{} has a trivial verify ({cmd}); replace it with the command that fails today, so the check cannot pass while the work is missing",
+                t.id
+            )
+        } else {
+            format!(
+                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest or go test",
+                t.id
+            )
+        };
+        out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::WeakVerify, t.line, message)));
+    }
+    out
+}
+
 fn report(change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
+    let mut findings = loaded.findings;
+    findings.extend(wide_scopes(top, &loaded.tasks));
+    findings.extend(weak_checks(&loaded.tasks));
     Report {
         missing: missing_programs(top, &loaded.tasks),
         questions: questions(&loaded.texts),
         no_tasks: loaded.tasks.is_empty(),
-        findings: loaded.findings,
+        findings,
         change,
     }
 }
@@ -199,5 +281,29 @@ mod tests {
         git(&repo, &["checkout", "-q", "-b", "other"]);
         assert!(check(&p, &repo, None).unwrap().is_empty());
         assert_eq!(check(&p, &repo, Some(&c.id.to_string())).unwrap().len(), 1);
+    }
+    #[test]
+    fn check_warns_about_a_scope_that_covers_much_of_the_repository() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for i in 0..WIDE_FILES + 5 {
+            std::fs::write(repo.join(format!("src/f{i}.txt")), "x").unwrap();
+        }
+        std::fs::write(repo.join("one.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "files"]);
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 Wide\n  verify: true\n  files: src/**\n- TSK-new2 Narrow\n  verify: true\n  files: one.txt\n",
+        )
+        .unwrap();
+        let r = &check(&p, &repo, None).unwrap()[0];
+        let wide: Vec<_> = r.findings.iter().filter(|(_, d)| d.rule == crate::diag::Rule::WideScope).collect();
+        assert_eq!(wide.len(), 1, "{:?}", r.findings);
+        assert!(wide[0].1.message.contains("src/**") && wide[0].1.message.contains("goes stale"), "{}", wide[0].1.message);
+        assert_eq!(wide[0].1.rule.severity(), crate::diag::Severity::Warning);
     }
 }

@@ -45,7 +45,10 @@ test("typed view and proof reject owner actions and open inputs", () => {
   }
   assert.throws(() => proofArgs({ task: "TSK-a", accept: true }));
   assert.throws(() => viewArgs({ target: "status", id: "CHG-a" }));
-  assert.deepEqual([...registered().keys()], ["rvow_view", "rvow_prove"]);
+  assert.deepEqual(
+    [...registered().keys()],
+    ["rvow_view", "rvow_prove", "rvow_accept", "rvow_archive", "rvow_confirm", "rvow_yolo"],
+  );
 });
 
 test("process execution passes literal argv with no shell", async () => {
@@ -115,7 +118,15 @@ test("installed folder loads every runtime module and named prompt exports", asy
   const start = events.get("session_start");
   assert.ok(start);
   start({}, { cwd: home, hasUI: false, sessionManager: { getEntries: () => [] } });
-  assert.deepEqual(tools.sort(), ["rvow_ask", "rvow_prove", "rvow_view"]);
+  assert.deepEqual(tools.sort(), [
+    "rvow_accept",
+    "rvow_archive",
+    "rvow_ask",
+    "rvow_confirm",
+    "rvow_prove",
+    "rvow_view",
+    "rvow_yolo",
+  ]);
   const prompts = await import(join(process.env.RVOW_TEST_INSTALLED, "..", "prompts.ts"));
   assert.match(prompts.refinePrompt([{ id: "CHG-a", title: "A" }]), /CHG-a/);
 });

@@ -20,15 +20,17 @@ use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
 use crate::stats::{self, Hook, Outcome, STATS_FILE};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
+use crate::yolo::{self, Tier, YOLO_FILE};
 
 mod rule;
 mod shell;
 mod stop_state;
-pub use rule::{Denial, Rule};
+mod streak;
+pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
 pub use shell::{bash_denial, bash_rule, script_denial, script_rule};
-use shell::{bash_enforcement_rule, bash_secret_rule};
+use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args};
 
 use rule::denial;
 
@@ -374,6 +376,9 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
             format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
         );
     }
+    if is(YOLO_FILE) {
+        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+    }
     if is(LEASE_FILE) {
         return denial(
             Rule::LeaseFile,
@@ -408,6 +413,27 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
     ))
 }
 
+/// Why a subagent that holds a lease must not run this `rvow prove`: it proves
+/// only the task leased to it, never another task or `--stale`.
+fn lease_prove_denial(project: &Project, cwd: &Path, agent_id: &str, cmd: &str) -> Result<Option<Denial>> {
+    let proves = prove_args(cmd);
+    if proves.is_empty() {
+        return Ok(None);
+    }
+    let Ok(home) = crate::store::home_dir() else { return Ok(None) };
+    let Some(lease) = lease::holder(project, &home, cwd, agent_id, crate::ledger::now_ms())? else {
+        return Ok(None);
+    };
+    let own = |args: &Vec<String>| matches!(args.as_slice(), [task] if !task.starts_with('-') && lease.task.starts_with(task.as_str()));
+    if proves.iter().all(own) {
+        return Ok(None);
+    }
+    Ok(denial(
+        Rule::LeaseScope,
+        format!("rvow prove from this agent covers only {task}, the task leased to it; run `rvow prove {task}`", task = lease.task),
+    ))
+}
+
 /// The rule and the reason that deny a tool call, or `None` to allow it.
 pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<Denial>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
@@ -419,13 +445,21 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
         let top = git::toplevel(&cwd).ok();
         let trust = top.as_deref().and_then(|t| signers_path(project, t));
-        return Ok(bash_rule(c)
+        let found = bash_rule(c)
             .or_else(|| script_rule(c, &cwd))
             .or_else(|| bash_secret_rule(c, &secret_paths()))
-            .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref()))));
+            .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
+        return match (found, input.get("agent_id").and_then(Value::as_str)) {
+            (None, Some(agent)) => lease_prove_denial(project, &cwd, agent, c),
+            (found, _) => Ok(found),
+        };
     }
     let files = file_args(&args);
-    if let Some(found) = files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| cache_denial(project, &cwd, f))) {
+    // The hidden checks are closed to every tool. The stats, lease, yolo and cache files are only closed to writes.
+    let writer = writes_files(tool);
+    if let Some(found) =
+        files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten()))
+    {
         return Ok(Some(found));
     }
     if !writes_files(tool) {
@@ -446,19 +480,55 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
     Ok(None)
 }
 
-/// Claude Code `PreToolUse`: a deny response, or `None` to allow.
+/// Claude Code `PreToolUse`: a deny or ask response, or `None` to allow.
+/// A rule in audit mode lets the call through and is only counted. After
+/// `BACKSTOP` denials in a row the next one is a question for the user.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
-    let denial = pre_tool_use_denial(project, input)?;
-    if let Some(d) = &denial {
-        stats::record(project, Hook::PreToolUse, Outcome::Deny, Some(d.rule), input.get("session_id").and_then(Value::as_str));
+    let session = input.get("session_id").and_then(Value::as_str);
+    let tier = yolo::active(project).map(|on| on.tier);
+    let found = pre_tool_use_denial(project, input)?;
+    // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
+    let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
+    let mode = |d: &Denial| {
+        if tier >= Some(Tier::Auto) && d.rule == Rule::OwnerCommand && command.is_some_and(only_accept_or_confirm) {
+            Mode::Audit
+        } else {
+            d.rule.mode_in(tier)
+        }
+    };
+    if let Some(d) = found.as_ref().filter(|d| mode(d) == Mode::Audit) {
+        stats::record(project, Hook::PreToolUse, Outcome::Audit, Some(d.rule), session);
     }
-    Ok(denial.map(|d| {
-        json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": format!("rvow: {}", d.reason),
-        }})
-    }))
+    let Some(d) = found.filter(|d| mode(d) == Mode::Enforce) else {
+        if let Some(s) = session {
+            streak::reset(project, s);
+        }
+        return Ok(None);
+    };
+    let asked = session.is_some_and(|s| streak::add(project, s) > streak::BACKSTOP);
+    if asked && let Some(s) = session {
+        streak::reset(project, s);
+    }
+    let (outcome, decision, reason) = if asked {
+        (
+            Outcome::Ask,
+            "ask",
+            format!(
+                "rvow: this session was denied {} times in a row. Allow this call? The rule is {}: {}",
+                streak::BACKSTOP,
+                d.rule.name(),
+                d.reason
+            ),
+        )
+    } else {
+        (Outcome::Deny, "deny", format!("rvow: {}", d.reason))
+    };
+    stats::record(project, Hook::PreToolUse, outcome, Some(d.rule), session);
+    Ok(Some(json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason,
+    }})))
 }
 
 /// The Claude mod's `agent.spawn`: binds the new subagent to the lease that its
@@ -483,7 +553,11 @@ pub fn claude_lease_end(project: &Project, input: &Value) -> Result<Option<Value
 /// branch has no active change.
 pub fn claude_session_start(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let text = brief::brief(project, home, &cwd)?;
+    let mut text = brief::brief(project, home, &cwd)?;
+    if let Some(on) = yolo::active(project) {
+        let warning = format!("rvow: yolo {} is on and ends by itself; the hooks relax, the gate still checks at push", on.tier.name());
+        text = brief::with_warning(&text, &warning);
+    }
     Ok((!text.is_empty()).then(|| {
         json!({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -585,6 +659,15 @@ fn changed_since_vow(top: &Path, c: &proof::Active) -> Option<Vec<String>> {
 /// One line for a status bar: proved tasks, drift and pending amendments of
 /// the branch's active changes, or `None` when the branch has none.
 pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
+    let line = status_line_inner(project, home, cwd)?;
+    Ok(match (line, yolo::active(project)) {
+        (line, None) => line,
+        (Some(line), Some(on)) => Some(format!("{line} [yolo {}]", on.tier.name())),
+        (None, Some(on)) => Some(format!("rvow [yolo {}]", on.tier.name())),
+    })
+}
+
+fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
     let top = git::toplevel(cwd)?;
     let Some(branch) = git::branch(&top)? else {
         return Ok(None);
@@ -645,6 +728,9 @@ fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option
     if input.get("agent_id").is_some() || flag("stop_hook_active") {
         return Ok(None);
     }
+    if yolo::active(project).is_some_and(|on| on.tier == Tier::Bypass) {
+        return Ok(None);
+    }
     let session = input.get("session_id").and_then(Value::as_str);
     let Some(reason) = stop_reason(project, home, &cwd)? else {
         if let Some(s) = session {
@@ -667,7 +753,7 @@ mod tests {
     fn a_literal_glob_matches_a_casewise_edited_path_on_macos() {
         // `key` lowercases the edited path on macOS; the scope must do the same
         // to the vowed globs or a literal glob like SKILL.md.tmpl never matches.
-        let rel = "skills/rvow/skill.md.tmpl";
+        let rel = &key(Path::new("skills/rvow/SKILL.md.tmpl"));
         let globs = if cfg!(target_os = "macos") {
             vec!["skills/rvow/SKILL.md.tmpl".to_lowercase()]
         } else {
@@ -719,7 +805,7 @@ mod tests {
             "git -c core.hooksPath=/dev/null push",
             "git config core.hooksPath /tmp/none",
             "echo '{}' >> ~/.local/share/rvow/x/active/c/ledger.jsonl",
-            "cat ids.jsonl",
+            "echo x >> ids.jsonl",
             "rm .git/hooks/pre-push",
             "rvow answer CHG-x:proposal.md:3 yes --via dialog",
             "rvow answer CHG-x:proposal.md:3 yes --via=dialog",
@@ -817,13 +903,69 @@ mod tests {
         }
     }
 
+    /// What the rules find for an edit, whatever the rule's mode does with it.
     fn edit(p: &Project, repo: &Path, file: &str) -> Option<Value> {
         let input = json!({
             "cwd": repo.to_str().unwrap(),
             "tool_name": "Edit",
             "tool_input": {"file_path": file},
         });
+        pre_tool_use_denial(p, &input).unwrap().map(
+            |d| json!({"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": format!("rvow: {}", d.reason)}}),
+        )
+    }
+
+    fn call(p: &Project, repo: &Path, file: &str, session: &str) -> Option<Value> {
+        let input = json!({
+            "cwd": repo.to_str().unwrap(),
+            "session_id": session,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": file},
+        });
         claude_pre_tool_use(p, &input).unwrap()
+    }
+
+    fn decision(out: &Option<Value>) -> Option<&str> {
+        out.as_ref().and_then(|v| v["hookSpecificOutput"]["permissionDecision"].as_str())
+    }
+
+    fn project_with_a_task() -> (crate::git::testrepo::TempDir, Project, PathBuf) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+        let home = tmp.0.join("home");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(c.path.join("tasks.md"), "- TSK-new1 T\n  verify: false\n  files: src/**, tests/**\n").unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(&p, prepared).unwrap();
+        (tmp, p, repo)
+    }
+
+    #[test]
+    fn a_protected_test_and_a_stray_file_are_audited_not_denied() {
+        let (_tmp, p, repo) = project_with_a_task();
+        assert_eq!(call(&p, &repo, "tests/t.sh", "s1"), None);
+        assert_eq!(call(&p, &repo, "docs/readme.md", "s1"), None);
+        let c = stats::counts(&p, 1, crate::ledger::now_ms());
+        assert_eq!(c.audits.get("protected-test"), Some(&1));
+        assert_eq!(c.audits.get("outside-scope"), Some(&1));
+        assert!(c.denials.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn the_fourth_denial_in_a_row_asks_the_user_and_an_allowed_call_ends_the_streak() {
+        let (_tmp, p, repo) = project_with_a_task();
+        let denied = || call(&p, &repo, ".claude/settings.json", "s2");
+        assert_eq!(decision(&denied()), Some("deny"));
+        assert_eq!(decision(&denied()), Some("deny"));
+        assert_eq!(decision(&denied()), Some("deny"));
+        assert_eq!(decision(&denied()), Some("ask"));
+        assert_eq!(decision(&denied()), Some("deny"), "the streak starts again after a question");
+        assert_eq!(call(&p, &repo, "src/lib.rs", "s2"), None);
+        assert_eq!(decision(&denied()), Some("deny"));
+        assert_eq!(stats::counts(&p, 1, crate::ledger::now_ms()).asks, 1);
     }
 
     #[test]
@@ -967,7 +1109,15 @@ mod tests {
         let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let tasks = dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
+        // A title change is free drift: it asks for a new proof and not for the user's confirm.
         std::fs::write(&tasks, text.replace("Write ok", "Write it")).unwrap();
+        let out = claude_stop(&p, &home, &input).unwrap().unwrap();
+        let reason = out["reason"].as_str().unwrap();
+        assert!(reason.contains("stale proofs") && !reason.contains("amend"), "{out}");
+        std::fs::write(&tasks, &text).unwrap();
+        let proposal = dir.join("proposal.md");
+        let text = std::fs::read_to_string(&proposal).unwrap();
+        std::fs::write(&proposal, format!("{text}\nOne more thing.\n")).unwrap();
         let out = claude_stop(&p, &home, &input).unwrap().unwrap();
         assert!(out["reason"].as_str().unwrap().contains("amend"), "{out}");
 
@@ -976,7 +1126,7 @@ mod tests {
 
         assert_eq!(
             status_line(&p, &home, &repo).unwrap().unwrap(),
-            format!("rvow {}: 0/1 proved, 1 drift, 1 pending", dir.file_name().unwrap().to_str().unwrap().get(..10).unwrap())
+            format!("rvow {}: 1/1 proved, 1 drift, 1 pending", dir.file_name().unwrap().to_str().unwrap().get(..10).unwrap())
         );
         let start = claude_session_start(&p, &home, &input).unwrap().unwrap();
         assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("tasks:"));

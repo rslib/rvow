@@ -17,6 +17,17 @@ Each task stores its own verify command.
 The agent never reports a pass.
 rvow observes it.
 
+## What the review shows
+
+`rvow review <change>` prints the plan and the accept checklist, and it runs no verify command.
+Each task appears with its `verify:` command and its `files:`, and with its `baseline:` and `mutants:` when the task sets them, so the person who accepts the plan sees the check and not only the title.
+
+Above the checklist, the review warns about a weak check.
+A check is weak when the whole verify command is a stub that proves nothing, such as `true`, `:`, `exit 0`, one `echo` or one `test -f`, or when a task sets `baseline: pass` on a command that runs no counted test runner.
+The warning code is `weak-verify`.
+`rvow check` prints the same warnings.
+A warning never blocks, so a change whose only finding is a weak check is still ready to accept.
+
 ## Why the checks live outside the model
 
 A model that writes both the code and the claim that the code works grades its own work.
@@ -71,14 +82,17 @@ It fails on unproved tasks, failed proofs, pending amendments, blocking drift an
 
 `rvow gate --rerun` goes further.
 It runs every verify command again in a clean worktree of HEAD, so a proof that depended on an uncommitted file or a local state fails.
-The rerun also covers tasks of archived changes on the branch, so a later change cannot break what an earlier change proved.
+The rerun skips a task whose proof is current and whose files are all committed: it was proved on this very content, so the state "proved" is what the push trusts.
+It runs the tasks that are not proved, or whose files changed since the proof.
+A task of an archived change is never rerun, because archiving needs every task proved and is a decision of the user.
+Set `rerun_proven = true` to rerun proven tasks as well.
 `rvow gate --out` writes the rerun results to a file, and `rvow ingest` adds them to the ledger of a home store.
 
 A rerun skips a task when an earlier clean pass has the same key.
 The key holds the content of the task's files at HEAD, the task and its requirements, the environment, the tools you list and the keys of the tasks it depends on.
 A rebase or an amend does not change the key, but a changed byte in scope does.
 The gate writes a pass only when the task ran tests, and signs each entry with a key that agents cannot read.
-`rvow gate --rerun --no-cache` runs every task, and so does `--out`.
+`rvow gate --rerun --no-cache` runs every task that is active on the branch, and so does `--out`.
 A scoped `setup` or `checks` entry runs only when a task that runs or a changed file matches it, so a Python change does not rebuild the C++ code.
 When the cache answers every task, the gate makes no worktree and runs no `setup`.
 [docs/settings.md](settings.md) lists the keys that tune the cache.
@@ -89,19 +103,66 @@ A subagent meets the same rules as the main agent, but it does not know which ta
 `rvow delegate <task>` records a lease for one task and prints a short brief.
 The first line of the brief is `lease: <task id>`, so put the brief at the start of the subagent's prompt.
 The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
+In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from the first prompt of that session and binds the session id.
 From then on the hook denies that subagent's edits of files outside the task's `files:`, and the reason names the task.
+It also denies an `rvow prove` of any other task or `rvow prove --stale`, so one subagent cannot prove another's work.
 A lease ends when its task is proved or blocked, when the subagent stops or after 4 hours.
 The lease file is closed to agents, like the gate cache.
 
 Two limits stay.
 A subagent without the mod is unbound, so it meets the usual rules.
-The hook sees files and not what a shell command writes, so a lease scopes the edit tools only.
+The hook sees files and not what a shell command writes, so a lease scopes the edit tools and `rvow prove` only.
+
+## What a hook denies and what it only counts
+
+A rule has a mode.
+Tampering is enforced: the ledger, the enforcement files, the hidden checks, the git hooks, the cache, lease and stats files, `rvow accept` and `rvow confirm`, and edits of archived changes and living specs.
+A lease that you chose with `rvow delegate` and an edit before the plan is accepted are enforced too.
+An edit outside the files of every task and an edit of a protected test are audited.
+The call goes through, `rvow stats` counts it, and the gate still blocks the branch: the first as a file outside every task scope and the second as weak drift that you must confirm.
+
+After 3 denials in a row in one session, the next one is a question to you instead of a denial.
+Any call that goes through ends the streak.
+Without a session id or without a person to ask, the call stays denied.
+
+## Yolo: relax the hooks for a while
+
+`! rvow yolo <tier> [--for 2h]` relaxes the hooks for a while. In the Claude mod and in pi, type `/rvow-yolo <tier> [30m]` instead, and the agent is told once.
+The default length is 2 hours and the longest is 24.
+It ends by itself, and `! rvow yolo off` ends it at once.
+Only you can switch it: an agent cannot run `rvow yolo` in a shell or write its file, in any tier.
+
+| Tier | What changes |
+|------|--------------|
+| `audit` | An edit before the plan is accepted, and a subagent edit outside its lease, are audited and not denied. Tampering stays denied. |
+| `auto` | Also lets the agent run `rvow accept` and `rvow confirm`. `rvow ingest` and a faked dialog answer stay denied. |
+| `bypass` | Every hook only audits, and a stop is never held back. |
+
+The status line shows `[yolo <tier>]` and the brief says so once.
+`rvow stats` counts what each tier let through.
+The gate is not relaxed: it still checks proofs, drift and scope at push.
+
+## Tools for the agent
+
+A slash command is for you, and a tool is for the agent.
+Both the Claude mod and the pi extension give the agent these tools:
+
+- `rvow_accept` asks you to accept a ready plan. You read the review and the checklist in a dialog, and nothing is accepted unless you say yes.
+- `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
+- `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved and no plan edit is pending, and it names what is missing otherwise. An archived change is trusted, and a push never reruns its tasks.
+- `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
+- `rvow_ask`, `rvow_view` and `rvow_prove` read the open questions, the dashboard and prove a task.
+
+The tool runs the command itself, so the hook that denies `rvow accept` in a shell does not stand in its way.
+Your answer in the dialog is the decision.
+When the command fails, the tool result holds its own words, such as `code: not-ready`, so the agent knows why.
+When you run a decision yourself, with `/rvow-accept` or the dock, and it fails, the agent gets a message that names the command and the reason.
 
 ## Measuring the hooks
 
 The hooks should help and stay quiet, so rvow counts what they do.
 Each denial and each stop is one line in `hook-stats.jsonl` in the project folder.
-A line holds the time, the hook, the outcome, the session id and, for a denial, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
+A line holds the time, the hook, the outcome (deny, audit, ask, block or pass), the session id and, for a denial, an audit or an ask, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
 It never holds a command or a path.
 `rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops.
 Use it to find the rule that fires most before you change any rule.
@@ -154,6 +215,39 @@ It keeps history and flags tasks that lack a verify command, and it never writes
 The export is one way and never overwrites: it refuses a target that already holds an `openspec` folder, and `--dry-run` lists the files without writing them.
 Each requirement keeps its rvow id in an HTML comment, and the report names what the tree loses, such as ledgers, proofs and vow hashes.
 A re-import reads the text back exactly, and it does not read the id comment or the deprecated marker, so a deprecated requirement comes back as an ordinary one with a new id.
+
+## Known limits
+
+These are accepted for now.
+Each one is caught later by the gate, or needs a person.
+
+- **The accept and confirm deny reads text.**
+  It follows `sh -c`, `eval`, wrappers, variables and scripts on disk.
+  It does not follow a name built at run time, a git alias or a script written in the same command.
+  `require_signature` is the real boundary, and it is off by default.
+- **Hardware signing keys are untested.**
+  The tests sign with a software key. A hardware key (`ed25519-sk`) has not been used yet.
+- **A timeout stops rvow and not its child.**
+  The pi tool `rvow_prove` ends the rvow process after its timeout, and the verify command that rvow started can keep running.
+- **`config.toml` has no edit deny.**
+  A change to it is caught as weaken drift, in repository mode and in the global file.
+- **A subagent can edit a protected test block.**
+  The hook sees files and not the test blocks inside a Rust file, so the edit is found afterwards as weaken drift.
+- **A lease needs the rvow hooks in the subagent.**
+  A Claude subagent is bound by the mod, and a pi subagent binds itself when its session loads the rvow extension, which is the default of `pi-subagents`.
+  A subagent that opts out (`extensions: false` or `isolated: true` in pi, or no mod in Claude Code) meets no rvow hook at all, so the lease does not apply and only the gate checks its work.
+  The hook also judges only the edit tools and `rvow prove`, since it sees files and not what a shell command writes.
+- **Session events are recorded from the docs and this session.**
+  Claude Code names five `SessionStart` sources: `startup`, `resume`, `clear`, `compact` and `fork` (a fork reported `resume` before v2.1.214).
+  The mod resets its brief state on `session.start`, which covers startup, resume, clear and fork, and on a `session.compact` that stands, so the next prompt carries the brief again after the summary replaced it.
+  A skipped, `precompute` or subagent compaction leaves the brief alone.
+  The Claude Code docs say that edits of settings hooks are normally picked up by a file watcher, and they do not say that hooks are read once at start.
+  The mod is a plugin and not a settings hook, so `/reload-plugins` is what loads a new install.
+- **A subagent's tool calls reach the same hooks.**
+  `PreToolUse` fires for them with `agent_id` and `agent_type`, which is how a lease binds the subagent.
+- **The shell hook reads text, and it reads in two ways.**
+  A command that only reads the ledger, the ids, the stats, lease, yolo or cache file is allowed, and so is a command that only prints text that names the hidden checks, such as an `echo` or a commit message.
+  A command that can write those files, or that reads the hidden checks, is denied, even when the name sits inside a string passed to an interpreter such as `python`, because the hook cannot tell a string from a path there.
 
 ## What we measured
 
