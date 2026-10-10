@@ -77,6 +77,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Keep a tampering denial a denial after 3 denials in a row, deny a shell glob that expands to a protected file, and hold the stop for each unproved task that no pending amendment names.
 - Fix `rvow install` leaving the rvow plugin disabled when it was installed but turned off.
 - Fix `rvow check` to report a plan with no tasks as not ready, and the brief to ask for `rvow check` instead of accept.
 - Fix the planning brief to print only the counters that are not zero.

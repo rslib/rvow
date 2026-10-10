@@ -26,6 +26,9 @@ pub struct Pending {
     pub reason: String,
     pub items: Vec<Value>,
     pub snapshot: String,
+    /// The task ids the amendment's items name, or `None` for an amendment
+    /// recorded before this key existed. `None` releases the whole change.
+    pub tasks: Option<Vec<String>>,
 }
 
 fn decided(change: &Active, amendment: &str) -> bool {
@@ -54,6 +57,11 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
                 reason: e.data.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
                 items: e.data.get("items").and_then(Value::as_array).cloned().unwrap_or_default(),
                 snapshot: sha256_hex(snapshot.to_string().as_bytes()),
+                tasks: e
+                    .data
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect()),
             });
         }
     }
@@ -133,10 +141,18 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                 items
             }
         };
+        let tasks: Vec<String> = c
+            .loaded
+            .tasks
+            .iter()
+            .map(|t| t.id.to_string())
+            .filter(|id| items.iter().any(|i| i.what.starts_with(&format!("{id} "))))
+            .collect();
         let id = registry::mint(project, &lock, IdKind::Amd, Some(&c.dir.id))?;
         data.insert("amendment".into(), id.to_string().into());
         data.insert("reason".into(), reason.trim().into());
         data.insert("items".into(), json!(items));
+        data.insert("tasks".into(), json!(tasks));
         ledger::append(&c.dir.path.join(LEDGER), &lock, Kind::Amend, data)?;
         out.push(Amended { id, change: c.dir.id.clone(), items });
     }

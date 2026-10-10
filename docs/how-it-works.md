@@ -64,6 +64,11 @@ An agent that could approve its own amendment would make drift detection a forma
 The agent can do two things instead.
 It can amend and wait, or it can run `rvow block` when a task cannot pass as written.
 
+A pending amendment also decides the Stop hook.
+The stop is held while an active change has an unproved or failed task, unless a pending amendment of that change names the task.
+An amendment that only changed `design.md` releases nothing, while an amendment whose items name a task releases that task.
+An amendment recorded before rvow wrote task names has no `tasks` key and releases its whole change.
+
 ## The proof and what stale means
 
 A proof ties a passing run to what the run saw: the task, the requirements it covers, the content of the files in scope and the recorded environment.
@@ -122,6 +127,7 @@ An edit outside the files of every task and an edit of a protected test are audi
 The call goes through, `rvow stats` counts it, and the gate still blocks the branch: the first as a file outside every task scope and the second as weak drift that you must confirm.
 
 After 3 denials in a row in one session, the next one is a question to you instead of a denial.
+A tampering denial is never an ask, whatever the streak: it stays a denial and keeps the streak for the next non-tampering denial.
 Any call that goes through ends the streak.
 Without a session id or without a person to ask, the call stays denied.
 
@@ -248,6 +254,7 @@ Each one is caught later by the gate, or needs a person.
 - **The shell hook reads text, and it reads in two ways.**
   A command that only reads the ledger, the ids, the stats, lease, yolo or cache file is allowed, and so is a command that only prints text that names the hidden checks, such as an `echo` or a commit message.
   A command that can write those files, or that reads the hidden checks, is denied, even when the name sits inside a string passed to an interpreter such as `python`, because the hook cannot tell a string from a path there.
+  A shell word that holds `*`, `?` or `[` is expanded from the call's working folder, and a glob that expands to a protected file is denied under that file's rule; a glob that matches nothing is allowed.
 
 ## What we measured
 

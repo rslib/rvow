@@ -590,6 +590,89 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
     bash_rule(cmd).map(|d| d.reason)
 }
 
+/// How many paths one command's glob words may expand to, so a pattern such as
+/// `**` cannot walk a whole tree.
+const GLOB_LIMIT: usize = 4096;
+
+fn has_glob(word: &str) -> bool {
+    word.contains(['*', '?', '['])
+}
+
+/// The filesystem paths that the glob words of `cmd` expand to from `cwd`.
+/// A word without `*`, `?` or `[` is not expanded, and a path that does not
+/// exist is dropped, so a pattern that matches nothing yields nothing.
+pub(super) fn glob_paths(cmd: &str, cwd: &Path) -> Vec<PathBuf> {
+    // A name the command sets itself wins; any other `$NAME` or `${NAME}` falls back to
+    // the process environment, as a shell does. `parse` clones this map before it inserts
+    // the command's own assignments.
+    let env: HashMap<String, String> =
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    let home = env.get("HOME").cloned();
+    let sh = parse(cmd, 0, &env);
+    let mut out = Vec::new();
+    for word in &sh.words {
+        if !has_glob(word) {
+            continue;
+        }
+        let word = expand_tilde(word, home.as_deref());
+        let path = Path::new(&word);
+        let (base, rest) = match path.strip_prefix("/") {
+            Ok(rest) => (PathBuf::from("/"), rest),
+            Err(_) => (cwd.to_path_buf(), path),
+        };
+        let components: Vec<String> = rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        expand(base, &components, &mut out);
+        if out.len() >= GLOB_LIMIT {
+            break;
+        }
+    }
+    out.retain(|p| p.exists());
+    out
+}
+
+/// A leading `~` or `~/x` as a shell writes it, with HOME from the environment.
+fn expand_tilde(word: &str, home: Option<&str>) -> String {
+    match home {
+        Some(h) if word == "~" => h.to_string(),
+        Some(h) => word.strip_prefix("~/").map_or_else(|| word.to_string(), |rest| format!("{h}/{rest}")),
+        None => word.to_string(),
+    }
+}
+
+fn expand(prefix: PathBuf, components: &[String], out: &mut Vec<PathBuf>) {
+    if out.len() >= GLOB_LIMIT {
+        return;
+    }
+    let Some((first, rest)) = components.split_first() else {
+        out.push(prefix);
+        return;
+    };
+    match first.as_str() {
+        "" | "." => expand(prefix, rest, out),
+        ".." => expand(prefix.parent().map(Path::to_path_buf).unwrap_or(prefix), rest, out),
+        _ if has_glob(first) => {
+            let Ok(glob) = globset::Glob::new(first) else {
+                return;
+            };
+            let matcher = glob.compile_matcher();
+            let Ok(entries) = std::fs::read_dir(&prefix) else {
+                return;
+            };
+            let mut names: Vec<String> = entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+            names.sort();
+            for name in names {
+                if out.len() >= GLOB_LIMIT {
+                    return;
+                }
+                if matcher.is_match(&name) {
+                    expand(prefix.join(&name), rest, out);
+                }
+            }
+        }
+        _ => expand(prefix.join(first), rest, out),
+    }
+}
+
 /// Why running a script that `cmd` names must not happen: the file holds an
 /// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
 /// same command writes first cannot be read yet; that stays a known gap.
