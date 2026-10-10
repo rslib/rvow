@@ -30,7 +30,7 @@ pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
 pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
-use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args};
+use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
 
 use rule::denial;
 
@@ -370,6 +370,7 @@ fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) 
     let secrets = secret_paths();
     let enforcement = enforcement_paths(trust);
     let hooks = top.map(|t| t.join(".git/hooks"));
+    let read_only = reads_only(cmd);
     for path in shell::glob_paths(cmd, cwd) {
         let real = key(&real_path(&path, cwd));
         let under = |p: &Path| {
@@ -399,6 +400,9 @@ fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) 
                 Rule::GitHooks,
                 ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into(),
             );
+        }
+        if read_only {
+            continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name == LEDGER || name == IDS_FILE {

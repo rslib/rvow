@@ -494,6 +494,14 @@ fn only_reads(invs: &[&[String]], cmd: &str) -> bool {
     !invs.is_empty() && !writes_files(invs, cmd) && invs.iter().all(|inv| READERS.contains(&base_name(&inv[0])))
 }
 
+/// True when the whole `cmd` only reads, so a glob that expands to a file
+/// rvow trusts may still run.
+pub(super) fn reads_only(cmd: &str) -> bool {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
+    only_reads(&invs, cmd)
+}
+
 /// True when the line only prints text: `echo`, `printf`, or a `git commit` or `git tag` message.
 fn only_text(invs: &[&[String]], cmd: &str) -> bool {
     !invs.is_empty()
@@ -782,9 +790,68 @@ fn redirect_targets(cmd: &str) -> Vec<String> {
     found
 }
 
+/// True when `sort` writes a file: `-o FILE`, `-oFILE`, or `--output` or any
+/// unique prefix of it (`--o`, `--ou`, ...) with `=FILE` or a following word.
+fn writes_sort_output(args: &[String]) -> bool {
+    args.iter().any(|w| {
+        if w.starts_with("--") {
+            w.split('=').next().is_some_and(|flag| flag.len() >= 3 && "--output".starts_with(flag))
+        } else {
+            w.starts_with('-') && w[1..].contains('o')
+        }
+    })
+}
+
+/// Short `uniq` flags that take a value, and their long forms.
+const UNIQ_VALUE_FLAGS: &[&str] = &["-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"];
+
+/// True when `uniq` writes a file: a second positional argument is its output.
+fn writes_uniq_output(args: &[String]) -> bool {
+    let mut positionals = 0;
+    let mut skip_next = false;
+    let mut ended = false;
+    for w in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if ended {
+            positionals += 1;
+        } else if w == "--" {
+            ended = true;
+        } else if w.starts_with("--") {
+            if !w.contains('=') && UNIQ_VALUE_FLAGS.contains(&w.as_str()) {
+                skip_next = true;
+            }
+        } else if w.starts_with('-') && w.len() > 1 {
+            // A value flag with nothing attached takes the next word;
+            // the rest of the word is its attached value.
+            let mut chars = w[1..].chars().peekable();
+            while let Some(c) = chars.next() {
+                if matches!(c, 'f' | 's' | 'w') {
+                    skip_next = chars.peek().is_none();
+                    break;
+                }
+            }
+        } else {
+            positionals += 1;
+        }
+        if positionals >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
 /// A writer such as `rm` or `sed -i`.
 fn is_writer(inv: &[String]) -> bool {
     let name = base_name(&inv[0]);
+    if name == "sort" {
+        return writes_sort_output(&inv[1..]);
+    }
+    if name == "uniq" {
+        return writes_uniq_output(&inv[1..]);
+    }
     WRITERS.contains(&name)
         && (name != "sed" || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
 }

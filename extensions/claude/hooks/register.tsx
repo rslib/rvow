@@ -319,6 +319,35 @@ async function decide($: EngineInterface, listing: string, verb: 'accept' | 'rej
   tellAgentOfFailure($, ['confirm', `--${verb}`, '--all', digest], r)
 }
 
+/** `/rvow-confirm` with no argument or `all`: list the pending plan edits and ask once. */
+async function confirmDialog($: EngineInterface, origin: { kind: string }) {
+  if (origin.kind !== 'composer')
+    return { text: '/rvow-confirm runs only when you type it yourself.' }
+  const listing = await rvow($, ['confirm'])
+  await refresh($)
+  if (listing.tone === 'fail') return { text: listing.text }
+  const digest = /^digest (\S+)$/m.exec(listing.text)?.[1]
+  if (!digest) return { text: listing.text }
+  const answer = await $.ui
+    .ask(`${listing.text}\n\nAccept all, reject all, or decide later?`, [
+      'Accept all',
+      'Reject all',
+      'Later',
+    ])
+    .catch(() => 'Later')
+  if (answer !== 'Accept all' && answer !== 'Reject all') {
+    return { text: 'The plan edits are still pending.' }
+  }
+  const argv = ['confirm', answer === 'Accept all' ? '--accept' : '--reject', '--all', digest]
+  const done = await rvow($, argv)
+  await refresh($)
+  const prompt = done.tone === 'ok' ? decisionPrompt(argv, done.text) : null
+  // The engine refuses a submit made while this hook still holds the command.
+  if (prompt) later($, async () => queue($, prompt))
+  tellAgentOfFailure($, argv, done)
+  return { text: done.text }
+}
+
 async function userOnly(
   $: EngineInterface,
   origin: { kind: string },
@@ -633,11 +662,13 @@ export const register: Register = (on) => {
 
   on('command.run', { command: 'rvow-confirm' }, async ($, e) => {
     const [verb, ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
-    const argv =
-      verb === 'accept' || verb === 'reject'
-        ? ['confirm', `--${verb}`, ...rest]
-        : ['confirm', ...(verb ? [verb, ...rest] : [])]
-    return userOnly($, e.origin, 'rvow-confirm', argv)
+    if (verb === 'accept' || verb === 'reject') {
+      return userOnly($, e.origin, 'rvow-confirm', ['confirm', `--${verb}`, ...rest])
+    }
+    if (verb !== undefined && verb !== 'all') {
+      return userOnly($, e.origin, 'rvow-confirm', ['confirm', verb, ...rest])
+    }
+    return confirmDialog($, e.origin)
   })
 
   on('command.run', { command: 'rvow-accept' }, async ($, e) => {

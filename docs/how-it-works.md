@@ -58,6 +58,11 @@ The agent edits the plan files and runs `rvow amend` with a reason.
 That records the edit as an amendment.
 The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
+In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.
+It then decides everything with the digest of the listing that was read, so an edit that arrived later waits for the next round.
+`/rvow-confirm accept <id>` and `/rvow-confirm reject <id>` decide those ids with no dialog.
+A confirm that names an amendment that already has a decision fails with the code `decided` and names the amendment and its decision, such as `AMD-x is already accepted`.
+An unknown id keeps the code `amendment`.
 
 Confirm belongs to the user for one reason.
 An agent that could approve its own amendment would make drift detection a formality.
@@ -282,6 +287,8 @@ Each one is caught later by the gate, or needs a person.
   A command that only reads the ledger, the ids, the stats, lease, yolo or cache file is allowed, and so is a command that only prints text that names the hidden checks, such as an `echo` or a commit message.
   A command that can write those files, or that reads the hidden checks, is denied, even when the name sits inside a string passed to an interpreter such as `python`, because the hook cannot tell a string from a path there.
   A shell word that holds `*`, `?` or `[` is expanded from the call's working folder, and a glob that expands to a protected file is denied under that file's rule; a glob that matches nothing is allowed.
+  A command that only reads through such a glob is allowed, since a read changes nothing that rvow trusts.
+  A glob that reaches the hidden checks stays denied, also for a read.
 
 ## What we measured
 

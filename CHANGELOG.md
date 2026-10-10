@@ -23,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Make the Stop hook give each reason once per session, and let subagent stops and stops during a rebase, merge or cherry-pick pass.
 - Let the hook allow read-only shell commands on the enforcement files and the git hooks folder, and text that only names a protected action.
 - Shorten the plan-changed message to three items and a count.
+- Name the amendment and its decision when a confirm names one that already has a decision, such as `AMD-x is already accepted`, with the code `decided`.
+  An unknown id keeps the code `amendment`.
+- Allow a shell command that only reads through a glob that expands to the ledger, the ids and the stats, lease, yolo and cache files.
+  A write through such a glob stays denied, and a glob that reaches the hidden checks stays denied, also for a read.
 
 ### Added
 
@@ -78,6 +82,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   Both respond to the mouse, and `/rvow-dock` shows or hides the dock.
 - Add a `code:` line to every error that rvow prints for an agent, so a script can match the failure.
 - Add the `context` and `rules` settings to add project facts and per-artifact rules to `rvow guide`, and the `interview_cap` setting to limit the questions of a clarify round.
+- Open one dialog for `/rvow-confirm` with no argument or `/rvow-confirm all` in the Claude mod to accept all pending plan edits, reject them all or decide later.
 - Add `rvow hook <event>` as the neutral form of the harness hook.
   The old form `rvow hook claude <event>` still works.
 - Add opt-in hidden checks and mutation runs to harden a task's proof, with a `mutants:` field in a task.

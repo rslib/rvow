@@ -219,11 +219,58 @@ pub fn confirm_signed(
         }
         None => {
             let known: Vec<Id> = pending.iter().map(|p| p.id.clone()).collect();
+            let mut decided: Vec<(Id, String)> = Vec::new();
+            for c in &changes {
+                for e in c.events.iter().filter(|e| e.kind == Kind::Confirm) {
+                    let pair = match (e.data.get("amendment").and_then(Value::as_str), e.data.get("decision").and_then(Value::as_str)) {
+                        (Some(a), Some(d)) => (a, d),
+                        _ => continue,
+                    };
+                    let Ok(amendment) = pair.0.parse::<Id>() else {
+                        continue;
+                    };
+                    decided.push((amendment, pair.1.to_string()));
+                }
+            }
+            decided.sort();
+            decided.dedup();
             let mut chosen = Vec::new();
             for input in ids {
                 let input = if input.contains('-') { input.clone() } else { format!("AMD-{input}") };
-                let id = id::resolve(&input, &known)
-                    .map_err(|e| Error::new("amendment", format!("{input}: {e}"), "run rvow confirm to list the pending amendments"))?;
+                let id = match id::resolve(&input, &known) {
+                    Ok(id) => id,
+                    Err(id::ResolveError::NotFound) => {
+                        let decided_ids: Vec<Id> = decided.iter().map(|(id, _)| id.clone()).collect();
+                        match id::resolve(&input, &decided_ids) {
+                            Ok(found) => {
+                                let past = decided
+                                    .iter()
+                                    .find(|(id, _)| *id == found)
+                                    .map(|(_, d)| match d.as_str() {
+                                        "accept" => "accepted".to_string(),
+                                        "reject" => "rejected".to_string(),
+                                        other => other.to_string(),
+                                    })
+                                    .unwrap_or_else(|| "decided".to_string());
+                                return Err(Error::new(
+                                    "decided",
+                                    format!("{found} is already {past}"),
+                                    "run rvow confirm to list the pending amendments",
+                                ));
+                            }
+                            Err(e) => {
+                                return Err(Error::new(
+                                    "amendment",
+                                    format!("{input}: {e}"),
+                                    "run rvow confirm to list the pending amendments",
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(Error::new("amendment", format!("{input}: {e}"), "run rvow confirm to list the pending amendments"));
+                    }
+                };
                 let found =
                     pending.iter().find(|p| p.id == id).ok_or_else(|| Error::internal(format!("{id} resolved but is not pending")))?;
                 chosen.push(found);
