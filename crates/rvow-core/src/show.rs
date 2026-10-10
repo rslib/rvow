@@ -174,7 +174,14 @@ fn proof_history(change: &std::path::Path, id: &Id) -> String {
         let tests = e.data.get("tests_run").and_then(|v| v.as_u64()).map_or("unknown tests".to_string(), |n| format!("{n} tests"));
         let ms = e.data.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
         let machine = e.data.get("run").and_then(|r| r.get("machine")).and_then(|v| v.as_str()).unwrap_or("unknown");
-        let _ = writeln!(out, "  {verdict}, {tests}, {ms} ms, {machine}");
+        let mutants = e
+            .data
+            .get("mutants")
+            .and_then(|m| m.get("survived"))
+            .and_then(|v| v.as_u64())
+            .map(|n| format!(", mutants: {n} survived"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "  {verdict}, {tests}, {ms} ms, {machine}{mutants}");
     }
     env_diffs(&mut out, &runs);
     out

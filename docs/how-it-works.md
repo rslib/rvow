@@ -88,6 +88,12 @@ A proof is stale when one of those has changed since the run.
 The reasons are task changed, requirement changed, inputs changed, private policy changed and environment changed.
 A stale task needs a new proof, and `rvow prove --stale` runs them all.
 
+A task can also set `mutants:`, an extra check that runs after `verify:` passes.
+rvow runs it with `RVOW_DIFF` set to a file holding the diff of the task's files against the vow's base commit, and `RVOW_CHANGED_FILES` listing the changed paths one per line, so `cargo mutants --in-diff "$RVOW_DIFF"` tests only the changed lines.
+The diff covers committed changes since the base, uncommitted edits and untracked files in scope, and the file is removed after the run.
+When the output holds a cargo-mutants summary, the proof records the missed count as `survived` inside the `mutants` object, and `rvow show <task>` prints `mutants: N survived` on that run's line.
+A failing mutants run fails the task.
+
 Stale is not failed.
 It means the old evidence no longer covers the current tree.
 `rvow gate --strict` fails on stale and flaky proofs.

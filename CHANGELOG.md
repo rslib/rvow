@@ -90,6 +90,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Add `rvow hook <event>` as the neutral form of the harness hook.
   The old form `rvow hook claude <event>` still works.
 - Add opt-in hidden checks and mutation runs to harden a task's proof, with a `mutants:` field in a task.
+- Run a task's `mutants:` command with `RVOW_DIFF` set to a file holding the diff of the task's files against the base commit, and `RVOW_CHANGED_FILES` listing the changed paths one per line, so `cargo mutants --in-diff "$RVOW_DIFF"` tests only the changed lines.
+  Record the missed count as `survived` inside the `mutants` object of the proof event when the output holds a cargo-mutants summary, and print `mutants: N survived` in `rvow show`.
 
 ### Fixed
 

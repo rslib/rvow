@@ -452,7 +452,23 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let mutants = task
         .mutants
         .as_deref()
-        .map(|command| runner::run(command, &top, &[], task.timeout.unwrap_or(config.timeout()), echo))
+        .map(|command| {
+            // The mutants command sees only the task's own changed lines:
+            // RVOW_DIFF names a temp file with the diff of the task's files
+            // against the vow's base commit, and RVOW_CHANGED_FILES lists the
+            // changed paths, one per line. Both reach only the child. A vow
+            // with no base commit predates the diff, so the diff is empty.
+            let scoped = match change.baseline().and_then(|b| b.get("base_commit")).and_then(Value::as_str) {
+                Some(base) => git::task_diff(&top, base, &task.files)?,
+                None => git::TaskDiff { diff: String::new(), files: Vec::new() },
+            };
+            let path = diff_file(&scoped.diff)?;
+            let vars =
+                vec![("RVOW_DIFF".to_string(), path.display().to_string()), ("RVOW_CHANGED_FILES".to_string(), scoped.files.join("\n"))];
+            let outcome = runner::run(command, &top, &vars, task.timeout.unwrap_or(config.timeout()), echo);
+            let _ = std::fs::remove_file(&path);
+            outcome
+        })
         .transpose()?;
     let private_check = crate::hardening::run_private(project, home, &top, task, task.timeout.unwrap_or(config.timeout()))?;
     let private_policy = private_check.as_ref().map(|c| c.digest.clone());
@@ -474,6 +490,10 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     if let Some(check) = &mutants {
         let mut value = json!(check);
         value["passed"] = check.passed().into();
+        // The survivor count lives inside the mutants object.
+        if let Some(n) = runner::survived(&check.tail) {
+            value["survived"] = n.into();
+        }
         data.insert("mutants".into(), value);
     }
     if let Some(check) = &private_check {
@@ -537,6 +557,16 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         lfs_pointers: inputs.lfs_pointers,
         next,
     })
+}
+
+/// Writes `diff` to a temp file for `RVOW_DIFF`. The caller removes it after
+/// the mutants run.
+fn diff_file(diff: &str) -> Result<PathBuf> {
+    let bytes = Error::random::<8>()?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("rvow-diff-{hex}"));
+    std::fs::write(&path, diff).map_err(|e| Error::io(&path, e))?;
+    Ok(path)
 }
 
 fn change_branch(changes: &[Active], id: &Id) -> String {

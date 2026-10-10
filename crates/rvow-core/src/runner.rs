@@ -108,6 +108,30 @@ impl TestCount {
     }
 }
 
+/// The surviving mutants in a cargo-mutants summary line such as
+/// `12 mutants tested in 4s: 2 missed, 9 caught, 1 unviable`: the `N` in
+/// `N missed` on the last matching line. `None` when the output holds no
+/// summary.
+pub fn survived(tail: &[String]) -> Option<u64> {
+    let mut out = None;
+    for line in tail {
+        if !line.contains("mutant") || !line.contains("missed") {
+            continue;
+        }
+        let mut rest = line.as_str();
+        while let Some(i) = rest.find("missed") {
+            let before = rest[..i].trim_end();
+            if let Some(n) = before.split(|c: char| !c.is_ascii_digit()).rfind(|s| !s.is_empty())
+                && let Ok(v) = n.parse::<u64>()
+            {
+                out = Some(v);
+            }
+            rest = &rest[i + "missed".len()..];
+        }
+    }
+    out
+}
+
 /// Masks secrets and personal paths in one output line.
 pub fn mask(line: &str, home: Option<&str>, repo: &str) -> String {
     let mut masker = TailMask::default();
@@ -318,6 +342,17 @@ pub fn run(cmd: &str, cwd: &Path, env: &[(String, String)], timeout: Duration, e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_surviving_mutants() {
+        let summary = |s: &str| survived(&[s.to_string()]);
+        assert_eq!(summary("12 mutants tested in 4s: 2 missed, 9 caught, 1 unviable"), Some(2));
+        assert_eq!(summary("1 mutant tested: 0 missed, 1 caught"), Some(0));
+        assert_eq!(summary("ok"), None);
+        assert_eq!(summary("missed the bus"), None, "no mutant word, no count");
+        let tail = vec!["12 mutants tested in 4s: 2 missed, 9 caught".to_string(), "done".to_string()];
+        assert_eq!(survived(&tail), Some(2));
+    }
 
     fn quiet(cmd: &str, timeout: Duration) -> Outcome {
         let dir = std::env::temp_dir();
