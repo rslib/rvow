@@ -98,9 +98,65 @@ fn wide_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
         .collect()
 }
 
+/// Shell operators that make a verify command more than one program, so the
+/// single-program rules below do not apply.
+const OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", ">", "<", "`", "$(", "\\", "\n"];
+
+/// The whole verify command is a stub that runs no check: `true`, `:`, `exit 0`,
+/// one `echo` or one `test`.
+fn trivial_verify(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() || OPERATORS.iter().any(|op| cmd.contains(op)) {
+        return false;
+    }
+    let mut words = cmd.split_whitespace();
+    match words.next().unwrap_or("") {
+        "true" | ":" | "echo" | "test" | "[" => true,
+        "exit" => words.next() == Some("0") && words.next().is_none(),
+        _ => false,
+    }
+}
+
+/// The verify command runs a test runner whose output counts tests, so
+/// `baseline: pass` says more than "the command exited 0".
+fn counted_runner(cmd: &str) -> bool {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let pair = |a: &str, b: &str| words.windows(2).any(|w| w == [a, b]);
+    pair("cargo", "test") || pair("cargo", "nextest") || pair("go", "test") || words.contains(&"pytest") || words.contains(&"jest")
+}
+
+/// A warning for each task whose check proves nothing: a stub command, or a
+/// `baseline: pass` on a command with no counted test runner.
+fn weak_checks(tasks: &[Task]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for t in tasks {
+        let Some(cmd) = t.verify.as_deref() else {
+            continue;
+        };
+        let trivial = trivial_verify(cmd);
+        if !trivial && !(t.baseline_pass && !counted_runner(cmd)) {
+            continue;
+        }
+        let message = if trivial {
+            format!(
+                "{} has a trivial verify ({cmd}); replace it with the command that fails today, so the check cannot pass while the work is missing",
+                t.id
+            )
+        } else {
+            format!(
+                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest or go test",
+                t.id
+            )
+        };
+        out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::WeakVerify, t.line, message)));
+    }
+    out
+}
+
 fn report(change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
     let mut findings = loaded.findings;
     findings.extend(wide_scopes(top, &loaded.tasks));
+    findings.extend(weak_checks(&loaded.tasks));
     Report {
         missing: missing_programs(top, &loaded.tasks),
         questions: questions(&loaded.texts),

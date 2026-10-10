@@ -33,12 +33,21 @@ pub fn overview(living: &[CapSpec]) -> Vec<(String, Vec<String>)> {
 
 /// One requirement, task or change in full, found by a unique id prefix.
 pub fn show(project: &Project, input: &str) -> Result<String> {
+    render(project, input, false)
+}
+
+/// Like `show`, but a change lists the check fields of each task.
+pub fn review(project: &Project, input: &str) -> Result<String> {
+    render(project, input, true)
+}
+
+fn render(project: &Project, input: &str, checks: bool) -> Result<String> {
     let id = change::find(project, input)?.id;
     let (living, _) = change::load_living(project)?;
     let (dirs, _) = change::list(project)?;
     if id.kind() == Kind::Chg {
         let dir = dirs.iter().find(|c| c.id == id).ok_or_else(|| not_listed(&id))?;
-        return show_change(dir, &living);
+        return show_change(dir, &living, checks);
     }
     let mut open = Vec::new();
     for dir in dirs.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
@@ -104,7 +113,12 @@ fn duration(d: Duration) -> String {
 }
 
 fn render_task(task: &Task) -> String {
-    let mut out = format!("- {} {}\n", task.id, task.title);
+    format!("- {} {}\n{}", task.id, task.title, task_fields(task))
+}
+
+/// The indented fields under a task: covers, verify, files and the optional ones.
+fn task_fields(task: &Task) -> String {
+    let mut out = String::new();
     if !task.covers.is_empty() {
         let covers: Vec<String> = task.covers.iter().map(Ref::to_string).collect();
         let _ = writeln!(out, "  covers: {}", covers.join(", "));
@@ -113,6 +127,9 @@ fn render_task(task: &Task) -> String {
     let _ = writeln!(out, "  files: {}", task.files.join(", "));
     if task.baseline_pass {
         out.push_str("  baseline: pass\n");
+    }
+    if let Some(mutants) = &task.mutants {
+        let _ = writeln!(out, "  mutants: {mutants}");
     }
     if let Some(t) = task.timeout {
         let _ = writeln!(out, "  timeout: {}", duration(t));
@@ -231,7 +248,7 @@ fn env_fields(e: &Event) -> BTreeMap<String, String> {
     fields
 }
 
-fn show_change(dir: &ChangeDir, living: &[CapSpec]) -> Result<String> {
+fn show_change(dir: &ChangeDir, living: &[CapSpec], checks: bool) -> Result<String> {
     let loaded = change::load(&dir.path, living)?;
     let (events, _) = ledger::read(&dir.path.join(change::LEDGER))?;
     let mut out =
@@ -240,6 +257,11 @@ fn show_change(dir: &ChangeDir, living: &[CapSpec]) -> Result<String> {
         out.push_str("tasks:\n");
         for t in &loaded.tasks {
             let _ = writeln!(out, "  {} {}", t.id, t.title);
+            if checks {
+                for line in task_fields(t).lines() {
+                    let _ = writeln!(out, "  {line}");
+                }
+            }
         }
     }
     let deltas: Vec<_> = loaded.deltas.iter().flat_map(|(_, f)| &f.deltas).collect();

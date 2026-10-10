@@ -18,7 +18,7 @@ Write `tasks.md` as a list of tasks. The order in the file is the work order.
 
 - It must fail before the work and pass after. Run it before you write the code, and see it fail for the reason that the task fixes. The one exception is `baseline: pass`, a guard that must stay green.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists. Write the test first if it does not.
-- Do not use `true`, `echo` or a build alone as the check. Run the test that covers the behavior.
+- Do not use `true`, `echo` or a build alone as the check. Run the test that covers the behavior. `rvow check` and `rvow review` warn with `weak-verify` about a stub command, and about `baseline: pass` on a command that runs no counted test such as `cargo test`, `pytest` or `go test`.
 - Each task lands its own tests. Do not defer tests to a final task.
 - Keep each task to one reviewable step. Split a task when its `files:` scope covers unrelated areas.
 

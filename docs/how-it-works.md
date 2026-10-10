@@ -17,6 +17,17 @@ Each task stores its own verify command.
 The agent never reports a pass.
 rvow observes it.
 
+## What the review shows
+
+`rvow review <change>` prints the plan and the accept checklist, and it runs no verify command.
+Each task appears with its `verify:` command and its `files:`, and with its `baseline:` and `mutants:` when the task sets them, so the person who accepts the plan sees the check and not only the title.
+
+Above the checklist, the review warns about a weak check.
+A check is weak when the whole verify command is a stub that proves nothing, such as `true`, `:`, `exit 0`, one `echo` or one `test -f`, or when a task sets `baseline: pass` on a command that runs no counted test runner.
+The warning code is `weak-verify`.
+`rvow check` prints the same warnings.
+A warning never blocks, so a change whose only finding is a weak check is still ready to accept.
+
 ## Why the checks live outside the model
 
 A model that writes both the code and the claim that the code works grades its own work.

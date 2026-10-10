@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use rvow_core::change::{self, Stage};
-use rvow_core::diag::Severity;
+use rvow_core::diag::{Rule, Severity};
 use rvow_core::error::Result;
 use rvow_core::git;
 use rvow_core::import;
@@ -164,8 +164,14 @@ pub fn review(target: &str, packet: bool, record: Option<&std::path::Path>) -> R
         reply.table("findings", rows, "0 advisory findings");
         return Ok(reply);
     }
-    let text = show::show(&p, target)?;
-    Ok(Reply::lines(format!("{text}\n\n{REVIEW}")))
+    let text = show::review(&p, target)?;
+    let mut warnings = String::new();
+    for report in plan::check(&p, &cwd()?, Some(target))? {
+        for (_, d) in report.findings.iter().filter(|(_, d)| d.rule == Rule::WeakVerify) {
+            warnings.push_str(&format!("warning[weak-verify]: {}\n", d.message));
+        }
+    }
+    Ok(Reply::lines(format!("{warnings}{text}\n\n{REVIEW}")))
 }
 
 pub fn ids(target: Option<&str>) -> Result<Reply> {
