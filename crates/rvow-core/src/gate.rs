@@ -17,7 +17,7 @@ use crate::store::Project;
 
 pub mod cache;
 mod check;
-mod rerun;
+pub(crate) mod rerun;
 mod signature;
 
 use check::check_scope;
@@ -604,7 +604,9 @@ mod tests {
         let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let tasks = dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
-        std::fs::write(&tasks, text.replace("grep -q ok out.txt", "true")).unwrap();
+        // A changed check that still fails runs its amend baseline and is
+        // recorded; one that passes at once is refused with code baseline.
+        std::fs::write(&tasks, text.replace("grep -q ok out.txt", "grep -q ok other.txt")).unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(r.failures.iter().any(|f| f.contains("weaken drift")), "{r:?}");
 

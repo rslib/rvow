@@ -83,7 +83,7 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
     let scope: Vec<String> = before.iter().flat_map(|t| t.files.clone()).collect();
     for old in before {
         let Some(new) = after.iter().find(|t| t.id == old.id) else {
-            out.push(item(Class::Confirm, format!("{} removed", old.id)));
+            out.push(item(Class::Weaken, format!("{} removed", old.id)));
             continue;
         };
         let id = &old.id;
@@ -117,8 +117,18 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
             let what = if wider { "scope made wider" } else { "scope made narrower" };
             out.push(changed(class, format!("{id} {what}"), &old.files.join(", "), &new.files.join(", ")));
         }
-        if old.baseline_pass != new.baseline_pass || old.timeout != new.timeout {
-            out.push(item(Class::Free, format!("{id} baseline or timeout changed")));
+        if old.baseline_pass != new.baseline_pass {
+            // Gaining `baseline: pass` lets a passing check stand, so it is
+            // weaken; dropping the flag only makes the check stricter.
+            if new.baseline_pass {
+                out.push(item(Class::Weaken, format!("{id} baseline pass added")));
+            } else {
+                out.push(item(Class::Free, format!("{id} baseline pass removed")));
+            }
+        }
+        if old.timeout != new.timeout {
+            // A timeout only bounds the run; it never changes what passes.
+            out.push(item(Class::Free, format!("{id} timeout changed")));
         }
     }
     for new in after.iter().filter(|t| !before.iter().any(|o| o.id == t.id)) {
@@ -158,6 +168,20 @@ fn delta_items(before: &BTreeMap<String, String>, after: &BTreeMap<String, Strin
     }
 }
 
+/// The tasks of the change as the accepted baseline recorded them, for
+/// callers that compare the plan then and now, such as the amend baseline.
+/// The snapshot stores each tasks file by its content hash, as `drift` reads
+/// it, so both stay on the same bytes.
+pub(crate) fn baseline_tasks(project: &Project, change: &Active) -> Result<Vec<Task>> {
+    let Some(base) = change.baseline() else {
+        return Ok(Vec::new());
+    };
+    match hashes(base, "files").get(TASKS) {
+        Some(h) => Ok(parse_tasks(&object(project, h)?).0),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Every difference between the change's files and its baseline, weaken first.
 pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) -> Result<Vec<Item>> {
     let Some(base) = change.baseline() else {
@@ -180,10 +204,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
         out.push(item(Class::Free, "design changed"));
     }
 
-    let old_tasks = match files.get(TASKS) {
-        Some(h) => parse_tasks(&object(project, h)?).0,
-        None => Vec::new(),
-    };
+    let old_tasks = baseline_tasks(project, change)?;
     task_items(&old_tasks, &loaded.tasks, &mut out);
 
     let prefix = format!("{DELTAS}/");

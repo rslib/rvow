@@ -117,24 +117,9 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
             .collect::<Result<_>>()?
     };
     for a in shown {
-        println!("{} for {}", a.id, a.change);
-        for i in &a.items {
-            let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
-            let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
-            println!("  {class}: {what}");
-            if let (Some(old), Some(new)) = (i.get("before").and_then(|v| v.as_str()), i.get("after").and_then(|v| v.as_str())) {
-                let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-                let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-                let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
-                for line in &old[head..old.len() - tail] {
-                    println!("    - {line}");
-                }
-                for line in &new[head..new.len() - tail] {
-                    println!("    + {line}");
-                }
-            }
+        for line in a.render() {
+            println!("{line}");
         }
-        println!("  reason (from the agent): {}", a.reason);
     }
     if ids.is_empty() {
         println!("digest {}", amend::digest(&pending));

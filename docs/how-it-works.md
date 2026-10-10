@@ -43,8 +43,11 @@ Drift is any difference between the plan files now and the plan files at accept.
 rvow sorts each difference into one of three classes.
 
 - Free: a change that cannot widen what the agent may do, such as a new task inside an existing scope or an edit to `design.md`.
+  Dropping a `baseline: pass` flag or changing a timeout is free too: the check only gets stricter or slower.
 - Confirm: a change that alters the plan, such as a new requirement, a changed title or a wider `files:` scope.
 - Weaken: a change that could make a check easier to pass, such as a changed verify command, an edited test that a proof relied on or a changed config.
+  A removed task is weaken as well: the work it demanded goes away with it.
+  So is a task that gains `baseline: pass`: a check that had to fail first may now pass at once.
 
 The gate fails on confirm and weaken drift until the user decides.
 Free drift passes without a question, so small work does not wait for a person.
@@ -56,6 +59,10 @@ It can tell that a test file or a verify command changed, and that is where it a
 The plan must be able to change, because plans are wrong.
 The agent edits the plan files and runs `rvow amend` with a reason.
 That records the edit as an amendment.
+Before it records, `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up the same way as the gate rerun.
+A check that passes there with tests run is refused with the code `baseline`, unless the task says `baseline: pass`, and a `baseline: pass` check that fails there is refused too.
+Nothing is recorded when the baseline refuses.
+Each run's task id, exit code and test count go into the amendment, and `rvow confirm` lists weaken items first with each baseline result, so the user sees which checks failed before the work.
 The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
 In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.

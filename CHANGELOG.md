@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Audit an edit outside every task scope and an edit of a protected test instead of denying it. The hook counts it, and the gate still blocks the branch.
 - Ask the user after 3 denials in a row in one session, instead of denying a fourth time.
 - Tell the agent when an accept, a confirm or an archive that the user ran fails, with the command and the reason.
+- Run the baseline of an added or changed check at amend time: `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up like the gate rerun, and refuses with the code `baseline` a check that passes there without `baseline: pass`, or a `baseline: pass` check that fails there.
+  The amendment records each run's task id, exit code and test count, and `rvow confirm` lists weaken items first with each baseline result.
+- Count a removed task and a task that gains `baseline: pass` as weaken drift.
+  Dropping the flag or changing a timeout stays free.
 - Treat a change of a task title as free drift.
 - Let a subagent that holds a lease prove only its own task.
 - Make the brief name missing or failed work of the newest change before a stale task of an older change.
