@@ -177,3 +177,57 @@ pub(super) fn check_scope(
     }
     Ok(())
 }
+
+/// Work written before any change was accepted: while a backlog plan names
+/// this branch and no change is active on it, every file that differs from
+/// the base outside the rvow tree and outside every done change of the branch
+/// fails, naming the waiting plan. Shell work done before accept must not
+/// push clean.
+pub(super) fn check_backlog_scope(
+    project: &Project,
+    top: &Path,
+    base: &str,
+    branch: &str,
+    living: &[CapSpec],
+    r: &mut Report,
+) -> Result<()> {
+    let (all, _) = change::list(project)?;
+    let mut waiting: Vec<String> = Vec::new();
+    let mut done_globs: Vec<String> = Vec::new();
+    for d in &all {
+        let loaded = change::load(&d.path, living)?;
+        if loaded.proposal.branch != branch {
+            continue;
+        }
+        match d.stage {
+            Stage::Backlog => waiting.push(d.id.to_string()),
+            Stage::Done => done_globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())),
+            _ => {}
+        }
+    }
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    waiting.sort();
+    let plans = waiting.join(", ");
+    let Some(base_ref) = base_ref(top, base) else {
+        r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
+        return Ok(());
+    };
+    let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
+    let set = globset(&done_globs)?;
+    let repo_dir = format!("{REPO_DIR}/");
+    let mut differed: Vec<String> = changed_files(top, &mb)?
+        .into_iter()
+        .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
+        .filter(|f| !set.is_match(f))
+        .collect();
+    differed.sort();
+    for f in differed.iter().take(MAX_LISTED) {
+        r.failures.push(format!("{f} differs from {base} while {plans} waits for accept; accept the plan first, then write the code"));
+    }
+    if differed.len() > MAX_LISTED {
+        r.failures.push(format!("and {} more files differ from {base} while {plans} waits for accept", differed.len() - MAX_LISTED));
+    }
+    Ok(())
+}

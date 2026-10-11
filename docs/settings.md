@@ -55,6 +55,12 @@ checks = ["cargo test --locked"]
 The project `context` and each artifact `rules.<artifact>` value are capped at
 2000 UTF-8 bytes. Values above the cap are refused at load.
 
+## Default test globs
+
+Without `test_globs`, a file counts as a test when it lives in a `tests/`, `__tests__/`, `spec/` or `src/test/` folder at any depth, or when its name matches `*_test.*`, `test_*.py`, `*.test.*`, `*.spec.*`, `*_spec.rb` or `*Test.java`.
+Without `protect_infra`, the guard also protects snapshots, `conftest.py`, `pytest.ini`, `tox.ini`, `jest.config.*`, `vitest.config.*`, `.cargo/config.toml`, `Makefile`, `justfile` and `package.json`.
+Setting either key replaces its defaults.
+
 ## Linking build output into the rerun
 
 `rvow gate --rerun` runs every verify command in a clean worktree of HEAD, so a verify command that needs generated output such as `node_modules` fails there.

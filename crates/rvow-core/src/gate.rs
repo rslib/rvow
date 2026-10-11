@@ -20,6 +20,7 @@ mod check;
 pub(crate) mod rerun;
 mod signature;
 
+use check::check_backlog_scope;
 use check::check_scope;
 use rerun::{Lazy, Scope, changed_files, prove_data};
 
@@ -122,10 +123,14 @@ fn gate_for(
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         r.warnings.extend(judge_warnings(project, home, cwd, &c.dir.id.to_string()));
     }
-    if let Some(branch) = branch.as_deref()
-        && !queue.is_empty()
-    {
-        check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
+    if let Some(branch) = branch.as_deref() {
+        if queue.is_empty() {
+            if target.is_none() {
+                check_backlog_scope(project, &top, &config.base, branch, &living, &mut r)?;
+            }
+        } else {
+            check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
+        }
     }
 
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };

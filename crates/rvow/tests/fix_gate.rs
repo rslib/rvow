@@ -55,6 +55,25 @@ impl Fixture {
         Self { dir, repo, home, project }
     }
 
+    /// Like `new`, but with the rvow tree inside the repository.
+    fn repo(name: &str, config: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("rvow-fix-gate-{}-{name}", std::process::id()));
+        let repo = dir.join("repo");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&repo).unwrap();
+        let fixture_git = |args: &[&str]| {
+            let output = git_command(&repo).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        fixture_git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("initial.txt"), "initial").unwrap();
+        fixture_git(&["add", "initial.txt"]);
+        fixture_git(&["commit", "-q", "-m", "initial"]);
+        let project = store::init(&repo, &home, store::Mode::Repo).unwrap();
+        std::fs::write(project.root.join("config.toml"), config).unwrap();
+        Self { dir, repo, home, project }
+    }
+
     fn git(&self, args: &[&str]) {
         let output = git_command(&self.repo).args(args).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -263,4 +282,66 @@ fn a_changed_allowed_signers_file_is_weaken_drift() {
     let after = gate::gate(&f.project, &f.home, &f.repo, options(), &mut std::io::sink()).unwrap();
     assert!(after.failures.iter().any(|l| l.contains("weaken drift") && l.contains("allowed_signers")), "{:?}", after.failures);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gate_fails_work_before_accept_shell_work() {
+    let f = Fixture::new("before-accept", "");
+    f.git(&["checkout", "-q", "-b", "work"]);
+    let plan = change::new(&f.project, "Waiting", "work", true).unwrap();
+    std::fs::create_dir_all(f.repo.join("src")).unwrap();
+    std::fs::write(f.repo.join("src/a.rs"), "fn a() {}").unwrap();
+    f.git(&["add", "src/a.rs"]);
+    f.git(&["commit", "-q", "-m", "shell work"]);
+    let report =
+        gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: false, rerun: false, out: None }, &mut std::io::sink()).unwrap();
+    assert!(!report.passed());
+    assert!(report.failures.iter().any(|l| l.contains("src/a.rs")), "{report:?}");
+    assert!(report.failures.iter().any(|l| l.contains(&plan.id.to_string())), "{report:?}");
+}
+
+#[test]
+fn gate_fails_work_before_accept_no_plan_quiet() {
+    let f = Fixture::new("no-plan", "");
+    f.git(&["checkout", "-q", "-b", "work"]);
+    std::fs::create_dir_all(f.repo.join("src")).unwrap();
+    std::fs::write(f.repo.join("src/a.rs"), "fn a() {}").unwrap();
+    f.git(&["add", "src/a.rs"]);
+    f.git(&["commit", "-q", "-m", "shell work"]);
+    let report =
+        gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: false, rerun: false, out: None }, &mut std::io::sink()).unwrap();
+    assert!(report.passed(), "{report:?}");
+}
+
+#[test]
+fn gate_fails_work_before_accept_plan_files_pass() {
+    let f = Fixture::repo("plan-files", "");
+    f.git(&["add", "-A"]);
+    f.git(&["commit", "-q", "-m", "rvow tree"]);
+    f.git(&["checkout", "-q", "-b", "work"]);
+    change::new(&f.project, "Waiting", "work", true).unwrap();
+    std::fs::write(f.repo.join("rvow/note.txt"), "plan files only").unwrap();
+    f.git(&["add", "rvow/note.txt"]);
+    f.git(&["commit", "-q", "-m", "plan files"]);
+    let report =
+        gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: false, rerun: false, out: None }, &mut std::io::sink()).unwrap();
+    assert!(report.passed(), "{report:?}");
+}
+
+#[test]
+fn gate_fails_work_before_accept_done_change_covers() {
+    let f = Fixture::new("covered", "");
+    f.git(&["checkout", "-q", "-b", "work"]);
+    let spec = "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN src/a.rs holds ok\n";
+    let (c, task, _) = f.accept("Done", "src/a.rs", Some(spec), "REQ-new1");
+    std::fs::create_dir_all(f.repo.join("src")).unwrap();
+    f.prove_and_commit(&task, "src/a.rs");
+    f.archive(&c);
+    change::new(&f.project, "Waiting", "work", true).unwrap();
+    std::fs::write(f.repo.join("src/a.rs"), "ok changed\n").unwrap();
+    f.git(&["add", "src/a.rs"]);
+    f.git(&["commit", "-q", "-m", "covered edit"]);
+    let report =
+        gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: false, rerun: false, out: None }, &mut std::io::sink()).unwrap();
+    assert!(report.passed(), "{report:?}");
 }

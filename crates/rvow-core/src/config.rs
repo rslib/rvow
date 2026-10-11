@@ -219,14 +219,28 @@ pub fn load(project: &Project, home: &Path) -> Result<Config> {
         base: pick!(base).unwrap_or_else(|| "main".into()),
         timeout_secs,
         inputs: pick!(inputs).unwrap_or_default(),
-        test_globs: pick!(test_globs)
-            .unwrap_or_else(|| strings(&["tests/**", "**/*_test.*", "**/test_*.py", "**/*.test.*", "**/*.spec.*"])),
+        test_globs: pick!(test_globs).unwrap_or_else(|| {
+            strings(&[
+                "tests/**",
+                "**/tests/**",
+                "**/__tests__/**",
+                "**/spec/**",
+                "**/src/test/**",
+                "**/*_test.*",
+                "**/test_*.py",
+                "**/*.test.*",
+                "**/*.spec.*",
+                "**/*_spec.rb",
+                "**/*Test.java",
+            ])
+        }),
         protect_infra: pick!(protect_infra).unwrap_or_else(|| {
             strings(&[
                 "**/__snapshots__/**",
                 "**/*.snap",
                 "**/conftest.py",
                 "**/pytest.ini",
+                "**/tox.ini",
                 "**/jest.config.*",
                 "**/vitest.config.*",
                 ".cargo/config.toml",
@@ -399,5 +413,41 @@ mod tests {
             std::fs::write(p.root.join(CONFIG_FILE), format!("{key} = \"x\"\n")).unwrap();
             assert_eq!(load(&p, &home).unwrap_err().code, "config", "{key}");
         }
+    }
+
+    /// The default globs protect a nested Rust test folder, the JavaScript,
+    /// Ruby and Java layouts and the tox setup, until the project sets its own.
+    #[test]
+    fn default_globs_cover_common_layouts() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let c = load(&p, &home).unwrap();
+        let guarded: Vec<String> = c.test_globs.iter().chain(&c.protect_infra).cloned().collect();
+        let set = crate::fingerprint::globset(&guarded).unwrap();
+        for f in [
+            "crates/x/tests/cli.rs",
+            "tests/cli.rs",
+            "web/__tests__/a.js",
+            "app/models/user_spec.rb",
+            "src/test/java/FooTest.java",
+            "lib/FooTest.java",
+            "tox.ini",
+            "a/b/tox.ini",
+        ] {
+            assert!(set.is_match(f), "{f} is not guarded");
+        }
+        for f in ["src/a.rs", "app/models/user.rb", "src/main/java/Foo.java"] {
+            assert!(!set.is_match(f), "{f} is guarded");
+        }
+        std::fs::write(p.root.join(CONFIG_FILE), "test_globs = [\"t/**\"]\nprotect_infra = [\"Makefile\"]\n").unwrap();
+        let c = load(&p, &home).unwrap();
+        let guarded: Vec<String> = c.test_globs.iter().chain(&c.protect_infra).cloned().collect();
+        let set = crate::fingerprint::globset(&guarded).unwrap();
+        assert!(!set.is_match("crates/x/tests/cli.rs"));
+        assert!(!set.is_match("tox.ini"));
+        assert!(set.is_match("t/a.rs"));
+        assert!(set.is_match("Makefile"));
     }
 }

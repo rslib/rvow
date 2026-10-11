@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Fail `rvow gate` on code that differs from the base while a backlog plan names the branch and no change is active on it, naming the waiting plan.
+  Files under the in-repo rvow tree and files that a done change of the branch covers still pass.
 - Trust a proof only when its seal checks and its verify programs match, and rerun a task whose scope holds an ignored file.
   A proof from before seals existed reruns once.
 - Mark a task stale with `dependency-changed` when a file in a `depends_on:` task's scope changed since the dependent task's proof.
@@ -34,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Protect nested test folders by default: `tests/`, `__tests__/`, `spec/` and `src/test/` at any depth, with `*_spec.rb` and `*Test.java` names, and the `tox.ini` setup file.
+  Setting `test_globs` or `protect_infra` still replaces the defaults.
 - Add an optional spec-conformance judge: `rvow guide judge` prints the shared judge prompt, and `rvow review --record <file> --judge --harness <harness> --model <model>` records its findings against the current packet (`--record -` reads stdin).
   The gate shows each finding as a warning without failing, and `rvow archive` names `/rvow-judge` when the current packet has no judge note.
   The hook denies `rvow review --judge` for agents, and `/rvow-judge` with the `rvow_judge` tool in the Claude mod and pi runs the judge in a clean read-only session with no rvow extension, recording the model it ran on.
