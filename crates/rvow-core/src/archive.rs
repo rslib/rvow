@@ -13,6 +13,7 @@ use crate::change::{self, CapSpec, ChangeDir, LEDGER, Stage};
 use crate::diag::Severity;
 use crate::error::{Error, Result};
 use crate::gate;
+use crate::git;
 use crate::id::{self, Id, Kind as IdKind, Ref};
 use crate::ledger::{self, Kind};
 use crate::lint::Finding;
@@ -217,6 +218,12 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     let mut data = Map::new();
     data.insert("merged".into(), by_op.into());
     data.insert("record".into(), json!(hashes));
+    // Without a checkout or a commit there is no HEAD to record; the gate then reads the vow base.
+    if let Ok(top) = git::toplevel(cwd)
+        && let Ok(head) = git::run(&top, &["rev-parse", "HEAD"])
+    {
+        data.insert("head".into(), head.into());
+    }
     ledger::append(&dir.path.join(LEDGER), &lock, Kind::Archive, data)?;
     let path = retire(project, &dir, Stage::Done)?;
     Ok(Archived { id: dir.id, path, merged })

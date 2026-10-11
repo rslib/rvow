@@ -119,6 +119,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the gate counting the files of every done change of the branch, so a done change whose work is already in the base no longer widens the scope.
+  A done change counts only while its archive HEAD is not a strict ancestor of the merge base.
 - Fix `rvow archive` failing when the judge note lookup fails.
   The archive now goes on and names `/rvow-judge`.
 - Fix `rvow review --judge` reporting a bad record for a record file that is missing.

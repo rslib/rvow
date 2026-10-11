@@ -122,6 +122,7 @@ It means the old evidence no longer covers the current tree.
 It fails on unproved tasks, failed proofs, pending amendments, blocking drift and files changed outside every task scope.
 The base it measures from is the newer merge base of the local and the remote base branch with HEAD, so commits you have not pushed yet never count as outside every task.
 When the two merge bases diverge, the remote one wins.
+A done change counts toward that scope only while the HEAD recorded at its archive is not a strict ancestor of the merge base.
 
 Work written before the plan is accepted fails too: while a backlog plan names the branch and no change is active on it, before the plan is accepted, the gate fails on each file that differs from the base outside the rvow tree and outside every done change of the branch, and names the waiting plan.
 
