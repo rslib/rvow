@@ -274,11 +274,15 @@ fn judge_fix_archive_survives_a_failed_judge_lookup() {
     let out = r.ok(&["new", "--spec", "Out"]);
     let id = field(&out, "created").to_owned();
     let dir = Path::new(field(&out, "path")).to_owned();
-    // A path that git reads as pathspec magic: the proof hashes it from disk,
-    // but the review packet's `git diff -- <path>` fails on it.
+    // The packet fails because the base blob of out.txt is missing: the
+    // proof hashes out.txt from disk, but the packet's `git diff <base> --`
+    // cannot read the old blob. The work is committed first, so the gate's
+    // merge-base diff is empty and needs no blob, and prove and archive pass.
+    // A magic file name no longer fails the packet, since task file names
+    // now reach git as literal pathspecs.
     std::fs::write(
         dir.join("tasks.md"),
-        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt, :(bad\n",
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
     )
     .unwrap();
     std::fs::write(
@@ -286,15 +290,22 @@ fn judge_fix_archive_survives_a_failed_judge_lookup() {
         "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
     )
     .unwrap();
+    std::fs::write(r.repo().join("out.txt"), "old\n").unwrap();
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-q", "-m", "base"]);
     let accept = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap();
     assert!(accept.status.success(), "{}", String::from_utf8_lossy(&accept.stdout));
-    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
-    std::fs::write(r.repo().join(":(bad"), "x").unwrap();
+    std::fs::write(r.repo().join("out.txt"), "ok\n").unwrap();
     let brief = r.ok(&["brief"]);
     let task =
         brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
     let proved = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap();
     assert!(proved.status.success(), "{}", String::from_utf8_lossy(&proved.stdout));
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-q", "-m", "work"]);
+    let blob = String::from_utf8(r.cmd("git").args(["rev-parse", "HEAD~1:out.txt"]).output().unwrap().stdout).unwrap();
+    let blob = blob.trim().to_owned();
+    std::fs::remove_file(r.repo().join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
     let (packet, code) = r.rvow(&["review", &id, "--packet"]);
     assert_ne!(code, 0, "the packet must fail for this test to mean anything: {packet}");
     let out = r.ok(&["archive", &id]);

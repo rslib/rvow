@@ -235,7 +235,9 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
     if !target.starts_with(&format!("{root}/"))
         && let Some(files) = active_scope(project, top)?
         && !files.is_match(rel)
-        && git::run(top, &["check-ignore", "-q", "--", rel]).is_err()
+        // check-ignore rejects --literal-pathspecs, so a leading ./ keeps a
+        // magic-looking name literal while matching the same ignore rules.
+        && git::run(top, &["check-ignore", "-q", "--", &format!("./{rel}")]).is_err()
     {
         return Ok(denial(
             Rule::OutsideScope,

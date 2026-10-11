@@ -113,7 +113,7 @@ pub fn task_diff(top: &Path, base: &str, globs: &[String]) -> Result<TaskDiff> {
         let part = if untracked.contains(f) {
             diff_no_index(top, f)?
         } else {
-            run(top, &["-c", "core.quotePath=false", "diff", "--no-renames", base, "--", f])?
+            run(top, &["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-renames", base, "--", f])?
         };
         if !part.is_empty() {
             if !diff.is_empty() {
@@ -131,7 +131,7 @@ fn diff_no_index(top: &Path, rel: &str) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(top)
-        .args(["-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel])
+        .args(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")

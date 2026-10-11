@@ -81,11 +81,11 @@ pub fn packet_for(project: &Project, home: &Path, cwd: &Path, target: &str) -> R
     paths.dedup();
     let mut evidence = String::new();
     for path in paths.into_iter().filter(|p| set.is_match(p)) {
-        let diff = git::run(&top, &["diff", "--no-ext-diff", "--no-textconv", base, "--", &path])?;
+        let diff = git::run(&top, &["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", base, "--", &path])?;
         if !diff.is_empty() {
             evidence.push_str(&diff);
         }
-        let tracked = git::run(&top, &["ls-files", "--", &path])?;
+        let tracked = git::run(&top, &["--literal-pathspecs", "ls-files", "--", &path])?;
         if tracked.is_empty() {
             let full = top.join(&path);
             if std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
