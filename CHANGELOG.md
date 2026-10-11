@@ -34,6 +34,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add an optional spec-conformance judge: `rvow guide judge` prints the shared judge prompt, and `rvow review --record <file> --judge --harness <harness> --model <model>` records its findings against the current packet (`--record -` reads stdin).
+  The gate shows each finding as a warning without failing, and `rvow archive` names `/rvow-judge` when the current packet has no judge note.
+  The hook denies `rvow review --judge` for agents, and `/rvow-judge` with the `rvow_judge` tool in the Claude mod and pi runs the judge in a clean read-only session with no rvow extension, recording the model it ran on.
 - Add a seal to each proof so a hand-written proof no longer counts.
   The seal is an HMAC under the rerun cache key over the event kind, time, parents and data.
 - Print each task's `verify:`, `files:`, `baseline:` and `mutants:` in `rvow review`, and list a weak-check warning above the checklist.

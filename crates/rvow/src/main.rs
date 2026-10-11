@@ -79,6 +79,15 @@ enum Cmd {
         /// Record advisory JSON findings against the current packet identity.
         #[arg(long)]
         record: Option<PathBuf>,
+        /// Record as a judge note with harness and model.
+        #[arg(long, requires = "record")]
+        judge: bool,
+        /// The harness that ran the judge.
+        #[arg(long, requires = "judge", required_if_eq("judge", "true"))]
+        harness: Option<String>,
+        /// The model the judge ran on.
+        #[arg(long, requires = "judge", required_if_eq("judge", "true"))]
+        model: Option<String>,
     },
     /// List every change with its stage, branch and title.
     Ls,
@@ -355,6 +364,7 @@ enum Artifact {
     Spec,
     Tasks,
     Design,
+    Judge,
 }
 
 fn main() -> ExitCode {
@@ -391,7 +401,9 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::New { title, spec } => plan::new(&title.join(" "), !spec),
         Cmd::Validate => plan::validate(),
         Cmd::Accept { change, .. } => lifecycle::accept(&change).map(Reply::done),
-        Cmd::Review { change, packet, record } => plan::review(&change, packet, record.as_deref()),
+        Cmd::Review { change, packet, record, judge, harness, model } => {
+            plan::review(&change, packet, record.as_deref(), judge, harness.as_deref(), model.as_deref())
+        }
         Cmd::Ls => read::ls(),
         Cmd::Path { id } => read::path(&id),
         Cmd::Show { id, full } => read::show(&id, full),

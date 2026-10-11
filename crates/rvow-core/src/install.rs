@@ -10,13 +10,14 @@ use crate::git;
 use crate::vow::sha256_hex;
 
 pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow/index.ts");
-const PI_MODULES: [(&str, &str); 6] = [
+const PI_MODULES: [(&str, &str); 7] = [
     ("formats.ts", include_str!("../../../extensions/pi/rvow/formats.ts")),
     ("prompts.ts", include_str!("../../../extensions/pi/rvow/prompts.ts")),
     ("types.ts", include_str!("../../../extensions/pi/rvow/types.ts")),
     ("tools.ts", include_str!("../../../extensions/pi/rvow/tools.ts")),
     ("typed-tools.ts", include_str!("../../../extensions/pi/rvow/typed-tools.ts")),
     ("refresh.ts", include_str!("../../../extensions/pi/rvow/refresh.ts")),
+    ("judge.ts", include_str!("../../../extensions/pi/rvow/judge.ts")),
 ];
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");

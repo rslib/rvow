@@ -26,13 +26,26 @@ import {
   failedPrompt,
   failedText,
   firstTab,
+  formatJudgeFindings,
   ID,
   isDecision,
+  JUDGE,
+  JUDGE_AGENT,
+  JUDGE_AGENT_DESCRIPTION,
+  JUDGE_DESCRIPTION,
+  JUDGE_NO_FINDINGS,
+  JUDGE_PROMPT_FALLBACK,
+  JUDGE_SCHEMA,
+  JUDGE_TOOLS,
+  judgeArgs,
+  judgeRecordArgv,
+  judgeSpawnPrompt,
   MARKS,
   MAX_LINES,
   OPEN,
   OUTCOME,
   PANE,
+  parseJudgeAnswer,
   REVIEW,
   RULE,
   refinePrompt,
@@ -75,6 +88,21 @@ const FOLD_LINES = 8
 let sentBrief = ''
 /** A tool call carries no session id, so the last prompt's id goes with `pre-tool-use`. */
 let sessionId: string | undefined
+/** Judge subagent answers waiting for their run: `turn.complete` resolves them by agent id. */
+const judgeWaiters = new Map<string, (answer: string) => void>()
+/** Runs whose spawn reported no agent id: each takes the next judge answer. */
+const judgeAnonymous: ((answer: string) => void)[] = []
+/** Judge answers that arrived before their run waited: kept by agent id. */
+const judgeAnswers = new Map<string, string>()
+
+/** The oldest kept judge answer, if any, so a run with no agent id can take it. */
+function takeStashedJudgeAnswer(): string | undefined {
+  const first = judgeAnswers.keys().next()
+  if (first.done) return undefined
+  const answer = judgeAnswers.get(first.value)
+  judgeAnswers.delete(first.value)
+  return answer
+}
 const BRIEF_WAIT_MS = 5_000
 
 /** Runs `work` after the current event returns, so the session never waits for rvow. */
@@ -381,6 +409,116 @@ async function refine($: EngineInterface, plans: RvowPlan[]) {
   await update($, noticeAtom, () => ({ tone: 'ok', text: 'queued for the agent' }))
 }
 
+/** Registers the read-only judge agent type with the shared judge prompt. */
+async function registerJudgeAgent($: EngineInterface) {
+  const guide = await rvow($, ['guide', 'judge'])
+  const prompt = guide.tone === 'ok' && guide.text.trim() ? guide.text : JUDGE_PROMPT_FALLBACK
+  try {
+    await $.agent.register({
+      name: 'judge',
+      description: JUDGE_AGENT_DESCRIPTION,
+      prompt,
+      tools: [...JUDGE_TOOLS],
+    })
+  } catch {
+    // A broken registration never locks the session; /rvow-judge reports it per run.
+  }
+}
+
+/** The active changes of this branch, newest effort first. */
+async function judgeChanges($: EngineInterface): Promise<{ id: string; title: string }[]> {
+  const out = await hook($, 'view', {})
+  const changes = Array.isArray(out?.changes) ? out.changes : []
+  return changes
+    .filter(
+      (c): c is { id: string; title: string } =>
+        isRecord(c) && typeof c.id === 'string' && typeof c.title === 'string',
+    )
+    .map((c) => ({ id: c.id, title: c.title }))
+}
+
+/**
+ * Runs the judge for one change: builds the packet, spawns the read-only judge
+ * agent, and records its findings with the model the subagent ran on. The mod
+ * records, never the agent: the hook denies an agent's own `--judge` call.
+ */
+async function judgeRun($: EngineInterface, argsText: string): Promise<{ text: string }> {
+  // The type is registered at session start; this covers a session that
+  // started before the registration landed, and is a no-op replace after.
+  await registerJudgeAgent($)
+  const { change, model } = judgeArgs(argsText)
+  let id = change
+  if (!id) {
+    const active = await judgeChanges($)
+    if (active.length === 0) return { text: 'no active change on this branch; see /rvow-status' }
+    const [only] = active
+    if (!only || active.length > 1) {
+      return {
+        text: [
+          `${active.length} changes are active; name one:`,
+          ...active.map((c) => `${c.id} ${c.title}`),
+        ].join('\n'),
+      }
+    }
+    id = only.id
+  }
+  const packet = await rvow($, ['review', id, '--packet', '--human'])
+  if (packet.tone !== 'ok') return { text: packet.text }
+  const identity = /^identity: (\S+)/m.exec(packet.text)?.[1]
+  if (!identity) return { text: `cannot read the packet of ${id}` }
+  const body = packet.text.split('\n').slice(1).join('\n')
+  const guide = await rvow($, ['guide', 'judge', '--human'])
+  const prompt =
+    guide.tone === 'ok' && guide.text.trim()
+      ? judgeSpawnPrompt(guide.text, identity, body)
+      : judgeSpawnPrompt(JUDGE_PROMPT_FALLBACK, identity, body)
+  let started: { model: string; agentId?: string } | { deny: string }
+  try {
+    started = await $.agent.spawn({
+      prompt,
+      subagentType: JUDGE_AGENT,
+      ...(model ? { model } : {}),
+    })
+  } catch (err) {
+    return { text: `cannot start the judge: ${String(err)}` }
+  }
+  if ('deny' in started) return { text: started.deny }
+  const agentId = started.agentId
+  // A run whose spawn reported no agent id takes the next judge answer.
+  // The engine always reports one; only a test harness does not. A stranger's
+  // answer cannot record: its packet id will not match.
+  const early = agentId !== undefined ? judgeAnswers.get(agentId) : takeStashedJudgeAnswer()
+  if (agentId !== undefined && early !== undefined) judgeAnswers.delete(agentId)
+  // The subagent's answer arrives as its turn.complete, whatever its reason,
+  // so this wait always ends.
+  const answer =
+    early !== undefined
+      ? early
+      : agentId !== undefined
+        ? await new Promise<string>((resolve) => judgeWaiters.set(agentId, resolve)).finally(() =>
+            judgeWaiters.delete(agentId),
+          )
+        : await new Promise<string>((resolve) => judgeAnonymous.push(resolve))
+  const parsed = answer ? parseJudgeAnswer(answer, identity) : null
+  if (!parsed) return { text: JUDGE_NO_FINDINGS }
+  const cwd = await $.session.cwd()
+  let recorded: { exitCode: number; stdout: string; stderr: string }
+  try {
+    recorded = await $.process.run([BIN, ...judgeRecordArgv(id, started.model)], {
+      cwd,
+      stdin: parsed.text,
+      timeoutMs: 600_000,
+    })
+  } catch (err) {
+    return { text: `cannot record the judge: ${String(err)}` }
+  }
+  if (recorded.exitCode !== 0) {
+    return { text: recorded.stdout.trim() || recorded.stderr.trim() || 'cannot record the judge' }
+  }
+  await refresh($)
+  return { text: formatJudgeFindings(id, started.model, parsed.findings) }
+}
+
 /** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
 async function ask($: EngineInterface): Promise<string> {
   const cwd = await $.session.cwd()
@@ -456,6 +594,10 @@ export const register: Register = (on) => {
       name: 'rvow-status',
       description: 'Show the rvow state of this branch in a pane',
     })
+    await $.command.register({
+      name: 'rvow-judge',
+      description: 'Run the spec conformance judge for a change: [CHG-id] [model]',
+    })
     await $.tool.register({
       name: 'rvow_ask',
       description:
@@ -481,9 +623,18 @@ export const register: Register = (on) => {
       description: YOLO_DESCRIPTION,
       inputSchema: YOLO_SCHEMA,
     })
+    await $.tool.register({
+      name: 'rvow_judge',
+      description: JUDGE_DESCRIPTION,
+      inputSchema: JUDGE_SCHEMA,
+    })
+    later($, () => registerJudgeAgent($))
     later($, () => refresh($))
     return started
   })
+
+  // The judge type is spawned by the mod itself, never offered to the model.
+  on('agent.offer', { agent: JUDGE_AGENT }, async () => ({ isOffered: false }))
 
   // The agent may ask for a tier. Only the user's answer in the dialog switches one on, and the tool
   // runs the CLI itself, since the hook refuses an agent that runs `rvow yolo` in a shell.
@@ -583,6 +734,17 @@ export const register: Register = (on) => {
     return { result }
   })
 
+  // The agent's way to the judge: the mod builds the packet, spawns the
+  // read-only judge agent and records its findings itself, since the hook
+  // denies an agent's own `rvow review --judge` call.
+  on('tool.call', { tool: JUDGE }, async ($, e) => {
+    const input = e as Record<string, unknown>
+    const change = typeof input.change === 'string' ? input.change : ''
+    const model = typeof input.model === 'string' ? input.model : ''
+    const { text } = await judgeRun($, [change, model].filter(Boolean).join(' '))
+    return { result: text }
+  })
+
   on('tool.call', async ($, e, next) => {
     if (!CHECKED.test(e.tool)) return next(e)
     const { tool, tool_use_id, agentId, consent, ...args } = e as Record<string, unknown>
@@ -656,6 +818,22 @@ export const register: Register = (on) => {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
+    // A judge subagent's answer arrives here; its run waits on it by agent id.
+    // An answer before its wait is kept, so an early arrival records all the same.
+    // A run with no agent id takes the next answer of any turn.
+    if (e.agentId) {
+      const wait = judgeWaiters.get(e.agentId)
+      if (wait) {
+        judgeWaiters.delete(e.agentId)
+        wait(e.answer)
+      } else if (judgeAnonymous.length > 0) {
+        judgeAnonymous.shift()?.(e.answer)
+      } else {
+        judgeAnswers.set(e.agentId, e.answer)
+      }
+    } else {
+      judgeAnonymous.shift()?.(e.answer)
+    }
     await refresh($)
     return done
   })
@@ -715,6 +893,12 @@ export const register: Register = (on) => {
     const id = e.args.trim()
     if (!id) return { text: 'usage: /rvow-archive <CHG-id>' }
     return userOnly($, e.origin, 'rvow-archive', ['archive', id])
+  })
+
+  on('command.run', { command: 'rvow-judge' }, async ($, e) => {
+    if (e.origin.kind !== 'composer')
+      return { text: '/rvow-judge runs only when you type it yourself.' }
+    return judgeRun($, e.args)
   })
 
   on('command.run', { command: 'rvow-status' }, async ($) => {

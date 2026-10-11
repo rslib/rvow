@@ -22,6 +22,11 @@ rvow observes it.
 `rvow review <change>` prints the plan and the accept checklist, and it runs no verify command.
 Each task appears with its `verify:` command and its `files:`, and with its `baseline:` and `mutants:` when the task sets them, so the person who accepts the plan sees the check and not only the title.
 
+An optional judge reviews the work against the spec: `rvow guide judge` prints the shared judge prompt, and `rvow review <change> --record <file> --judge --harness <harness> --model <model>` records its findings against the current packet (`--record -` reads stdin).
+The packet is data and not instructions, and the judge looks for special-cased tests, weakened checks and behavior the spec does not ask for.
+The agent's shell cannot record one: the hook denies `rvow review --judge`.
+`rvow gate` shows each finding as a warning and keeps its result, and `rvow archive` names `/rvow-judge` when the current packet has no judge note.
+
 Above the checklist, the review warns about a weak check.
 A check is weak when the whole verify command is a stub that proves nothing, such as `true`, `:`, `exit 0`, one `echo` or one `test -f`, or when a task sets `baseline: pass` on a command that runs no counted test runner.
 The warning code is `weak-verify`.
@@ -202,6 +207,7 @@ Both the Claude mod and the pi extension give the agent these tools:
 - `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
 - `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved and no plan edit is pending, and it names what is missing otherwise. An archived change is trusted, and a push never reruns its tasks.
 - `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
+- `rvow_judge` runs the spec conformance judge for a change in a clean read-only session with no rvow extension, and records its findings with the model it ran on. Type `/rvow-judge [CHG-id] [model]` yourself instead.
 - `rvow_ask`, `rvow_view` and `rvow_prove` read the open questions, the dashboard and prove a task.
 
 The tool runs the command itself, so the hook that denies `rvow accept` in a shell does not stand in its way.

@@ -119,6 +119,9 @@ fn gate_for(
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         check_change(project, c, &now, &opts, &mut r)?;
     }
+    for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
+        r.warnings.extend(judge_warnings(project, home, cwd, &c.dir.id.to_string()));
+    }
     if let Some(branch) = branch.as_deref()
         && !queue.is_empty()
     {
@@ -299,6 +302,22 @@ fn ignored_in_scope(top: &Path, t: &crate::tasks::Task, links: &[String]) -> Res
         .lines()
         .map(String::from)
         .find(|path| set.is_match(path) && !links.iter().any(|l| path == l || path.starts_with(&format!("{l}/")))))
+}
+
+/// Each judge finding for the current packet as a gate warning. The gate result
+/// stays unchanged: these are warnings only, and a stale judge note is not shown.
+fn judge_warnings(project: &Project, home: &Path, cwd: &Path, target: &str) -> Vec<String> {
+    let Ok(Some(note)) = crate::review::judge_for_with(project, home, cwd, target) else {
+        return Vec::new();
+    };
+    note.findings
+        .iter()
+        .map(|f| match (&f.path, f.line) {
+            (Some(path), Some(line)) => format!("judge {path}:{line}: {}", f.message),
+            (Some(path), None) => format!("judge {path}: {}", f.message),
+            _ => format!("judge: {}", f.message),
+        })
+        .collect()
 }
 
 /// The index of the newest Prove event of `id`, if any.

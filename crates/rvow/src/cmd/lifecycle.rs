@@ -42,6 +42,7 @@ pub fn accept(target: &str) -> Result<bool> {
 pub fn archive(target: &str) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
+    let judged = rvow_core::review::judge_for(&p, &cwd()?, target)?.is_some();
     let a = archive::archive(&p, &home, &cwd()?, target)?;
     let mut r = Reply::new();
     let mut rows = Vec::new();
@@ -50,6 +51,11 @@ pub fn archive(target: &str) -> Result<Reply> {
         rows.push(obj! { "op" => op.word(), "id" => id });
     }
     r.line(format!("archived {} to {}", a.id, a.path.display()));
+    if !judged {
+        let hint = format!("note: no judge note for the current packet; ask the user to run /rvow-judge {}", a.id);
+        r.line(&hint);
+        r.set("judge", hint);
+    }
     r.line("next: pick the next plan with rvow ls");
     r.set("archived", a.id.to_string());
     r.set("path", a.path.display().to_string());

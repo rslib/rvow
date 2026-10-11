@@ -395,6 +395,10 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
     let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
     match sub.as_str() {
         "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        "review" if args.iter().any(|w| w == "--judge" || w.starts_with("--judge=")) => denial(
+            Rule::OwnerCommand,
+            "rvow review --judge records the judge note and belongs to the user; ask the user to run /rvow-judge".into(),
+        ),
         "yolo" => denial(
             Rule::YoloFile,
             "rvow yolo relaxes the hooks and belongs to the user; ask the user to run `! rvow yolo <tier>`".into(),
