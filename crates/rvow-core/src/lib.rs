@@ -1,5 +1,6 @@
 pub mod amend;
 pub mod archive;
+pub mod attest;
 pub mod brief;
 pub mod bundle;
 pub mod change;

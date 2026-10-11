@@ -169,6 +169,15 @@ A yolo file without a valid seal turns every tier off.
   The last sealed pass that stays is a real pass on the same inputs, so the risk is a hidden flaky failure and not a fake pass.
 - A fake tool in a folder that is already on `PATH` before the real one is not caught, because the rerun reads the same `PATH` as the proof.
 
+## Attestations
+
+A proof lives in the local ledger in rvow's own format, so no other tool can check it.
+`rvow attest <change> --out <file>` exports the current proofs as in-toto statements, one per line.
+Each task with a current proof gets one Test Result statement with its result, its verify command, its test count and each file in scope with its SHA-256.
+A task with a stale proof or no proof gets no line.
+The last line sums up the change with the vow hash, the newest confirm hash, the gate result and the tasks without a current proof.
+`rvow attest <change> --out <file> --sign` also writes an ssh signature of the file in the `rvow` namespace with the `signing_key` of the global config.
+
 ## Subagents and leases
 
 A subagent meets the same rules as the main agent, but it does not know which task is its own.

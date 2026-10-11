@@ -15,7 +15,7 @@ mod output;
 mod skill;
 mod w18;
 
-use cmd::{export, lifecycle, plan, prove, read, setup};
+use cmd::{attest, export, lifecycle, plan, prove, read, setup};
 use output::Reply;
 
 const DESCRIPTION: &str = "Hold a coding agent to an accepted plan.";
@@ -326,6 +326,17 @@ enum Cmd {
         /// The run file that `gate --out` wrote.
         file: PathBuf,
     },
+    /// Export the current proofs of a change as in-toto attestations.
+    Attest {
+        /// The change id or a unique prefix of it.
+        change: String,
+        /// Write the JSON lines to this file.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Sign the file with the configured signing key.
+        #[arg(long)]
+        sign: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -459,6 +470,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
         Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
         Cmd::Ingest { file } => cmd::ingest::ingest(&file),
+        Cmd::Attest { change, out, sign } => attest::attest(&change, &out, sign),
         Cmd::Archive { change } => lifecycle::archive(&change),
         Cmd::Drop { change, reason } => lifecycle::drop_change(&change, &reason),
         Cmd::Supersede { old, by, reason } => lifecycle::supersede(&old, &by, &reason),
