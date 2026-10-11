@@ -68,6 +68,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Add scoped `setup` and `checks` entries, `{ run, files }`, that run only when a task or a changed file matches.
   The rerun worktree and `setup` now wait until a task needs them.
 
+- Write the rendered skill to `skills/rvow/SKILL.md` in the pi agent folder on `rvow install`, keeping a user edit and reporting a stale copy in the install check.
+- Add one `loop:` line to the brief with the next task, naming `rvow prove`, `rvow amend` with the `rvow_confirm` tool, and `rvow show`.
+  A branch with no active change and no backlog plan gets one line naming `rvow new` and `rvow guide proposal`.
+- Add `rvow next` to print the next task of the branch with its id, title, state, verify command and files, or to say that no task is next.
 - Add `rvow init`, `rvow new` and `rvow validate` to create the rvow tree, plan a change and check it.
 - Add `rvow accept` to run the baseline and record the plan as the vow.
 - Add `rvow prove` to run a task's stored verify command and record the proof, and `rvow status` and `rvow gate` to show where the branch stands.

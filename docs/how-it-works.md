@@ -231,6 +231,16 @@ Your answer in the dialog is the decision.
 When the command fails, the tool result holds its own words, such as `code: not-ready`, so the agent knows why.
 When you run a decision yourself, with `/rvow-accept` or the dock, and it fails, the agent gets a message that names the command and the reason.
 
+## Reaching every agent
+
+An agent that never met rvow still finds it.
+`rvow install` writes the rendered skill to `skills/rvow/SKILL.md` in the pi agent folder, the same text as the Claude skill.
+A user edit of that file is kept like any other managed file, and the install check reports a stale copy.
+The skill description starts with `Load before you` and names the trigger: an accepted change, a denied hook, a failed gate, a stale proof or a `CHG-` or `TSK-` id.
+When the brief names a next task, one `loop:` line says to run `rvow prove <task>` after the work, to change the plan with `rvow amend` and the `rvow_confirm` tool, and to read the plan with `rvow show <change>`.
+A branch with no active change and no backlog plan gets one line naming `rvow new` and `rvow guide proposal` instead.
+`rvow next` prints the next task of the branch with its id, title, state, verify command and files, or says that no task is next.
+
 ## Measuring the hooks
 
 The hooks should help and stay quiet, so rvow counts what they do.

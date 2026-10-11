@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use rvow_core::archive;
 use rvow_core::brief;
 use rvow_core::change;
+use rvow_core::config;
 use rvow_core::error::Result;
+use rvow_core::fingerprint;
+use rvow_core::git;
 use rvow_core::guide;
 use rvow_core::proof::{self, State};
 use rvow_core::show;
@@ -257,6 +260,46 @@ pub fn brief() -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     Ok(Reply::lines(brief::brief(&p, &home, &cwd()?)?))
+}
+
+/// The next task of this branch with its id, title, state, verify command
+/// and files, or a line saying no task is next. Exit 0 either way.
+pub fn next() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let cwd = cwd()?;
+    let mut r = Reply::new();
+    let Some(p) = store::find(&cwd, &home)? else {
+        r.line("no task is next");
+        r.set("next", "no task is next");
+        r.help("Run `rvow init` to create this repository's rvow tree in the rvow home; the repository stays untouched");
+        return Ok(r);
+    };
+    let top = git::toplevel(&cwd)?;
+    let (living, _) = change::load_living(&p)?;
+    let changes = proof::active(&p, &living)?;
+    let branch = git::branch(&top)?.unwrap_or_default();
+    let queue = proof::on_branch(&changes, &branch);
+    let config = config::load(&p, &home)?;
+    let now = proof::Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    match proof::next(&queue, &now)? {
+        Some((_, t, s)) => {
+            r.line(format!("next: {} {} [{}]", t.id, t.title, s.name()));
+            r.line(format!("  verify: {}", t.verify.as_deref().unwrap_or("")));
+            r.line(format!("  files: {}", t.files.join(", ")));
+            r.set("task", t.id.to_string());
+            r.set("title", t.title.clone());
+            r.set("state", s.name());
+            r.set("verify", t.verify.as_deref().unwrap_or(""));
+            r.set("files", t.files.join(", "));
+            r.help(format!("Run `rvow prove {}` after the work to record its proof", t.id));
+        }
+        None => {
+            r.line("no task is next");
+            r.set("next", "no task is next");
+            r.help("Run `rvow status` for the tasks on this branch");
+        }
+    }
+    Ok(r)
 }
 
 fn status_change(r: &mut Reply, c: &proof::ChangeStatus) -> (Node, usize) {

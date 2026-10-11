@@ -75,6 +75,7 @@ It keeps a file that you edited and says so.
 ## Next steps
 
 - `rvow install` adds the skill, the Claude Code mod, the pi extension and the pre-push gate.
+- `rvow next` prints the next task of the branch with its id, title, state, verify command and files, or says that no task is next.
 - `rvow delegate <task>` leases one task to a subagent and prints the brief to give it.
 - `rvow stats` shows how often each hook denied or blocked in the last days.
 - `rvow yolo <audit|auto|bypass|off>` (or `/rvow-yolo` in the Claude mod and pi) relaxes the hooks for a while. Only you can run it, and the gate still checks at push.

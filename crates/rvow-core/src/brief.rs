@@ -172,9 +172,19 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
             ids.join(", ")
         )));
     };
+    // An empty queue already means this branch has no active change, whatever
+    // other branches hold. A branch with no plan gets one line, with no task
+    // rules after it; a waiting plan keeps its planning brief instead.
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        return planning(project, cwd).map(bounded);
+        let text = planning(project, cwd)?;
+        if text.is_empty() {
+            return Ok(
+                "rvow is here and this branch has no plan: run `rvow new \"<title>\"` to start one, `rvow guide proposal` shows how\n"
+                    .to_string(),
+            );
+        }
+        return Ok(bounded(text));
     }
     let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
@@ -220,6 +230,10 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
             let full = format!("next: {}", proof::render_task(t, &c.loaded, &living));
             let all = format!("{out}{full}");
             out = if fits(&all) { all } else { out + &compact(t, c, &living) };
+            out.push_str(&format!(
+                "loop: after the work run `rvow prove {}`; to change the plan run `rvow amend` and call the `rvow_confirm` tool; to read the plan run `rvow show {}`\n",
+                t.id, c.dir.id
+            ));
         }
         None => out.push_str("next: every task on this branch is proved or blocked\n"),
     }
@@ -322,11 +336,13 @@ mod tests {
     }
 
     #[test]
-    fn silent_without_a_change_and_hints_on_a_detached_head() {
+    fn a_branch_without_a_change_points_to_new_and_hints_on_a_detached_head() {
         let (tmp, p, repo, _) = accepted();
         let home = tmp.0.join("home");
         git(&repo, &["checkout", "-q", "-b", "other"]);
-        assert_eq!(brief(&p, &home, &repo).unwrap(), "");
+        let b = brief(&p, &home, &repo).unwrap();
+        assert_eq!(b.lines().count(), 1, "{b}");
+        assert!(b.contains("rvow new") && b.contains("rvow guide proposal"), "{b}");
         git(&repo, &["checkout", "-q", "--detach"]);
         let b = brief(&p, &home, &repo).unwrap();
         assert!(b.contains("CHG-") && b.contains("check out a branch"), "{b}");

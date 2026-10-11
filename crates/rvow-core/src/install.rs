@@ -132,6 +132,12 @@ fn marked_skill(text: &str) -> String {
     format!("{front}<!-- rvow-managed skill-sha256:{} -->\n{body}", sha256_hex(text.as_bytes()))
 }
 
+/// The skill for pi at `<pi_dir>/skills/rvow/SKILL.md`: the same text and
+/// marker as the Claude skill, so a user's edit is kept the same way.
+pub fn pi_skill(pi_dir: &Path, text: &str) -> Result<Outcome> {
+    skill(pi_dir, text)
+}
+
 /// Compares an installed skill with the current rendered text, including legacy body-only markers.
 pub fn skill_is_current(installed: &str, text: &str) -> bool {
     if installed == marked_skill(text) {
@@ -371,6 +377,7 @@ pub fn stale_managed_files(claude_dir: &Path, rvow_home: &Path, pi_dir: Option<&
         literal.is_some_and(|bin| t == MOD_REGISTER.replace("'__RVOW_BIN__'", &bin))
     });
     if let Some(pi) = pi_dir {
+        check(pi.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
         let dir = pi.join("extensions/rvow");
         for (name, body) in std::iter::once(("index.ts", PI_EXTENSION)).chain(PI_MODULES) {
             check(dir.join(name), &|t| t == format!("// {MARK}{}\n{body}", sha256_hex(body.as_bytes())));

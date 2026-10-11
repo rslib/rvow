@@ -133,6 +133,8 @@ enum Cmd {
     View,
     /// Print the short generated brief for this branch.
     Brief,
+    /// Print the next task of this branch.
+    Next,
     /// Install the skill, the Claude Code hooks, the pi extension and the pre-push gate.
     Install {
         /// How rvow joins Claude Code: a mod (plugin), or hooks in a settings file.
@@ -414,6 +416,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Ids { change } => plan::ids(change.as_deref()),
         Cmd::View => read::dashboard(),
         Cmd::Brief => read::brief(),
+        Cmd::Next => read::next(),
         Cmd::Hook { target, event } => {
             let event = match (target, event) {
                 (HookTarget::Claude, Some(event)) => Some(event),
