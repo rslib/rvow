@@ -132,16 +132,14 @@ fn format_finding((path, d): &Finding) -> String {
 }
 
 fn base_commit(top: &Path, base: &str) -> Result<String> {
-    for r in [format!("refs/remotes/origin/{base}"), format!("refs/heads/{base}")] {
-        if git::run(top, &["rev-parse", "--verify", "--quiet", &r]).is_ok() {
-            return git::run(top, &["merge-base", "HEAD", &r]);
-        }
+    match git::base_ref(top, base) {
+        Some(r) => git::run(top, &["merge-base", "HEAD", &r]),
+        None => Err(Error::new(
+            "base",
+            format!("neither origin/{base} nor {base} exists"),
+            "set base in config.toml to the branch this work merges into",
+        )),
     }
-    Err(Error::new(
-        "base",
-        format!("neither origin/{base} nor {base} exists"),
-        "set base in config.toml to the branch this work merges into",
-    ))
 }
 
 /// Validates a backlog change and runs every verify command once. Fails when a

@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Measure the vow and the gate from the newer merge base of the local and the remote base branch, so unpushed commits on the base branch never count as outside every task.
+  When the two merge bases diverge, the remote one wins.
 - Fail `rvow gate` on code that differs from the base while a backlog plan names the branch and no change is active on it, naming the waiting plan.
   Files under the in-repo rvow tree and files that a done change of the branch covers still pass.
 - Trust a proof only when its seal checks and its verify programs match, and rerun a task whose scope holds an ignored file.

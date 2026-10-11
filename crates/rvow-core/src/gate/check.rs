@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::rerun::{base_ref, changed_files};
+use super::rerun::changed_files;
 use super::signature::{amendment_ancestor, bound_confirm_payload, signature_ok};
 use super::{Options, Report};
 use crate::amend;
@@ -143,7 +143,7 @@ pub(super) fn check_scope(
     queue: &[&Active],
     r: &mut Report,
 ) -> Result<()> {
-    let Some(base_ref) = base_ref(top, base) else {
+    let Some(base_ref) = git::base_ref(top, base) else {
         r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
     };
@@ -210,7 +210,7 @@ pub(super) fn check_backlog_scope(
     }
     waiting.sort();
     let plans = waiting.join(", ");
-    let Some(base_ref) = base_ref(top, base) else {
+    let Some(base_ref) = git::base_ref(top, base) else {
         r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
     };

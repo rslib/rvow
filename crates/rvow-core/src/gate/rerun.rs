@@ -119,8 +119,9 @@ impl Scope {
     pub(crate) fn new(top: &Path, base: &str, misses: &[&Task]) -> Result<Scope> {
         let head = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"])?.lines().map(String::from).collect();
         let tasks = misses.iter().map(|t| globset(&t.files)).collect::<Result<Vec<_>>>()?;
-        let changed =
-            base_ref(top, base).and_then(|b| git::run(top, &["merge-base", "HEAD", &b]).ok()).and_then(|mb| changed_files(top, &mb).ok());
+        let changed = git::base_ref(top, base)
+            .and_then(|b| git::run(top, &["merge-base", "HEAD", &b]).ok())
+            .and_then(|mb| changed_files(top, &mb).ok());
         Ok(Scope { head, tasks, changed })
     }
 
@@ -191,12 +192,6 @@ impl<'a> Lazy<'a> {
     pub(super) fn current(&self) -> PathBuf {
         self.tree.as_ref().map_or_else(|| self.top.to_path_buf(), |t| t.path.clone())
     }
-}
-
-pub(super) fn base_ref(top: &Path, base: &str) -> Option<String> {
-    [format!("refs/remotes/origin/{base}"), format!("refs/heads/{base}")]
-        .into_iter()
-        .find(|r| git::run(top, &["rev-parse", "--verify", "--quiet", r]).is_ok())
 }
 
 /// Files that differ from `mb` in the worktree, plus untracked files git does

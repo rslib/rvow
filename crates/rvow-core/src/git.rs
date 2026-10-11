@@ -27,6 +27,25 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
+/// The base branch ref to measure from: the local or the remote base branch,
+/// whichever has the newer merge base with HEAD. When the two merge bases are
+/// equal or neither contains the other, the remote one wins, as it did when it
+/// always came first. `None` when neither side exists.
+pub fn base_ref(top: &Path, base: &str) -> Option<String> {
+    let local = format!("refs/heads/{base}");
+    let remote = format!("refs/remotes/origin/{base}");
+    // A side with no merge base counts as missing, so unrelated histories
+    // fall back to the other side instead of failing here.
+    let mb = |r: &str| run(top, &["merge-base", "HEAD", r]).ok();
+    match (mb(&local), mb(&remote)) {
+        (None, None) => None,
+        (Some(_), None) => Some(local),
+        (None, Some(_)) => Some(remote),
+        (Some(l), Some(r)) if l != r && run(top, &["merge-base", "--is-ancestor", &r, &l]).is_ok() => Some(local),
+        _ => Some(remote),
+    }
+}
+
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     run(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
