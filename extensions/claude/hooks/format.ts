@@ -156,6 +156,72 @@ export type JudgeFinding = {
   severity?: string
 }
 
+/** The most early judge answers kept at one time. */
+export const JUDGE_KEPT = 8
+
+/**
+ * Subagent answers on their way to judge runs, by agent id. An answer that
+ * arrives before its run waits is kept only while a run is pending, at most
+ * JUDGE_KEPT of them, oldest dropped first. A turn with no agent id is the
+ * main agent's and never answers a judge run. A run whose spawn reported no
+ * agent id takes the next subagent answer that no other run waits for; the
+ * packet id check keeps a wrong one from recording.
+ */
+export class JudgeInbox {
+  private runs = 0
+  private readonly waiters = new Map<string, (answer: string) => void>()
+  private readonly kept = new Map<string, string>()
+  private readonly anonymous: ((answer: string) => void)[] = []
+
+  get size(): number {
+    return this.kept.size
+  }
+
+  /** Call before the spawn, so an answer that beats the spawn result is kept. */
+  begin(): void {
+    this.runs++
+  }
+
+  end(): void {
+    this.runs = Math.max(0, this.runs - 1)
+    if (this.runs === 0) this.kept.clear()
+  }
+
+  deliver(agentId: string | undefined, answer: string): void {
+    if (!agentId) return
+    const wait = this.waiters.get(agentId)
+    if (wait) {
+      this.waiters.delete(agentId)
+      wait(answer)
+      return
+    }
+    const next = this.anonymous.shift()
+    if (next) {
+      next(answer)
+      return
+    }
+    if (this.runs === 0) return
+    this.kept.set(agentId, answer)
+    for (const oldest of this.kept.keys()) {
+      if (this.kept.size <= JUDGE_KEPT) break
+      this.kept.delete(oldest)
+    }
+  }
+
+  /** The answer of `agentId`: a kept one now, else the next one delivered. */
+  answer(agentId: string | undefined): Promise<string> {
+    const key = agentId ?? this.kept.keys().next().value
+    const early = key === undefined ? undefined : this.kept.get(key)
+    if (key !== undefined && early !== undefined) {
+      this.kept.delete(key)
+      return Promise.resolve(early)
+    }
+    return new Promise((resolve) =>
+      agentId === undefined ? this.anonymous.push(resolve) : this.waiters.set(agentId, resolve),
+    )
+  }
+}
+
 /** The `/rvow-judge [CHG] [model]` arguments: a change id and a model name, either optional. */
 export function judgeArgs(args: string): { change?: string; model?: string } {
   const out: { change?: string; model?: string } = {}

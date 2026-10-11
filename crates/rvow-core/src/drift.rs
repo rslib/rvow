@@ -173,13 +173,91 @@ fn delta_items(before: &BTreeMap<String, String>, after: &BTreeMap<String, Strin
 /// The snapshot stores each tasks file by its content hash, as `drift` reads
 /// it, so both stay on the same bytes.
 pub(crate) fn baseline_tasks(project: &Project, change: &Active) -> Result<Vec<Task>> {
+    Ok(baseline_texts(project, change)?.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default())
+}
+
+/// The baseline's tasks.md and delta files. A placeholder that `rvow ids`
+/// replaced with an id minted for this change reads as that id, when the
+/// minted item has the same content; any other difference stays drift.
+fn baseline_texts(project: &Project, change: &Active) -> Result<BTreeMap<String, String>> {
     let Some(base) = change.baseline() else {
-        return Ok(Vec::new());
+        return Ok(BTreeMap::new());
     };
-    match hashes(base, "files").get(TASKS) {
-        Some(h) => Ok(parse_tasks(&object(project, h)?).0),
-        None => Ok(Vec::new()),
+    let prefix = format!("{DELTAS}/");
+    let mut texts = BTreeMap::new();
+    for (rel, h) in hashes(base, "files") {
+        if rel == TASKS || rel.starts_with(&prefix) {
+            let text = object(project, &h)?;
+            texts.insert(rel, text);
+        }
     }
+    let minted = crate::registry::minted_for(project, &change.dir.id)?;
+    if minted.is_empty() {
+        return Ok(texts);
+    }
+    let deltas_of = |texts: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+        texts.iter().filter(|(rel, _)| rel.starts_with(&prefix)).map(|(rel, t)| (rel.clone(), t.clone())).collect()
+    };
+    let now: BTreeMap<String, String> = change.loaded.texts.iter().map(|(rel, t)| (rel.clone(), t.clone())).collect();
+    // Requirements first: a renamed task's covers name the minted requirement.
+    let reqs = renames(&delta_map(&deltas_of(&texts)), &delta_map(&deltas_of(&now)), &minted);
+    rename(&mut texts, &reqs);
+    let task_map = |tasks: &[Task]| -> BTreeMap<String, String> { tasks.iter().map(|t| (t.id.to_string(), vow::task_hash(t))).collect() };
+    let before = texts.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default();
+    let tasks = renames(&task_map(&before), &task_map(&change.loaded.tasks), &minted);
+    rename(&mut texts, &tasks);
+    Ok(texts)
+}
+
+/// Each placeholder of `before` that is gone from `after`, paired with an id
+/// minted for the change that is new in `after` and holds the same value.
+fn renames<V: PartialEq>(
+    before: &BTreeMap<String, V>,
+    after: &BTreeMap<String, V>,
+    minted: &std::collections::HashSet<crate::id::Id>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (from, value) in before {
+        if !matches!(from.parse::<crate::id::Ref>(), Ok(crate::id::Ref::Placeholder { .. })) || after.contains_key(from) {
+            continue;
+        }
+        let to = after.iter().find(|(to, v)| {
+            *v == value
+                && !before.contains_key(*to)
+                && to.parse::<crate::id::Id>().is_ok_and(|id| minted.contains(&id))
+                && !out.iter().any(|(_, used)| used == *to)
+        });
+        if let Some((to, _)) = to {
+            out.push((from.clone(), to.clone()));
+        }
+    }
+    out
+}
+
+fn rename(texts: &mut BTreeMap<String, String>, pairs: &[(String, String)]) {
+    for text in texts.values_mut() {
+        for (from, to) in pairs {
+            *text = vow::replace_token(text, from, to);
+        }
+    }
+}
+
+/// Whether a config value differs that the user's files set now or set at the
+/// baseline. A value that only a newer rvow default changed is not drift. A
+/// baseline from before `config_keys` was recorded does not say what the user
+/// set, so there an unset key passes only when its old value was an earlier default.
+fn user_config_changed(config: &Config, base: &Map<String, Value>, before: &str, now: &str) -> bool {
+    let (Ok(Value::Object(before)), Ok(Value::Object(now))) = (serde_json::from_str::<Value>(before), serde_json::from_str::<Value>(now))
+    else {
+        return true;
+    };
+    let recorded = base.get("config_keys").and_then(Value::as_array);
+    let mut keys = config.user_keys.clone();
+    keys.extend(recorded.into_iter().flatten().filter_map(Value::as_str).map(String::from));
+    before.keys().chain(now.keys()).any(|k| {
+        let old = before.get(k);
+        old != now.get(k) && (keys.contains(k) || (recorded.is_none() && !old.is_some_and(|v| crate::config::earlier_default(k, v))))
+    })
 }
 
 /// Every difference between the change's files and its baseline, weaken first.
@@ -208,10 +286,8 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
     task_items(&old_tasks, &loaded.tasks, &mut out);
 
     let prefix = format!("{DELTAS}/");
-    let mut old_deltas = BTreeMap::new();
-    for (rel, h) in files.iter().filter(|(rel, _)| rel.starts_with(&prefix)) {
-        old_deltas.insert(rel.clone(), object(project, h)?);
-    }
+    let old_deltas: BTreeMap<String, String> =
+        baseline_texts(project, change)?.into_iter().filter(|(rel, _)| rel.starts_with(&prefix)).collect();
     let new_deltas: BTreeMap<String, String> = loaded.texts.iter().filter(|(rel, _)| rel.starts_with(&prefix)).cloned().collect();
     delta_items(&old_deltas, &new_deltas, &mut out);
 
@@ -231,7 +307,9 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
     let config_then = base.get("config").and_then(Value::as_str).unwrap_or("");
     if config_now != config_then {
         let before = object(project, config_then).unwrap_or_default();
-        out.push(changed(Class::Weaken, "config changed", &before, &canonical));
+        if user_config_changed(config, base, &before, &canonical) {
+            out.push(changed(Class::Weaken, "config changed", &before, &canonical));
+        }
     }
 
     let protected_then: BTreeMap<String, String> = base

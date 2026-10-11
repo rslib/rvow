@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { expect, test } from 'claude-code/testing'
-import { JUDGE_AGENT, JUDGE_NO_FINDINGS } from './format'
+import { JUDGE_AGENT, JUDGE_KEPT, JUDGE_NO_FINDINGS, JudgeInbox } from './format'
 import { cmd, procResult } from './testkit'
 
 const ID = 'CHG-judge1'
@@ -145,4 +145,33 @@ test('a broken judge answer records nothing and says so', async ($, on) => {
   const r = await done
   expect(runs.some((x) => x.argv.includes('--judge'))).toBe(false)
   expect(r.text).toContain(JUDGE_NO_FINDINGS)
+})
+
+test('a subagent answer with no judge run waiting is not kept', async () => {
+  const inbox = new JudgeInbox()
+  inbox.deliver('a1', 'another subagent')
+  expect(inbox.size).toBe(0)
+})
+
+test('a turn with no agent id never answers a judge run', async () => {
+  const inbox = new JudgeInbox()
+  inbox.begin()
+  const answer = inbox.answer('j1')
+  inbox.deliver(undefined, 'the main turn')
+  inbox.deliver('j1', 'the judge')
+  expect(await answer).toBe('the judge')
+  const unnamed = inbox.answer(undefined)
+  inbox.deliver(undefined, 'the main turn')
+  inbox.deliver('s1', 'a subagent')
+  expect(await unnamed).toBe('a subagent')
+})
+
+test('early answers are kept only while a judge run waits, and at most JUDGE_KEPT', async () => {
+  const inbox = new JudgeInbox()
+  inbox.begin()
+  for (let i = 0; i < JUDGE_KEPT + 2; i++) inbox.deliver(`a${i}`, `answer ${i}`)
+  expect(inbox.size).toBe(JUDGE_KEPT)
+  expect(await inbox.answer(`a${JUDGE_KEPT + 1}`)).toBe(`answer ${JUDGE_KEPT + 1}`)
+  inbox.end()
+  expect(inbox.size).toBe(0)
 })

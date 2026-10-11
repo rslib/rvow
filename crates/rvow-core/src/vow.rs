@@ -88,7 +88,7 @@ pub fn requirement_hash(r: &Requirement) -> String {
 
 /// Replaces whole-token occurrences of `from`, so `REQ-new1` does not touch
 /// `REQ-new12`.
-fn replace_token(text: &str, from: &str, to: &str) -> String {
+pub(crate) fn replace_token(text: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find(from) {
@@ -366,6 +366,7 @@ pub fn snapshot(project: &Project, top: &Path, config: &Config, loaded: &Loaded,
     let mut data = Map::new();
     data.insert("branch".into(), branch.into());
     data.insert("config".into(), put_object(project, config.canonical()?.as_bytes())?.into());
+    data.insert("config_keys".into(), json!(config.user_keys));
     data.insert("files".into(), files.into());
     data.insert("tasks".into(), tasks.into());
     data.insert("requirements".into(), requirements.into());

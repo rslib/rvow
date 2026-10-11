@@ -266,3 +266,46 @@ fn read_notes(r: &Repo, id: &str) -> (Vec<serde_json::Value>, String) {
         .collect();
     (notes, path)
 }
+
+#[test]
+fn judge_fix_archive_survives_a_failed_judge_lookup() {
+    let r = Repo::new("lookupfail");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    // A path that git reads as pathspec magic: the proof hashes it from disk,
+    // but the review packet's `git diff -- <path>` fails on it.
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt, :(bad\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("specs/out.md"),
+        "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+    )
+    .unwrap();
+    let accept = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap();
+    assert!(accept.status.success(), "{}", String::from_utf8_lossy(&accept.stdout));
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    std::fs::write(r.repo().join(":(bad"), "x").unwrap();
+    let brief = r.ok(&["brief"]);
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    let proved = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap();
+    assert!(proved.status.success(), "{}", String::from_utf8_lossy(&proved.stdout));
+    let (packet, code) = r.rvow(&["review", &id, "--packet"]);
+    assert_ne!(code, 0, "the packet must fail for this test to mean anything: {packet}");
+    let out = r.ok(&["archive", &id]);
+    assert!(out.contains("archived"), "{out}");
+    assert!(out.contains("/rvow-judge"), "{out}");
+}
+
+#[test]
+fn judge_fix_missing_record_file_is_named() {
+    let (r, id) = accepted("missingfile");
+    let (out, code) = r.rvow(&["review", &id, "--record", "missing.json", "--judge", "--harness", "claude", "--model", "m"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("missing.json"), "{out}");
+}

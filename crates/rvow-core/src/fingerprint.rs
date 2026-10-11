@@ -363,6 +363,7 @@ mod tests {
         let tmp = TempDir::new();
         let mut cfg = crate::config::Config {
             base: "main".into(),
+            user_keys: Default::default(),
             timeout_secs: 60,
             inputs: vec![],
             test_globs: vec![],
@@ -393,6 +394,7 @@ mod tests {
         let tmp = TempDir::new();
         let cfg = crate::config::Config {
             base: "main".into(),
+            user_keys: Default::default(),
             timeout_secs: 60,
             inputs: vec![],
             test_globs: vec![],

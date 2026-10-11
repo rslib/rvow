@@ -37,6 +37,7 @@ import {
   JUDGE_PROMPT_FALLBACK,
   JUDGE_SCHEMA,
   JUDGE_TOOLS,
+  JudgeInbox,
   judgeArgs,
   judgeRecordArgv,
   judgeSpawnPrompt,
@@ -88,21 +89,8 @@ const FOLD_LINES = 8
 let sentBrief = ''
 /** A tool call carries no session id, so the last prompt's id goes with `pre-tool-use`. */
 let sessionId: string | undefined
-/** Judge subagent answers waiting for their run: `turn.complete` resolves them by agent id. */
-const judgeWaiters = new Map<string, (answer: string) => void>()
-/** Runs whose spawn reported no agent id: each takes the next judge answer. */
-const judgeAnonymous: ((answer: string) => void)[] = []
-/** Judge answers that arrived before their run waited: kept by agent id. */
-const judgeAnswers = new Map<string, string>()
-
-/** The oldest kept judge answer, if any, so a run with no agent id can take it. */
-function takeStashedJudgeAnswer(): string | undefined {
-  const first = judgeAnswers.keys().next()
-  if (first.done) return undefined
-  const answer = judgeAnswers.get(first.value)
-  judgeAnswers.delete(first.value)
-  return answer
-}
+/** The pending judge runs and the subagent answers on their way to them. */
+const judgePending = new JudgeInbox()
 const BRIEF_WAIT_MS = 5_000
 
 /** Runs `work` after the current event returns, so the session never waits for rvow. */
@@ -443,6 +431,17 @@ async function judgeChanges($: EngineInterface): Promise<{ id: string; title: st
  * records, never the agent: the hook denies an agent's own `--judge` call.
  */
 async function judgeRun($: EngineInterface, argsText: string): Promise<{ text: string }> {
+  // Counted from the start, not from the spawn: an answer can arrive before
+  // the spawn returns, and it is kept only while a run is pending.
+  judgePending.begin()
+  try {
+    return await judgeOnce($, argsText)
+  } finally {
+    judgePending.end()
+  }
+}
+
+async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: string }> {
   // The type is registered at session start; this covers a session that
   // started before the registration landed, and is a no-op replace after.
   await registerJudgeAgent($)
@@ -483,22 +482,9 @@ async function judgeRun($: EngineInterface, argsText: string): Promise<{ text: s
     return { text: `cannot start the judge: ${String(err)}` }
   }
   if ('deny' in started) return { text: started.deny }
-  const agentId = started.agentId
-  // A run whose spawn reported no agent id takes the next judge answer.
-  // The engine always reports one; only a test harness does not. A stranger's
-  // answer cannot record: its packet id will not match.
-  const early = agentId !== undefined ? judgeAnswers.get(agentId) : takeStashedJudgeAnswer()
-  if (agentId !== undefined && early !== undefined) judgeAnswers.delete(agentId)
   // The subagent's answer arrives as its turn.complete, whatever its reason,
   // so this wait always ends.
-  const answer =
-    early !== undefined
-      ? early
-      : agentId !== undefined
-        ? await new Promise<string>((resolve) => judgeWaiters.set(agentId, resolve)).finally(() =>
-            judgeWaiters.delete(agentId),
-          )
-        : await new Promise<string>((resolve) => judgeAnonymous.push(resolve))
+  const answer = await judgePending.answer(started.agentId)
   const parsed = answer ? parseJudgeAnswer(answer, identity) : null
   if (!parsed) return { text: JUDGE_NO_FINDINGS }
   const cwd = await $.session.cwd()
@@ -818,22 +804,7 @@ export const register: Register = (on) => {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    // A judge subagent's answer arrives here; its run waits on it by agent id.
-    // An answer before its wait is kept, so an early arrival records all the same.
-    // A run with no agent id takes the next answer of any turn.
-    if (e.agentId) {
-      const wait = judgeWaiters.get(e.agentId)
-      if (wait) {
-        judgeWaiters.delete(e.agentId)
-        wait(e.answer)
-      } else if (judgeAnonymous.length > 0) {
-        judgeAnonymous.shift()?.(e.answer)
-      } else {
-        judgeAnswers.set(e.agentId, e.answer)
-      }
-    } else {
-      judgeAnonymous.shift()?.(e.answer)
-    }
+    judgePending.deliver(e.agentId, e.answer)
     await refresh($)
     return done
   })

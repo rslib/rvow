@@ -1,6 +1,6 @@
 //! Settings from `$RVOW_HOME/config.toml` and the project's `config.toml`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -62,7 +62,7 @@ impl Step {
 }
 
 /// One config file as written. Every key is optional.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct File {
     pub base: Option<String>,
@@ -134,6 +134,10 @@ pub struct Config {
     pub context: String,
     #[serde(default, skip_serializing_if = "Rules::is_empty")]
     pub rules: Rules,
+    /// The keys that the user's config files set; the rest are defaults of
+    /// this rvow version. Outside the canonical form, like `machine`.
+    #[serde(skip)]
+    pub user_keys: BTreeSet<String>,
 }
 
 /// Files that enforce rvow itself. Always protected, whatever the config says.
@@ -262,7 +266,53 @@ pub fn load(project: &Project, home: &Path) -> Result<Config> {
         agent,
         context,
         rules,
+        user_keys: user_keys(project, home)?,
     })
+}
+
+/// Default values of earlier rvow versions, by `Config` key. A baseline from
+/// before `config_keys` was recorded may hold one for a key no file set.
+const EARLIER_DEFAULTS: &[(&str, &[&str])] = &[
+    ("test_globs", &["tests/**", "**/*_test.*", "**/test_*.py", "**/*.test.*", "**/*.spec.*"]),
+    (
+        "protect_infra",
+        &[
+            "**/__snapshots__/**",
+            "**/*.snap",
+            "**/conftest.py",
+            "**/pytest.ini",
+            "**/jest.config.*",
+            "**/vitest.config.*",
+            ".cargo/config.toml",
+            "Makefile",
+            "justfile",
+            "package.json",
+        ],
+    ),
+];
+
+/// Whether `value` is the default of `key` in an earlier rvow version.
+pub(crate) fn earlier_default(key: &str, value: &serde_json::Value) -> bool {
+    EARLIER_DEFAULTS.iter().any(|(k, list)| *k == key && *value == serde_json::json!(list))
+}
+
+/// The keys of `Config` that the user's config files set, as `load` merges
+/// them. A key missing here comes from a default of this rvow version.
+fn user_keys(project: &Project, home: &Path) -> Result<BTreeSet<String>> {
+    let mut files = vec![read_file(&project.root.join(CONFIG_FILE))?];
+    if project.meta.mode == Mode::Home {
+        files.push(read_file(&home.join(CONFIG_FILE))?);
+    }
+    let mut keys = BTreeSet::new();
+    for file in files {
+        let value = serde_json::to_value(&file).map_err(|e| Error::internal(format!("config file does not serialize: {e}")))?;
+        for (key, v) in value.as_object().into_iter().flatten() {
+            if !v.is_null() {
+                keys.insert(if key == "timeout" { "timeout_secs".to_string() } else { key.clone() });
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// The `rerun_links` key, merged like the keys of `load`. It stays out of

@@ -54,6 +54,12 @@ rvow sorts each difference into one of three classes.
   A removed task is weaken as well: the work it demanded goes away with it.
   So is a task that gains `baseline: pass`: a check that had to fail first may now pass at once.
 
+A changed config is drift only for a value that your config files set now or set at the baseline.
+A new default value that comes with a newer rvow is no drift.
+An older baseline does not record which values your files set, so there an unset value passes only when its old value was a default of an earlier rvow.
+A placeholder that `rvow ids` replaced with an id that rvow minted for the same change is no drift either, when the item under the new id holds the same content.
+`rvow amend` then runs no baseline for that task.
+
 The gate fails on confirm and weaken drift until the user decides.
 Free drift passes without a question, so small work does not wait for a person.
 rvow cannot tell that an agent special-cased a tested input.
@@ -216,7 +222,8 @@ Both the Claude mod and the pi extension give the agent these tools:
 - `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
 - `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved and no plan edit is pending, and it names what is missing otherwise. An archived change is trusted, and a push never reruns its tasks.
 - `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
-- `rvow_judge` runs the spec conformance judge for a change in a clean read-only session with no rvow extension, and records its findings with the model it ran on. Type `/rvow-judge [CHG-id] [model]` yourself instead.
+- `rvow_judge` runs the spec conformance judge for a change in a clean read-only session with no rvow extension, and records its findings with the model it ran on.
+  In pi the judge session also starts with `--no-skills` and `--no-context-files`, so it loads no skill and no AGENTS.md or CLAUDE.md. Type `/rvow-judge [CHG-id] [model]` yourself instead.
 - `rvow_ask`, `rvow_view` and `rvow_prove` read the open questions, the dashboard and prove a task.
 
 The tool runs the command itself, so the hook that denies `rvow accept` in a shell does not stand in its way.

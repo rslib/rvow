@@ -96,6 +96,8 @@ test("the judge runs in a clean session and its findings are recorded and shown"
   const piArgv = readFileSync(join(fake, "argv"), "utf8");
   assert.match(piArgv, /RVOW_JUDGE=1/);
   assert.match(piArgv, /--no-extensions/);
+  assert.match(piArgv, /--no-skills/);
+  assert.match(piArgv, /--no-context-files/);
   assert.match(piArgv, /--tools read,grep,find,ls/);
   assert.match(piArgv, /--mode json/);
   assert.match(piArgv, /--no-session/);

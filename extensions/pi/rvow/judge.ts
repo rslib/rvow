@@ -110,7 +110,8 @@ function messageText(msg: PiMessage): string {
 /**
  * Runs the judge prompt in a new `pi` session with read-only tools and no
  * extensions: `--no-session` keeps no state, `--no-extensions` loads no
- * extension (rvow included), and `RVOW_JUDGE=1` keeps this extension
+ * extension (rvow included), `--no-skills` and `--no-context-files` keep
+ * skills and AGENTS.md or CLAUDE.md out, and `RVOW_JUDGE=1` keeps this extension
  * unregistered even where discovery still runs. Returns the final answer and
  * the model the run reported, if any.
  */
@@ -125,6 +126,8 @@ export function runJudgeChild(
     "-p",
     "--no-session",
     "--no-extensions",
+    "--no-skills",
+    "--no-context-files",
     "--tools",
     JUDGE_TOOLS,
     ...(model ? ["--model", model] : []),

@@ -42,7 +42,8 @@ pub fn accept(target: &str) -> Result<bool> {
 pub fn archive(target: &str) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
-    let judged = rvow_core::review::judge_for(&p, &cwd()?, target)?.is_some();
+    // The judge note is advisory: a failed lookup counts as no note and never stops the archive.
+    let judged = matches!(rvow_core::review::judge_for(&p, &cwd()?, target), Ok(Some(_)));
     let a = archive::archive(&p, &home, &cwd()?, target)?;
     let mut r = Reply::new();
     let mut rows = Vec::new();

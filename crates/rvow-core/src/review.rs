@@ -156,27 +156,26 @@ fn judge_invalid() -> Error {
     )
 }
 
-fn read_record_bytes(file: &Path) -> Result<Vec<u8>> {
+/// The record bytes of `file`, or stdin for `-`. An oversized record fails
+/// with `too_big`; a read failure names the file.
+fn read_record_bytes(file: &Path, too_big: fn() -> Error) -> Result<Vec<u8>> {
     if file.as_os_str() == "-" {
         let mut input = Vec::new();
         use std::io::Read;
         std::io::stdin().read_to_end(&mut input).map_err(|e| Error::io(file, e))?;
         if input.len() as u64 > RECORD_BYTES {
-            return Err(invalid());
+            return Err(too_big());
         }
         return Ok(input);
     }
     if std::fs::metadata(file).map_err(|e| Error::io(file, e))?.len() > RECORD_BYTES {
-        return Err(invalid());
+        return Err(too_big());
     }
     std::fs::read(file).map_err(|e| Error::io(file, e))
 }
 
-fn check_findings(findings: &[Finding]) -> Result<()> {
-    if findings.iter().any(|f| f.message.trim().is_empty() || f.message.len() > 4000 || f.path.as_ref().is_some_and(|p| p.len() > 1000)) {
-        return Err(invalid());
-    }
-    Ok(())
+fn findings_ok(findings: &[Finding]) -> bool {
+    !findings.iter().any(|f| f.message.trim().is_empty() || f.message.len() > 4000 || f.path.as_ref().is_some_and(|p| p.len() > 1000))
 }
 
 /// Validates current packet identity and appends only a Note. No approval or
@@ -187,9 +186,11 @@ pub fn record(project: &Project, cwd: &Path, target: &str, file: &Path) -> Resul
 
 /// Advisory Note recording with explicit private storage context.
 pub fn record_for(project: &Project, home: &Path, cwd: &Path, target: &str, file: &Path) -> Result<Recorded> {
-    let bytes = read_record_bytes(file)?;
+    let bytes = read_record_bytes(file, invalid)?;
     let mut advice: Advice = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    check_findings(&advice.findings)?;
+    if !findings_ok(&advice.findings) {
+        return Err(invalid());
+    }
     let lock = project.lock()?;
     let current = packet_for(project, home, cwd, target)?;
     if advice.packet != current.identity {
@@ -235,11 +236,7 @@ fn judge_bytes(bytes: &[u8], harness: &str, model: &str) -> Result<Advice> {
         return Err(judge_invalid());
     }
     let advice: Advice = serde_json::from_slice(bytes).map_err(|_| judge_invalid())?;
-    if advice
-        .findings
-        .iter()
-        .any(|f| f.message.trim().is_empty() || f.message.len() > 4000 || f.path.as_ref().is_some_and(|p| p.len() > 1000))
-    {
+    if !findings_ok(&advice.findings) {
         return Err(judge_invalid());
     }
     Ok(advice)
@@ -261,7 +258,7 @@ pub fn record_judge_for(
     harness: &str,
     model: &str,
 ) -> Result<JudgeRecorded> {
-    let bytes = read_record_bytes(file).map_err(|_| judge_invalid())?;
+    let bytes = read_record_bytes(file, judge_invalid)?;
     record_judge_bytes_for(project, home, cwd, target, &bytes, harness, model)
 }
 

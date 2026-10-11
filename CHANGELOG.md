@@ -29,6 +29,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Count a removed task and a task that gains `baseline: pass` as weaken drift.
   Dropping the flag or changing a timeout stays free.
 - Treat a change of a task title as free drift.
+- Stop showing `config changed` drift for a new default value of a newer rvow.
+  A value that your config files set, now or at the baseline, still counts.
+- Stop showing a placeholder that `rvow ids` minted as a removed and an added item, and run no amend baseline for it.
+- Start the pi judge session with `--no-skills` and `--no-context-files`.
 - Let a subagent that holds a lease prove only its own task.
 - Make the brief name missing or failed work of the newest change before a stale task of an older change.
 - Make the Stop hook give each reason once per session, and let subagent stops and stops during a rebase, merge or cherry-pick pass.
@@ -107,6 +111,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow archive` failing when the judge note lookup fails.
+  The archive now goes on and names `/rvow-judge`.
+- Fix `rvow review --judge` reporting a bad record for a record file that is missing.
+  The error now names the file.
+- Fix the Claude mod keeping every subagent answer for the whole session.
+  It keeps a judge answer only while a judge run waits, and never hands the main agent's answer to a judge run.
 - Keep a tampering denial a denial after 3 denials in a row, deny a shell glob that expands to a protected file, and hold the stop for each unproved task that no pending amendment names.
 - Fix `rvow install` leaving the rvow plugin disabled when it was installed but turned off.
 - Fix `rvow check` to report a plan with no tasks as not ready, and the brief to ask for `rvow check` instead of accept.
