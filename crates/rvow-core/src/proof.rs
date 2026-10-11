@@ -37,6 +37,10 @@ impl Active {
         self.events.iter().find(|e| e.kind == Kind::Vow)
     }
 
+    pub fn base_commit(&self) -> Option<&str> {
+        self.vow()?.data.get("base_commit")?.as_str()
+    }
+
     /// The snapshot that drift is measured against: the snapshot of the latest
     /// accepted amendment, else the vow.
     pub fn baseline(&self) -> Option<&Map<String, Value>> {
@@ -215,7 +219,14 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
         return Ok(State::Failed);
     }
     let key = str_of(last, "key");
-    let flaky = mine.iter().any(|e| e.kind == Kind::Prove && str_of(e, "key") == key && !is_proved(e));
+    let last_tree = last.data.get("worktree").and_then(Value::as_str).unwrap_or("");
+    let flaky = !last_tree.is_empty()
+        && mine.iter().any(|e| {
+            e.kind == Kind::Prove
+                && str_of(e, "key") == key
+                && !is_proved(e)
+                && e.data.get("worktree").and_then(Value::as_str) == Some(last_tree)
+        });
     let mut reasons = Vec::new();
     if str_of(last, "task_hash") != task_hash(task) {
         reasons.push("task-changed");
@@ -446,6 +457,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let inputs = now.inputs(task)?;
+    let tree = fingerprint::worktree(&top, project)?;
     let cmd = task.verify_command()?;
     let started = ledger::now_ms();
     let outcome = runner::run(cmd, &top, &[], task.timeout.unwrap_or(config.timeout()), echo)?;
@@ -458,7 +470,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
             // against the vow's base commit, and RVOW_CHANGED_FILES lists the
             // changed paths, one per line. Both reach only the child. A vow
             // with no base commit predates the diff, so the diff is empty.
-            let scoped = match change.baseline().and_then(|b| b.get("base_commit")).and_then(Value::as_str) {
+            let scoped = match change.base_commit() {
                 Some(base) => git::task_diff(&top, base, &task.files)?,
                 None => git::TaskDiff { diff: String::new(), files: Vec::new() },
             };
@@ -508,6 +520,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("tail".into(), json!(outcome.tail));
     data.insert("inputs".into(), inputs.hash.clone().into());
     data.insert("input_files".into(), inputs.files.into());
+    data.insert("worktree".into(), tree.into());
     data.insert("depends".into(), json!(dependency_inputs(&change.loaded.tasks, task, &now)));
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.into());
@@ -725,13 +738,17 @@ pub(crate) mod tests {
         assert!(!r.proved, "0 tests run is not a proof");
         std::fs::write(&tasks, text).unwrap();
 
-        let flaky = "f=$(cat n 2>/dev/null || echo 0); echo $((f+1)) > n; [ $f -ne 0 ] && echo 'test result: ok. 1 passed; 0 failed;'";
+        let flag = std::env::temp_dir().join(format!("rvow-flaky-{}-{}", std::process::id(), tmp.0.display().to_string().len()));
+        let _ = std::fs::remove_file(&flag);
+        let flaky = format!("test -f {} && echo 'test result: ok. 1 passed; 0 failed;'", flag.display());
         let text = std::fs::read_to_string(&tasks).unwrap();
         let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
         std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: {flaky}"))).unwrap();
         assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(&flag, "go\n").unwrap();
         assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "flaky");
+        let _ = std::fs::remove_file(&flag);
     }
 
     #[test]

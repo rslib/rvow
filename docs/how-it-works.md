@@ -65,6 +65,9 @@ The plan must be able to change, because plans are wrong.
 The agent edits the plan files and runs `rvow amend` with a reason.
 That records the edit as an amendment.
 Before it records, `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up the same way as the gate rerun.
+The base commit always comes from the vow, also after a confirmed amendment, so a second amend and the mutants diff keep working.
+When the vow has no base commit, the amend error names a step for an active change such as `rvow block`.
+`rvow amend` mints placeholder ids before it takes the snapshot, as accept does, so a new task keeps its real id after confirm and a later `rvow ids` mints nothing.
 A check that passes there with tests run is refused with the code `baseline`, unless the task says `baseline: pass`, and a `baseline: pass` check that fails there is refused too.
 Nothing is recorded when the baseline refuses.
 Each run's task id, exit code and test count go into the amendment, and `rvow confirm` lists weaken items first with each baseline result, so the user sees which checks failed before the work.
@@ -92,6 +95,10 @@ A proof ties a passing run to what the run saw: the task, the requirements it co
 A proof is stale when one of those has changed since the run.
 The reasons are task changed, requirement changed, inputs changed, private policy changed and environment changed.
 A stale task needs a new proof, and `rvow prove --stale` runs them all.
+
+A task is flaky only when a pass and a failure share the same run key and the same worktree fingerprint.
+Each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, so a fix outside the task's files changes the fingerprint and clears the failure instead of marking it flaky.
+A failure recorded before worktree fingerprints existed has none and does not count as flaky.
 
 A task can also set `mutants:`, an extra check that runs after `verify:` passes.
 rvow runs it with `RVOW_DIFF` set to a file holding the diff of the task's files against the vow's base commit, and `RVOW_CHANGED_FILES` listing the changed paths one per line, so `cargo mutants --in-diff "$RVOW_DIFF"` tests only the changed lines.

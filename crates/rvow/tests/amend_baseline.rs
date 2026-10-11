@@ -82,6 +82,20 @@ fn active_dir(project: &store::Project) -> PathBuf {
     std::fs::read_dir(project.root.join("active")).unwrap().next().unwrap().unwrap().path()
 }
 
+/// The task id of the entry whose title contains `title`, read back from
+/// tasks.md after amend minted the placeholders.
+fn task_id_with_title(dir: &Path, title: &str) -> String {
+    let text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    for line in text.lines().filter(|l| l.starts_with("- ")) {
+        if line.contains(title) {
+            let id = line[2..].split_whitespace().next().unwrap().to_string();
+            assert!(id.starts_with("TSK-"), "no TSK- id in {line}");
+            return id;
+        }
+    }
+    panic!("no {title} in {text}");
+}
+
 fn drift_items(s: &Setup) -> Vec<(drift::Class, String)> {
     let (living, _) = change::load_living(&s.project).unwrap();
     let changes = proof::active(&s.project, &living).unwrap();
@@ -177,7 +191,11 @@ fn amend_baseline_passing_check_is_refused() {
     std::fs::write(dir.join("tasks.md"), text).unwrap();
     let err = amend::amend(&s.project, &s.home, &s.repo, None, "add a task", None).unwrap_err();
     assert_eq!(err.code, "baseline", "{err:?}");
-    assert!(err.message.contains("TSK-new2"), "{err:?}");
+    assert!(err.message.contains("passes on the base commit"), "{err:?}");
+    assert!(!err.message.contains("TSK-new2"), "amend mints before the baseline: {err:?}");
+    let minted = task_id_with_title(&dir, "Extra check");
+    assert_ne!(minted, "TSK-new2", "the new task keeps no placeholder: {minted}");
+    assert!(err.message.contains(&minted), "the message names the minted id {minted}: {err:?}");
     assert!(pending_of(&s).is_empty(), "a refused amendment records nothing");
 }
 
@@ -215,7 +233,10 @@ fn amend_baseline_guard_must_pass() {
     std::fs::write(dir.join("tasks.md"), text).unwrap();
     let err = amend::amend(&s.project, &s.home, &s.repo, None, "add a guard", None).unwrap_err();
     assert_eq!(err.code, "baseline", "{err:?}");
-    assert!(err.message.contains("TSK-new2"), "{err:?}");
+    assert!(!err.message.contains("TSK-new2"), "amend mints before the baseline: {err:?}");
+    let minted = task_id_with_title(&dir, "Guard");
+    assert_ne!(minted, "TSK-new2", "the new task keeps no placeholder: {minted}");
+    assert!(err.message.contains(&minted), "the message names the minted id {minted}: {err:?}");
     assert!(pending_of(&s).is_empty(), "a refused amendment records nothing");
 }
 
@@ -259,8 +280,10 @@ fn confirm_list_shows_the_baseline_result() {
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1, "{pend:?}");
     let lines = amend::listing(&pend);
-    assert!(
-        lines.iter().any(|l| l.contains("TSK-new2 fails before the work") && l.contains("exit 1") && l.contains("3 tests")),
-        "{lines:?}"
-    );
+    assert!(lines.iter().any(|l| l.contains("fails before the work") && l.contains("exit 1") && l.contains("3 tests")), "{lines:?}");
+    assert!(lines.iter().all(|l| !l.contains("TSK-new2")), "amend mints before the snapshot: {lines:?}");
+    let minted = &pend[0].baseline[0].task;
+    assert_ne!(minted, "TSK-new2", "the baseline names no placeholder: {lines:?}");
+    assert!(minted.starts_with("TSK-"), "the baseline names the minted id: {lines:?}");
+    assert!(lines.iter().any(|l| l.contains(minted)), "the listing names the minted id {minted}: {lines:?}");
 }

@@ -21,6 +21,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Tell the agent when an accept, a confirm or an archive that the user ran fails, with the command and the reason.
 - Run the baseline of an added or changed check at amend time: `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up like the gate rerun, and refuses with the code `baseline` a check that passes there without `baseline: pass`, or a `baseline: pass` check that fails there.
   The amendment records each run's task id, exit code and test count, and `rvow confirm` lists weaken items first with each baseline result.
+- Read the base commit from the vow, also after a confirmed amendment, so `rvow amend` and the mutants diff keep working.
+  When the vow has no base commit, the amend error names `rvow block` instead of accept.
+- Mint placeholder ids before the amend snapshot, so a new task keeps its real id after confirm and `rvow ids` mints nothing afterwards.
+- Call a task flaky only on the same worktree: each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, and a pass and a failure count as flaky only with the same run key and fingerprint.
+  An old failure with no fingerprint does not count.
 - Count a removed task and a task that gains `baseline: pass` as weaken drift.
   Dropping the flag or changing a timeout stays free.
 - Treat a change of a task title as free drift.

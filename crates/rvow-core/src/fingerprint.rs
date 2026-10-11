@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::runner;
+use crate::store::{Mode, Project, REPO_DIR};
 use crate::vow::sha256_hex;
 
 const ENV_TIMEOUT: Duration = Duration::from_secs(30);
@@ -87,6 +88,28 @@ pub fn inputs(top: &Path, globs: &[String]) -> Result<Inputs> {
         files += 1;
     }
     Ok(Inputs { hash: sha256_hex(list.as_bytes()), files, lfs_pointers })
+}
+
+/// Hashes every tracked file plus every untracked file that git does not
+/// ignore, by path and content. Two runs on the same worktree share it,
+/// while any fix anywhere changes it. In repo mode the in-repo rvow tree
+/// (`rvow/`) is skipped: each prove appends to its ledger, so keeping it
+/// would make every fingerprint differ.
+pub fn worktree(top: &Path, project: &Project) -> Result<String> {
+    let skip_repo = project.meta.mode == Mode::Repo;
+    let prefix = format!("{REPO_DIR}/");
+    let mut list = String::new();
+    for rel in candidate_files(top)? {
+        if skip_repo && (rel == REPO_DIR || rel.starts_with(&prefix)) {
+            continue;
+        }
+        let (hash, _) = file_hash(top, &rel)?;
+        list.push_str(&rel);
+        list.push('\0');
+        list.push_str(&hash);
+        list.push('\n');
+    }
+    Ok(sha256_hex(list.as_bytes()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

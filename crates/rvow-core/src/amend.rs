@@ -221,8 +221,12 @@ fn baseline(
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
-    let base_commit = change.baseline().and_then(|b| b.get("base_commit")).and_then(Value::as_str).ok_or_else(|| {
-        Error::new("baseline", format!("{} has no base commit in its vow", change.dir.id), "accept the change again so the vow records one")
+    let base_commit = change.base_commit().ok_or_else(|| {
+        Error::new(
+            "baseline",
+            format!("{} has no base commit in its vow", change.dir.id),
+            "run rvow block to record why this check cannot run, then re-create the change so a new vow records the base commit",
+        )
     })?;
     let links = config::rerun_links(project, home)?;
     let env: Vec<(String, String)> = config.rerun_env.clone().into_iter().collect();
@@ -283,7 +287,7 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
     }
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
-    let changes = proof::active(project, &living)?;
+    let mut changes = proof::active(project, &living)?;
     let wanted: Option<Id> = target.map(|t| change::resolve(project, t)).transpose()?.map(|c| c.id);
     let branch = git::branch(&top)?;
     let config = config::load(project, home)?;
@@ -301,7 +305,7 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
     let unlock = unlock.as_deref();
     let lock = project.lock()?;
     let mut out = Vec::new();
-    for c in &changes {
+    for c in &mut changes {
         let selected = match &wanted {
             Some(id) => &c.dir.id == id,
             None => c.branch() == branch.as_deref(),
@@ -325,6 +329,8 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                 }]
             }
             None => {
+                crate::vow::mint_placeholders(project, &lock, &c.dir, &c.loaded)?;
+                c.loaded = change::load(&c.dir.path, &living)?;
                 let items = drift::drift(project, &top, &config, c)?;
                 if items.is_empty() {
                     continue;
