@@ -109,6 +109,19 @@ fn current(top: &Path, key: &str) -> Option<String> {
     }
 }
 
+/// Whether `now` keeps every line of `before` and only adds free lines: new
+/// Rust test items for `.rs` files, standalone added checks elsewhere. This
+/// is the same check `drift` below uses; callers that compare other saved
+/// text, such as protected files, use it too.
+pub(crate) fn preserved(rel: &str, before: &str, now: &str) -> bool {
+    if rel.strip_suffix(RUST_TESTS).unwrap_or(rel).ends_with(".rs") {
+        rust::preserved(before, now)
+    } else {
+        let mut remaining = now.lines();
+        before.lines().all(|line| remaining.by_ref().any(|candidate| candidate == line)) && added_lines_safe(before, now)
+    }
+}
+
 fn added_lines_safe(before: &str, now: &str) -> bool {
     let mut old = before.lines().peekable();
     now.lines().all(|line| {
@@ -142,13 +155,7 @@ pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
             out.push(Item { class: Class::Weaken, what: what("was removed"), before: None, after: None });
             continue;
         };
-        let preserved = if key.ends_with(RUST_TESTS) || key.ends_with(".rs") {
-            rust::preserved(&before, &now)
-        } else {
-            let mut remaining = now.lines();
-            before.lines().all(|line| remaining.by_ref().any(|candidate| candidate == line)) && added_lines_safe(&before, &now)
-        };
-        if !preserved {
+        if !preserved(&key, &before, &now) {
             out.push(Item { class: Class::Weaken, what: what("lost or changed lines"), before: Some(before), after: None });
         }
     }

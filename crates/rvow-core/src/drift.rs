@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use crate::change::{DELTAS, DESIGN, PROPOSAL, TASKS};
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::fingerprint::globset;
 use crate::proof::Active;
 use crate::spec::{DeltaOp, parse_deltas};
 use crate::store::Project;
@@ -320,6 +321,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     let protected_now = protected_files(top, config)?;
+    let tests = globset(&config.test_globs)?;
     for (rel, hash) in &protected_then {
         match protected_now.get(rel) {
             None => out.push(item(Class::Weaken, format!("protected file {rel} removed"))),
@@ -329,6 +331,15 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
                     let what = format!("protected file {rel} changed");
                     let old = object(project, hash).ok();
                     let new = String::from_utf8(bytes).ok();
+                    // A protected test file that only grew is not drift. Infra
+                    // files and a missing or corrupt baseline object keep the
+                    // hash rule exactly as before.
+                    if let (Some(o), Some(n)) = (old.as_deref(), new.as_deref())
+                        && tests.is_match(rel)
+                        && crate::guard::preserved(rel, o, n)
+                    {
+                        continue;
+                    }
                     out.push(match (old, new) {
                         (Some(o), Some(n)) if o.len() + n.len() <= SHOW_LIMIT => changed(Class::Weaken, what, &o, &n),
                         _ => item(Class::Weaken, what),

@@ -59,6 +59,9 @@ A new default value that comes with a newer rvow is no drift.
 An older baseline does not record which values your files set, so there an unset value passes only when its old value was a default of an earlier rvow.
 A placeholder that `rvow ids` replaced with an id that rvow minted for the same change is no drift either, when the item under the new id holds the same content.
 `rvow amend` then runs no baseline for that task.
+A protected test file that only grew is not drift.
+Added tests and standalone added checks stay free.
+A lost or changed line is weaken drift.
 
 The gate fails on confirm and weaken drift until the user decides.
 Free drift passes without a question, so small work does not wait for a person.
