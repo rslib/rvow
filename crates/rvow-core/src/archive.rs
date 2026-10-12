@@ -13,6 +13,7 @@ use crate::change::{self, CapSpec, ChangeDir, LEDGER, Stage};
 use crate::diag::Severity;
 use crate::error::{Error, Result};
 use crate::gate;
+use crate::git;
 use crate::id::{self, Id, Kind as IdKind, Ref};
 use crate::ledger::{self, Kind};
 use crate::lint::Finding;
@@ -217,6 +218,12 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     let mut data = Map::new();
     data.insert("merged".into(), by_op.into());
     data.insert("record".into(), json!(hashes));
+    // Without a checkout or a commit there is no HEAD to record; the gate then reads the vow base.
+    if let Ok(top) = git::toplevel(cwd)
+        && let Ok(head) = git::run(&top, &["rev-parse", "HEAD"])
+    {
+        data.insert("head".into(), head.into());
+    }
     ledger::append(&dir.path.join(LEDGER), &lock, Kind::Archive, data)?;
     let path = retire(project, &dir, Stage::Done)?;
     Ok(Archived { id: dir.id, path, merged })
@@ -557,13 +564,13 @@ rvow SHALL keep three.
         std::fs::write(&tasks, text.replacen("  verify", "  covers: REQ-new2\n  verify", 1)).unwrap();
         let a = amend::amend(&p, &home, &repo, None, "one more", None).unwrap();
         amend::confirm(&p, &[a[0].id.to_string()], amend::Decision::Accept, None).unwrap();
+        let specs = std::fs::read_to_string(dir.join("specs/core.md")).unwrap();
+        assert!(!specs.contains("REQ-new2"), "amend mints before the snapshot: {specs}");
         prove_ok(&p, &home, &repo, &task, "e1.txt");
 
-        let err = archive(&p, &home, &repo, &id).unwrap_err();
-        assert_eq!(err.code, "merge");
-        assert!(err.message.contains("REQ-new2 is a placeholder"), "{err}");
-        assert_eq!(spec(&p, "core"), CORE);
-        assert!(record::load(&p).unwrap().is_empty());
+        let archived = archive(&p, &home, &repo, &id).unwrap();
+        assert_eq!(archived.merged.len(), 1);
+        assert!(spec(&p, "core").contains("Late"), "{}", spec(&p, "core"));
     }
 
     #[test]

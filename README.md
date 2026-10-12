@@ -75,9 +75,12 @@ It keeps a file that you edited and says so.
 ## Next steps
 
 - `rvow install` adds the skill, the Claude Code mod, the pi extension and the pre-push gate.
+- `rvow next` prints the next task of the branch with its id, title, state, verify command and files, or says that no task is next.
 - `rvow delegate <task>` leases one task to a subagent and prints the brief to give it.
+- `rvow attest <change> --out <file>` exports the current proofs as in-toto statements for other tools to check, with `--sign` adding an ssh signature.
 - `rvow stats` shows how often each hook denied or blocked in the last days.
 - `rvow yolo <audit|auto|bypass|off>` (or `/rvow-yolo` in the Claude mod and pi) relaxes the hooks for a while. Only you can run it, and the gate still checks at push.
+- `/rvow-judge [CHG-id] [model]` (in the Claude mod and pi) runs the optional spec-conformance judge in a clean read-only session and records its findings. The gate shows them as warnings, and `rvow archive` names the command when they are missing.
 - `rvow guide proposal` prints the short guide for writing a plan artifact. The other artifacts are `spec`, `tasks` and `design`.
 - `rvow --help` and `rvow <command> --help` are the command reference.
 - [docs/settings.md](docs/settings.md) lists every setting and the global-only keys.

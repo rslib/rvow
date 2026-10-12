@@ -45,6 +45,23 @@ pub fn load(project: &Project) -> Result<HashSet<Id>> {
     Ok(ids)
 }
 
+/// The ids that rvow minted for `change`.
+pub fn minted_for(project: &Project, change: &Id) -> Result<HashSet<Id>> {
+    let path = project.root.join(IDS_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(Error::io(&path, e)),
+    };
+    let want = change.to_string();
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
+        .filter(|e| e.change.as_deref() == Some(want.as_str()))
+        .filter_map(|e| e.id.parse::<Id>().ok())
+        .collect())
+}
+
 /// Mints an id that the project never used and records it.
 pub fn mint(project: &Project, _lock: &Lock, kind: Kind, change: Option<&Id>) -> Result<Id> {
     let taken = load(project)?;

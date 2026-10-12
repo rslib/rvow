@@ -65,6 +65,12 @@ impl Rule {
         }
     }
 
+    /// A tampering rule guards rvow itself. Its denial stays a denial after any streak,
+    /// since the backstop must not turn it into a question that a tired user may allow.
+    pub fn tampering(self) -> bool {
+        !matches!(self, Rule::OwnerCommand | Rule::LeaseScope | Rule::UnacceptedPlan | Rule::OutsideScope | Rule::ProtectedTest)
+    }
+
     pub const ALL: [Rule; 14] = [
         Rule::OwnerCommand,
         Rule::GitHooks,

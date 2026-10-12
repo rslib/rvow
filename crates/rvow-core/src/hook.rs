@@ -29,8 +29,8 @@ mod streak;
 pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
-pub use shell::{bash_denial, bash_rule, script_denial, script_rule};
-use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args};
+pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
+use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
 
 use rule::denial;
 
@@ -129,6 +129,29 @@ fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
     let home = crate::store::home_dir().ok()?;
     let config = config::load(project, &home).ok()?;
     (!config.allowed_signers.is_empty()).then(|| top.join(&config.allowed_signers))
+}
+
+/// True when `path` is a committed test file: a regular file, not a symlink,
+/// inside the repository at `top`, that matches the config test globs, is
+/// tracked and has no staged or unstaged change against HEAD. The path is
+/// resolved against `cwd`, canonicalized, and must lie inside `top`. Any
+/// failure means false, so the text check still runs.
+fn committed_test_file(project: &Project, top: Option<&Path>, path: &Path) -> bool {
+    let Some(top) = top else { return false };
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
+    let Ok(path) = path.canonicalize() else { return false };
+    let Ok(top) = top.canonicalize() else { return false };
+    let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return false };
+    let Ok(home) = crate::store::home_dir() else { return false };
+    let Ok(config) = config::load(project, &home) else { return false };
+    let Ok(tests) = fingerprint::globset(&config.test_globs) else { return false };
+    if !tests.is_match(rel) {
+        return false;
+    }
+    git::run(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).is_ok()
+        && git::run(&top, &["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", rel]).is_ok()
 }
 
 /// Files outside any repository that enforce rvow: the installed mod, Claude
@@ -235,7 +258,9 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
     if !target.starts_with(&format!("{root}/"))
         && let Some(files) = active_scope(project, top)?
         && !files.is_match(rel)
-        && git::run(top, &["check-ignore", "-q", "--", rel]).is_err()
+        // check-ignore rejects --literal-pathspecs, so a leading ./ keeps a
+        // magic-looking name literal while matching the same ignore rules.
+        && git::run(top, &["check-ignore", "-q", "--", &format!("./{rel}")]).is_err()
     {
         return Ok(denial(
             Rule::OutsideScope,
@@ -363,6 +388,78 @@ fn secret_denial(cwd: &Path, file: &str) -> Option<Denial> {
     })
 }
 
+/// Why a Bash command whose shell glob expands to a protected file must not run.
+/// A glob hides the name from the text rules, so each glob word is expanded from
+/// `cwd` and the result is matched by the rule that guards it.
+fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) -> Option<Denial> {
+    let secrets = secret_paths();
+    let enforcement = enforcement_paths(trust);
+    let hooks = top.map(|t| t.join(".git/hooks"));
+    let read_only = reads_only(cmd);
+    for path in shell::glob_paths(cmd, cwd) {
+        let real = key(&real_path(&path, cwd));
+        let under = |p: &Path| {
+            let p = key(&real_path(p, cwd));
+            real == p || real.starts_with(&format!("{p}/"))
+        };
+        if let Some(p) = secrets.iter().find(|p| under(p)) {
+            return denial(
+                Rule::HiddenChecks,
+                format!(
+                    "{} holds checks that stay hidden from the implementing agent; do not read or write them. If the plan needs them, run `rvow block <task> --reason \"...\"`",
+                    p.display()
+                ),
+            );
+        }
+        if let Some(p) = enforcement.iter().find(|p| under(p)) {
+            return denial(
+                Rule::EnforcementFile,
+                format!(
+                    "{} enforces rvow; changing it is for the user. If the plan needs it, run `rvow block <task> --reason \"...\"`",
+                    p.display()
+                ),
+            );
+        }
+        if hooks.as_ref().is_some_and(|h| under(h)) {
+            return denial(
+                Rule::GitHooks,
+                ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into(),
+            );
+        }
+        if read_only {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == LEDGER || name == IDS_FILE {
+            return denial(
+                Rule::Ledger,
+                format!(
+                    "{LEDGER} and {IDS_FILE} are written only by rvow; run `rvow show <change>` to read the plan or `rvow note` to record something"
+                ),
+            );
+        }
+        if name == CACHE_FILE {
+            return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
+        }
+        if name == STATS_FILE {
+            return denial(
+                Rule::StatsFile,
+                format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
+            );
+        }
+        if name == YOLO_FILE {
+            return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+        }
+        if name == LEASE_FILE {
+            return denial(
+                Rule::LeaseFile,
+                format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
+            );
+        }
+    }
+    None
+}
+
 /// Why `file` must not be read or written: it is the gate's cache file or the lease file.
 fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
     let target = key(&real_path(Path::new(file), cwd));
@@ -445,8 +542,10 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
         let top = git::toplevel(&cwd).ok();
         let trust = top.as_deref().and_then(|t| signers_path(project, t));
+        let committed = |path: &Path| committed_test_file(project, top.as_deref(), path);
         let found = bash_rule(c)
-            .or_else(|| script_rule(c, &cwd))
+            .or_else(|| shell::script_rule_committed(c, &cwd, &committed))
+            .or_else(|| glob_denial(c, &cwd, top.as_deref(), trust.as_deref()))
             .or_else(|| bash_secret_rule(c, &secret_paths()))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
         return match (found, input.get("agent_id").and_then(Value::as_str)) {
@@ -505,7 +604,8 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         }
         return Ok(None);
     };
-    let asked = session.is_some_and(|s| streak::add(project, s) > streak::BACKSTOP);
+    let denied = session.map(|s| streak::add(project, s));
+    let asked = !d.rule.tampering() && denied.is_some_and(|n| n > streak::BACKSTOP);
     if asked && let Some(s) = session {
         streak::reset(project, s);
     }
@@ -593,11 +693,13 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     if queue.is_empty() {
         return Ok(None);
     }
-    if !amend::pending(&changes).is_empty() {
-        return Ok(None);
-    }
+    let pending = amend::pending(&changes);
     let config = config::load(project, home)?;
     for c in &queue {
+        // A recorded amendment already tells the user about this change's drift.
+        if pending.iter().any(|p| p.change == c.dir.id) {
+            continue;
+        }
         let blocking: Vec<String> =
             drift::drift(project, &top, &config, c)?.into_iter().filter(|i| i.class.blocks()).map(|i| i.what).collect();
         if !blocking.is_empty() {
@@ -617,10 +719,16 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     // enforced by the pre-push gate, and nagging about them each time hides the plan that matters.
     let newest = queue.iter().max_by_key(|c| c.vow().map_or(0, |e| e.time));
     for c in queue.iter().filter(|c| newest.is_some_and(|n| std::ptr::eq(*c, n))) {
+        let released = released_tasks(&c.dir.id, &pending);
         let changed = changed_since_vow(&top, c);
         for t in &c.loaded.tasks {
             let s = proof::state(c, t, &now)?;
             if !s.open() {
+                continue;
+            }
+            // A pending amendment releases the tasks its items name, and an
+            // older one without task names releases the whole change.
+            if released.as_ref().is_none_or(|set| set.contains(&t.id.to_string())) {
                 continue;
             }
             // A task nobody started is no reason to hold the agent back from a plain answer.
@@ -645,6 +753,17 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     }
     // One fixed text for every stale task, so it is given once and not once for each task.
     Ok(stale.then(|| "some tasks have stale proofs; run rvow prove --stale before you push".to_string()))
+}
+
+/// The tasks a pending amendment of `change` releases, or `None` for the whole
+/// change when an amendment has no `tasks` key (it predates that key).
+fn released_tasks(change: &crate::id::Id, pending: &[amend::Pending]) -> Option<BTreeSet<String>> {
+    let mut set = BTreeSet::new();
+    for p in pending.iter().filter(|p| &p.change == change) {
+        let tasks = p.tasks.as_ref()?;
+        set.extend(tasks.iter().cloned());
+    }
+    Some(set)
 }
 
 /// The files that differ from the vow's base commit, committed or not, or
@@ -956,14 +1075,19 @@ mod tests {
 
     #[test]
     fn the_fourth_denial_in_a_row_asks_the_user_and_an_allowed_call_ends_the_streak() {
-        let (_tmp, p, repo) = project_with_a_task();
-        let denied = || call(&p, &repo, ".claude/settings.json", "s2");
+        let tmp = crate::git::testrepo::TempDir::new();
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let home = tmp.0.join("home");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        // An edit before the plan is accepted is enforced and is not tampering, so the backstop applies.
+        let denied = || call(&p, &repo, "src/lib.rs", "s2");
         assert_eq!(decision(&denied()), Some("deny"));
         assert_eq!(decision(&denied()), Some("deny"));
         assert_eq!(decision(&denied()), Some("deny"));
         assert_eq!(decision(&denied()), Some("ask"));
         assert_eq!(decision(&denied()), Some("deny"), "the streak starts again after a question");
-        assert_eq!(call(&p, &repo, "src/lib.rs", "s2"), None);
+        assert_eq!(call(&p, &repo, c.path.join("tasks.md").to_str().unwrap(), "s2"), None);
         assert_eq!(decision(&denied()), Some("deny"));
         assert_eq!(stats::counts(&p, 1, crate::ledger::now_ms()).asks, 1);
     }

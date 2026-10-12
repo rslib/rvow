@@ -132,7 +132,14 @@ pub fn validate() -> Result<Reply> {
     Ok(r)
 }
 
-pub fn review(target: &str, packet: bool, record: Option<&std::path::Path>) -> Result<Reply> {
+pub fn review(
+    target: &str,
+    packet: bool,
+    record: Option<&std::path::Path>,
+    judge: bool,
+    harness: Option<&str>,
+    model: Option<&str>,
+) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     if packet {
@@ -146,6 +153,29 @@ pub fn review(target: &str, packet: bool, record: Option<&std::path::Path>) -> R
         return Ok(reply);
     }
     if let Some(file) = record {
+        if judge {
+            let harness = harness.unwrap_or("");
+            let model = model.unwrap_or("");
+            let recorded = rvow_core::review::record_judge_for(&p, &home, &cwd()?, target, file, harness, model)?;
+            let mut reply = Reply::new();
+            reply.line(format!("judge review: {} of {} findings (event {})", recorded.kept, recorded.total, recorded.event));
+            reply.set("event", recorded.event);
+            reply.set("total", recorded.total);
+            reply.set("kept", recorded.kept);
+            reply.set("truncated", recorded.truncated);
+            reply.set("harness", recorded.harness);
+            reply.set("model", recorded.model);
+            let rows = recorded
+                .findings
+                .iter()
+                .map(|finding| {
+                    reply.line(format!("  judge: {}", finding.message));
+                    obj! { "message" => finding.message, "path" => finding.path, "line" => finding.line }
+                })
+                .collect();
+            reply.table("findings", rows, "0 judge findings");
+            return Ok(reply);
+        }
         let recorded = rvow_core::review::record_for(&p, &home, &cwd()?, target, file)?;
         let mut reply = Reply::new();
         reply.line(format!("advisory review: {} of {} findings (event {})", recorded.kept, recorded.total, recorded.event));

@@ -48,6 +48,13 @@ const WRAPPERS: &[&str] = &[
     "{",
 ];
 const DECLARATIONS: &[&str] = &["export", "declare", "local", "readonly", "typeset"];
+/// Shell builtins, whose `PATH` entry a shell does not use.
+const BUILTINS: &[&str] = &[
+    ":", ".", "[", "alias", "bg", "break", "builtin", "cd", "command", "continue", "declare", "dirs", "disown", "echo", "enable", "eval",
+    "exec", "exit", "export", "false", "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let", "local", "logout", "popd",
+    "printf", "pushd", "pwd", "read", "readonly", "return", "set", "shift", "source", "suspend", "test", "times", "trap", "true", "type",
+    "typeset", "ulimit", "umask", "unalias", "unset", "wait",
+];
 /// `git commit` options whose value is the next word.
 const COMMIT_VALUE_OPTIONS: &[&str] =
     &["--message", "--file", "--author", "--date", "--reuse-message", "--reedit-message", "--fixup", "--squash", "--template", "--cleanup"];
@@ -241,6 +248,25 @@ fn tokenize(text: &str) -> Tokens {
     lx.tokens
 }
 
+/// The program word that starts each simple command of `text`, with any
+/// assignment or declaration before it skipped. Only the commands the text
+/// starts directly are read; the code inside `sh -c` is not.
+pub fn programs(text: &str) -> Vec<String> {
+    tokenize(&without_heredocs(text))
+        .commands
+        .iter()
+        .filter_map(|seg| {
+            let start = seg.iter().position(|w| !is_assignment(w) && !DECLARATIONS.contains(&base_name(w)))?;
+            seg.get(start).cloned()
+        })
+        .collect()
+}
+
+/// Whether a shell runs `word` as a builtin, so its `PATH` entry does not matter.
+pub fn is_builtin(word: &str) -> bool {
+    BUILTINS.contains(&base_name(word))
+}
+
 fn expand_vars(word: &str, vars: &HashMap<String, String>) -> String {
     let mut out = String::new();
     let chars: Vec<char> = word.chars().collect();
@@ -369,6 +395,10 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
     let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
     match sub.as_str() {
         "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        "review" if args.iter().any(|w| w == "--judge" || w.starts_with("--judge=")) => denial(
+            Rule::OwnerCommand,
+            "rvow review --judge records the judge note and belongs to the user; ask the user to run /rvow-judge".into(),
+        ),
         "yolo" => denial(
             Rule::YoloFile,
             "rvow yolo relaxes the hooks and belongs to the user; ask the user to run `! rvow yolo <tier>`".into(),
@@ -466,6 +496,14 @@ const READERS: &[&str] = &[
 /// True when every command of the line only reads and none writes a file.
 fn only_reads(invs: &[&[String]], cmd: &str) -> bool {
     !invs.is_empty() && !writes_files(invs, cmd) && invs.iter().all(|inv| READERS.contains(&base_name(&inv[0])))
+}
+
+/// True when the whole `cmd` only reads, so a glob that expands to a file
+/// rvow trusts may still run.
+pub(super) fn reads_only(cmd: &str) -> bool {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
+    only_reads(&invs, cmd)
 }
 
 /// True when the line only prints text: `echo`, `printf`, or a `git commit` or `git tag` message.
@@ -590,15 +628,138 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
     bash_rule(cmd).map(|d| d.reason)
 }
 
+/// How many paths one command's glob words may expand to, so a pattern such as
+/// `**` cannot walk a whole tree.
+const GLOB_LIMIT: usize = 4096;
+
+fn has_glob(word: &str) -> bool {
+    word.contains(['*', '?', '['])
+}
+
+/// The filesystem paths that the glob words of `cmd` expand to from `cwd`.
+/// A word without `*`, `?` or `[` is not expanded, and a path that does not
+/// exist is dropped, so a pattern that matches nothing yields nothing.
+pub(super) fn glob_paths(cmd: &str, cwd: &Path) -> Vec<PathBuf> {
+    // A name the command sets itself wins; any other `$NAME` or `${NAME}` falls back to
+    // the process environment, as a shell does. `parse` clones this map before it inserts
+    // the command's own assignments.
+    let env: HashMap<String, String> =
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    let home = env.get("HOME").cloned();
+    let sh = parse(cmd, 0, &env);
+    let mut out = Vec::new();
+    for word in &sh.words {
+        if !has_glob(word) {
+            continue;
+        }
+        let word = expand_tilde(word, home.as_deref());
+        let path = Path::new(&word);
+        let (base, rest) = match path.strip_prefix("/") {
+            Ok(rest) => (PathBuf::from("/"), rest),
+            Err(_) => (cwd.to_path_buf(), path),
+        };
+        let components: Vec<String> = rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        expand(base, &components, &mut out);
+        if out.len() >= GLOB_LIMIT {
+            break;
+        }
+    }
+    out.retain(|p| p.exists());
+    out
+}
+
+/// A leading `~` or `~/x` as a shell writes it, with HOME from the environment.
+fn expand_tilde(word: &str, home: Option<&str>) -> String {
+    match home {
+        Some(h) if word == "~" => h.to_string(),
+        Some(h) => word.strip_prefix("~/").map_or_else(|| word.to_string(), |rest| format!("{h}/{rest}")),
+        None => word.to_string(),
+    }
+}
+
+fn expand(prefix: PathBuf, components: &[String], out: &mut Vec<PathBuf>) {
+    if out.len() >= GLOB_LIMIT {
+        return;
+    }
+    let Some((first, rest)) = components.split_first() else {
+        out.push(prefix);
+        return;
+    };
+    match first.as_str() {
+        "" | "." => expand(prefix, rest, out),
+        ".." => expand(prefix.parent().map(Path::to_path_buf).unwrap_or(prefix), rest, out),
+        _ if has_glob(first) => {
+            let Ok(glob) = globset::Glob::new(first) else {
+                return;
+            };
+            let matcher = glob.compile_matcher();
+            let Ok(entries) = std::fs::read_dir(&prefix) else {
+                return;
+            };
+            let mut names: Vec<String> = entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+            names.sort();
+            for name in names {
+                if out.len() >= GLOB_LIMIT {
+                    return;
+                }
+                if matcher.is_match(&name) {
+                    expand(prefix.join(&name), rest, out);
+                }
+            }
+        }
+        _ => expand(prefix.join(first), rest, out),
+    }
+}
+
+fn reads_no_file(name: &str, arg: &str) -> bool {
+    if arg == "-" {
+        return true;
+    }
+    if name.starts_with("python") {
+        matches!(arg, "-c" | "-m")
+    } else if name.starts_with("node") {
+        matches!(arg, "-e" | "-p")
+    } else if name.starts_with("perl") {
+        matches!(arg, "-e" | "-E")
+    } else if name.starts_with("ruby") {
+        matches!(arg, "-e")
+    } else if name.starts_with("php") {
+        matches!(arg, "-r")
+    } else {
+        matches!(arg, "eval" | "-e")
+    }
+}
+
+fn interpreter_script<'a>(name: &str, args: &'a [String]) -> Option<&'a String> {
+    for w in args {
+        if reads_no_file(name, w) {
+            return None;
+        }
+        if !w.starts_with('-') {
+            return Some(w);
+        }
+    }
+    None
+}
+
 /// Why running a script that `cmd` names must not happen: the file holds an
 /// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
 /// same command writes first cannot be read yet; that stays a known gap.
 pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
+    script_rule_committed(cmd, cwd, &|_| false)
+}
+
+/// The same rule with the caller's predicate for a committed test file: when
+/// it says true for the script path, the text is data and is not read. Every
+/// other script keeps the text check.
+pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) -> bool) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
-        let file = if is_shell(name) || is_interpreter(name) {
+        let file = if is_shell(name) {
             inv[1..].iter().find(|w| !w.starts_with('-'))
+        } else if is_interpreter(name) {
+            interpreter_script(name, &inv[1..])
         } else if name == "source" || name == "." {
             inv.get(1)
         } else if inv[0].contains('/') {
@@ -614,6 +775,9 @@ pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
             continue;
         };
         if !meta.is_file() || meta.len() > 256 * 1024 || base_name(file) == "rvow" {
+            continue;
+        }
+        if committed(&path) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -673,9 +837,68 @@ fn redirect_targets(cmd: &str) -> Vec<String> {
     found
 }
 
+/// True when `sort` writes a file: `-o FILE`, `-oFILE`, or `--output` or any
+/// unique prefix of it (`--o`, `--ou`, ...) with `=FILE` or a following word.
+fn writes_sort_output(args: &[String]) -> bool {
+    args.iter().any(|w| {
+        if w.starts_with("--") {
+            w.split('=').next().is_some_and(|flag| flag.len() >= 3 && "--output".starts_with(flag))
+        } else {
+            w.starts_with('-') && w[1..].contains('o')
+        }
+    })
+}
+
+/// Short `uniq` flags that take a value, and their long forms.
+const UNIQ_VALUE_FLAGS: &[&str] = &["-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"];
+
+/// True when `uniq` writes a file: a second positional argument is its output.
+fn writes_uniq_output(args: &[String]) -> bool {
+    let mut positionals = 0;
+    let mut skip_next = false;
+    let mut ended = false;
+    for w in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if ended {
+            positionals += 1;
+        } else if w == "--" {
+            ended = true;
+        } else if w.starts_with("--") {
+            if !w.contains('=') && UNIQ_VALUE_FLAGS.contains(&w.as_str()) {
+                skip_next = true;
+            }
+        } else if w.starts_with('-') && w.len() > 1 {
+            // A value flag with nothing attached takes the next word;
+            // the rest of the word is its attached value.
+            let mut chars = w[1..].chars().peekable();
+            while let Some(c) = chars.next() {
+                if matches!(c, 'f' | 's' | 'w') {
+                    skip_next = chars.peek().is_none();
+                    break;
+                }
+            }
+        } else {
+            positionals += 1;
+        }
+        if positionals >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
 /// A writer such as `rm` or `sed -i`.
 fn is_writer(inv: &[String]) -> bool {
     let name = base_name(&inv[0]);
+    if name == "sort" {
+        return writes_sort_output(&inv[1..]);
+    }
+    if name == "uniq" {
+        return writes_uniq_output(&inv[1..]);
+    }
     WRITERS.contains(&name)
         && (name != "sed" || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
 }

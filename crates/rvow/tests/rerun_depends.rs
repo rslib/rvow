@@ -196,3 +196,27 @@ fn depends_keys_chain_and_a_bad_chain_is_uncacheable() {
     let unknown = parse_tasks("- TSK-aaaaaa A\n  verify: true\n  files: a\n  depends_on: TSK-zzzzzz\n").0;
     assert_eq!(dependent_keys(&unknown, &own("a1"))["TSK-aaaaaa"], None);
 }
+
+// REQ-yw2dwa: a dependency's files change makes the dependent stale.
+
+#[test]
+fn dependency_changed_stales_the_dependent() {
+    let fx = Fx::new("stale");
+    let before = fx.rvow(&["status"]);
+    assert!(before.contains("proved"), "{before}");
+    assert!(!before.contains("dependency-changed"), "{before}");
+
+    fx.commit("a/x", "changed");
+    let after = fx.rvow(&["status"]);
+    assert!(after.contains("dependency-changed"), "{after}");
+}
+
+#[test]
+fn dependency_changed_a_new_proof_of_an_unchanged_dependency_keeps_the_dependent() {
+    let fx = Fx::new("reproof");
+    let out = fx.rvow(&["prove", &fx.ids[0]]);
+    assert!(out.contains("proved"), "{out}");
+    let status = fx.rvow(&["status"]);
+    assert!(status.contains("proved"), "{status}");
+    assert!(!status.contains("dependency-changed"), "{status}");
+}

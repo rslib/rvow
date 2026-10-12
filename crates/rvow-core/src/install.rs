@@ -10,13 +10,14 @@ use crate::git;
 use crate::vow::sha256_hex;
 
 pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow/index.ts");
-const PI_MODULES: [(&str, &str); 6] = [
+const PI_MODULES: [(&str, &str); 7] = [
     ("formats.ts", include_str!("../../../extensions/pi/rvow/formats.ts")),
     ("prompts.ts", include_str!("../../../extensions/pi/rvow/prompts.ts")),
     ("types.ts", include_str!("../../../extensions/pi/rvow/types.ts")),
     ("tools.ts", include_str!("../../../extensions/pi/rvow/tools.ts")),
     ("typed-tools.ts", include_str!("../../../extensions/pi/rvow/typed-tools.ts")),
     ("refresh.ts", include_str!("../../../extensions/pi/rvow/refresh.ts")),
+    ("judge.ts", include_str!("../../../extensions/pi/rvow/judge.ts")),
 ];
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
@@ -129,6 +130,12 @@ pub fn skill(claude_dir: &Path, text: &str) -> Result<Outcome> {
 fn marked_skill(text: &str) -> String {
     let (front, body) = split_front_matter(text);
     format!("{front}<!-- rvow-managed skill-sha256:{} -->\n{body}", sha256_hex(text.as_bytes()))
+}
+
+/// The skill for pi at `<pi_dir>/skills/rvow/SKILL.md`: the same text and
+/// marker as the Claude skill, so a user's edit is kept the same way.
+pub fn pi_skill(pi_dir: &Path, text: &str) -> Result<Outcome> {
+    skill(pi_dir, text)
 }
 
 /// Compares an installed skill with the current rendered text, including legacy body-only markers.
@@ -370,6 +377,7 @@ pub fn stale_managed_files(claude_dir: &Path, rvow_home: &Path, pi_dir: Option<&
         literal.is_some_and(|bin| t == MOD_REGISTER.replace("'__RVOW_BIN__'", &bin))
     });
     if let Some(pi) = pi_dir {
+        check(pi.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
         let dir = pi.join("extensions/rvow");
         for (name, body) in std::iter::once(("index.ts", PI_EXTENSION)).chain(PI_MODULES) {
             check(dir.join(name), &|t| t == format!("// {MARK}{}\n{body}", sha256_hex(body.as_bytes())));

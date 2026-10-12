@@ -103,7 +103,10 @@ test("dock sees external state, configurable focus, Escape interruption and tear
     assert.ok(predicate(), "timed out waiting for external view refresh");
   };
   const render = () => widgets.get("rvow-dock")?.render(100).join("\n") ?? "";
-  await waitFor(() => render().includes("before external edit"), 8_000);
+  // A refresh that misses waits for the next 5 s loop turn plus two process
+  // starts, which a loaded machine can push past a short budget. The wait
+  // polls, so a long budget costs nothing when the view arrives early.
+  await waitFor(() => render().includes("before external edit"), 30_000);
   assert.ok(shortcuts.has("alt+w"));
   get(shortcuts, "alt+w").handler(ctx);
   assert.match(render(), / focus /);
@@ -114,7 +117,7 @@ test("dock sees external state, configurable focus, Escape interruption and tear
   get(shortcuts, "alt+w").handler(ctx);
   assert.deepEqual(listener("\x1b"), { consume: true });
   writeFileSync(stateFile, view("changed in another shell"));
-  await waitFor(() => render().includes("changed in another shell"), 15_000);
+  await waitFor(() => render().includes("changed in another shell"), 30_000);
   const denied = await get(events, "tool_call")(
     {
       toolName: "bash",

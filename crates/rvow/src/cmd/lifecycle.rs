@@ -42,6 +42,8 @@ pub fn accept(target: &str) -> Result<bool> {
 pub fn archive(target: &str) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
+    // The judge note is advisory: a failed lookup counts as no note and never stops the archive.
+    let judged = matches!(rvow_core::review::judge_for(&p, &cwd()?, target), Ok(Some(_)));
     let a = archive::archive(&p, &home, &cwd()?, target)?;
     let mut r = Reply::new();
     let mut rows = Vec::new();
@@ -50,6 +52,11 @@ pub fn archive(target: &str) -> Result<Reply> {
         rows.push(obj! { "op" => op.word(), "id" => id });
     }
     r.line(format!("archived {} to {}", a.id, a.path.display()));
+    if !judged {
+        let hint = format!("note: no judge note for the current packet; ask the user to run /rvow-judge {}", a.id);
+        r.line(&hint);
+        r.set("judge", hint);
+    }
     r.line("next: pick the next plan with rvow ls");
     r.set("archived", a.id.to_string());
     r.set("path", a.path.display().to_string());
@@ -117,24 +124,9 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
             .collect::<Result<_>>()?
     };
     for a in shown {
-        println!("{} for {}", a.id, a.change);
-        for i in &a.items {
-            let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
-            let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
-            println!("  {class}: {what}");
-            if let (Some(old), Some(new)) = (i.get("before").and_then(|v| v.as_str()), i.get("after").and_then(|v| v.as_str())) {
-                let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-                let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-                let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
-                for line in &old[head..old.len() - tail] {
-                    println!("    - {line}");
-                }
-                for line in &new[head..new.len() - tail] {
-                    println!("    + {line}");
-                }
-            }
+        for line in a.render() {
+            println!("{line}");
         }
-        println!("  reason (from the agent): {}", a.reason);
     }
     if ids.is_empty() {
         println!("digest {}", amend::digest(&pending));

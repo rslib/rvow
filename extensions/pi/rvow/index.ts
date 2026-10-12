@@ -42,6 +42,7 @@ import {
   tabCounts,
   tabSpans,
 } from "./formats.ts";
+import { judgeArgs, judgeRun } from "./judge.ts";
 import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
 import { BIN, FAST_MS, run, SLOW_MS } from "./tools.ts";
@@ -229,6 +230,9 @@ type State = {
 };
 
 export default function (pi: ExtensionAPI) {
+  // A judge child session sets RVOW_JUDGE=1: it registers no command, tool or
+  // hook, so the judge runs with read-only tools and no rvow extension.
+  if (process.env.RVOW_JUDGE === "1") return;
   let toolsRegistered = false;
   let epoch = 0;
   let background = new AbortController();
@@ -1292,6 +1296,47 @@ export default function (pi: ExtensionAPI) {
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
     await decide(ctx, ["archive", arg]);
+  });
+
+  userCommand(
+    "rvow-judge",
+    "Run the spec conformance judge for a change: [CHG-id] [model]",
+    async (ctx, _first, all) => {
+      const { change, model } = judgeArgs(all);
+      ctx.ui.setStatus("rvow", "rvow judge ...");
+      const { text } = await judgeRun(ctx.cwd, {
+        ...(change ? { change } : {}),
+        ...(model ? { model } : {}),
+      });
+      ctx.ui.notify(text, "info");
+      await refresh(ctx);
+    },
+  );
+
+  pi.registerTool({
+    name: "rvow_judge",
+    label: "rvow judge",
+    description:
+      "Run the spec conformance judge for a change: it reviews the changed code against the plan in a clean read-only session with no rvow extension, and records its findings. The extension runs the judge and records, never the agent.",
+    parameters: {
+      type: "object",
+      properties: {
+        change: { type: "string" },
+        model: { type: "string" },
+      },
+      additionalProperties: false,
+    } as ToolDefinition["parameters"],
+    async execute(_id, params, _signal, _update, ctx) {
+      const p = (params ?? {}) as { change?: unknown; model?: unknown };
+      const change = typeof p.change === "string" ? p.change : undefined;
+      const model = typeof p.model === "string" ? p.model : undefined;
+      const { text } = await judgeRun(ctx.cwd, {
+        ...(change ? { change } : {}),
+        ...(model ? { model } : {}),
+      });
+      await refresh(ctx);
+      return { content: [{ type: "text", text }], details: {} };
+    },
   });
 
   pi.registerTool({

@@ -3,12 +3,9 @@
 //! it and carries an HMAC under a key that agents cannot read.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
@@ -16,13 +13,12 @@ use crate::fingerprint::{self, Env};
 use crate::git;
 use crate::ledger::{append_line, now_ms, short_hash};
 use crate::runner::Outcome;
+use crate::seal;
 use crate::store::{Lock, Project};
 use crate::tasks::Task;
 use crate::vow::{sha256_hex, task_hash};
 
 pub const CACHE_FILE: &str = "rerun-cache.jsonl";
-const KEY_FOLDER: &str = "hidden-checks";
-const KEY_FILE: &str = ".cache-key";
 const KEY_FORMAT: u32 = 1;
 const BAD_MAC: &str = "has an invalid MAC";
 
@@ -55,24 +51,14 @@ pub struct Hit {
 
 pub struct Cache {
     path: PathBuf,
-    key_path: PathBuf,
+    home: PathBuf,
     entries: Vec<Body>,
     warnings: Vec<String>,
     last: String,
 }
 
-fn mac_of(key: &[u8], body: &Body) -> Result<Hmac<Sha256>> {
-    let text = serde_json::to_string(body).map_err(|e| Error::internal(format!("cache entry does not serialize: {e}")))?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| Error::internal(format!("bad cache key: {e}")))?;
-    mac.update(text.as_bytes());
-    Ok(mac)
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) || !s.is_ascii() {
-        return None;
-    }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+fn body_text(body: &Body) -> Result<String> {
+    serde_json::to_string(body).map_err(|e| Error::internal(format!("cache entry does not serialize: {e}")))
 }
 
 impl Cache {
@@ -80,14 +66,13 @@ impl Cache {
     /// ignored with a warning; it never fails the open.
     pub fn open(project: &Project, home: &Path) -> Result<Cache> {
         let path = project.root.join(CACHE_FILE);
-        let key_path = home.join(KEY_FOLDER).join(KEY_FILE);
-        let mut cache = Cache { path, key_path, entries: Vec::new(), warnings: Vec::new(), last: String::new() };
+        let mut cache = Cache { path, home: home.to_path_buf(), entries: Vec::new(), warnings: Vec::new(), last: String::new() };
         let text = match std::fs::read_to_string(&cache.path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cache),
             Err(e) => return Err(Error::io(&cache.path, e)),
         };
-        let key = std::fs::read(&cache.key_path).ok().filter(|k| k.len() == 32);
+        let key = seal::read_key(home);
         let mut broken = false;
         for (i, line) in text.lines().enumerate() {
             let entry = serde_json::from_str::<Entry>(line).ok();
@@ -96,9 +81,9 @@ impl Cache {
                 (None, _) => Some("is not a cache entry"),
                 (Some(e), _) if e.body.prev != cache.last => Some("does not chain to the line before it"),
                 (_, None) => Some("cannot be checked without the cache key"),
-                (Some(e), Some(k)) => match hex_decode(&e.mac).map(|m| mac_of(k, &e.body).map(|mac| mac.verify_slice(&m).is_ok())) {
-                    Some(Ok(true)) => None,
-                    _ => Some(BAD_MAC),
+                (Some(e), Some(k)) => match body_text(&e.body).is_ok_and(|t| seal::verify(k, &t, &e.mac)) {
+                    true => None,
+                    false => Some(BAD_MAC),
                 },
             };
             cache.last = short_hash(line.as_bytes());
@@ -127,22 +112,7 @@ impl Cache {
     }
 
     fn secret(&self) -> Result<Vec<u8>> {
-        if let Ok(k) = std::fs::read(&self.key_path)
-            && k.len() == 32
-        {
-            return Ok(k);
-        }
-        if let Some(dir) = self.key_path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
-        }
-        let secret = Error::random::<32>()?;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-        let mut file = opts.open(&self.key_path).map_err(|e| Error::io(&self.key_path, e))?;
-        file.write_all(&secret).map_err(|e| Error::io(&self.key_path, e))?;
-        Ok(secret.to_vec())
+        seal::key(&self.home)
     }
 
     /// Appends one entry. The caller holds the project lock. A cache file with
@@ -166,7 +136,7 @@ impl Cache {
             time: now_ms(),
             prev: self.last.clone(),
         };
-        let mac: String = mac_of(&secret, &body)?.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let mac = seal::mac(&secret, &body_text(&body)?)?;
         let line = serde_json::to_string(&Entry { body: body.clone(), mac })
             .map_err(|e| Error::internal(format!("cache entry does not serialize: {e}")))?;
         append_line(&self.path, &line)?;
@@ -186,8 +156,9 @@ impl Cache {
     }
 }
 
-/// The SHA-256 of an executable, found by path or on `PATH`, through symlinks.
-fn tool_hash(name: &str) -> Option<String> {
+/// The resolved path and SHA-256 of an executable, found by path or on `PATH`,
+/// through symlinks.
+pub(crate) fn tool_id(name: &str) -> Option<(String, String)> {
     let candidates: Vec<PathBuf> = if name.contains('/') {
         vec![PathBuf::from(name)]
     } else {
@@ -200,8 +171,13 @@ fn tool_hash(name: &str) -> Option<String> {
         if std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 == 0 {
             return None;
         }
-        meta.is_file().then(|| std::fs::read(&real).ok()).flatten().map(|b| sha256_hex(&b))
+        meta.is_file().then(|| std::fs::read(&real).ok()).flatten().map(|b| (real.to_string_lossy().into_owned(), sha256_hex(&b)))
     })
+}
+
+/// The SHA-256 of an executable, found by path or on `PATH`, through symlinks.
+fn tool_hash(name: &str) -> Option<String> {
+    tool_id(name).map(|(_, hash)| hash)
 }
 
 /// The cache key of a task, or `None` when the task must not be cached: an

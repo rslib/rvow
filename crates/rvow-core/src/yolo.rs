@@ -37,9 +37,18 @@ impl Tier {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct State {
+struct Body {
     tier: Tier,
     until: u64,
+}
+
+/// The yolo file: the state plus the seal that ties it to the rerun cache key.
+#[derive(Debug, Serialize, Deserialize)]
+struct File {
+    #[serde(flatten)]
+    body: Body,
+    #[serde(default)]
+    seal: Option<String>,
 }
 
 /// A tier that is on, and when it ends in milliseconds since the epoch.
@@ -63,8 +72,13 @@ pub fn set(project: &Project, tier: Tier, length: Duration) -> Result<On> {
         ));
     }
     let until = now_ms() + length.as_millis() as u64;
-    let text = serde_json::to_string(&State { tier, until }).map_err(|e| Error::internal(format!("cannot write the yolo state: {e}")))?;
-    std::fs::write(path(project), text).map_err(|e| Error::io(&path(project), e))?;
+    let body = Body { tier, until };
+    let text = serde_json::to_string(&body).map_err(|e| Error::internal(format!("cannot write the yolo state: {e}")))?;
+    let key = crate::seal::key(&crate::hardening::project_home(project)?)?;
+    let seal = crate::seal::mac(&key, &text)?;
+    let file = serde_json::to_string(&File { body, seal: Some(seal) })
+        .map_err(|e| Error::internal(format!("cannot write the yolo state: {e}")))?;
+    std::fs::write(path(project), file).map_err(|e| Error::io(&path(project), e))?;
     Ok(On { tier, until })
 }
 
@@ -76,10 +90,17 @@ pub fn off(project: &Project) -> Result<()> {
     }
 }
 
-/// The tier that is on at `now`, or `None` when none is, it ended or the file is unreadable.
+/// The tier that is on at `now`, or `None` when none is, it ended, the file is
+/// unreadable, or its seal does not check under the rerun cache key.
 pub fn active_at(project: &Project, now: u64) -> Option<On> {
-    let state: State = serde_json::from_str(&std::fs::read_to_string(path(project)).ok()?).ok()?;
-    (state.until > now).then_some(On { tier: state.tier, until: state.until })
+    let text = std::fs::read_to_string(path(project)).ok()?;
+    let file: File = serde_json::from_str(&text).ok()?;
+    let key = crate::seal::read_key(&crate::hardening::project_home(project).ok()?)?;
+    let body = serde_json::to_string(&file.body).ok()?;
+    if !crate::seal::verify(&key, &body, file.seal.as_deref().unwrap_or("")) {
+        return None;
+    }
+    (file.body.until > now).then_some(On { tier: file.body.tier, until: file.body.until })
 }
 
 impl On {

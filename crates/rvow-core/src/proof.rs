@@ -37,6 +37,10 @@ impl Active {
         self.events.iter().find(|e| e.kind == Kind::Vow)
     }
 
+    pub fn base_commit(&self) -> Option<&str> {
+        self.vow()?.data.get("base_commit")?.as_str()
+    }
+
     /// The snapshot that drift is measured against: the snapshot of the latest
     /// accepted amendment, else the vow.
     pub fn baseline(&self) -> Option<&Map<String, Value>> {
@@ -215,7 +219,14 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
         return Ok(State::Failed);
     }
     let key = str_of(last, "key");
-    let flaky = mine.iter().any(|e| e.kind == Kind::Prove && str_of(e, "key") == key && !is_proved(e));
+    let last_tree = last.data.get("worktree").and_then(Value::as_str).unwrap_or("");
+    let flaky = !last_tree.is_empty()
+        && mine.iter().any(|e| {
+            e.kind == Kind::Prove
+                && str_of(e, "key") == key
+                && !is_proved(e)
+                && e.data.get("worktree").and_then(Value::as_str) == Some(last_tree)
+        });
     let mut reasons = Vec::new();
     if str_of(last, "task_hash") != task_hash(task) {
         reasons.push("task-changed");
@@ -233,6 +244,9 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     }
     if str_of(last, "env_key") != now.env.key() {
         reasons.push("env-changed");
+    }
+    if dependency_changed(change, task, last, now) {
+        reasons.push("dependency-changed");
     }
     Ok(if !reasons.is_empty() {
         State::Stale(reasons)
@@ -386,6 +400,47 @@ pub(crate) fn run_key(
     sha256_hex(value.to_string().as_bytes())
 }
 
+/// The programs a verify command starts directly, each with its resolved path
+/// and SHA-256. A shell builtin or a name that resolves to nothing is absent,
+/// so it must still be absent at the gate.
+pub fn verify_programs(cmd: &str) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    for word in crate::hook::programs(cmd) {
+        if crate::hook::is_builtin(&word) {
+            continue;
+        }
+        if let Some((path, hash)) = crate::gate::cache::tool_id(&word) {
+            out.insert(word, json!({ "path": path, "sha256": hash }));
+        }
+    }
+    out
+}
+
+/// The input hash of each `depends_on:` task at prove time, so a later change
+/// in a dependency's files stales the dependent. A task that cannot be
+/// resolved records `missing`, which only matches another missing one.
+pub fn dependency_inputs(tasks: &[Task], task: &Task, now: &Now) -> BTreeMap<String, String> {
+    task.depends_on
+        .iter()
+        .map(|d| {
+            let hash = tasks.iter().find(|t| t.id == *d).and_then(|t| now.inputs(t).ok()).map_or_else(|| "missing".to_string(), |i| i.hash);
+            (d.to_string(), hash)
+        })
+        .collect()
+}
+
+/// Whether a task named in `depends_on:` differs from the input hash its
+/// dependent's proof recorded. A task with no record counts as changed.
+fn dependency_changed(change: &Active, task: &Task, last: &Event, now: &Now) -> bool {
+    if task.depends_on.is_empty() {
+        return false;
+    }
+    let recorded: BTreeMap<String, String> =
+        last.data.get("depends").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let current = dependency_inputs(&change.loaded.tasks, task, now);
+    task.depends_on.iter().any(|d| recorded.get(&d.to_string()) != current.get(&d.to_string()))
+}
+
 /// Runs a task's stored verify command and records the proof.
 pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut dyn Write) -> Result<Proved> {
     let top = git::toplevel(cwd)?;
@@ -402,13 +457,30 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let inputs = now.inputs(task)?;
+    let tree = fingerprint::worktree(&top, project)?;
     let cmd = task.verify_command()?;
     let started = ledger::now_ms();
     let outcome = runner::run(cmd, &top, &[], task.timeout.unwrap_or(config.timeout()), echo)?;
     let mutants = task
         .mutants
         .as_deref()
-        .map(|command| runner::run(command, &top, &[], task.timeout.unwrap_or(config.timeout()), echo))
+        .map(|command| {
+            // The mutants command sees only the task's own changed lines:
+            // RVOW_DIFF names a temp file with the diff of the task's files
+            // against the vow's base commit, and RVOW_CHANGED_FILES lists the
+            // changed paths, one per line. Both reach only the child. A vow
+            // with no base commit predates the diff, so the diff is empty.
+            let scoped = match change.base_commit() {
+                Some(base) => git::task_diff(&top, base, &task.files)?,
+                None => git::TaskDiff { diff: String::new(), files: Vec::new() },
+            };
+            let path = diff_file(&scoped.diff)?;
+            let vars =
+                vec![("RVOW_DIFF".to_string(), path.display().to_string()), ("RVOW_CHANGED_FILES".to_string(), scoped.files.join("\n"))];
+            let outcome = runner::run(command, &top, &vars, task.timeout.unwrap_or(config.timeout()), echo);
+            let _ = std::fs::remove_file(&path);
+            outcome
+        })
         .transpose()?;
     let private_check = crate::hardening::run_private(project, home, &top, task, task.timeout.unwrap_or(config.timeout()))?;
     let private_policy = private_check.as_ref().map(|c| c.digest.clone());
@@ -430,6 +502,10 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     if let Some(check) = &mutants {
         let mut value = json!(check);
         value["passed"] = check.passed().into();
+        // The survivor count lives inside the mutants object.
+        if let Some(n) = runner::survived(&check.tail) {
+            value["survived"] = n.into();
+        }
         data.insert("mutants".into(), value);
     }
     if let Some(check) = &private_check {
@@ -444,9 +520,12 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("tail".into(), json!(outcome.tail));
     data.insert("inputs".into(), inputs.hash.clone().into());
     data.insert("input_files".into(), inputs.files.into());
+    data.insert("worktree".into(), tree.into());
+    data.insert("depends".into(), json!(dependency_inputs(&change.loaded.tasks, task, &now)));
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
+    data.insert("programs".into(), json!(verify_programs(cmd)));
     if proved {
         data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
     }
@@ -465,7 +544,8 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let ledger_path = change.dir.path.join(LEDGER);
     let event = {
         let lock = project.lock()?;
-        ledger::append(&ledger_path, &lock, Kind::Prove, data)?
+        let key = crate::seal::key(home)?;
+        ledger::append_sealed(&ledger_path, &lock, Kind::Prove, data, Some(&key))?
     };
 
     let (events, _) = ledger::read(&ledger_path)?;
@@ -490,6 +570,16 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         lfs_pointers: inputs.lfs_pointers,
         next,
     })
+}
+
+/// Writes `diff` to a temp file for `RVOW_DIFF`. The caller removes it after
+/// the mutants run.
+fn diff_file(diff: &str) -> Result<PathBuf> {
+    let bytes = Error::random::<8>()?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("rvow-diff-{hex}"));
+    std::fs::write(&path, diff).map_err(|e| Error::io(&path, e))?;
+    Ok(path)
 }
 
 fn change_branch(changes: &[Active], id: &Id) -> String {
@@ -648,13 +738,17 @@ pub(crate) mod tests {
         assert!(!r.proved, "0 tests run is not a proof");
         std::fs::write(&tasks, text).unwrap();
 
-        let flaky = "f=$(cat n 2>/dev/null || echo 0); echo $((f+1)) > n; [ $f -ne 0 ] && echo 'test result: ok. 1 passed; 0 failed;'";
+        let flag = std::env::temp_dir().join(format!("rvow-flaky-{}-{}", std::process::id(), tmp.0.display().to_string().len()));
+        let _ = std::fs::remove_file(&flag);
+        let flaky = format!("test -f {} && echo 'test result: ok. 1 passed; 0 failed;'", flag.display());
         let text = std::fs::read_to_string(&tasks).unwrap();
         let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
         std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: {flaky}"))).unwrap();
         assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(&flag, "go\n").unwrap();
         assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "flaky");
+        let _ = std::fs::remove_file(&flag);
     }
 
     #[test]

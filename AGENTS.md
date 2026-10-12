@@ -34,6 +34,13 @@ The claude steps skip with exit 0 when the `claude` CLI is missing, so a skip pr
 `prek run` runs the same checks as the git hook, on staged files only.
 CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 
+Agent evals (needs the `claude` CLI and a built binary):
+
+```sh
+evals/agent/run.sh haiku --case next-task --runs 1   # one live case, a few cents
+evals/agent/run.sh                                   # the full suite, capped at $5
+```
+
 ## Where things go
 
 | Area | Home | Rule |
@@ -44,6 +51,7 @@ CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 | Agent skill | `skills/rvow/SKILL.md.tmpl` | Rendered by `crates/rvow/src/skill.rs` at install. Write each command as `{{cmd:<args>}}`; a command or flag the CLI lacks fails the render and `cargo test`. |
 | Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-core/src/install.rs`. |
 | pi extension | `extensions/pi/rvow/*.ts` (`extensions/pi/rvow.ts` only re-exports it) | `extensions/pi/rvow/index.ts` is `PI_EXTENSION`; every other file is in `PI_MODULES` of `crates/rvow-core/src/install.rs`. |
+| Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. |
 
 Update this section in the change that moves an area.
 

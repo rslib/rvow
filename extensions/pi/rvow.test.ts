@@ -1112,9 +1112,9 @@ test("rvow-confirm tells the agent what the user decided", async () => {
 
 test("the pi extension registers its commands and tool", () => {
   const t = setup({});
-  for (const c of ["status", "confirm", "review", "accept", "archive", "yolo"])
+  for (const c of ["status", "confirm", "review", "accept", "archive", "yolo", "judge"])
     assert.ok(t.commands.has(`rvow-${c}`), c);
-  assert.deepEqual(t.tools, ["rvow_ask"]);
+  assert.deepEqual(t.tools, ["rvow_judge", "rvow_ask"]);
 });
 
 for (const name of ["rvow-review", "rvow-accept", "rvow-archive", "rvow-yolo"]) {

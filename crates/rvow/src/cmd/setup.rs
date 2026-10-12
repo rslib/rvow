@@ -181,7 +181,9 @@ fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
 fn install_pi(r: &mut Reply, home: &Path) -> Result<()> {
     let pi = install::pi_dir(Some(home)).unwrap_or_else(|| home.join(".pi/agent"));
     if pi.is_dir() {
+        let rendered = crate::skill::render()?;
         report(r, "pi extension", install::pi_extension(&pi)?);
+        report(r, "pi skill", install::pi_skill(&pi, &rendered)?);
     } else {
         r.line(format!("pi extension: skipped, {} does not exist", pi.display()));
     }

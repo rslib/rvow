@@ -166,7 +166,7 @@ pub struct Run {
 /// Records an imported run in the ledger of the active change it names in
 /// the project at `project_root`.
 pub fn ingest_run(project_root: &Path, run: &Run) -> Result<Event> {
-    if ["kind", "time", "parents", "hash", "line"].iter().any(|name| run.data.contains_key(*name)) {
+    if ["kind", "time", "parents", "hash", "line", "seal"].iter().any(|name| run.data.contains_key(*name)) {
         return Err(Error::new("run-data", "a proof result contains reserved event fields", "ingest the original CI result file"));
     }
     if !crate::bundle::safe_ingest_project(&run.project) {
@@ -232,7 +232,14 @@ pub fn ingest_run(project_root: &Path, run: &Run) -> Result<Event> {
             crate::vow::put_object(&project, text.as_bytes())?;
         }
     }
-    append(&change.path.join(crate::change::LEDGER), &lock, Kind::Prove, data)
+    let key = home_for(project_root, &run.project).map(|home| crate::seal::key(&home)).transpose()?;
+    append_sealed(&change.path.join(crate::change::LEDGER), &lock, Kind::Prove, data, key.as_deref())
+}
+
+/// The rvow home that holds `project_root`, which `ingest` builds as
+/// `home.join(run.project)`.
+fn home_for(project_root: &Path, locator: &str) -> Option<std::path::PathBuf> {
+    project_root.ancestors().nth(Path::new(locator).components().count()).map(Path::to_path_buf)
 }
 
 /// A run proves only a task that exists in the change, as it is written now:
@@ -257,8 +264,10 @@ fn verify_run_matches_plan(project: &crate::store::Project, change: &crate::chan
     Ok(())
 }
 
-/// The events no other event names as a parent.
-fn heads(events: &[Event]) -> Vec<String> {
+/// The events no other event names as a parent. `append` writes these as the
+/// parents of the next event, so an event whose parents are not the heads of
+/// the events before it was not appended in place.
+pub(crate) fn heads(events: &[Event]) -> Vec<String> {
     let named: HashSet<&str> = events.iter().flat_map(|e| e.parents.iter().map(String::as_str)).collect();
     let mut heads: Vec<String> = events.iter().filter(|e| !named.contains(e.hash.as_str())).map(|e| e.hash.clone()).collect();
     heads.sort();
@@ -267,9 +276,23 @@ fn heads(events: &[Event]) -> Vec<String> {
 
 /// Appends one event after the current heads and returns it with its hash.
 /// The lock proves the caller holds the project's write lock.
-pub fn append(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Value>) -> Result<Event> {
+pub fn append(path: &Path, lock: &Lock, kind: Kind, data: Map<String, Value>) -> Result<Event> {
+    append_sealed(path, lock, kind, data, None)
+}
+
+/// Like `append`, but a `key` seals the event under the rerun cache key. The
+/// seal covers the kind, time and parents that this call picks, so a sealed
+/// event copied after a later one no longer checks.
+pub fn append_sealed(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Value>, key: Option<&[u8]>) -> Result<Event> {
     let (events, _) = read(path)?;
-    let mut ev = Event { kind, time: now_ms(), parents: heads(&events), data, hash: String::new(), line: 0 };
+    let time = now_ms();
+    let parents = heads(&events);
+    let mut data = data;
+    if let Some(key) = key {
+        let value = crate::seal::seal(key, kind, time, &parents, &data)?;
+        data.insert(crate::seal::SEAL_FIELD.into(), value.into());
+    }
+    let mut ev = Event { kind, time, parents, data, hash: String::new(), line: 0 };
     let line = serde_json::to_string(&ev).map_err(|e| Error::internal(format!("ledger event does not serialize: {e}")))?;
     append_line(path, &line)?;
     ev.hash = short_hash(line.as_bytes());

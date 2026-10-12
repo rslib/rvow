@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::rerun::{base_ref, changed_files};
+use super::rerun::changed_files;
 use super::signature::{amendment_ancestor, bound_confirm_payload, signature_ok};
 use super::{Options, Report};
 use crate::amend;
@@ -134,6 +134,23 @@ pub(crate) fn check_change(project: &Project, c: &Active, now: &Now, opts: &Opti
     Ok(())
 }
 
+/// A done change counts toward scope only while its work is not in the base:
+/// its archive HEAD, or its vow base when no HEAD was recorded, must not be
+/// a strict ancestor of the merge base. No point or an unknown commit counts,
+/// so a missing object never breaks the gate.
+fn done_counts(top: &Path, events: &[ledger::Event], mb: &str) -> bool {
+    let head = events.iter().rev().find(|e| e.kind == Kind::Archive).and_then(|e| e.data.get("head")).and_then(Value::as_str);
+    let vow_base = events.iter().find(|e| e.kind == Kind::Vow).and_then(|e| e.data.get("base_commit")).and_then(Value::as_str);
+    let point = match head.or(vow_base) {
+        Some(p) => p,
+        None => return true,
+    };
+    if point == mb {
+        return true;
+    }
+    git::run(top, &["merge-base", "--is-ancestor", point, mb]).is_err()
+}
+
 pub(super) fn check_scope(
     project: &Project,
     top: &Path,
@@ -143,7 +160,7 @@ pub(super) fn check_scope(
     queue: &[&Active],
     r: &mut Report,
 ) -> Result<()> {
-    let Some(base_ref) = base_ref(top, base) else {
+    let Some(base_ref) = git::base_ref(top, base) else {
         r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
     };
@@ -161,7 +178,11 @@ pub(super) fn check_scope(
     let (all, _) = change::list(project)?;
     for d in all.iter().filter(|d| d.stage == Stage::Done) {
         let loaded = change::load(&d.path, living)?;
-        if loaded.proposal.branch == branch {
+        if loaded.proposal.branch != branch {
+            continue;
+        }
+        let (events, _) = ledger::read(&d.path.join(LEDGER))?;
+        if done_counts(top, &events, &mb) {
             globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
         }
     }
@@ -174,6 +195,68 @@ pub(super) fn check_scope(
         .collect();
     if !outside.is_empty() {
         r.failures.push(format!("{} changed files lie outside every task's files: {}", outside.len(), list(&outside)));
+    }
+    Ok(())
+}
+
+/// Work written before any change was accepted: while a backlog plan names
+/// this branch and no change is active on it, every file that differs from
+/// the base outside the rvow tree and outside every done change of the branch
+/// fails, naming the waiting plan. Shell work done before accept must not
+/// push clean.
+pub(super) fn check_backlog_scope(
+    project: &Project,
+    top: &Path,
+    base: &str,
+    branch: &str,
+    living: &[CapSpec],
+    r: &mut Report,
+) -> Result<()> {
+    let (all, _) = change::list(project)?;
+    let mut waiting: Vec<String> = Vec::new();
+    let mut done: Vec<&change::ChangeDir> = Vec::new();
+    for d in &all {
+        let loaded = change::load(&d.path, living)?;
+        if loaded.proposal.branch != branch {
+            continue;
+        }
+        match d.stage {
+            Stage::Backlog => waiting.push(d.id.to_string()),
+            Stage::Done => done.push(d),
+            _ => {}
+        }
+    }
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    waiting.sort();
+    let plans = waiting.join(", ");
+    let Some(base_ref) = git::base_ref(top, base) else {
+        r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
+        return Ok(());
+    };
+    let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
+    let mut done_globs: Vec<String> = Vec::new();
+    for d in done {
+        let loaded = change::load(&d.path, living)?;
+        let (events, _) = ledger::read(&d.path.join(LEDGER))?;
+        if done_counts(top, &events, &mb) {
+            done_globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
+        }
+    }
+    let set = globset(&done_globs)?;
+    let repo_dir = format!("{REPO_DIR}/");
+    let mut differed: Vec<String> = changed_files(top, &mb)?
+        .into_iter()
+        .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
+        .filter(|f| !set.is_match(f))
+        .collect();
+    differed.sort();
+    for f in differed.iter().take(MAX_LISTED) {
+        r.failures.push(format!("{f} differs from {base} while {plans} waits for accept; accept the plan first, then write the code"));
+    }
+    if differed.len() > MAX_LISTED {
+        r.failures.push(format!("and {} more files differ from {base} while {plans} waits for accept", differed.len() - MAX_LISTED));
     }
     Ok(())
 }

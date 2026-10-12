@@ -15,7 +15,7 @@ mod output;
 mod skill;
 mod w18;
 
-use cmd::{export, lifecycle, plan, prove, read, setup};
+use cmd::{attest, export, lifecycle, plan, prove, read, setup};
 use output::Reply;
 
 const DESCRIPTION: &str = "Hold a coding agent to an accepted plan.";
@@ -79,6 +79,15 @@ enum Cmd {
         /// Record advisory JSON findings against the current packet identity.
         #[arg(long)]
         record: Option<PathBuf>,
+        /// Record as a judge note with harness and model.
+        #[arg(long, requires = "record")]
+        judge: bool,
+        /// The harness that ran the judge.
+        #[arg(long, requires = "judge", required_if_eq("judge", "true"))]
+        harness: Option<String>,
+        /// The model the judge ran on.
+        #[arg(long, requires = "judge", required_if_eq("judge", "true"))]
+        model: Option<String>,
     },
     /// List every change with its stage, branch and title.
     Ls,
@@ -124,6 +133,8 @@ enum Cmd {
     View,
     /// Print the short generated brief for this branch.
     Brief,
+    /// Print the next task of this branch.
+    Next,
     /// Install the skill, the Claude Code hooks, the pi extension and the pre-push gate.
     Install {
         /// How rvow joins Claude Code: a mod (plugin), or hooks in a settings file.
@@ -315,6 +326,17 @@ enum Cmd {
         /// The run file that `gate --out` wrote.
         file: PathBuf,
     },
+    /// Export the current proofs of a change as in-toto attestations.
+    Attest {
+        /// The change id or a unique prefix of it.
+        change: String,
+        /// Write the JSON lines to this file.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Sign the file with the configured signing key.
+        #[arg(long)]
+        sign: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -355,6 +377,7 @@ enum Artifact {
     Spec,
     Tasks,
     Design,
+    Judge,
 }
 
 fn main() -> ExitCode {
@@ -391,7 +414,9 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::New { title, spec } => plan::new(&title.join(" "), !spec),
         Cmd::Validate => plan::validate(),
         Cmd::Accept { change, .. } => lifecycle::accept(&change).map(Reply::done),
-        Cmd::Review { change, packet, record } => plan::review(&change, packet, record.as_deref()),
+        Cmd::Review { change, packet, record, judge, harness, model } => {
+            plan::review(&change, packet, record.as_deref(), judge, harness.as_deref(), model.as_deref())
+        }
         Cmd::Ls => read::ls(),
         Cmd::Path { id } => read::path(&id),
         Cmd::Show { id, full } => read::show(&id, full),
@@ -402,6 +427,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Ids { change } => plan::ids(change.as_deref()),
         Cmd::View => read::dashboard(),
         Cmd::Brief => read::brief(),
+        Cmd::Next => read::next(),
         Cmd::Hook { target, event } => {
             let event = match (target, event) {
                 (HookTarget::Claude, Some(event)) => Some(event),
@@ -444,6 +470,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
         Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
         Cmd::Ingest { file } => cmd::ingest::ingest(&file),
+        Cmd::Attest { change, out, sign } => attest::attest(&change, &out, sign),
         Cmd::Archive { change } => lifecycle::archive(&change),
         Cmd::Drop { change, reason } => lifecycle::drop_change(&change, &reason),
         Cmd::Supersede { old, by, reason } => lifecycle::supersede(&old, &by, &reason),

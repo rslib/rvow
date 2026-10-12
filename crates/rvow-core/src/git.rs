@@ -27,6 +27,25 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
+/// The base branch ref to measure from: the local or the remote base branch,
+/// whichever has the newer merge base with HEAD. When the two merge bases are
+/// equal or neither contains the other, the remote one wins, as it did when it
+/// always came first. `None` when neither side exists.
+pub fn base_ref(top: &Path, base: &str) -> Option<String> {
+    let local = format!("refs/heads/{base}");
+    let remote = format!("refs/remotes/origin/{base}");
+    // A side with no merge base counts as missing, so unrelated histories
+    // fall back to the other side instead of failing here.
+    let mb = |r: &str| run(top, &["merge-base", "HEAD", r]).ok();
+    match (mb(&local), mb(&remote)) {
+        (None, None) => None,
+        (Some(_), None) => Some(local),
+        (None, Some(_)) => Some(remote),
+        (Some(l), Some(r)) if l != r && run(top, &["merge-base", "--is-ancestor", &r, &l]).is_ok() => Some(local),
+        _ => Some(remote),
+    }
+}
+
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     run(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
@@ -56,6 +75,76 @@ pub fn origin_url(dir: &Path) -> Option<String> {
 pub fn branch(dir: &Path) -> Result<Option<String>> {
     let name = run(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     Ok((name != "HEAD").then_some(name))
+}
+
+/// The diff of one task's files against a base commit: the unified diff and
+/// the changed paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDiff {
+    pub diff: String,
+    pub files: Vec<String>,
+}
+
+/// The diff of every file that matches `globs` against `base`: committed
+/// changes since the base, uncommitted edits and untracked files. An
+/// untracked file shows as an added file. Files outside the globs stay out.
+/// Empty when nothing in scope changed.
+/// Splits NUL-terminated git output (`-z`) into paths. `-z` leaves paths
+/// unquoted, so a name with non-ASCII bytes still matches the task's globs.
+fn nul_paths(out: &str) -> Vec<String> {
+    out.strip_suffix('\0').unwrap_or(out).split('\0').filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+pub fn task_diff(top: &Path, base: &str, globs: &[String]) -> Result<TaskDiff> {
+    let set = crate::fingerprint::globset(globs)?;
+    let mut untracked = std::collections::HashSet::new();
+    for path in nul_paths(&run(top, &["ls-files", "--others", "--exclude-standard", "-z"])?) {
+        untracked.insert(path);
+    }
+    let mut names = nul_paths(&run(top, &["diff", "--no-renames", "--name-only", "-z", base, "--"])?);
+    names.extend(untracked.iter().cloned());
+    names.sort();
+    names.dedup();
+    let files: Vec<String> = names.into_iter().filter(|f| set.is_match(f)).collect();
+    let mut diff = String::new();
+    for f in &files {
+        // quotePath=false keeps non-ASCII names raw in the patch headers,
+        // so an --in-diff consumer sees the same path as RVOW_CHANGED_FILES.
+        let part = if untracked.contains(f) {
+            diff_no_index(top, f)?
+        } else {
+            run(top, &["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-renames", base, "--", f])?
+        };
+        if !part.is_empty() {
+            if !diff.is_empty() {
+                diff.push('\n');
+            }
+            diff.push_str(&part);
+        }
+    }
+    Ok(TaskDiff { diff, files })
+}
+
+/// `git diff --no-index /dev/null <file>`: the added-file diff of an
+/// untracked file. It exits 1 on a difference, which is the expected case.
+fn diff_no_index(top: &Path, rel: &str) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(top)
+        .args(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
+    match out.status.code() {
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string()),
+        _ => Err(Error::new(
+            "git",
+            format!("git diff --no-index failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
+            "run the command in a git repository",
+        )),
+    }
 }
 
 /// Turns a remote URL into a `host/owner/repo` path as ghq does, or `None` for a

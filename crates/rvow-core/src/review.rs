@@ -81,11 +81,11 @@ pub fn packet_for(project: &Project, home: &Path, cwd: &Path, target: &str) -> R
     paths.dedup();
     let mut evidence = String::new();
     for path in paths.into_iter().filter(|p| set.is_match(p)) {
-        let diff = git::run(&top, &["diff", "--no-ext-diff", "--no-textconv", base, "--", &path])?;
+        let diff = git::run(&top, &["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", base, "--", &path])?;
         if !diff.is_empty() {
             evidence.push_str(&diff);
         }
-        let tracked = git::run(&top, &["ls-files", "--", &path])?;
+        let tracked = git::run(&top, &["--literal-pathspecs", "ls-files", "--", &path])?;
         if tracked.is_empty() {
             let full = top.join(&path);
             if std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
@@ -148,6 +148,36 @@ fn invalid() -> Error {
     )
 }
 
+fn judge_invalid() -> Error {
+    Error::new(
+        "review-record",
+        "judge record must contain packet and advisory findings only",
+        "write JSON with packet identity and findings containing message, optional path, line and severity",
+    )
+}
+
+/// The record bytes of `file`, or stdin for `-`. An oversized record fails
+/// with `too_big`; a read failure names the file.
+fn read_record_bytes(file: &Path, too_big: fn() -> Error) -> Result<Vec<u8>> {
+    if file.as_os_str() == "-" {
+        let mut input = Vec::new();
+        use std::io::Read;
+        std::io::stdin().read_to_end(&mut input).map_err(|e| Error::io(file, e))?;
+        if input.len() as u64 > RECORD_BYTES {
+            return Err(too_big());
+        }
+        return Ok(input);
+    }
+    if std::fs::metadata(file).map_err(|e| Error::io(file, e))?.len() > RECORD_BYTES {
+        return Err(too_big());
+    }
+    std::fs::read(file).map_err(|e| Error::io(file, e))
+}
+
+fn findings_ok(findings: &[Finding]) -> bool {
+    !findings.iter().any(|f| f.message.trim().is_empty() || f.message.len() > 4000 || f.path.as_ref().is_some_and(|p| p.len() > 1000))
+}
+
 /// Validates current packet identity and appends only a Note. No approval or
 /// proof event can be produced by this API.
 pub fn record(project: &Project, cwd: &Path, target: &str, file: &Path) -> Result<Recorded> {
@@ -156,16 +186,9 @@ pub fn record(project: &Project, cwd: &Path, target: &str, file: &Path) -> Resul
 
 /// Advisory Note recording with explicit private storage context.
 pub fn record_for(project: &Project, home: &Path, cwd: &Path, target: &str, file: &Path) -> Result<Recorded> {
-    if std::fs::metadata(file).map_err(|e| Error::io(file, e))?.len() > RECORD_BYTES {
-        return Err(invalid());
-    }
-    let bytes = std::fs::read(file).map_err(|e| Error::io(file, e))?;
+    let bytes = read_record_bytes(file, invalid)?;
     let mut advice: Advice = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if advice
-        .findings
-        .iter()
-        .any(|f| f.message.trim().is_empty() || f.message.len() > 4000 || f.path.as_ref().is_some_and(|p| p.len() > 1000))
-    {
+    if !findings_ok(&advice.findings) {
         return Err(invalid());
     }
     let lock = project.lock()?;
@@ -181,4 +204,147 @@ pub fn record_for(project: &Project, home: &Path, cwd: &Path, target: &str, file
     let data = json!({"note": "review", "packet": current.identity, "findings": advice.findings, "total": total, "truncated": truncated});
     let event = ledger::append(&dir.path.join(LEDGER), &lock, ledger::Kind::Note, data.as_object().cloned().ok_or_else(invalid)?)?;
     Ok(Recorded { event: event.hash, total, kept, truncated, findings: advice.findings })
+}
+
+/// A recorded judge note: the same advisory findings plus the harness and model.
+pub struct JudgeRecorded {
+    pub event: String,
+    pub total: usize,
+    pub kept: usize,
+    pub truncated: bool,
+    pub harness: String,
+    pub model: String,
+    pub findings: Vec<Finding>,
+}
+
+/// A judge note read back for the current packet.
+pub struct JudgeNote {
+    pub event: String,
+    pub packet: String,
+    pub harness: String,
+    pub model: String,
+    pub findings: Vec<Finding>,
+    pub total: usize,
+    pub truncated: bool,
+}
+
+fn judge_bytes(bytes: &[u8], harness: &str, model: &str) -> Result<Advice> {
+    if harness.trim().is_empty() || model.trim().is_empty() {
+        return Err(judge_invalid());
+    }
+    if bytes.len() as u64 > RECORD_BYTES {
+        return Err(judge_invalid());
+    }
+    let advice: Advice = serde_json::from_slice(bytes).map_err(|_| judge_invalid())?;
+    if !findings_ok(&advice.findings) {
+        return Err(judge_invalid());
+    }
+    Ok(advice)
+}
+
+/// Records a judge note for the current packet. The harness and model name
+/// who ran the judge; a plain review note never counts as a judge note.
+pub fn record_judge(project: &Project, cwd: &Path, target: &str, file: &Path, harness: &str, model: &str) -> Result<JudgeRecorded> {
+    record_judge_for(project, &crate::hardening::project_home(project)?, cwd, target, file, harness, model)
+}
+
+/// Judge recording with explicit private storage context.
+pub fn record_judge_for(
+    project: &Project,
+    home: &Path,
+    cwd: &Path,
+    target: &str,
+    file: &Path,
+    harness: &str,
+    model: &str,
+) -> Result<JudgeRecorded> {
+    let bytes = read_record_bytes(file, judge_invalid)?;
+    record_judge_bytes_for(project, home, cwd, target, &bytes, harness, model)
+}
+
+/// Judge recording from bytes already read, so tests can pass stdin content directly.
+pub fn record_judge_bytes_for(
+    project: &Project,
+    home: &Path,
+    cwd: &Path,
+    target: &str,
+    bytes: &[u8],
+    harness: &str,
+    model: &str,
+) -> Result<JudgeRecorded> {
+    let mut advice = judge_bytes(bytes, harness, model)?;
+    let lock = project.lock()?;
+    let current = packet_for(project, home, cwd, target)?;
+    if advice.packet != current.identity {
+        return Err(Error::new("review-stale", "review packet inputs changed", "run rvow review <CHG> --packet and review the new packet"));
+    }
+    let dir = change::resolve(project, target)?;
+    let total = advice.findings.len();
+    advice.findings.truncate(MAX_FINDINGS);
+    let kept = advice.findings.len();
+    let truncated = total > kept;
+    let data = json!({
+        "note": "judge",
+        "packet": current.identity,
+        "harness": harness,
+        "model": model,
+        "findings": advice.findings,
+        "total": total,
+        "truncated": truncated
+    });
+    let event = ledger::append(&dir.path.join(LEDGER), &lock, ledger::Kind::Note, data.as_object().cloned().ok_or_else(judge_invalid)?)?;
+    Ok(JudgeRecorded {
+        event: event.hash,
+        total,
+        kept,
+        truncated,
+        harness: harness.to_string(),
+        model: model.to_string(),
+        findings: advice.findings,
+    })
+}
+
+fn judge_event(data: &serde_json::Map<String, serde_json::Value>, packet: &str) -> bool {
+    data.get("note").and_then(serde_json::Value::as_str) == Some("judge")
+        && data.get("packet").and_then(serde_json::Value::as_str) == Some(packet)
+}
+
+fn judge_note_from(event: &ledger::Event) -> Option<JudgeNote> {
+    let data = &event.data;
+    if data.get("note").and_then(serde_json::Value::as_str) != Some("judge") {
+        return None;
+    }
+    Some(JudgeNote {
+        event: event.hash.clone(),
+        packet: data.get("packet").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+        harness: data.get("harness").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+        model: data.get("model").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+        findings: data.get("findings").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default(),
+        total: data.get("total").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize,
+        truncated: data.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// The newest judge note for the current packet, if any. A plain review note
+/// never counts: only `note: judge` matches.
+pub fn judge_for(project: &Project, cwd: &Path, target: &str) -> Result<Option<JudgeNote>> {
+    judge_for_with(project, &crate::hardening::project_home(project)?, cwd, target)
+}
+
+/// Judge lookup with explicit private storage context.
+pub fn judge_for_with(project: &Project, home: &Path, cwd: &Path, target: &str) -> Result<Option<JudgeNote>> {
+    let current = packet_for(project, home, cwd, target)?;
+    let dir = change::resolve(project, target)?;
+    let (events, _) = ledger::read(&dir.path.join(LEDGER))?;
+    let mut found: Option<JudgeNote> = None;
+    for event in &events {
+        if event.kind != ledger::Kind::Note {
+            continue;
+        }
+        if !judge_event(&event.data, &current.identity) {
+            continue;
+        }
+        found = judge_note_from(event);
+    }
+    Ok(found)
 }

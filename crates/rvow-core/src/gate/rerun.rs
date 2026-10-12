@@ -13,20 +13,27 @@ use crate::runner;
 use crate::tasks::Task;
 use crate::vow::sha256_hex;
 
-/// A temporary detached worktree of HEAD, removed on drop. This is the one
-/// place where rvow writes to git.
-pub(super) struct Worktree {
+/// A temporary detached worktree of one commit, removed on drop. This is the
+/// one place where rvow writes to git. The gate rerun and the amend baseline
+/// share it, so both run in a clean checkout set up the same way.
+pub(crate) struct Worktree {
     repo: PathBuf,
-    pub(super) path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 impl Worktree {
-    pub(super) fn add(repo: &Path, links: &[String]) -> Result<Worktree> {
+    pub(crate) fn add(repo: &Path, links: &[String]) -> Result<Worktree> {
+        Self::add_at(repo, "HEAD", links)
+    }
+
+    /// The same clean checkout at `commit`, for the amend baseline on the
+    /// vow's base commit.
+    pub(crate) fn add_at(repo: &Path, commit: &str, links: &[String]) -> Result<Worktree> {
         let b = Error::random::<6>()?;
         let name: String = b.iter().map(|x| format!("{x:02x}")).collect();
         let path = std::env::temp_dir().join(format!("rvow-rerun-{name}"));
         let p = path.to_string_lossy().into_owned();
-        git::run(repo, &["worktree", "add", "--detach", "--quiet", &p, "HEAD"])?;
+        git::run(repo, &["worktree", "add", "--detach", "--quiet", &p, commit])?;
         let tree = Worktree { repo: repo.to_path_buf(), path };
         tree.link(links)?;
         Ok(tree)
@@ -102,25 +109,26 @@ impl Drop for Worktree {
 
 /// What decides whether a scoped `setup` or `checks` entry runs: the tasks
 /// that will run, and the files that the branch changed.
-pub(super) struct Scope {
+pub(crate) struct Scope {
     head: Vec<String>,
     tasks: Vec<globset::GlobSet>,
     changed: Option<Vec<String>>,
 }
 
 impl Scope {
-    pub(super) fn new(top: &Path, base: &str, misses: &[&Task]) -> Result<Scope> {
+    pub(crate) fn new(top: &Path, base: &str, misses: &[&Task]) -> Result<Scope> {
         let head = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"])?.lines().map(String::from).collect();
         let tasks = misses.iter().map(|t| globset(&t.files)).collect::<Result<Vec<_>>>()?;
-        let changed =
-            base_ref(top, base).and_then(|b| git::run(top, &["merge-base", "HEAD", &b]).ok()).and_then(|mb| changed_files(top, &mb).ok());
+        let changed = git::base_ref(top, base)
+            .and_then(|b| git::run(top, &["merge-base", "HEAD", &b]).ok())
+            .and_then(|mb| changed_files(top, &mb).ok());
         Ok(Scope { head, tasks, changed })
     }
 
     /// A plain entry always runs. A scoped entry runs when a task that runs
     /// shares a file with its globs, or a changed file matches one of them. An
     /// unknown base counts as a match, so nothing is skipped by mistake.
-    pub(super) fn wants(&self, step: &Step) -> Result<bool> {
+    pub(crate) fn wants(&self, step: &Step) -> Result<bool> {
         let Some(files) = step.files() else { return Ok(true) };
         let set = globset(files)?;
         if self.head.iter().any(|f| set.is_match(f) && self.tasks.iter().any(|t| t.is_match(f))) {
@@ -186,12 +194,6 @@ impl<'a> Lazy<'a> {
     }
 }
 
-pub(super) fn base_ref(top: &Path, base: &str) -> Option<String> {
-    [format!("refs/remotes/origin/{base}"), format!("refs/heads/{base}")]
-        .into_iter()
-        .find(|r| git::run(top, &["rev-parse", "--verify", "--quiet", r]).is_ok())
-}
-
 /// Files that differ from `mb` in the worktree, plus untracked files git does
 /// not ignore.
 pub(super) fn changed_files(top: &Path, mb: &str) -> Result<Vec<String>> {
@@ -222,9 +224,11 @@ pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, i
     data.insert("tail".into(), serde_json::json!(o.tail));
     data.insert("inputs".into(), inputs.hash.clone().into());
     data.insert("input_files".into(), inputs.files.into());
+    data.insert("depends".into(), serde_json::json!(proof::dependency_inputs(&c.loaded.tasks, t, now)));
     data.insert("env".into(), serde_json::json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
+    data.insert("programs".into(), serde_json::json!(proof::verify_programs(t.verify.as_deref().unwrap_or(""))));
     data.insert(
         "run".into(),
         serde_json::json!({ "invocation": invocation(), "rvow": env!("CARGO_PKG_VERSION"), "machine": proof::machine(now.config), "agent": proof::agent(now.config), "head": git::run(now.top, &["rev-parse", "HEAD"]).unwrap_or_default(), "branch": git::branch(now.top).ok().flatten(), "ci": fingerprint::ci() }),

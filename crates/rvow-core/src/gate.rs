@@ -1,6 +1,7 @@
 //! `rvow gate`: the deterministic check behind the Stop hook, pre-push and
 //! archive.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -16,9 +17,10 @@ use crate::store::Project;
 
 pub mod cache;
 mod check;
-mod rerun;
+pub(crate) mod rerun;
 mod signature;
 
+use check::check_backlog_scope;
 use check::check_scope;
 use rerun::{Lazy, Scope, changed_files, prove_data};
 
@@ -118,10 +120,17 @@ fn gate_for(
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         check_change(project, c, &now, &opts, &mut r)?;
     }
-    if let Some(branch) = branch.as_deref()
-        && !queue.is_empty()
-    {
-        check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
+    for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
+        r.warnings.extend(judge_warnings(project, home, cwd, &c.dir.id.to_string()));
+    }
+    if let Some(branch) = branch.as_deref() {
+        if queue.is_empty() {
+            if target.is_none() {
+                check_backlog_scope(project, &top, &config.base, branch, &living, &mut r)?;
+            }
+        } else {
+            check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
+        }
     }
 
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
@@ -143,6 +152,8 @@ fn gate_for(
         // A task whose proof is current and whose files are all committed was proved on this very content,
         // so a push does not run it again. `--out` still reruns every task, since it records the runs.
         let uncommitted = if opts.out.is_none() && use_cache && !policy.rerun_proven { changed_files(&top, "HEAD").ok() } else { None };
+        // A proof is trusted only when its seal checks under the key in the rvow home.
+        let seal_key = if uncommitted.is_some() { crate::seal::read_key(home) } else { None };
         let mut plan = Vec::new();
         for c in &queue {
             let mut own = std::collections::BTreeMap::new();
@@ -170,8 +181,21 @@ fn gate_for(
                 };
                 let proven = match &uncommitted {
                     Some(dirty) => {
-                        proof::state(c, t, &now)? == proof::State::Proved
+                        let ignored = ignored_in_scope(&top, t, &links)?;
+                        let trusted = proof::state(c, t, &now)? == proof::State::Proved
                             && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
+                            && ignored.is_none();
+                        let sealed = seal_key.as_deref().is_some_and(|key| sealed_proof(c, &t.id.to_string(), key));
+                        let mismatch = if trusted && sealed { program_mismatch(c, t) } else { None };
+                        if trusted && !sealed {
+                            r.warnings.push(format!("{}: the newest proof has no valid seal, so it is rerun", t.id));
+                        } else if let Some(name) = &mismatch {
+                            r.warnings.push(format!("{}: the program {name} differs from the proof, so it is rerun", t.id));
+                        }
+                        if let Some(path) = &ignored {
+                            r.warnings.push(format!("{}: the ignored file {path} is in scope, so it is rerun", t.id));
+                        }
+                        trusted && sealed && mismatch.is_none()
                     }
                     None => false,
                 };
@@ -271,6 +295,78 @@ fn gate_for(
 /// selected change, so other unfinished changes can remain on the branch.
 pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Result<Report> {
     gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, &mut std::io::sink())
+}
+
+/// The first git-ignored file that matches `t`'s `files:` outside every
+/// `rerun_links` folder. The rerun worktree sees a linked folder, so a file
+/// there does not stop the trust.
+fn ignored_in_scope(top: &Path, t: &crate::tasks::Task, links: &[String]) -> Result<Option<String>> {
+    let set = fingerprint::globset(&t.files)?;
+    let listing = git::run(top, &["ls-files", "--others", "--ignored", "--exclude-standard"])?;
+    Ok(listing
+        .lines()
+        .map(String::from)
+        .find(|path| set.is_match(path) && !links.iter().any(|l| path == l || path.starts_with(&format!("{l}/")))))
+}
+
+/// Each judge finding for the current packet as a gate warning. The gate result
+/// stays unchanged: these are warnings only, and a stale judge note is not shown.
+fn judge_warnings(project: &Project, home: &Path, cwd: &Path, target: &str) -> Vec<String> {
+    let Ok(Some(note)) = crate::review::judge_for_with(project, home, cwd, target) else {
+        return Vec::new();
+    };
+    note.findings
+        .iter()
+        .map(|f| match (&f.path, f.line) {
+            (Some(path), Some(line)) => format!("judge {path}:{line}: {}", f.message),
+            (Some(path), None) => format!("judge {path}: {}", f.message),
+            _ => format!("judge: {}", f.message),
+        })
+        .collect()
+}
+
+/// The index of the newest Prove event of `id`, if any.
+fn newest_prove_at(c: &Active, id: &str) -> Option<usize> {
+    c.events
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, e)| e.kind == crate::ledger::Kind::Prove && e.data.get("task").and_then(|v| v.as_str()) == Some(id))
+        .map(|(i, _)| i)
+}
+
+/// The newest Prove event of `id`, if any.
+fn newest_prove<'a>(c: &'a Active, id: &str) -> Option<&'a crate::ledger::Event> {
+    newest_prove_at(c, id).map(|i| &c.events[i])
+}
+
+/// Whether the newest Prove event of `id` carries a seal that checks under
+/// `key` and was appended where it belongs. A copy of an old sealed line keeps
+/// its seal, so its parents must equal the heads of the events before it, as
+/// `append` computed them.
+fn sealed_proof(c: &Active, id: &str, key: &[u8]) -> bool {
+    let Some(index) = newest_prove_at(c, id) else { return false };
+    let event = &c.events[index];
+    event.parents == crate::ledger::heads(&c.events[..index]) && crate::seal::checks(key, event)
+}
+
+/// The first program of `t`'s verify command whose resolved path or content
+/// differs from the newest proof. A missing `programs` record counts as a
+/// mismatch, so a proof from before programs existed reruns.
+fn program_mismatch(c: &Active, t: &crate::tasks::Task) -> Option<String> {
+    let recorded: BTreeMap<String, serde_json::Value> = newest_prove(c, &t.id.to_string())
+        .and_then(|e| e.data.get("programs"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let current = proof::verify_programs(t.verify.as_deref().unwrap_or(""));
+    if recorded == current {
+        return None;
+    }
+    current
+        .iter()
+        .find(|(name, value)| recorded.get(*name) != Some(*value))
+        .map(|(name, _)| name.clone())
+        .or_else(|| recorded.keys().find(|name| !current.contains_key(*name)).cloned())
 }
 
 #[cfg(test)]
@@ -532,7 +628,9 @@ mod tests {
         let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let tasks = dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
-        std::fs::write(&tasks, text.replace("grep -q ok out.txt", "true")).unwrap();
+        // A changed check that still fails runs its amend baseline and is
+        // recorded; one that passes at once is refused with code baseline.
+        std::fs::write(&tasks, text.replace("grep -q ok out.txt", "grep -q ok other.txt")).unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(r.failures.iter().any(|f| f.contains("weaken drift")), "{r:?}");
 

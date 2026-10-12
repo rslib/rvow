@@ -4,6 +4,7 @@ pub const PROPOSAL: &str = include_str!("../../../guides/proposal.md");
 pub const SPEC: &str = include_str!("../../../guides/spec.md");
 pub const TASKS: &str = include_str!("../../../guides/tasks.md");
 pub const DESIGN: &str = include_str!("../../../guides/design.md");
+pub const JUDGE: &str = include_str!("../../../guides/judge.md");
 
 #[cfg(test)]
 mod tests {
@@ -20,7 +21,7 @@ mod tests {
 
     #[test]
     fn every_guide_fits_the_word_budget() {
-        for (name, text) in [("proposal", PROPOSAL), ("spec", SPEC), ("tasks", TASKS), ("design", DESIGN)] {
+        for (name, text) in [("proposal", PROPOSAL), ("spec", SPEC), ("tasks", TASKS), ("design", DESIGN), ("judge", JUDGE)] {
             let n = text.split_whitespace().count();
             assert!(n <= MAX_WORDS, "{name} guide has {n} words");
             assert!(text.is_ascii(), "{name} guide is not ASCII");

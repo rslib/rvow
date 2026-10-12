@@ -123,6 +123,7 @@ test("installed folder loads every runtime module and named prompt exports", asy
     "rvow_archive",
     "rvow_ask",
     "rvow_confirm",
+    "rvow_judge",
     "rvow_prove",
     "rvow_view",
     "rvow_yolo",
