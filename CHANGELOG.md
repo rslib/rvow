@@ -133,3 +133,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Fix the planning brief to print only the counters that are not zero.
 - Fix the review packet and the task diff failing for a task file whose name git reads as pathspec magic, such as `:(bad`.
   Task file names now reach git as literal paths.
+- Fix the hook reading a data file as a script when an interpreter takes the script from stdin or runs inline code.

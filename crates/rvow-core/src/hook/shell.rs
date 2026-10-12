@@ -711,6 +711,37 @@ fn expand(prefix: PathBuf, components: &[String], out: &mut Vec<PathBuf>) {
     }
 }
 
+fn reads_no_file(name: &str, arg: &str) -> bool {
+    if arg == "-" {
+        return true;
+    }
+    if name.starts_with("python") {
+        matches!(arg, "-c" | "-m")
+    } else if name.starts_with("node") {
+        matches!(arg, "-e" | "-p")
+    } else if name.starts_with("perl") {
+        matches!(arg, "-e" | "-E")
+    } else if name.starts_with("ruby") {
+        matches!(arg, "-e")
+    } else if name.starts_with("php") {
+        matches!(arg, "-r")
+    } else {
+        matches!(arg, "eval" | "-e")
+    }
+}
+
+fn interpreter_script<'a>(name: &str, args: &'a [String]) -> Option<&'a String> {
+    for w in args {
+        if reads_no_file(name, w) {
+            return None;
+        }
+        if !w.starts_with('-') {
+            return Some(w);
+        }
+    }
+    None
+}
+
 /// Why running a script that `cmd` names must not happen: the file holds an
 /// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
 /// same command writes first cannot be read yet; that stays a known gap.
@@ -718,8 +749,10 @@ pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
-        let file = if is_shell(name) || is_interpreter(name) {
+        let file = if is_shell(name) {
             inv[1..].iter().find(|w| !w.starts_with('-'))
+        } else if is_interpreter(name) {
+            interpreter_script(name, &inv[1..])
         } else if name == "source" || name == "." {
             inv.get(1)
         } else if inv[0].contains('/') {
