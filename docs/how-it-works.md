@@ -263,6 +263,15 @@ It never holds a command or a path.
 Use it to find the rule that fires most before you change any rule.
 Agents cannot read or write the stats file.
 
+## Agent evals
+
+The evals check that an agent with the mod follows the loop, instead of trusting the hooks alone.
+Each case under `evals/agent/cases/` holds a prompt, a setup script and graders.
+`evals/agent/run.sh` runs every case with the mod and with no mod on haiku by default.
+The runner installs the mod with the built binary into a throwaway home, so your store and your Claude folder stay untouched, and writes the report to `evals/agent/results/`.
+The offline test in `crates/rvow/tests/audit_evals.rs` runs each setup with no model and checks the scaffold it leaves behind.
+Run one case live with `evals/agent/run.sh haiku --case <name> --runs 1` before you trust a new grader.
+
 ## The pre-push gate
 
 `rvow install` adds a pre-push hook that runs `rvow gate --strict --rerun`.
