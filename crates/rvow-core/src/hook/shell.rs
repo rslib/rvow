@@ -365,7 +365,23 @@ fn parse(cmd: &str, depth: u8, outer: &HashMap<String, String>) -> Shell {
 }
 
 fn mentions_accept(code: &str) -> bool {
-    let tokens: Vec<&str> = code.split(|c: char| !c.is_alphanumeric()).collect();
+    // A slash command name such as `/rvow-accept` cannot run from a script,
+    // so every `/rvow-` word is dropped before the token check.
+    let mut kept = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(at) = rest.find('/') {
+        let after = &rest[at + 1..];
+        if after.starts_with("rvow-") {
+            kept.push_str(&rest[..at]);
+            let end = after.find(|c: char| !(c.is_alphanumeric() || c == '-')).unwrap_or(after.len());
+            rest = &after[end..];
+        } else {
+            kept.push_str(&rest[..at + 1]);
+            rest = after;
+        }
+    }
+    kept.push_str(rest);
+    let tokens: Vec<&str> = kept.split(|c: char| !c.is_alphanumeric()).collect();
     tokens.contains(&"rvow") && tokens.iter().any(|t| matches!(*t, "accept" | "confirm"))
 }
 
@@ -746,13 +762,15 @@ fn interpreter_script<'a>(name: &str, args: &'a [String]) -> Option<&'a String> 
 /// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
 /// same command writes first cannot be read yet; that stays a known gap.
 pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
-    script_rule_committed(cmd, cwd, &|_| false)
+    // No repository context here, so every script keeps the whole-file check.
+    script_rule_committed(cmd, cwd, &|p| std::fs::read_to_string(p).ok())
 }
 
-/// The same rule with the caller's predicate for a committed test file: when
-/// it says true for the script path, the text is data and is not read. Every
-/// other script keeps the text check.
-pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) -> bool) -> Option<Denial> {
+/// The same rule with the caller's text selector for a committed test file:
+/// when it returns `None` for the script path, the file is data and is not
+/// read. When it returns text, only that text is checked; every other script
+/// keeps the whole-file check.
+pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) -> Option<String>) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
@@ -777,24 +795,29 @@ pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) ->
         if !meta.is_file() || meta.len() > 256 * 1024 || base_name(file) == "rvow" {
             continue;
         }
-        if committed(&path) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Some(text) = committed(&path) else {
+            // A clean committed test file: the text is data and is not read.
             continue;
         };
-        let first = text.lines().next().unwrap_or("");
-        let foreign = is_interpreter(name) || INTERPRETERS.iter().any(|i| first.starts_with("#!") && first.contains(i));
-        let inner = if foreign {
-            mentions_accept(&text).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") })
-        } else {
-            bash_rule(&text)
-        };
-        if let Some(inner) = inner {
-            return denial(inner.rule, format!("{file} holds a command the user owns, so it does not run from here: {}", inner.reason));
+        // The interpreter comes from the file's own first line, never from
+        // the selected text, which may hold only the added lines.
+        let first = std::fs::read_to_string(&path).ok().and_then(|t| t.lines().next().map(str::to_string)).unwrap_or_default();
+        if let Some(inner) = check_text(name, &first, &text, file) {
+            return inner;
         }
     }
     None
+}
+
+/// The denial for the text of a script that runs, or `None`.
+fn check_text(name: &str, first: &str, text: &str, file: &str) -> Option<Option<Denial>> {
+    let foreign = is_interpreter(name) || INTERPRETERS.iter().any(|i| first.starts_with("#!") && first.contains(i));
+    let inner = if foreign {
+        mentions_accept(text).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") })
+    } else {
+        bash_rule(text)
+    };
+    inner.map(|d| denial(d.rule, format!("{file} holds a command the user owns, so it does not run from here: {}", d.reason)))
 }
 
 pub fn script_denial(cmd: &str, cwd: &Path) -> Option<String> {

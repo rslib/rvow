@@ -82,12 +82,24 @@ impl Fx {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// Commits `t/deny.test.js` and writes the same text back, so the file
-    /// has no change against HEAD.
+    /// Commits `t/deny.test.js` with the given text and writes it back, so the
+    /// file has no change against HEAD.
     fn commit_script(&self) {
+        std::fs::write(self.repo().join(SCRIPT), TEXT).unwrap();
         self.git(&["add", SCRIPT]);
         self.git(&["commit", "-q", "-m", "script"]);
         std::fs::write(self.repo().join(SCRIPT), TEXT).unwrap();
+    }
+
+    /// Commits `t/deny.test.js` clean, then appends the given lines, so the
+    /// added lines hold exactly `text`.
+    fn commit_then_append(&self, text: &str) {
+        std::fs::write(self.repo().join(SCRIPT), "base line\n").unwrap();
+        self.git(&["add", SCRIPT]);
+        self.git(&["commit", "-q", "-m", "script"]);
+        let mut full = String::from("base line\n");
+        full.push_str(text);
+        std::fs::write(self.repo().join(SCRIPT), full).unwrap();
     }
 
     fn project(&self) -> Project {
@@ -180,6 +192,45 @@ fn committed_tests_subfolder_committed_file_runs() {
 }
 
 #[test]
+fn committed_tests_added_plain_line_runs() {
+    let fx = Fx::new("added-plain");
+    std::fs::create_dir_all(fx.repo().join("t")).unwrap();
+    fx.rvow(&["init"]);
+    fx.commit_script();
+    std::fs::write(fx.repo().join(SCRIPT), format!("{TEXT}just a plain line\n")).unwrap();
+    assert_eq!(fx.run(CMD), None, "only the lines added against HEAD are read");
+}
+
+#[test]
+fn committed_tests_added_owner_line_is_denied() {
+    let fx = Fx::new("added-owner");
+    std::fs::create_dir_all(fx.repo().join("t")).unwrap();
+    fx.rvow(&["init"]);
+    fx.commit_then_append("rvow accept CHG-x\n");
+    let denial = fx.run(CMD);
+    assert!(denial.as_ref().is_some_and(|d| d.reason.contains("deny.test.js")), "{denial:?}");
+}
+
+#[test]
+fn committed_tests_slash_name_runs() {
+    let fx = Fx::new("slash-only");
+    std::fs::create_dir_all(fx.repo().join("t")).unwrap();
+    fx.rvow(&["init"]);
+    std::fs::write(fx.repo().join(SCRIPT), "/rvow-accept CHG-a1\n").unwrap();
+    assert_eq!(fx.run(CMD), None, "a slash command name cannot run from a script");
+}
+
+#[test]
+fn committed_tests_slash_name_with_owner_call_is_denied() {
+    let fx = Fx::new("slash-with-owner");
+    std::fs::create_dir_all(fx.repo().join("t")).unwrap();
+    fx.rvow(&["init"]);
+    std::fs::write(fx.repo().join(SCRIPT), "/rvow-accept CHG-a1\nrvow accept CHG-a1\n").unwrap();
+    let denial = fx.run(CMD);
+    assert!(denial.as_ref().is_some_and(|d| d.reason.contains("deny.test.js")), "{denial:?}");
+}
+
+#[test]
 fn committed_tests_symlink_is_checked() {
     let fx = Fx::new("symlink");
     fx.rvow(&["init"]);
@@ -189,4 +240,21 @@ fn committed_tests_symlink_is_checked() {
     fx.git(&["commit", "-q", "-m", "link"]);
     let denial = fx.run("node --test link.test.js");
     assert!(denial.is_some(), "a symlink is not a committed test file");
+}
+
+#[test]
+fn committed_tests_added_line_keeps_the_file_shebang() {
+    let fx = Fx::new("added-shebang");
+    std::fs::create_dir_all(fx.repo().join("t")).unwrap();
+    fx.rvow(&["init"]);
+    std::fs::write(fx.repo().join(SCRIPT), "#!/usr/bin/env node\nconsole.log(1)\n").unwrap();
+    fx.git(&["add", SCRIPT]);
+    fx.git(&["commit", "-q", "-m", "clean"]);
+    std::fs::write(
+        fx.repo().join(SCRIPT),
+        "#!/usr/bin/env node\nconsole.log(1)\nrequire('child_process').execSync('rvow ' + 'accept CHG-x')\n",
+    )
+    .unwrap();
+    let denial = fx.run("./t/deny.test.js");
+    assert!(denial.as_ref().is_some_and(|d| d.reason.contains("deny.test.js")), "{denial:?}");
 }

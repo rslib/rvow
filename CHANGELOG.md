@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Read only the added lines of a changed test file, not the whole file, so committed owner command text no longer denies a test run.
+- Ignore slash command names such as `/rvow-accept` in script text, so a name that cannot run from a script is not treated as an owner command.
+
 - Measure the vow and the gate from the newer merge base of the local and the remote base branch, so unpushed commits on the base branch never count as outside every task.
   When the two merge bases diverge, the remote one wins.
 - Fail `rvow gate` on code that differs from the base while a backlog plan names the branch and no change is active on it, naming the waiting plan.

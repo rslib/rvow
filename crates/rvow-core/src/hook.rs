@@ -131,27 +131,42 @@ fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
     (!config.allowed_signers.is_empty()).then(|| top.join(&config.allowed_signers))
 }
 
-/// True when `path` is a committed test file: a regular file, not a symlink,
-/// inside the repository at `top`, that matches the config test globs, is
-/// tracked and has no staged or unstaged change against HEAD. The path is
-/// resolved against `cwd`, canonicalized, and must lie inside `top`. Any
-/// failure means false, so the text check still runs.
-fn committed_test_file(project: &Project, top: Option<&Path>, path: &Path) -> bool {
-    let Some(top) = top else { return false };
+/// The text of `path` that the owner-command check reads: `None` for a clean
+/// committed test file, only the lines added against HEAD for a tracked
+/// test-glob file with changes, and the whole file for every other case. The
+/// path is resolved against `cwd`, canonicalized, and must lie inside `top`.
+/// Any path failure or git failure means the whole file, so the check fails
+/// closed.
+fn committed_test_text(project: &Project, top: Option<&Path>, path: &Path) -> Option<String> {
+    let whole = || std::fs::read_to_string(path).ok();
+    let Some(top) = top else { return whole() };
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return false;
+        return whole();
     }
-    let Ok(path) = path.canonicalize() else { return false };
-    let Ok(top) = top.canonicalize() else { return false };
-    let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return false };
-    let Ok(home) = crate::store::home_dir() else { return false };
-    let Ok(config) = config::load(project, &home) else { return false };
-    let Ok(tests) = fingerprint::globset(&config.test_globs) else { return false };
+    let Ok(path) = path.canonicalize() else { return whole() };
+    let Ok(top) = top.canonicalize() else { return whole() };
+    let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return whole() };
+    let Ok(home) = crate::store::home_dir() else { return whole() };
+    let Ok(config) = config::load(project, &home) else { return whole() };
+    let Ok(tests) = fingerprint::globset(&config.test_globs) else { return whole() };
     if !tests.is_match(rel) {
-        return false;
+        return whole();
     }
-    git::run(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).is_ok()
-        && git::run(&top, &["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", rel]).is_ok()
+    if git::run(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).is_err() {
+        return whole();
+    }
+    match git::run(&top, &["--literal-pathspecs", "diff", "--no-color", "-U0", "HEAD", "--", rel]) {
+        // A clean committed test file is data; none of it is read.
+        Ok(diff) if diff.is_empty() => None,
+        Ok(diff) => Some(added_lines(&diff)),
+        Err(_) => whole(),
+    }
+}
+
+/// The '+' lines of a unified diff without the '+++' header, each without its
+/// '+' prefix.
+fn added_lines(diff: &str) -> String {
+    diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).map(|l| &l[1..]).collect::<Vec<_>>().join("\n")
 }
 
 /// Files outside any repository that enforce rvow: the installed mod, Claude
@@ -542,7 +557,7 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
         let top = git::toplevel(&cwd).ok();
         let trust = top.as_deref().and_then(|t| signers_path(project, t));
-        let committed = |path: &Path| committed_test_file(project, top.as_deref(), path);
+        let committed = |path: &Path| committed_test_text(project, top.as_deref(), path);
         let found = bash_rule(c)
             .or_else(|| shell::script_rule_committed(c, &cwd, &committed))
             .or_else(|| glob_denial(c, &cwd, top.as_deref(), trust.as_deref()))
