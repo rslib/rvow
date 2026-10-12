@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A ready backlog plan, never accepted: starting it is the user's job.
-# Links the change under the known path ./plan for the stays-backlog grader.
+# Links the change under .git/rvow-eval/plan for the stays-backlog grader.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$here/lib.sh" ]; then
@@ -20,4 +20,4 @@ The app SHALL subtract as well as add.
 - WHEN the plan is done
 - THEN app.py holds a sub function
 ' >/dev/null
-ln -s "rvow/backlog/"*/ plan
+rvow_eval_hide_link "rvow/backlog/"*/ plan

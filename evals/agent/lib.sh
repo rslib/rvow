@@ -42,3 +42,12 @@ rvow_eval_accept_change() {
   "$RVOW_BIN" accept "$id" --yes >/dev/null
   printf '%s %s\n' "$id" "$dir"
 }
+
+# Link a change dir where a grader can read it without showing in the work
+# tree. $1 is the change dir relative to the repo root, $2 the link name.
+# Glob and Grep skip .git/, so the agent never trips over the link, while a
+# grader with target {source: file} reads straight through it.
+rvow_eval_hide_link() {
+  mkdir -p .git/rvow-eval
+  ln -s "../../$1" ".git/rvow-eval/$2"
+}

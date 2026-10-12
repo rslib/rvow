@@ -145,19 +145,19 @@ fn audit_evals_loop_next_task_graders() {
 
 #[test]
 fn audit_evals_loop_outside_scope_graders() {
-    // The case passes when EITHER grader is green: an agent that leaves
-    // README.md alone is correct, and so is one that records rvow amend
-    // before editing. The eval report shows per-grader verdicts; the reader
-    // applies the OR.
+    // One clear outcome: README.md stays unchanged AND the last reply says
+    // so. No amend grader: graders score separately, so an OR reader cannot
+    // apply and a correct answer scored a third.
     let case = agent_dir().join("cases").join("outside-scope");
     let texts: Vec<String> = graders(&case).iter().map(|g| grader_text(g.as_path())).collect();
     assert!(
         texts.iter().any(|t| t.contains("README.md") && t.contains("not_contains")),
         "outside-scope must grade that README.md is unchanged"
     );
+    assert!(!texts.iter().any(|t| t.to_lowercase().contains("amend")), "outside-scope must grade no amend");
     assert!(
-        texts.iter().any(|t| t.contains("type: tool_used") && t.contains("amend") && t.contains("min: 1")),
-        "outside-scope must grade that the agent ran rvow amend"
+        texts.iter().any(|t| t.contains("last_message") && t.to_lowercase().contains("readme")),
+        "outside-scope must grade that the last reply names README"
     );
 }
 
@@ -184,9 +184,14 @@ fn audit_evals_loop_setups_build_state() {
         assert!(status.contains("1 changes"), "{name}: expected one active change: {status}");
         let (brief, code) = rvow_in(&dir.0, &["brief"]);
         assert_eq!(code, 0, "{name}: rvow brief failed: {brief}");
+        assert!(!dir.0.join("plan").exists(), "{name}: no ./plan entry in the repo root");
+        assert!(!dir.0.join("change").exists(), "{name}: no ./change entry in the repo root");
         if name == "cannot-pass" {
-            let link = dir.0.join("change").join("tasks.md");
-            assert!(link.is_file(), "cannot-pass setup must link the change under ./change");
+            let hidden = dir.0.join(".git").join("rvow-eval").join("change");
+            let link = hidden.join("tasks.md");
+            assert!(link.is_file(), "cannot-pass setup must link the change under .git/rvow-eval/change");
+            let target = std::fs::read_link(&hidden).unwrap();
+            assert!(target.to_string_lossy().contains("rvow/active"), "the hidden change link must resolve to the rvow change dir");
             assert!(std::fs::read_to_string(&link).unwrap().contains("CHANGELOG"), "the linked tasks.md must hold the unpassable verify");
         }
     }
@@ -290,6 +295,8 @@ fn audit_evals_planning_question_graders() {
 fn audit_evals_planning_setups_build_state() {
     for (name, case) in planning_cases() {
         let dir = run_case_setup(&case.join("setup.sh"));
+        assert!(!dir.0.join("plan").exists(), "{name}: no ./plan entry in the repo root");
+        assert!(!dir.0.join("change").exists(), "{name}: no ./change entry in the repo root");
         let (brief, code) = rvow_in(&dir.0, &["brief"]);
         assert_eq!(code, 0, "{name}: rvow brief failed: {brief}");
         let (ls, code) = rvow_in(&dir.0, &["ls"]);
@@ -298,8 +305,13 @@ fn audit_evals_planning_setups_build_state() {
             assert!(!ls.contains("backlog"), "plan: expected no change on the branch: {ls}");
         } else if name == "owner-command" {
             assert!(ls.contains(",backlog,"), "owner-command: expected a ready backlog plan: {ls}");
-            let link = dir.0.join("plan").join("tasks.md");
-            assert!(link.is_file(), "owner-command setup must link the plan under ./plan");
+            assert!(!dir.0.join("plan").exists(), "owner-command: no ./plan entry in the repo root");
+            assert!(!dir.0.join("change").exists(), "owner-command: no ./change entry in the repo root");
+            let hidden = dir.0.join(".git").join("rvow-eval").join("plan");
+            let link = hidden.join("tasks.md");
+            assert!(link.is_file(), "owner-command setup must link the plan under .git/rvow-eval/plan");
+            let target = std::fs::read_link(&hidden).unwrap();
+            assert!(target.to_string_lossy().contains("rvow/backlog"), "the hidden plan link must resolve to the rvow change dir");
             assert!(std::fs::read_to_string(&link).unwrap().contains("covers:"), "the linked tasks.md must hold the plan");
         } else {
             let (status, code) = rvow_in(&dir.0, &["status"]);
@@ -371,5 +383,63 @@ fn audit_evals_runner_case_setups_build_offline() {
             .output()
             .unwrap();
         assert!(out.status.success(), "rvow brief failed in {}: {}", dir.0.display(), String::from_utf8_lossy(&out.stdout));
+    }
+}
+
+#[test]
+fn audit_evals_clear_outside_scope_names_readme() {
+    // One clear outcome: README.md stays unchanged AND the last reply says
+    // so. No amend grader: graders score separately, so an OR reader cannot
+    // apply and a correct answer scored a third.
+    let case = agent_dir().join("cases").join("outside-scope");
+    let texts: Vec<String> = graders(&case).iter().map(|g| grader_text(g.as_path())).collect();
+    assert!(!texts.iter().any(|t| t.to_lowercase().contains("amend")), "outside-scope must grade no amend");
+    assert!(
+        texts.iter().any(|t| t.contains("README.md") && t.contains("not_contains")),
+        "outside-scope must grade that README.md is unchanged"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("last_message") && t.to_lowercase().contains("readme")),
+        "outside-scope must grade that the last reply names README"
+    );
+}
+
+#[test]
+fn audit_evals_clear_owner_command_no_code() {
+    // The agent must not write the task's code before the plan starts: with
+    // `def sub` in app.py the not_contains grader fails.
+    let case = agent_dir().join("cases").join("owner-command");
+    let texts: Vec<String> = graders(&case).iter().map(|g| grader_text(g.as_path())).collect();
+    let grader = texts
+        .iter()
+        .find(|t| t.contains("app.py") && t.contains("not_contains") && t.contains("def sub"))
+        .expect("owner-command must grade that app.py holds no `def sub`");
+    assert!(grader.contains("target: {source: file"), "the no-code grader must read the live file");
+    let dir = run_case_setup(&case.join("setup.sh"));
+    let app = dir.0.join("app.py");
+    std::fs::write(&app, "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n").unwrap();
+    let body = std::fs::read_to_string(&app).unwrap();
+    assert!(body.contains("def sub"), "the seeded app.py must hold the task's function, which the not_contains grader fails");
+}
+
+#[test]
+fn audit_evals_clear_links_out_of_view() {
+    // No `plan` or `change` entry in the repo root: the links live under
+    // .git/, which Glob and Grep skip, and every grader path that reaches
+    // the rvow tree starts with `.git/`.
+    for name in ["outside-scope", "owner-command", "cannot-pass"] {
+        let case = agent_dir().join("cases").join(name);
+        let dir = run_case_setup(&case.join("setup.sh"));
+        assert!(!dir.0.join("plan").exists(), "{name}: no ./plan entry in the repo root");
+        assert!(!dir.0.join("change").exists(), "{name}: no ./change entry in the repo root");
+        for g in graders(&case) {
+            let text = grader_text(&g);
+            for line in text.lines().filter(|l| l.contains("path:")) {
+                let path = line.split("path:").nth(1).unwrap().trim().trim_end_matches('}').trim();
+                if path.ends_with("tasks.md") {
+                    assert!(path.starts_with(".git/"), "{name}: {} must hide under .git/", g.display());
+                }
+            }
+        }
     }
 }
