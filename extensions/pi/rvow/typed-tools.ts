@@ -311,7 +311,10 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         `rvow ${change}`,
         `${text(review).trim()}\n\nAccept ${change}?`,
       );
-      if (!yes) return declined(`The user did not accept ${change}; it stays a plan.`);
+      if (!yes)
+        return declined(
+          `The user did not accept ${change}; it stays a plan. The user can run /rvow-accept ${change} to start it.`,
+        );
       return queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, 10 * 60_000));
     },
   });
@@ -344,7 +347,10 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         `rvow ${change}`,
         `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
       );
-      if (!yes) return declined(`The user did not archive ${change}; it stays active.`);
+      if (!yes)
+        return declined(
+          `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
+        );
       return queue(() => result(["archive", change], ctx.cwd, signal, SLOW_MS));
     },
   });
@@ -368,7 +374,10 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         "rvow confirm",
         `${text(list).trim()}\n\n${decision === "accept" ? "Accept" : "Reject"} all of these?`,
       );
-      if (!yes) return declined("The user did not decide, so the plan edits are still pending.");
+      if (!yes)
+        return declined(
+          "The user did not decide, so the plan edits are still pending. The user can run /rvow-confirm to decide them.",
+        );
       return queue(() =>
         result(["confirm", `--${decision}`, "--all", digest], ctx.cwd, signal, SLOW_MS),
       );

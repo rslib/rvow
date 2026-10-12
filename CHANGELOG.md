@@ -44,6 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   An unknown id keeps the code `amendment`.
 - Allow a shell command that only reads through a glob that expands to the ledger, the ids and the stats, lease, yolo and cache files.
   A write through such a glob stays denied, and a glob that reaches the hidden checks stays denied, also for a read.
+- Name the slash command the user can run when they decline the accept, archive or confirm dialog, so the agent says what to run next.
 
 ### Added
 

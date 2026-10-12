@@ -256,6 +256,7 @@ test("rvow_accept shows the review and accepts only when the user says yes", asy
   const no = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: false });
   assert.deepEqual(seen, [["review", "CHG-a1"]]);
   assert.match(JSON.stringify(no.content), /did not accept CHG-a1/);
+  assert.match(JSON.stringify(no.content), /\/rvow-accept CHG-a1/);
   await assert.rejects(yoloCall(value, { change: "CHG-a1" }, { hasUI: false }), /no one is here/);
   await assert.rejects(
     yoloCall(value, { change: "x; rm -rf /" }, { hasUI: true }),
@@ -300,6 +301,7 @@ test("rvow_confirm lists without a dialog and decides with one", async () => {
   const no = await yoloCall(value, { decision: "reject" }, { hasUI: true, answer: false });
   assert.deepEqual(seen, [["confirm"]]);
   assert.match(JSON.stringify(no.content), /still pending/);
+  assert.match(JSON.stringify(no.content), /\/rvow-confirm/);
 });
 
 const viewOf = (states: string[], pending = 0) =>
@@ -338,6 +340,7 @@ test("rvow_archive asks only when every task is proved, and archives on a yes", 
   const no = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: false });
   assert.deepEqual(seen, [["hook", "view"]]);
   assert.match(JSON.stringify(no.content), /stays active/);
+  assert.match(JSON.stringify(no.content), /\/rvow-archive CHG-a1/);
   await assert.rejects(yoloCall(value, { change: "CHG-a1" }, { hasUI: false }), /no one is here/);
 });
 

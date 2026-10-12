@@ -45,6 +45,7 @@ test('rvow_accept runs nothing when the user says not now', async ($, on) => {
   const out = JSON.stringify(await $.tool.call(call(ACCEPT, { change: 'CHG-a1' })))
   expect(mutating(ran)).toEqual([])
   expect(out).toContain('did not accept CHG-a1')
+  expect(out).toContain('/rvow-accept CHG-a1')
 })
 
 test('a failed accept tells the agent why, in the result', async ($, on) => {
@@ -92,6 +93,12 @@ test('a confirm the user declines or that fails is reported to the agent', async
     'still pending',
   )
   expect(mutating(no.ran)).toEqual([])
+})
+
+test('rvow_confirm tells the agent the command the user can run', async ($, on) => {
+  fake(on, 'No', () => [0, LIST])
+  const out = JSON.stringify(await $.tool.call(call(CONFIRM, { decision: 'reject' })))
+  expect(out).toContain('/rvow-confirm')
 })
 
 test('the failure text names the command and keeps its own words', () => {
@@ -143,6 +150,12 @@ test('a refused or failed archive is reported to the agent', async ($, on) => {
     'stays active',
   )
   expect(no.ran.filter((l) => l.startsWith('archive'))).toEqual([])
+})
+
+test('rvow_archive tells the agent the command the user can run', async ($, on) => {
+  fake(on, 'Not yet', (line) => lines(line, ['proved']))
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(out).toContain('/rvow-archive CHG-a1')
 })
 
 test('archiveBlockers reads the state of one change', () => {

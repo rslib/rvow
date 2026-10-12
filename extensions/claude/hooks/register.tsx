@@ -654,7 +654,9 @@ export const register: Register = (on) => {
       .ask(`${review.out}\n\nAccept ${change}?`, ['Accept', 'Not now'])
       .catch(() => 'Not now')
     if (answer !== 'Accept')
-      return { result: `The user did not accept ${change}; it stays a plan.` }
+      return {
+        result: `The user did not accept ${change}; it stays a plan. The user can run /rvow-accept ${change} to start it.`,
+      }
     const done = await tellOut($, ['accept', change, '--yes'])
     return { result: done.ok ? done.out : failedText(['accept', change], done.out) }
   })
@@ -686,7 +688,9 @@ export const register: Register = (on) => {
       )
       .catch(() => 'Not yet')
     if (answer !== 'Archive')
-      return { result: `The user did not archive ${change}; it stays active.` }
+      return {
+        result: `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
+      }
     const done = await tellOut($, ['archive', change])
     return { result: done.ok ? done.out : failedText(['archive', change], done.out) }
   })
@@ -708,7 +712,10 @@ export const register: Register = (on) => {
       ])
       .catch(() => 'No')
     if (answer !== 'Yes')
-      return { result: 'The user did not decide, so the plan edits are still pending.' }
+      return {
+        result:
+          'The user did not decide, so the plan edits are still pending. The user can run /rvow-confirm to decide them.',
+      }
     const argv = ['confirm', `--${decision}`, '--all', digest]
     const done = await tellOut($, argv)
     return { result: done.ok ? done.out : failedText(argv, done.out) }
