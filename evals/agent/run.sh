@@ -36,6 +36,9 @@ for case in "$plugin"/evals/*/; do
   cp "$here/lib.sh" "$case/lib.sh"
   # The scaffold env may be cleaned, so bake the absolute paths into the
   # copied setup script as well as exporting them for the agent's shell.
+  # The baked RVOW_HOME names the install home, but each setup moves its
+  # eval store inside its scaffold (see rvow_eval_store in lib.sh), so the
+  # agent session writes the case store, never the install home.
   {
     head -n 1 "$case/setup.sh"
     printf 'RVOW_BIN=%s\nRVOW_HOME=%s\nPATH=%s:"$PATH"\nexport RVOW_BIN RVOW_HOME PATH\n' "$(sq "$rvow")" "$(sq "$rvow_home")" "$(sq "$bindir")"

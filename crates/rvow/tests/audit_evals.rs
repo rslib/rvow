@@ -486,6 +486,152 @@ fn audit_evals_clear_owner_command_no_code() {
 }
 
 #[test]
+fn audit_evals_store_inside_scaffold() {
+    // Each agent eval case setup must record an rvow store inside its
+    // scaffold, even when RVOW_HOME names a folder outside it (as run.sh
+    // sets it): the agent sandbox passes no RVOW_HOME through and denies
+    // writes outside the scaffold, so a store recorded outside breaks
+    // `prove` and `block` there. The helpers stay nested in this test so
+    // the file grows by a new test only.
+    // Runs a case setup.sh in a temp scaffold whose HOME is inside the
+    // scaffold, with RVOW_HOME naming a folder outside the scaffold
+    // (`outside == true`, as run.sh sets it) or unset. Returns the scaffold
+    // and the outside folder (missing when unset, so the leak check below
+    // skips itself).
+    fn run_case_setup_with_rvow_home(setup: &Path, name: &str, outside: bool) -> (TempDir, PathBuf) {
+        let stem = format!("rvow-audit-store-{}-{name}-{}", std::process::id(), if outside { "outside" } else { "nohome" });
+        let dir = std::env::temp_dir().join(&stem);
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let outside_dir = std::env::temp_dir().join(format!("{stem}-outside"));
+        if outside {
+            let _ = std::fs::remove_dir_all(&outside_dir);
+            std::fs::create_dir_all(&outside_dir).unwrap();
+        }
+        let bindir = Path::new(env!("CARGO_BIN_EXE_rvow")).parent().unwrap().to_path_buf();
+        let path = format!("{}:{}", bindir.display(), std::env::var("PATH").unwrap());
+        let mut cmd = Command::new("bash");
+        cmd.arg(setup)
+            .current_dir(&dir)
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("PATH", path);
+        if outside {
+            cmd.env("RVOW_HOME", &outside_dir);
+        } else {
+            cmd.env_remove("RVOW_HOME");
+        }
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "setup {} failed in {}", setup.display(), dir.display());
+        (TempDir(dir), outside_dir)
+    }
+    // Runs rvow the way an agent session does: HOME inside the scaffold and
+    // no RVOW_HOME, so the recorded pointer decides the home. The caller
+    // asserts on the files, not the exit status.
+    fn agent_rvow(dir: &Path, home: &Path, task: &str) {
+        Command::new(env!("CARGO_BIN_EXE_rvow"))
+            .args(["prove", task])
+            .current_dir(dir)
+            .env("HOME", home)
+            .env_remove("RVOW_HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+    }
+    // The first task id of the active change in a setup scaffold, if any.
+    fn active_task_id(dir: &Path) -> Option<String> {
+        let mut changes: Vec<PathBuf> = std::fs::read_dir(dir.join("rvow").join("active")).ok()?.map(|e| e.unwrap().path()).collect();
+        changes.sort();
+        for change in changes {
+            let text = std::fs::read_to_string(change.join("tasks.md")).ok()?;
+            for line in text.lines() {
+                let Some(rest) = line.trim().strip_prefix("- ") else { continue };
+                let Some(id) = rest.split_whitespace().next() else { continue };
+                if id.starts_with("TSK-") {
+                    return Some(id.to_string());
+                }
+            }
+        }
+        None
+    }
+    // Every file under a dir, relative paths as strings.
+    fn all_files(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(p) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&p) else { continue };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(rel) = path.strip_prefix(dir) {
+                    out.push(rel.display().to_string());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+    fn each_setup(outside: bool) {
+        let cases = agent_dir().join("cases");
+        let mut names: Vec<String> =
+            std::fs::read_dir(&cases).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert!(!names.is_empty(), "expected cases under evals/agent/cases");
+        for name in names {
+            let setup = cases.join(&name).join("setup.sh");
+            if !setup.is_file() {
+                continue;
+            }
+            let (scaffold, outside_dir) = run_case_setup_with_rvow_home(&setup, &name, outside);
+            let dir = scaffold.0.clone();
+            // The recorded rvow home is the pointer the setup leaves for an
+            // agent session, which carries no RVOW_HOME of its own.
+            let pointer = dir.join("home").join(".config").join("rvow").join("home");
+            let recorded =
+                std::fs::read_to_string(&pointer).unwrap_or_else(|_| panic!("{name}: no recorded rvow home at {}", pointer.display()));
+            let recorded = PathBuf::from(recorded.trim());
+            // Canonicalize both sides: TMPDIR spells the scaffold /var/... while
+            // the setup resolves it to /private/var/....
+            let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            let recorded_canon = std::fs::canonicalize(&recorded).unwrap_or_else(|_| recorded.clone());
+            assert!(
+                recorded_canon.starts_with(&canon),
+                "{name}: the recorded rvow home {} is outside the scaffold {}",
+                recorded.display(),
+                dir.display()
+            );
+            assert!(recorded.is_dir(), "{name}: the recorded rvow home {} does not exist", recorded.display());
+            // An agent session resolves its home through that pointer, with no
+            // RVOW_HOME. `prove` seals its run under the home key, so it writes
+            // store files; it must be able to write them inside the scaffold.
+            if let Some(task) = active_task_id(&dir) {
+                agent_rvow(&dir, &dir.join("home"), task.as_str());
+                let files = all_files(&recorded);
+                assert!(!files.is_empty(), "{name}: no store files under the recorded rvow home {}", recorded.display());
+            }
+            if outside_dir.exists() {
+                let leaked = all_files(&outside_dir);
+                assert!(leaked.is_empty(), "{name}: the outside RVOW_HOME gained store files: {:?}", &leaked[..leaked.len().min(5)]);
+            }
+        }
+    }
+    each_setup(true);
+    each_setup(false);
+}
+
+#[test]
 fn audit_evals_clear_links_out_of_view() {
     // No `plan` or `change` entry in the repo root: the links live under
     // .git/, which Glob and Grep skip, and every grader path that reaches

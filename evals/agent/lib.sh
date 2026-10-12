@@ -16,8 +16,23 @@ rvow_eval_git_repo() {
   git -c user.name=t -c user.email=t@t commit -q -m "feat: add app"
 }
 
+# Point this case at an rvow store inside the scaffold. The agent sandbox
+# passes no RVOW_HOME through and denies writes outside the scaffold, so a
+# store recorded outside (as the RVOW_HOME run.sh bakes in) breaks `prove`
+# and `block` in the agent session. The store hides under .git/, which Glob
+# and Grep skip, so the agent never trips over it; `rvow init` records it in
+# the scaffold home pointer, which is how the agent's rvow finds it. $PWD is
+# the scaffold: every setup.sh runs there. Must run before any rvow command.
+rvow_eval_store() {
+  local store=$PWD/.git/rvow-eval/home
+  mkdir -p "$store"
+  RVOW_HOME=$store
+  export RVOW_HOME
+}
+
 # An in-repo rvow tree for the current repository.
 rvow_eval_init() {
+  rvow_eval_store
   "$RVOW_BIN" init --in-repo >/dev/null
 }
 
