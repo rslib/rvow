@@ -41,6 +41,13 @@ evals/agent/run.sh haiku --case next-task --runs 1   # one live case, a few cent
 evals/agent/run.sh                                   # the full suite, capped at $5
 ```
 
+Trigger evals (needs the `claude` CLI and a built binary):
+
+```sh
+evals/triggers/run.sh haiku --case chg-next --runs 1   # one live case, a few cents
+evals/triggers/run.sh                                  # the full suite, capped at $3
+```
+
 ## Where things go
 
 | Area | Home | Rule |
@@ -52,6 +59,7 @@ evals/agent/run.sh                                   # the full suite, capped at
 | Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-core/src/install.rs`. |
 | pi extension | `extensions/pi/rvow/*.ts` (`extensions/pi/rvow.ts` only re-exports it) | `extensions/pi/rvow/index.ts` is `PI_EXTENSION`; every other file is in `PI_MODULES` of `crates/rvow-core/src/install.rs`. |
 | Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. |
+| Trigger evals | `evals/triggers/` | `evals/triggers/run.sh` renders the skill into a skill-only plugin in a throwaway home; each case holds `prompt.md` and `graders/fires.md`; results stay local. |
 
 Update this section in the change that moves an area.
 
