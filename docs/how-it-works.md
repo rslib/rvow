@@ -331,6 +331,7 @@ Each one is caught later by the gate, or needs a person.
 - **The accept and confirm deny reads text.**
   It follows `sh -c`, `eval`, wrappers, variables and scripts on disk.
   It does not follow a name built at run time, a git alias or a script written in the same command.
+  A committed test file with no change against HEAD is not read, so its text as data does not count.
   `require_signature` is the real boundary, and it is off by default.
 - **Hardware signing keys are untested.**
   The tests sign with a software key. A hardware key (`ed25519-sk`) has not been used yet.

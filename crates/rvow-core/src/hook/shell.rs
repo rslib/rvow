@@ -746,6 +746,13 @@ fn interpreter_script<'a>(name: &str, args: &'a [String]) -> Option<&'a String> 
 /// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
 /// same command writes first cannot be read yet; that stays a known gap.
 pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
+    script_rule_committed(cmd, cwd, &|_| false)
+}
+
+/// The same rule with the caller's predicate for a committed test file: when
+/// it says true for the script path, the text is data and is not read. Every
+/// other script keeps the text check.
+pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) -> bool) -> Option<Denial> {
     let sh = parse(cmd, 0, &HashMap::new());
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
@@ -768,6 +775,9 @@ pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
             continue;
         };
         if !meta.is_file() || meta.len() > 256 * 1024 || base_name(file) == "rvow" {
+            continue;
+        }
+        if committed(&path) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {

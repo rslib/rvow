@@ -131,6 +131,29 @@ fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
     (!config.allowed_signers.is_empty()).then(|| top.join(&config.allowed_signers))
 }
 
+/// True when `path` is a committed test file: a regular file, not a symlink,
+/// inside the repository at `top`, that matches the config test globs, is
+/// tracked and has no staged or unstaged change against HEAD. The path is
+/// resolved against `cwd`, canonicalized, and must lie inside `top`. Any
+/// failure means false, so the text check still runs.
+fn committed_test_file(project: &Project, top: Option<&Path>, path: &Path) -> bool {
+    let Some(top) = top else { return false };
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
+    let Ok(path) = path.canonicalize() else { return false };
+    let Ok(top) = top.canonicalize() else { return false };
+    let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return false };
+    let Ok(home) = crate::store::home_dir() else { return false };
+    let Ok(config) = config::load(project, &home) else { return false };
+    let Ok(tests) = fingerprint::globset(&config.test_globs) else { return false };
+    if !tests.is_match(rel) {
+        return false;
+    }
+    git::run(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).is_ok()
+        && git::run(&top, &["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", rel]).is_ok()
+}
+
 /// Files outside any repository that enforce rvow: the installed mod, Claude
 /// Code's plugins and settings, the pi extension and the signing trust file.
 fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
@@ -519,8 +542,9 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
         let top = git::toplevel(&cwd).ok();
         let trust = top.as_deref().and_then(|t| signers_path(project, t));
+        let committed = |path: &Path| committed_test_file(project, top.as_deref(), path);
         let found = bash_rule(c)
-            .or_else(|| script_rule(c, &cwd))
+            .or_else(|| shell::script_rule_committed(c, &cwd, &committed))
             .or_else(|| glob_denial(c, &cwd, top.as_deref(), trust.as_deref()))
             .or_else(|| bash_secret_rule(c, &secret_paths()))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));

@@ -119,6 +119,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the hook reading owner command text as data from a committed test file.
+  A committed test file with no change against HEAD runs, and every changed, untracked or non-test script still gets the check.
 - Fix the gate counting the files of every done change of the branch, so a done change whose work is already in the base no longer widens the scope.
   A done change counts only while its archive HEAD is not a strict ancestor of the merge base.
 - Fix `rvow archive` failing when the judge note lookup fails.
