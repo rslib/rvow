@@ -328,6 +328,69 @@ fn audit_evals_planning_case_list_exact() {
     names.sort();
     assert_eq!(names, ["cannot-pass", "next-task", "outside-scope", "owner-command", "plan", "question"]);
 }
+fn unquote_pattern(value: &str) -> &str {
+    let value = value.trim();
+    let quoted = |q: char| value.len() >= 2 && value.starts_with(q) && value.ends_with(q);
+    if quoted('\'') || quoted('"') { &value[1..value.len() - 1] } else { value }
+}
+
+fn grader_patterns(path: &Path) -> Vec<String> {
+    let text = grader_text(path);
+    let kind = text.lines().find_map(|l| l.strip_prefix("type: ").map(|s| s.trim().to_string())).unwrap_or_default();
+    let key = match kind.as_str() {
+        "regex" => "pattern:",
+        "tool_used" => "input_match:",
+        _ => return Vec::new(),
+    };
+    text.lines().filter_map(|l| l.trim().strip_prefix(key)).map(|v| unquote_pattern(v).to_string()).collect()
+}
+
+fn node_compiles(pattern: &str) -> bool {
+    Command::new("node").args(["-e", "new RegExp(process.argv[1])", pattern]).output().is_ok_and(|o| o.status.success())
+}
+
+fn all_grader_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for suite in ["agent", "triggers"] {
+        let cases = root().join("evals").join(suite).join("cases");
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&cases).unwrap().map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        for entry in entries {
+            let mut graders: Vec<PathBuf> = std::fs::read_dir(entry.join("graders"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|e| e == "md"))
+                .collect();
+            graders.sort();
+            files.extend(graders);
+        }
+    }
+    files
+}
+
+#[test]
+fn audit_evals_regex_patterns_compile_with_node() {
+    let files = all_grader_files();
+    assert!(!files.is_empty(), "expected grader files under evals/agent/cases and evals/triggers/cases");
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for path in &files {
+        for pattern in grader_patterns(path) {
+            checked += 1;
+            if !node_compiles(&pattern) {
+                failures.push(format!("{}: {pattern}", path.display()));
+            }
+        }
+    }
+    assert!(checked > 0, "expected regex patterns in the grader files");
+    assert!(failures.is_empty(), "patterns node cannot compile:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn audit_evals_regex_inline_flag_is_rejected() {
+    assert!(!node_compiles("(?i)readme"), "node must reject the (?i) inline flag");
+}
+
 fn run_case_setup(setup: &Path) -> TempDir {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!("rvow-audit-evals-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));

@@ -46,9 +46,31 @@ done
 
 out=$here/results/$model-$(date -u +%Y-%m-%dT%H-%M-%SZ)
 mkdir -p "$out"
-# The binary's dir first on PATH and RVOW_HOME exported, so the setup
-# scripts and the agent's shell reach the install under test.
-export PATH="$bindir:$PATH" RVOW_HOME="$rvow_home" RVOW_BIN="$rvow"
+# /usr/bin/git on macOS is an xcrun shim whose cache write the eval sandbox
+# denies, and the bare `git` name stays pinned to that shim inside the agent
+# session no matter what PATH says, so name a real binary outright. RVOW_GIT
+# carries it to the hooks, which run outside the sandbox with this
+# environment; EVAL_RVOW_GIT carries it to the agent session, whose sandbox
+# passes only EVAL_* variables through (rvow reads both).
+real_git=${RVOW_GIT:-}
+if [ -z "$real_git" ]; then
+  for g in /opt/homebrew/bin/git /usr/local/bin/git; do
+    if [ -x "$g" ]; then real_git=$g; break; fi
+  done
+fi
+if [ -z "$real_git" ]; then
+  while IFS= read -r g; do
+    if [ "$g" != /usr/bin/git ] || [ "$(uname)" != Darwin ]; then
+      if [ -x "$g" ]; then real_git=$g; break; fi
+    fi
+  done < <(command -v -a git 2>/dev/null)
+fi
+if [ -n "$real_git" ] && "$real_git" --version >/dev/null 2>&1; then
+  export PATH="$bindir:$PATH" RVOW_HOME="$rvow_home" RVOW_BIN="$rvow" RVOW_GIT="$real_git" EVAL_RVOW_GIT="$real_git"
+else
+  echo "run.sh: no working git outside the shim; eval git calls may fail" >&2
+  export PATH="$bindir:$PATH" RVOW_HOME="$rvow_home" RVOW_BIN="$rvow"
+fi
 # Only the plugin under test: no memory, bundled skills or CLAUDE.md files.
 (
   cd "$tmp"

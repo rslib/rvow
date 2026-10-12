@@ -107,3 +107,11 @@ A tool that is missing makes the task uncacheable, so the gate runs it.
 
 A clean checkout never contains the user's `machine`, `signing_key` or `agent`.
 Send those through the environment or a separate global file instead.
+
+## Choosing the git binary
+
+rvow runs the git it finds on `PATH`.
+Set `RVOW_GIT` to the path of a git binary to run that one for every git call instead.
+Set it when the git on `PATH` cannot run, such as a sandbox where `/usr/bin/git` is a launcher shim that the sandbox stops.
+An empty value falls back to `PATH`.
+The agent eval runner passes the same path as `EVAL_RVOW_GIT`, which is the only spelling that reaches inside the eval sandbox.

@@ -5,8 +5,21 @@ use std::process::Command;
 
 use crate::error::{Error, Result};
 
+/// The git binary to run: `RVOW_GIT` when it names a file, else `git`.
+/// A sandbox whose `git` on `PATH` cannot run sets `RVOW_GIT` to one that can.
+/// `EVAL_RVOW_GIT` is the same setting through the eval harness, whose
+/// sandbox passes only `EVAL_*` variables to the agent session.
+pub fn bin() -> String {
+    for key in ["RVOW_GIT", "EVAL_RVOW_GIT"] {
+        if let Some(v) = std::env::var(key).ok().filter(|v| !v.is_empty()) {
+            return v;
+        }
+    }
+    "git".to_string()
+}
+
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = Command::new(bin())
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -128,7 +141,7 @@ pub fn task_diff(top: &Path, base: &str, globs: &[String]) -> Result<TaskDiff> {
 /// `git diff --no-index /dev/null <file>`: the added-file diff of an
 /// untracked file. It exits 1 on a difference, which is the expected case.
 fn diff_no_index(top: &Path, rel: &str) -> Result<String> {
-    let out = Command::new("git")
+    let out = Command::new(bin())
         .arg("-C")
         .arg(top)
         .args(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel])
@@ -200,7 +213,7 @@ pub(crate) mod testrepo {
     /// Runs git with the user's global and system config ignored, so fixture
     /// repositories never depend on or sign with the user's settings.
     pub fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git")
+        let ok = Command::new(super::bin())
             .arg("-C")
             .arg(dir)
             .args(args)

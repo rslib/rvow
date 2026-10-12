@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   Use `--no-cache` to run every task, and see `docs/settings.md` for `rerun_cache`, `cache_with_links` and `tools`.
 - Add `max_age:` and `depends_on:` task fields for the gate cache.
 - Add scoped `setup` and `checks` entries, `{ run, files }`, that run only when a task or a changed file matches.
+- Add `RVOW_GIT` to run a chosen git binary for every git call.
+  Set it where the git on `PATH` cannot run, such as a sandbox that stops the system git shim.
 - Add `rvow attest <change> --out <file>` to export the current proofs as in-toto statements, one Test Result line per proved or failed task and one summary line for the change.
   Pass `--sign` to write an ssh signature of the file with the `signing_key` of the global config.
   The rerun worktree and `setup` now wait until a task needs them.
