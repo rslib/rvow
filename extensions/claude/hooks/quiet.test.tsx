@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
-import { cmd, procResult } from './testkit'
+import { expect } from 'claude-code/testing'
+import { cmd, procResult, test } from './testkit'
 
 const NOISE = Array.from({ length: 500 }, (_, i) => `check line ${i}`).join('\n')
 

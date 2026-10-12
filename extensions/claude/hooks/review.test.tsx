@@ -1,7 +1,7 @@
 import type { On, PaneOpenArgs } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { expect, mock, test } from 'claude-code/testing'
-import { cmd, PLACED, pane, procResult } from './testkit'
+import { expect, mock } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult, test } from './testkit'
 
 const ID = 'CHG-2q8jsb'
 const VIEW = {

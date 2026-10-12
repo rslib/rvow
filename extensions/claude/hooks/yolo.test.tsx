@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import { YOLO, YOLO_DESCRIPTION, yoloArgv } from './format'
-import { procResult } from './testkit'
+import { procResult, test } from './testkit'
 
 function fake(on: On, answer: string) {
   const ran: string[][] = []

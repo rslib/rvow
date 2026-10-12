@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import { ACCEPT, ARCHIVE, archiveBlockers, CONFIRM, failedText } from './format'
-import { procResult } from './testkit'
+import { procResult, test } from './testkit'
 
 const LIST = 'AMD-a1 weaken T1 verify changed\ndigest abc123\n'
 

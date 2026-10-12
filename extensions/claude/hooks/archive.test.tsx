@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { expect, test } from 'claude-code/testing'
-import { cmd, PLACED, pane, procResult } from './testkit'
+import { expect } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult, test } from './testkit'
 
 const PANE = pane()
 const NONE = { amendments: 0, questions: 0, blocked: 0, plans: 0 }

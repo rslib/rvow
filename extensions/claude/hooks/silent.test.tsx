@@ -1,5 +1,5 @@
-import { expect, test } from 'claude-code/testing'
-import { cmd, PLACED, procResult } from './testkit'
+import { expect } from 'claude-code/testing'
+import { cmd, PLACED, procResult, test } from './testkit'
 
 test('/rvow-status opens the pane and adds no chat line', async ($, on) => {
   let opened = 0

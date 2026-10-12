@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { expect, mock, test } from 'claude-code/testing'
-import { band, cmd, PLACED, procResult } from './testkit'
+import { expect, mock } from 'claude-code/testing'
+import { band, cmd, PLACED, procResult, test } from './testkit'
 
 const NONE = { amendments: 0, questions: 0, blocked: 0, plans: 0 }
 const PLAN = {

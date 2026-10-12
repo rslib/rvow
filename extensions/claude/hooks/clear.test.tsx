@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
-import { expect, mock, test } from 'claude-code/testing'
-import { procResult } from './testkit'
+import { expect, mock } from 'claude-code/testing'
+import { procResult, test } from './testkit'
 
 const BASE = { session_id: 's1', transcript_path: '/t/s1.jsonl', cwd: '/tmp' }
 const START = { cwd: '/tmp', surface: null, isInteractive: false }
