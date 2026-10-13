@@ -144,7 +144,7 @@ fn audit_proof_masked_nonsecret_variables_keep_distinct_fingerprints() {
         let mut keys = Vec::new();
         for value in ["a".repeat(64), "b".repeat(64)] {
             let out = Command::new(&executable)
-                .args(["--exact", "audit_proof_masked_nonsecret_variables_keep_distinct_fingerprints", "--nocapture"])
+                .args(["--exact", "audit_proof::audit_proof_masked_nonsecret_variables_keep_distinct_fingerprints", "--nocapture"])
                 .env("RVOW_AUDIT_MODE_CHILD", "1")
                 .env("RVOW_AUDIT_MODE", &value)
                 .output()
@@ -195,7 +195,7 @@ fn audit_proof_secret_environment_values_have_stable_content_fingerprints() {
         let mut results = Vec::new();
         for secret in ["short-first", "short-first", "short-second"] {
             let out = Command::new(&executable)
-                .args(["--exact", "audit_proof_secret_environment_values_have_stable_content_fingerprints", "--nocapture"])
+                .args(["--exact", "audit_proof::audit_proof_secret_environment_values_have_stable_content_fingerprints", "--nocapture"])
                 .env("RVOW_AUDIT_SECRET_CHILD", &f.root)
                 .env("RVOW_AUDIT_TOKEN", secret)
                 .output()

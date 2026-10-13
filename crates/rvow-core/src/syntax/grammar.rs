@@ -21,6 +21,16 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// pinned one. Lets tests and air-gapped machines supply grammars offline.
 pub const URL_VAR: &str = "RVOW_GRAMMAR_URL";
 
+/// When set to a non-empty value and no download base is set, a grammar is
+/// never downloaded from the pinned URLs: the fetch fails at once. Tests set
+/// it so none of them waits on the network. Users leave it unset.
+pub const OFFLINE_VAR: &str = "RVOW_GRAMMAR_OFFLINE";
+
+/// Whether the no-base refuse rule is on.
+pub fn offline() -> bool {
+    std::env::var(OFFLINE_VAR).is_ok_and(|v| !v.is_empty())
+}
+
 /// One pinned language: a prebuilt `tree-sitter-<name>.wasm` uploaded to a
 /// GitHub release and the sha256 of its exact bytes.
 #[derive(serde::Deserialize)]
@@ -128,6 +138,9 @@ fn download(url: &str, timeout: Duration) -> Result<Vec<u8>> {
 }
 
 fn fetch(entry: &Entry, base: Option<&str>, timeout: Duration) -> Result<Vec<u8>> {
+    if base.is_none() && offline() {
+        return Err(grammar_error(entry, format!("the pinned download is refused while {OFFLINE_VAR} is set")));
+    }
     let url = match base {
         Some(b) => with_base(&entry.url, b),
         None => entry.url.clone(),

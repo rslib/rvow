@@ -81,17 +81,3 @@ fn audit_integration_changelog_keeps_unreleased() {
     let changelog = std::fs::read_to_string(root().join("CHANGELOG.md")).unwrap();
     assert!(changelog.contains("## [Unreleased]"), "CHANGELOG.md must keep an [Unreleased] section while no release is cut");
 }
-
-/// The clean-checkout build is the plan's integrity guard: it compiles only the
-/// git-tracked sources. A run of the single-file Linux helper coverage is
-/// repeated here as a live integration smoke, not as a checkout copy.
-#[test]
-fn audit_integration_live_sources_build_for_targets() {
-    let status = Command::new("cargo")
-        .args(["build", "--locked", "--all-targets"])
-        .current_dir(root())
-        .env("CARGO_TARGET_DIR", root().join("target"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "cargo build --all-targets must succeed in the live tree");
-}

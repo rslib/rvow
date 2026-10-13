@@ -32,6 +32,9 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// grammar that cannot load keeps the strict item and its fetch hint.
 pub fn fetch_missing_grammars(project: &Project, top: &Path, home: &Path, config: &Config, change: &Active) {
     let base = std::env::var(crate::syntax::grammar::URL_VAR).ok().filter(|v| !v.is_empty());
+    if base.is_none() && crate::syntax::grammar::offline() {
+        return;
+    }
     let Ok(protected_now) = protected_files(top, config) else { return };
     let Ok(protected_then) = baseline_protected(project, change) else { return };
     for (rel, hash) in &protected_then {

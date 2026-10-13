@@ -21,6 +21,7 @@ fn npm(root: &Path, script: &str, installed: &Path) {
 }
 
 #[test]
+#[ignore = "runs the pi npm scripts; CI runs it with --include-ignored"]
 fn audit_pi_tools_installed_modules_and_typed_execution() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();

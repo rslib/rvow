@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make `cargo test --locked` fast: one integration test binary, optimized wasmtime and cranelift in the dev profile, no nested `cargo build` or npm audit in a plain run (CI passes `--include-ignored`), and `RVOW_GRAMMAR_OFFLINE` stops tests from downloading grammars.
 - Read only the added lines of a changed test file, not the whole file, so committed owner command text no longer denies a test run.
 - Ignore slash command names such as `/rvow-accept` in script text, so a name that cannot run from a script is not treated as an owner command.
 

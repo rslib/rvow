@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
+#[ignore = "runs the pi npm scripts; CI runs it with --include-ignored"]
 fn audit_pi_dock_refresh_focus_escape_and_shutdown() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for script in ["typecheck:pi", "test:pi:dock"] {

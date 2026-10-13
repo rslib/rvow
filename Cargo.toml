@@ -8,3 +8,79 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 publish = false
+
+# Optimize the wasm engine in debug builds: the syntax tests run it.
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 2
+
+[profile.dev.package.cranelift-assembler-x64-meta]
+opt-level = 2
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 2
+
+[profile.dev.package.cranelift-bitset]
+opt-level = 2
+
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+
+[profile.dev.package.cranelift-codegen-meta]
+opt-level = 2
+
+[profile.dev.package.cranelift-codegen-shared]
+opt-level = 2
+
+[profile.dev.package.cranelift-control]
+opt-level = 2
+
+[profile.dev.package.cranelift-entity]
+opt-level = 2
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 2
+
+[profile.dev.package.cranelift-isle]
+opt-level = 2
+
+[profile.dev.package.cranelift-native]
+opt-level = 2
+
+[profile.dev.package.cranelift-srcgen]
+opt-level = 2
+
+[profile.dev.package.wasmtime]
+opt-level = 2
+
+[profile.dev.package.wasmtime-c-api-impl]
+opt-level = 2
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-c-api-macros]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-component-util]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-core]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-fiber]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-jit-debug]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-jit-icache-coherence]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-unwinder]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-versioned-export-macros]
+opt-level = 2

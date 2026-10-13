@@ -251,3 +251,42 @@ fn syntax_drift_a_corrupt_cache_stays_drift() {
     let text = got.iter().find(|(_, w)| w.contains(".cargo/config.toml changed")).map(|(_, w)| w.clone()).unwrap_or_default();
     assert!(text.contains("rvow grammar fetch toml"), "{got:?}");
 }
+
+#[test]
+fn syntax_drift_offline_prove_opens_no_connection_and_names_the_fetch() {
+    let _env = env_lock();
+    let s = setup("offline-prove");
+    let entry = grammar::by_name("toml").unwrap();
+    rewrites(&s, &edit_of(&s, "\n\n", "\n"), &_env);
+    let (living, _) = change::load_living(&s.project).unwrap();
+    let active = proof::active(&s.project, &living).unwrap().remove(0);
+    let task = active.loaded.tasks[0].id.to_string();
+    let started = std::time::Instant::now();
+    let _ = proof::prove(&s.project, &s.home, &s.repo, &task, &mut std::io::sink());
+    let took = started.elapsed();
+    let got = items(&s, &_env);
+    assert!(!grammar::cache_file(&s.home, entry).is_file(), "no download happened");
+    assert!(took < std::time::Duration::from_secs(5), "prove must not wait on a connection, took {took:?}");
+    let text = got.iter().find(|(_, w)| w.contains(".cargo/config.toml changed")).map(|(_, w)| w.clone()).unwrap_or_default();
+    assert!(text.contains("rvow grammar fetch toml"), "{got:?}");
+}
+
+#[test]
+fn syntax_drift_offline_refuses_the_pinned_url_at_once() {
+    let _env = env_lock();
+    let s = setup("offline-acquire");
+    let entry = grammar::by_name("toml").unwrap();
+    let outcome = grammar::acquire(&s.home, entry, None);
+    let err = outcome.expect_err("the pinned URL must be refused");
+    assert!(err.message.contains("RVOW_GRAMMAR_OFFLINE"), "{}", err.message);
+    assert!(!grammar::cache_file(&s.home, entry).is_file());
+}
+
+#[test]
+fn syntax_drift_offline_flag_does_not_block_a_fixture_base() {
+    let _env = env_lock();
+    let s = setup("offline-base");
+    let entry = grammar::by_name("toml").unwrap();
+    let outcome = grammar::acquire(&s.home, entry, Some(&fixtures()));
+    assert!(outcome.is_ok(), "{outcome:?}");
+}

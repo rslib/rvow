@@ -171,7 +171,7 @@ fn audit_hardening_explicit_home_and_requirement_checks() {
     if std::env::var_os("RVOW_HARDENING_LIBRARY_CHILD").is_none() {
         let root = std::env::temp_dir().join(format!("rvow-hardening-env-{}", std::process::id()));
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "audit_hardening_explicit_home_and_requirement_checks", "--nocapture"])
+            .args(["--exact", "audit_hardening::audit_hardening_explicit_home_and_requirement_checks", "--nocapture"])
             .env("RVOW_HARDENING_LIBRARY_CHILD", "1")
             .env("HOME", root.join("user"))
             .env("RVOW_HOME", root.join("elsewhere"))
