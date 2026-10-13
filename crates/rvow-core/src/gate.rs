@@ -60,6 +60,14 @@ impl Report {
     }
 }
 
+/// Whether the gate may read its cache and whether it may write a new check
+/// pass. Archive holds the project lock and must not write.
+#[derive(Debug, Clone, Copy)]
+struct Caching {
+    use_cache: bool,
+    record: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     pub strict: bool,
@@ -70,12 +78,12 @@ pub struct Options {
 
 /// Checks the active changes of the current branch.
 pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, true, echo)
+    gate_for(project, home, cwd, opts, None, Caching { use_cache: true, record: true }, echo)
 }
 
 /// Like `gate`, but a rerun runs every task and ignores the cache.
 pub fn gate_uncached(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, false, echo)
+    gate_for(project, home, cwd, opts, None, Caching { use_cache: false, record: true }, echo)
 }
 
 fn gate_for(
@@ -84,9 +92,10 @@ fn gate_for(
     cwd: &Path,
     opts: Options,
     target: Option<&crate::id::Id>,
-    use_cache: bool,
+    caching: Caching,
     echo: &mut dyn Write,
 ) -> Result<Report> {
+    let (use_cache, record) = (caching.use_cache, caching.record);
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -134,11 +143,11 @@ fn gate_for(
     }
 
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
+    let policy = config::cache_policy(project, home)?;
     let mut run_dir = top.clone();
     let scope;
     let _keep_tree;
     if opts.rerun {
-        let policy = config::cache_policy(project, home)?;
         let links = config::rerun_links(project, home)?;
         let linked = !links.is_empty() && !policy.with_links;
         if use_cache && opts.out.is_none() && linked {
@@ -278,19 +287,57 @@ fn gate_for(
         scope = Scope::new(&top, &config.base, &[])?;
         _keep_tree = None;
     }
+    // The check cache shares the task cache file, so it opens after the rerun
+    // block has closed its own handle. It applies only to a check that ran in
+    // the repository itself, not in the clean rerun worktree.
+    let check_on = use_cache && !policy.off && run_dir == top;
+    let check_tools = if check_on { cache::tool_fingerprint(project, home)? } else { None };
+    let mut check_cache = if check_on { Some(cache::Cache::open(project, home)?) } else { None };
+    if let Some(cache) = &check_cache
+        && !opts.rerun
+    {
+        r.warnings.extend(cache.warnings().iter().cloned());
+    }
+    let dirty = if check_on { changed_files(&top, "HEAD")? } else { Vec::new() };
     for step in &config.checks {
         if !scope.wants(step)? {
             continue;
         }
         let cmd = step.run();
+        let clean = clean_in_scope(step, &dirty)?;
+        let key = if clean { cache::check_key(&top, cmd, check_tools.as_ref())? } else { None };
+        if let (Some(cache), Some(key)) = (&check_cache, &key)
+            && cache.lookup(cmd, key, crate::ledger::now_ms(), policy.max_age.as_millis() as u64).is_some()
+        {
+            let _ = writeln!(echo, "cached check: {cmd}");
+            continue;
+        }
         let _ = writeln!(echo, "check: {cmd}");
         let o = runner::run(cmd, &run_dir, &env, config.timeout(), echo)?;
         let _ = writeln!(echo, "check done: {cmd} ({} ms)", o.duration_ms);
         if !o.passed() {
             r.failures.push(format!("check failed: {cmd}"));
+        } else if clean
+            && record
+            && let (Some(cache), Some(key)) = (&mut check_cache, &key)
+        {
+            let lock = project.lock()?;
+            cache.record_pass(&lock, cmd, key, &o, &proof::machine(&config).to_string())?;
         }
     }
     Ok(r)
+}
+
+/// Whether `step`'s scope has no uncommitted change, counting new untracked
+/// files: its own `files` globs, or the whole tree for a plain check.
+fn clean_in_scope(step: &config::Step, dirty: &[String]) -> Result<bool> {
+    match step.files() {
+        Some(globs) => {
+            let set = fingerprint::globset(globs)?;
+            Ok(!dirty.iter().any(|f| set.is_match(f)))
+        }
+        None => Ok(dirty.is_empty()),
+    }
 }
 /// Checks repository integrity and scope while requiring proofs only for the
 /// selected change, so other unfinished changes can remain on the branch.
@@ -301,7 +348,15 @@ pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Re
 /// Like `change_gate`, with the echo the checks stream to: archive passes
 /// stderr, so the user sees each check while it runs instead of silence.
 pub fn change_gate_echo(project: &Project, home: &Path, cwd: &Path, c: &Active, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, echo)
+    gate_for(
+        project,
+        home,
+        cwd,
+        Options { strict: true, rerun: false, out: None },
+        Some(&c.dir.id),
+        Caching { use_cache: true, record: false },
+        echo,
+    )
 }
 
 /// The first git-ignored file that matches `t`'s `files:` outside every

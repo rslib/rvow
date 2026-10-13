@@ -47,7 +47,17 @@ pub fn fetch_missing_grammars(project: &Project, top: &Path, home: &Path, config
         if crate::syntax::grammar::cached(home, entry).is_some() {
             continue;
         }
-        let _ = crate::syntax::grammar::acquire_with_timeout(home, entry, base.as_deref(), FETCH_TIMEOUT);
+        // A failed fetch in the last hour is not retried here; the language
+        // stays like one with no grammar, and only `rvow grammar fetch` asks
+        // again.
+        let now = crate::ledger::now_ms();
+        if crate::syntax::grammar::fetch_recently_failed(home, entry, now, crate::syntax::grammar::FETCH_RETRY_WINDOW) {
+            continue;
+        }
+        match crate::syntax::grammar::acquire_with_timeout(home, entry, base.as_deref(), FETCH_TIMEOUT) {
+            Ok(_) => crate::syntax::grammar::clear_fetch_failure(home, entry),
+            Err(_) => crate::syntax::grammar::record_fetch_failure(home, entry, now),
+        }
     }
 }
 

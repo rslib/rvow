@@ -16,6 +16,13 @@ use crate::vow::sha256_hex;
 /// blocking the gate.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long prove and gate wait after a failed fetch before they try the same
+/// language again. `rvow grammar fetch` ignores it.
+pub const FETCH_RETRY_WINDOW: Duration = Duration::from_secs(3600);
+
+/// The per-home record of languages whose last fetch failed.
+const FAILURES_FILE: &str = "fetch-failures.json";
+
 /// Environment variable that replaces the download base of pinned URLs.
 /// `file://`, an HTTP(S) URL or a filesystem path; the file name stays the
 /// pinned one. Lets tests and air-gapped machines supply grammars offline.
@@ -164,6 +171,47 @@ fn fetch(entry: &Entry, base: Option<&str>, timeout: Duration) -> Result<Vec<u8>
 /// The grammar cache file for one pinned language.
 pub fn cache_file(home: &Path, entry: &Entry) -> PathBuf {
     home.join("grammars").join(format!("tree-sitter-{}.wasm", entry.name))
+}
+
+fn failures_path(home: &Path) -> PathBuf {
+    home.join("grammars").join(FAILURES_FILE)
+}
+
+fn read_failures(home: &Path) -> BTreeMap<String, u64> {
+    std::fs::read_to_string(failures_path(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn write_failures(home: &Path, failures: &BTreeMap<String, u64>) {
+    let path = failures_path(home);
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if let Ok(text) = serde_json::to_string(failures) {
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+/// Whether a failed fetch of `entry` is recorded less than `window` ago.
+/// Prove and gate treat such a language like one with no grammar at all.
+pub fn fetch_recently_failed(home: &Path, entry: &Entry, now_ms: u64, window: Duration) -> bool {
+    read_failures(home).get(&entry.name).is_some_and(|t| now_ms.saturating_sub(*t) < window.as_millis() as u64)
+}
+
+/// Records a failed fetch of `entry` at `now_ms`.
+pub fn record_fetch_failure(home: &Path, entry: &Entry, now_ms: u64) {
+    let mut failures = read_failures(home);
+    failures.insert(entry.name.clone(), now_ms);
+    write_failures(home, &failures);
+}
+
+/// Clears the failure record of `entry` after a fetch succeeds.
+pub fn clear_fetch_failure(home: &Path, entry: &Entry) {
+    let mut failures = read_failures(home);
+    if failures.remove(&entry.name).is_none() {
+        return;
+    }
+    write_failures(home, &failures);
 }
 
 /// The error callers show: the grammar is missing, never a panic.

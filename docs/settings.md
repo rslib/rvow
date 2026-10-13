@@ -85,6 +85,21 @@ The gate makes its rerun worktree and runs `setup` only when something needs the
 When the cache or a current proof answers every task, it makes no worktree and runs no `setup`.
 The `checks` that remain then run in the repository itself.
 
+## Running each check once per commit
+
+A `checks` entry that passes records its result in the same gate cache as a
+rerun task, so a commit that already passed the check does not run it again.
+The key is the command text, the id of the HEAD tree and the tool fingerprint,
+so a new commit or a changed tool runs the check again.
+When the key holds a pass and the check's scope has no uncommitted change, the
+gate skips the check and prints `cached check: <cmd>` on the same stream as
+`check:` and `check done:`.
+A plain check has the whole tree as its scope, new untracked files included; a
+`{ run, files }` entry has the files its globs match.
+An uncommitted change in the check's scope runs the check and records nothing,
+so a pass never counts for content that is not committed.
+`rerun_cache = "off"` turns the check cache off too, so every check runs.
+
 ## How long a cached pass lasts
 
 An entry in the gate cache stops answering for a task after `max_age`, which a task sets with a `max_age:` line such as `max_age: 24h`.
@@ -123,6 +138,8 @@ The file name of the download stays the pinned one, so a mirror folder of `tree-
 The drift check in a hook, the view or amend does not download at check time: it compares only with a grammar the cache already holds.
 `rvow prove` and `rvow gate` fetch first: the prove and gate fetch fills the cache with the missing pinned grammars of the changed protected files, waiting about 10 s per grammar.
 A failed fetch keeps the raw rules and names `rvow grammar fetch`, so a missing grammar never weakens drift.
+For one hour after a fetch fails in prove or gate, neither tries that language again and both treat it as a language with no grammar, so the drift item keeps the raw rule and the `rvow grammar fetch` hint.
+`rvow grammar fetch` always tries, and a success clears the one-hour record.
 Each compare result is saved in the `grammars/` folder, keyed by the hash of each text and the grammar hash, and the next compare of the same two texts reuses it without parsing.
 
 ## Choosing the git binary

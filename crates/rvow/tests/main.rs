@@ -78,6 +78,8 @@ mod fix_strings;
 mod fix_text;
 #[path = "suite/flaky_tree.rs"]
 mod flaky_tree;
+#[path = "suite/gate_speed.rs"]
+mod gate_speed;
 #[path = "suite/git_bin.rs"]
 mod git_bin;
 #[path = "suite/hook_stats.rs"]

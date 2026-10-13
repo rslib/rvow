@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Skip a configured `checks` command that already passed on the same commit, keyed by the command text, the HEAD tree id and the tool fingerprint, and print `cached check: <cmd>` on the check stream.
+  An uncommitted change in the check's scope runs the check again and records nothing, and `rerun_cache = "off"` turns the check cache off.
+- Do not try a grammar fetch again for one hour after it fails in prove or gate, treating the language as one with no grammar; `rvow grammar fetch` always tries and a success clears the record.
 - In pi, wait for the gate checks on archive and for the plan's whole baseline on accept instead of a fixed 60 s or 10 min, and say when a run timed out instead of returning no output.
 - Make `cargo test --locked` fast: one integration test binary, optimized wasmtime and cranelift in the dev profile, no nested `cargo build` or npm audit in a plain run (CI passes `--include-ignored`), and `RVOW_GRAMMAR_OFFLINE` stops tests from downloading grammars.
 - Read only the added lines of a changed test file, not the whole file, so committed owner command text no longer denies a test run.

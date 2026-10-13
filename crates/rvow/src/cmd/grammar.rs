@@ -80,6 +80,9 @@ pub fn fetch(langs: &[String]) -> Result<Reply> {
     for entry in &targets {
         let was_cached = matches!(cache_state(&home, entry), CacheState::Cached);
         let bytes = grammar::acquire(&home, entry, base.as_deref())?;
+        // An explicit fetch always tries, and a success clears the one-hour
+        // failure record of prove and gate.
+        grammar::clear_fetch_failure(&home, entry);
         if was_cached {
             cached += 1;
         } else {
