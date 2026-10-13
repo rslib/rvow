@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 export const BIN = process.env.RVOW_BIN || "rvow";
 export const FAST_MS = 10_000;
 export const SLOW_MS = 60_000;
+/** `rvow archive` runs the gate checks, and rvow bounds each check with its own
+ *  timeout, so the wait only guards against a hung binary. */
+export const GATE_MS = 60 * 60_000;
 
 let warned = false;
 
@@ -36,7 +39,11 @@ export function run(
       cancelled = true;
       child?.kill("SIGKILL");
     };
-    const timer = setTimeout(cancel, timeoutMs);
+    // A killed run says why, so the caller never sees an empty result.
+    const timer = setTimeout(() => {
+      out += `${out && !out.endsWith("\n") ? "\n" : ""}rvow ${args.join(" ")}: stopped after ${Math.round(timeoutMs / 1000)} s with no result; run it in a terminal\n`;
+      cancel();
+    }, timeoutMs);
     let child: ReturnType<typeof spawn> | undefined;
     try {
       child = spawn(BIN, args, { cwd, stdio: ["pipe", "pipe", "ignore"] });

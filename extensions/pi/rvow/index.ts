@@ -50,6 +50,7 @@ import {
   BIN,
   baselineNotice,
   FAST_MS,
+  GATE_MS,
   type PlanBudget,
   planBudget,
   run,
@@ -710,7 +711,7 @@ export default function (pi: ExtensionAPI) {
       S.notice = { tone: "ok", text: await ask(ctx) };
       await refresh(ctx);
     } else if (exit.act === "accept") settle(await acceptPlan(ctx, exit.id));
-    else settle(await decide(ctx, [exit.act, exit.id]));
+    else settle(await decide(ctx, [exit.act, exit.id], exit.act === "archive" ? GATE_MS : SLOW_MS));
     return true;
   }
 
@@ -1317,7 +1318,7 @@ export default function (pi: ExtensionAPI) {
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
-    await decide(ctx, ["archive", arg]);
+    await decide(ctx, ["archive", arg], GATE_MS);
   });
 
   userCommand(

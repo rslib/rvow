@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { run } from "./rvow/tools.ts";
+import { GATE_MS, type run, SLOW_MS } from "./rvow/tools.ts";
 import {
   archiveBlockers,
   proofArgs,
@@ -248,6 +248,7 @@ test("rvow_accept shows the review and accepts only when the user says yes", asy
   assert.match(asked[0] ?? "", /the checklist[\s\S]*Accept CHG-a1\?/);
   assert.deepEqual(seen, [
     ["review", "CHG-a1"],
+    ["hook", "view"],
     ["accept", "CHG-a1", "--yes"],
   ]);
   assert.equal((yes.details as { kind: string }).kind, "decision");
@@ -342,6 +343,37 @@ test("rvow_archive asks only when every task is proved, and archives on a yes", 
   assert.match(JSON.stringify(no.content), /stays active/);
   assert.match(JSON.stringify(no.content), /\/rvow-archive CHG-a1/);
   await assert.rejects(yoloCall(value, { change: "CHG-a1" }, { hasUI: false }), /no one is here/);
+});
+
+test("rvow_archive waits for the gate checks instead of the 60 s default", async () => {
+  const waits = new Map<string, number>();
+  const value = tool("rvow_archive", async (args, _cwd, _stdin, timeoutMs) => {
+    waits.set(args[0] ?? "", timeoutMs);
+    return args[0] === "hook"
+      ? { code: 0, out: viewOf(["proved"]) }
+      : { code: 0, out: "archived CHG-a1\n" };
+  });
+  await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
+  assert.equal(waits.get("archive"), GATE_MS);
+  assert.ok(GATE_MS > SLOW_MS);
+});
+
+test("rvow_accept waits for the plan's whole baseline", async () => {
+  const waits = new Map<string, number>();
+  const view = {
+    ...dashboard,
+    backlog: [
+      { id: "CHG-a1", tasks: 3, task_timeouts_secs: [1200, 0, 0], default_timeout_secs: 600 },
+    ],
+  };
+  const value = tool("rvow_accept", async (args, _cwd, _stdin, timeoutMs) => {
+    waits.set(args[0] ?? "", timeoutMs);
+    if (args[0] === "review") return { code: 0, out: "checklist\n" };
+    if (args[0] === "hook") return { code: 0, out: JSON.stringify(view) };
+    return { code: 0, out: "accepted CHG-a1\n" };
+  });
+  await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
+  assert.equal(waits.get("accept"), 2_400_000);
 });
 
 test("rvow_archive names what is missing and asks nothing", async () => {

@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { run, SLOW_MS } from "./tools.ts";
+import { acceptTimeoutMs, GATE_MS, planBudget, run, SLOW_MS } from "./tools.ts";
 import type { ToolOutput, View } from "./types.ts";
 
 export type ViewInput = { target?: "view" | "status" | "show"; id?: string };
@@ -315,7 +315,14 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         return declined(
           `The user did not accept ${change}; it stays a plan. The user can run /rvow-accept ${change} to start it.`,
         );
-      return queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, 10 * 60_000));
+      // The wait covers every baseline check of the plan, not a fixed ten minutes.
+      // A view that cannot be read keeps the fixed wait.
+      const seen = await queue(() =>
+        result(["hook", "view"], ctx.cwd, signal, SLOW_MS).catch(() => null),
+      );
+      const view = seen?.details.kind === "view" ? seen.details.data : null;
+      const wait = acceptTimeoutMs(planBudget(view, change));
+      return queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, wait));
     },
   });
   pi.registerTool({
@@ -351,7 +358,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         return declined(
           `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
         );
-      return queue(() => result(["archive", change], ctx.cwd, signal, SLOW_MS));
+      return queue(() => result(["archive", change], ctx.cwd, signal, GATE_MS));
     },
   });
   pi.registerTool({
