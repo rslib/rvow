@@ -71,7 +71,7 @@ It can tell that a test file or a verify command changed, and that is where it a
 ## Amendments and the user-only confirm
 
 The plan must be able to change, because plans are wrong.
-The agent edits the plan files and runs `rvow amend` with a reason.
+The agent replaces the changed part with `rvow put` and runs `rvow amend` with a reason.
 That records the edit as an amendment.
 Before it records, `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up the same way as the gate rerun.
 The base commit always comes from the vow, also after a confirmed amendment, so a second amend and the mutants diff keep working.

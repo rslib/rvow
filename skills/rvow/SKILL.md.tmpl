@@ -11,10 +11,10 @@ The brief at session start names the next task. {{cmd:brief}} prints it again.
 
 ## Work
 
-- Do the next task, then run {{cmd:prove <task>}}. rvow runs the stored verify command. Never run the check yourself and claim it passed.
-- A pass with 0 tests run is not a proof. Make the test exist and run.
+- Do the next task, then run {{cmd:prove <task>}}; rvow runs the stored verify command, and a pass with 0 tests run is not a proof, so make the test exist and run. Never run the check yourself and claim it passed.
 - {{cmd:status}} shows each task and any drift. {{cmd:prove --stale}} re-proves stale tasks.
 - Stay inside each task's `files:` scope. The gate fails on files outside it.
+- The store is read and written only through rvow: the hooks deny a direct path into it. {{cmd:show <change>}} prints the outline; {{cmd:show <change> proposal}} prints one part in full (`proposal`, `tasks` or `spec:<name>`); pipe a part to {{cmd:put <change> proposal}}, or one task or requirement block to {{cmd:put <task or requirement id>}}, and rvow prints `ok` or the check findings.
 
 ## Before accept
 
@@ -23,7 +23,7 @@ The brief at session start names the next task. {{cmd:brief}} prints it again.
 
 ## When the plan must change
 
-- Edit the plan files, then run {{cmd:amend --reason "..."}} and call the `rvow_confirm` tool (or ask the user to run `/rvow-confirm`).
+- Change the plan with {{cmd:put <change> <part>}} or one block with {{cmd:put <task or requirement id>}}, then run {{cmd:amend --reason "..."}} and call the `rvow_confirm` tool (or ask the user to run `/rvow-confirm`).
 - To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user.
 - You never run {{cmd:accept}} or {{cmd:confirm}} in a shell. The hooks deny them; use the tools.
 - When every task is proved, call the `rvow_archive` tool: the user answers in a dialog, and a push trusts an archived change.
@@ -34,6 +34,5 @@ When a task cannot pass as written, run {{cmd:block <task> --reason "..."}} and 
 
 ## Notes
 
-- {{cmd:note decision "..."}} records a choice the next session needs.
-- {{cmd:note handoff "..."}} leaves at most 5 lines for the next session.
+- {{cmd:note decision "..."}} records a choice the next session needs, and {{cmd:note handoff "..."}} leaves at most 5 lines for it.
 - {{cmd:delegate <task>}} leases a task to a subagent. Start the subagent's prompt with its output, first line unchanged.

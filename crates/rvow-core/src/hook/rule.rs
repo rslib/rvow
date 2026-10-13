@@ -31,6 +31,8 @@ pub enum Rule {
     UnacceptedPlan,
     /// Archived changes and the living specs.
     History,
+    /// The plan files of the rvow store, read and written only through rvow.
+    Store,
 }
 
 /// What a rule does when it fires.
@@ -71,7 +73,7 @@ impl Rule {
         !matches!(self, Rule::OwnerCommand | Rule::LeaseScope | Rule::UnacceptedPlan | Rule::OutsideScope | Rule::ProtectedTest)
     }
 
-    pub const ALL: [Rule; 14] = [
+    pub const ALL: [Rule; 15] = [
         Rule::OwnerCommand,
         Rule::GitHooks,
         Rule::Ledger,
@@ -86,6 +88,7 @@ impl Rule {
         Rule::OutsideScope,
         Rule::UnacceptedPlan,
         Rule::History,
+        Rule::Store,
     ];
 
     pub fn name(self) -> &'static str {
@@ -104,6 +107,7 @@ impl Rule {
             Rule::OutsideScope => "outside-scope",
             Rule::UnacceptedPlan => "unaccepted-plan",
             Rule::History => "history",
+            Rule::Store => "store",
         }
     }
 }

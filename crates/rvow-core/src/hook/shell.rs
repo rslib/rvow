@@ -652,6 +652,22 @@ fn has_glob(word: &str) -> bool {
     word.contains(['*', '?', '['])
 }
 
+/// The words of `cmd` that name a path, with `~` and `$VAR` expanded as a
+/// shell would: every word that holds a `/` or starts with `~` or `.`, without
+/// the glob words, which `glob_paths` expands instead.
+pub(super) fn path_words(cmd: &str) -> Vec<String> {
+    let env: HashMap<String, String> =
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    let home = env.get("HOME").cloned();
+    let sh = parse(cmd, 0, &env);
+    sh.words
+        .iter()
+        .filter(|w| !has_glob(w))
+        .map(|w| expand_tilde(w, home.as_deref()))
+        .filter(|w| w.starts_with('/') || w.starts_with('~') || w.starts_with('.') || w.contains('/'))
+        .collect()
+}
+
 /// The filesystem paths that the glob words of `cmd` expand to from `cwd`.
 /// A word without `*`, `?` or `[` is not expanded, and a path that does not
 /// exist is dropped, so a pattern that matches nothing yields nothing.

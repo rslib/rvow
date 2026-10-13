@@ -204,6 +204,16 @@ pub fn review(
     Ok(Reply::lines(format!("{warnings}{text}\n\n{REVIEW}")))
 }
 
+/// `rvow put`: replace one part of a change, or one task or requirement block,
+/// with the text on stdin, and print `ok` or the check findings.
+pub fn put(target: &str, part: Option<&str>) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let text = rvow_core::put::stdin()?;
+    let out = rvow_core::put::put(&p, &cwd()?, target, part, &text)?;
+    Ok(Reply::lines(out.lines.join("\n")))
+}
+
 pub fn ids(target: Option<&str>) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;

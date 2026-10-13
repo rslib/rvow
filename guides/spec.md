@@ -5,7 +5,8 @@ Write one file per capability: `specs/<capability>.md` in the change. It holds d
 ## Look first
 
 - Run `rvow spec list` to see every capability with its requirement ids and titles.
-- Run `rvow show <id>` for each related requirement. Do not read whole spec files.
+- Run `rvow show <id>` for each related requirement. Do not read whole files.
+- Read a change's spec with `rvow show <change> spec:<name>`; replace one block with `rvow put <requirement id>`.
 - Change an existing requirement before you add a near copy of it.
 
 ## Deltas

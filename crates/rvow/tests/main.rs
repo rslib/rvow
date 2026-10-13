@@ -86,6 +86,8 @@ mod hook_stats;
 mod judge;
 #[path = "suite/literal_paths.rs"]
 mod literal_paths;
+#[path = "suite/plan_access.rs"]
+mod plan_access;
 #[path = "suite/protected_growth.rs"]
 mod protected_growth;
 #[path = "suite/quiet_hooks.rs"]

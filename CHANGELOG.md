@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- `rvow show <change>` prints an outline of the change (each proposal section with its word count, each requirement with its title, each task with its state, and the parts), and `rvow show <change> <part>` prints the full text of one part: `proposal`, `tasks` or `spec:<name>`.
+- `rvow put` replaces one part of an open change, or one task or requirement block, with the text on stdin, writes it atomically and prints `ok` or the check findings of the change.
+- The hooks deny a direct read, write or search of the plan files in the rvow store of a home-mode project, and the reason names the `rvow show` or `rvow put` command for the need; a search from the root names `rvow ls` and `rvow show`.
 - `rvow check` warns with `full-suite` about a task whose verify runs the whole suite instead of one target, the mods show how many baseline checks accept will run and size the accept timeout to the plan's task timeouts, and `rvow archive` prints each gate check on stderr while it runs.
 - Compare a protected file by its syntax tree when both texts parse with the grammar of its language, so a file that only lost a blank line or a comment is not drift.
   `rvow grammar fetch [<lang>...]` fills the grammar cache with pinned checksummed `.wasm` grammars and `rvow grammar list` shows each pinned language and whether the cache holds it.
@@ -14,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- In pi, wait for the gate checks on archive and for the plan's whole baseline on accept instead of a fixed 60 s or 10 min, and say when a run timed out instead of returning no output.
 - Make `cargo test --locked` fast: one integration test binary, optimized wasmtime and cranelift in the dev profile, no nested `cargo build` or npm audit in a plain run (CI passes `--include-ignored`), and `RVOW_GRAMMAR_OFFLINE` stops tests from downloading grammars.
 - Read only the added lines of a changed test file, not the whole file, so committed owner command text no longer denies a test run.
 - Ignore slash command names such as `/rvow-accept` in script text, so a name that cannot run from a script is not treated as an owner command.
