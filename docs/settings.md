@@ -165,14 +165,19 @@ timeout = "5m"
 
 Every key except `run` is optional.
 
-Each `{param}` of `run` gets its value from the task's `key=value` pairs or from `default`, and `{junit}` is filled by rvow itself with a fresh report path.
+Each `{param}` of `run` gets its value from the task's `key=value` pairs or from `default`, and `{junit}` is filled by rvow itself with a fresh report path, quoted for the shell.
+Write `{junit}` without quotes in `run`; `rvow check` refuses a runner that quotes it.
+The report goes in the system temp dir, or in the dir that the runner's `env` sets as `RVOW_JUNIT_DIR`, and rvow removes it after it reads it.
 A task key that `run` does not use, a value outside `params`, and a param with no value are `rvow check` errors.
 Each value lands inside a shell command, so it may hold only `A-Z a-z 0-9 _ . : / + = * ^ $` and `-`; rvow refuses any other char, at check time and again before a run, and names the char.
+A `default` value follows the same char rule and the same `params` list.
 A task's own `timeout:` wins over the runner's `timeout`.
 
 When `run` holds `{junit}`, accept reads the JUnit report after the baseline run, records the failed test names in the vow and refuses when the report names no failed test.
 A case is failed when it holds a `<failure>` or an `<error>` child, and its name is the `name` attribute, or `classname.name` when both are there.
 At prove and at the gate rerun the proof passes only when the command exits 0, the report exists, each recorded name is there and passed, and no test case failed.
+An amendment that adds or changes such a task records its failed names at the amend baseline, and the recorded names hold after the amendment.
+A `baseline: pass` task on such a runner records no names: its report must hold at least one passed case and no failed case, at accept and at each prove.
 
 Each path of `needs` is filled with the same params and must exist before anything runs: accept, prove and the gate rerun run no command and name the missing path, so configure that build dir first.
 
@@ -183,3 +188,6 @@ When the output of a verify run holds `Re-running CMake`, the prove result notes
 
 The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`).
 A changed runner is weaken drift for each task that uses it, like a changed verify, and a runner that no task uses can change with no drift.
+The runner hash is also part of the proof key and the gate cache key, so a confirmed runner change makes the old proofs stale.
+`rvow review` and `rvow show` print the filled command as a `run:` line under the `verify:` line.
+A bundle refuses a task with an `@<runner>` verify; give a bundled task a plain verify.
