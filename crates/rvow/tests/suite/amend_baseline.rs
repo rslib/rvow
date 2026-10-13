@@ -287,3 +287,37 @@ fn confirm_list_shows_the_baseline_result() {
     assert!(minted.starts_with("TSK-"), "the baseline names the minted id: {lines:?}");
     assert!(lines.iter().any(|l| l.contains(minted)), "the listing names the minted id {minted}: {lines:?}");
 }
+
+/// Widens the task's scope to `files` and records an amendment of it.
+fn widen(s: &Setup, files: &str, reason: &str) -> String {
+    let dir = active_dir(&s.project);
+    let text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    let start = text.find("  files: ").unwrap();
+    let end = start + text[start..].find('\n').unwrap();
+    std::fs::write(dir.join("tasks.md"), format!("{}  files: {files}{}", &text[..start], &text[end..])).unwrap();
+    let amended = amend::amend(&s.project, &s.home, &s.repo, None, reason, None).unwrap();
+    amended[0].id.to_string()
+}
+
+#[test]
+fn amend_baseline_newest_snapshot_wins_a_batch_confirm() {
+    let s = setup("batch", &[failing()]);
+    let older = widen(&s, "out.txt, b.txt", "add b");
+    let newer = widen(&s, "out.txt, b.txt, c.txt", "add c");
+    // The older amendment's confirm is written last.
+    amend::confirm(&s.project, &[newer, older], amend::Decision::Accept, None).unwrap();
+    let got = drift_items(&s);
+    assert!(got.is_empty(), "the newest snapshot is the baseline: {got:?}");
+}
+
+#[test]
+fn amend_baseline_newest_rejected_keeps_the_older_snapshot() {
+    let s = setup("declined", &[failing()]);
+    let older = widen(&s, "out.txt, b.txt", "add b");
+    let newer = widen(&s, "out.txt, b.txt, c.txt", "add c");
+    amend::confirm(&s.project, &[older], amend::Decision::Accept, None).unwrap();
+    amend::confirm(&s.project, &[newer], amend::Decision::Reject, None).unwrap();
+    let a = real_id(&s, "TSK-new1");
+    let got = drift_items(&s);
+    assert_eq!(got.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>(), [format!("{a} scope made wider")], "{got:?}");
+}

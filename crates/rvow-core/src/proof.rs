@@ -41,23 +41,18 @@ impl Active {
         self.vow()?.data.get("base_commit")?.as_str()
     }
 
-    /// The snapshot that drift is measured against: the snapshot of the latest
-    /// accepted amendment, else the vow.
+    /// The snapshot that drift is measured against: the snapshot of the
+    /// accepted amendment recorded last, else the vow. The order of the confirm
+    /// events does not count, since one confirm can accept several at once.
     pub fn baseline(&self) -> Option<&Map<String, Value>> {
         let mut base = self.vow().map(|e| &e.data);
-        for e in self.events.iter().filter(|e| e.kind == Kind::Confirm) {
-            if e.data.get("decision").and_then(Value::as_str) != Some("accept") {
-                continue;
-            }
-            let id = e.data.get("amendment");
-            let snapshot = self
-                .events
-                .iter()
-                .find(|a| a.kind == Kind::Amend && a.data.get("amendment") == id)
-                .and_then(|a| a.data.get("snapshot"))
-                .and_then(Value::as_object);
-            if snapshot.is_some() {
-                base = snapshot;
+        for a in self.events.iter().filter(|e| e.kind == Kind::Amend) {
+            let id = a.data.get("amendment");
+            let accepted = self.events.iter().any(|e| {
+                e.kind == Kind::Confirm && e.data.get("amendment") == id && e.data.get("decision").and_then(Value::as_str) == Some("accept")
+            });
+            if let (true, Some(snapshot)) = (accepted, a.data.get("snapshot").and_then(Value::as_object)) {
+                base = Some(snapshot);
             }
         }
         base
