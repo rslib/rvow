@@ -1,7 +1,15 @@
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
-import { acceptTimeoutMs, baselineNotice, type PlanBudget, planBudget } from './accept'
+import {
+  acceptTimeoutMs,
+  baselineNotice,
+  declinedAcceptReason,
+  type PlanBudget,
+  planBudget,
+  repeatAcceptResult,
+  shortReview,
+} from './accept'
 import {
   ACCENT,
   ACCEPT,
@@ -58,6 +66,8 @@ import {
   yoloArgv,
 } from './format'
 
+type AcceptMemory = Record<string, { review: string; reason: string }>
+const acceptMemoryAtom = atom({ plugin: 'rvow', key: 'accept-memory' } as const, {})
 const viewAtom = atom({ plugin: 'rvow', key: 'view' } as const, null)
 const reviewAtom = atom({ plugin: 'rvow', key: 'review' } as const, {})
 const amendmentsAtom = atom({ plugin: 'rvow', key: 'amendments' } as const, null)
@@ -745,15 +755,36 @@ export const register: Register = (on) => {
     }
     const review = await tellOut($, ['review', change])
     if (!review.ok) return { result: failedText(['review', change], review.out) }
+    // A repeat while the plan is unchanged asks nothing: the earlier reason stands.
+    const remembered = ((await read($, acceptMemoryAtom)) as unknown as AcceptMemory)[change]
+    if (remembered && remembered.review === review.out)
+      return { result: repeatAcceptResult(remembered.reason, change) }
     const answer = await $.ui
-      .ask(`${review.out}\n\nAccept ${change}?`, ['Accept', 'Not now'])
+      .ask(`${shortReview(review.out, change)}\n\nAccept ${change}?`, ['Accept', 'Not now'])
       .catch(() => 'Not now')
-    if (answer !== 'Accept')
-      return {
-        result: `The user did not accept ${change}; it stays a plan. The user can run /rvow-accept ${change} to start it.`,
-      }
+    if (answer !== 'Accept') {
+      const reason = declinedAcceptReason(change)
+      await update($, acceptMemoryAtom, (m) => ({
+        ...((m as unknown as AcceptMemory) ?? {}),
+        [change]: { review: review.out, reason },
+      }))
+      return { result: repeatAcceptResult(reason, change) }
+    }
     const done = await acceptPlan($, ['accept', change, '--yes'])
-    return { result: done.tone === 'ok' ? done.text : failedText(['accept', change], done.text) }
+    if (done.tone === 'ok') {
+      await update($, acceptMemoryAtom, (m) => {
+        const next = { ...((m as unknown as AcceptMemory) ?? {}) }
+        delete next[change]
+        return next
+      })
+      return { result: done.text }
+    }
+    const reason = failedText(['accept', change], done.text)
+    await update($, acceptMemoryAtom, (m) => ({
+      ...((m as unknown as AcceptMemory) ?? {}),
+      [change]: { review: review.out, reason },
+    }))
+    return { result: reason }
   })
 
   on('tool.call', { tool: ARCHIVE }, async ($, e) => {

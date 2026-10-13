@@ -1034,7 +1034,7 @@ test("the shared prompt strings equal the Claude mod's", () => {
     );
     assert.match(
       m.failedPrompt(["accept", "CHG-a"], failure),
-      /failed:\nerror: CHG-a has no task\ncode: not-ready\nhelp: add a task\nFix what it names/,
+      /failed:\nerror: CHG-a has no task\ncode: not-ready\nhelp: add a task\nFix what it names first/,
     );
   });
 });

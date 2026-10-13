@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   An uncommitted change in the check's scope runs the check again and records nothing, and `rerun_cache = "off"` turns the check cache off.
 - Do not try a grammar fetch again for one hour after it fails in prove or gate, treating the language as one with no grammar; `rvow grammar fetch` always tries and a success clears the record.
 - In pi, wait for the gate checks on archive and for the plan's whole baseline on accept instead of a fixed 60 s or 10 min, and say when a run timed out instead of returning no output.
+- Keep the accept dialog short: it shows at most 10 checklist lines and names `rvow review <id>` for the rest, and the accept tool asks nothing again while the plan is unchanged, returning the earlier reason with the `/rvow-accept <id>` command the user can run.
 - Make `cargo test --locked` fast: one integration test binary, optimized wasmtime and cranelift in the dev profile, no nested `cargo build` or npm audit in a plain run (CI passes `--include-ignored`), and `RVOW_GRAMMAR_OFFLINE` stops tests from downloading grammars.
 - Read only the added lines of a changed test file, not the whole file, so committed owner command text no longer denies a test run.
 - Ignore slash command names such as `/rvow-accept` in script text, so a name that cannot run from a script is not treated as an owner command.

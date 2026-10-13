@@ -396,3 +396,72 @@ test("rvow_archive names what is missing and asks nothing", async () => {
     null,
   );
 });
+
+const reviewLines = (n: number) =>
+  `${Array.from({ length: n }, (_, i) => `checklist line ${i + 1}`).join("\n")}\n`;
+
+test("rvow_accept cuts a long review in the dialog and names rvow review", async () => {
+  const value = tool("rvow_accept", async (args) =>
+    args[0] === "review"
+      ? { code: 0, out: reviewLines(40) }
+      : { code: 0, out: "accepted CHG-m1\n" },
+  );
+  const asked: string[] = [];
+  await yoloCall(value, { change: "CHG-m1" }, { hasUI: true, answer: true, asked });
+  assert.match(asked[0] ?? "", /checklist line 10/);
+  assert.match(asked[0] ?? "", /30 more lines/);
+  assert.match(asked[0] ?? "", /rvow review CHG-m1/);
+  assert.doesNotMatch(asked[0] ?? "", /checklist line 11/);
+});
+
+test("a failed accept is not asked again while the plan is unchanged", async () => {
+  let accepts = 0;
+  const value = tool("rvow_accept", async (args) => {
+    if (args[0] === "review") return { code: 0, out: reviewLines(40) };
+    if (args[0] === "accept") {
+      accepts++;
+      return { code: 1, out: "error: CHG-m2 has no passing check\ncode: not-ready\n" };
+    }
+    return { code: 0, out: "null\n" };
+  });
+  const asked: string[] = [];
+  const first = await yoloCall(value, { change: "CHG-m2" }, { hasUI: true, answer: true, asked });
+  assert.match(JSON.stringify(first.content), /not-ready/);
+  const second = await yoloCall(value, { change: "CHG-m2" }, { hasUI: true, answer: true, asked });
+  // One dialog for both calls, and accept ran once: the repeat returns the old reason.
+  assert.equal(asked.length, 1);
+  assert.equal(accepts, 1);
+  assert.match(JSON.stringify(second.content), /not-ready/);
+  assert.match(JSON.stringify(second.content), /\/rvow-accept CHG-m2/);
+});
+
+test("a declined accept is not asked again while the plan is unchanged", async () => {
+  let accepts = 0;
+  const value = tool("rvow_accept", async (args) => {
+    if (args[0] === "review") return { code: 0, out: reviewLines(40) };
+    accepts++;
+    return { code: 0, out: "accepted CHG-m3\n" };
+  });
+  const asked: string[] = [];
+  const first = await yoloCall(value, { change: "CHG-m3" }, { hasUI: true, answer: false, asked });
+  assert.match(JSON.stringify(first.content), /did not accept CHG-m3/);
+  const second = await yoloCall(value, { change: "CHG-m3" }, { hasUI: true, answer: false, asked });
+  assert.equal(asked.length, 1);
+  assert.equal(accepts, 0);
+  assert.match(JSON.stringify(second.content), /did not accept CHG-m3/);
+});
+
+test("a changed plan after a failure asks again", async () => {
+  let reviews = 0;
+  const value = tool("rvow_accept", async (args) => {
+    if (args[0] === "review") {
+      reviews++;
+      return { code: 0, out: reviews === 1 ? reviewLines(40) : `${reviewLines(40)}one more\n` };
+    }
+    return { code: 1, out: "error: CHG-m4 has no passing check\ncode: not-ready\n" };
+  });
+  const asked: string[] = [];
+  await yoloCall(value, { change: "CHG-m4" }, { hasUI: true, answer: true, asked });
+  await yoloCall(value, { change: "CHG-m4" }, { hasUI: true, answer: true, asked });
+  assert.equal(asked.length, 2);
+});

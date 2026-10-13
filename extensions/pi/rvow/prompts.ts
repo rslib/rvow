@@ -5,7 +5,7 @@ export function failedPrompt(argv: string[], out: string): string {
   return [
     `I tried \`rvow ${argv.join(" ")}\` and it failed:`,
     ...lines.slice(0, FAILED_LINES),
-    "Fix what it names, then ask me to run it again.",
+    "Fix what it names first. If nothing changed, do not ask me to run it again.",
   ].join("\n");
 }
 
