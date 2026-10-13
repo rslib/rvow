@@ -21,12 +21,25 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
     } else if o.timed_out {
         "failed: timed out".to_string()
     } else if o.passed() {
-        "failed: the command passed but ran 0 tests".to_string()
+        match &p.junit {
+            Some(rvow_core::junit::Check::Failed(why)) => format!("failed: junit report: {why}"),
+            _ => "failed: the command passed but ran 0 tests".to_string(),
+        }
     } else {
         format!("failed: exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
     };
     r.line(format!("{} {verdict} ({tests} tests, {} ms, event {})", p.task, o.duration_ms, p.event));
     let mut warnings: Vec<String> = p.lfs_pointers.iter().map(|f| format!("{f} is a Git LFS pointer, run git lfs pull")).collect();
+    if let Some(note) = &p.note {
+        r.line(format!("note: {note}"));
+    }
+    let junit = match &p.junit {
+        Some(rvow_core::junit::Check::Failed(why)) => {
+            r.line(format!("junit: {why}"));
+            Some(why.clone())
+        }
+        _ => None,
+    };
     for w in &warnings {
         r.line(format!("warning: {w}"));
     }
@@ -45,6 +58,8 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
         "tests" => o.tests_run,
         "ms" => o.duration_ms,
         "event" => p.event,
+        "junit" => junit,
+        "note" => p.note.clone(),
     };
     (row, warnings)
 }

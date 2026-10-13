@@ -1,10 +1,15 @@
 //! `rvow check`: a read-only report on a plan before the user accepts it.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde_json::Value;
+
 use crate::change::{self, ChangeDir, Loaded, Stage};
+use crate::config::{self, Config};
 use crate::error::Result;
 use crate::git;
+use crate::ledger::{self, Kind};
 use crate::lint::{Finding, Question, questions};
 use crate::store::Project;
 use crate::tasks::Task;
@@ -33,10 +38,30 @@ fn on_path(name: &str) -> bool {
 /// Tasks whose verify command starts with a program that neither exists on
 /// PATH nor as a file in the repository. Such a command fails for the wrong
 /// reason, so its failing baseline proves nothing.
+/// The command each task runs, with a `@runner` verify filled from the
+/// project config. A task whose fill fails keeps its raw verify text;
+/// `runner_checks` reports the fill error itself.
+pub fn filled_commands(runners: &BTreeMap<String, crate::template::Runner>, tasks: &[Task]) -> BTreeMap<String, String> {
+    tasks
+        .iter()
+        .map(|t| {
+            let cmd = crate::template::plan(runners, t).map(|p| p.command.clone()).unwrap_or_else(|_| t.verify.clone().unwrap_or_default());
+            (t.id.to_string(), cmd)
+        })
+        .collect()
+}
+
 pub fn missing_programs(top: &Path, tasks: &[Task]) -> Vec<(String, String)> {
+    let raw: BTreeMap<String, String> = tasks.iter().map(|t| (t.id.to_string(), t.verify.clone().unwrap_or_default())).collect();
+    missing_programs_filled(top, tasks, &raw)
+}
+
+/// Like `missing_programs`, with each task's command already filled from its
+/// runner, when it names one.
+pub fn missing_programs_filled(top: &Path, tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for t in tasks {
-        let Some(cmd) = t.verify.as_deref() else {
+        let Some(cmd) = filled.get(&t.id.to_string()).map(String::as_str) else {
             continue;
         };
         let Some(prog) = program(cmd) else {
@@ -56,6 +81,79 @@ pub fn missing_programs(top: &Path, tasks: &[Task]) -> Vec<(String, String)> {
     out
 }
 
+/// One full-suite verify warning: the task and why its verify slows accept.
+/// The gate's `checks` already run the whole suite, so a task verify that
+/// repeats them makes the accept baseline as slow as the gate.
+#[derive(Debug)]
+pub struct SlowVerify {
+    pub task: String,
+    pub message: String,
+}
+
+/// A verify that chains this many commands with `&&` or `;` is a suite of its own.
+pub const CHAINED_COMMANDS: usize = 3;
+/// A verify whose last recorded run took longer than this is a full suite.
+pub const SLOW_PROOF_SECS: u64 = 60;
+
+/// The commands a verify chains with `&&` or `;`.
+pub fn chained_commands(cmd: &str) -> usize {
+    cmd.replace("&&", ";").split(';').filter(|s| !s.trim().is_empty()).count()
+}
+
+/// The duration of the newest recorded proof of `cmd` in this project, in ms.
+fn last_run_ms(project: &Project, cmd: &str) -> Option<u64> {
+    let dirs = change::list(project).ok()?.0;
+    let mut newest: Option<(u64, u64)> = None;
+    for d in &dirs {
+        let Ok((events, _)) = ledger::read(&d.path.join(change::LEDGER)) else { continue };
+        for e in events.iter().filter(|e| e.kind == Kind::Prove) {
+            if e.data.get("verify").and_then(Value::as_str) != Some(cmd) {
+                continue;
+            }
+            let Some(ms) = e.data.get("duration_ms").and_then(Value::as_u64) else { continue };
+            if newest.is_none_or(|(time, _)| e.time > time) {
+                newest = Some((e.time, ms));
+            }
+        }
+    }
+    newest.map(|(_, ms)| ms)
+}
+
+/// A warning for each task whose verify runs the full suite instead of one
+/// target: it chains commands, repeats a configured check, or ran slowly the
+/// last time the same command was proved in this project.
+pub fn full_suite(project: &Project, config: &Config, tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<SlowVerify> {
+    let mut out = Vec::new();
+    for t in tasks {
+        let Some(cmd) = filled.get(&t.id.to_string()).map(|s| s.trim()) else { continue };
+        let mut why = Vec::new();
+        let chained = chained_commands(cmd);
+        if chained >= CHAINED_COMMANDS {
+            why.push(format!("chains {chained} commands"));
+        }
+        if config.checks.iter().any(|s| s.run().trim() == cmd) {
+            why.push("repeats a configured `checks` entry".to_string());
+        }
+        if let Some(ms) = last_run_ms(project, cmd)
+            && ms > SLOW_PROOF_SECS * 1000
+        {
+            why.push(format!("took {} s on its last recorded run", ms / 1000));
+        }
+        if why.is_empty() {
+            continue;
+        }
+        out.push(SlowVerify {
+            task: t.id.to_string(),
+            message: format!(
+                "{} verify ({cmd}) {}; put the full suite in the project `checks` and keep this verify targeted",
+                t.id,
+                why.join(", ")
+            ),
+        });
+    }
+    out
+}
+
 #[derive(Debug)]
 pub struct Report {
     pub change: ChangeDir,
@@ -63,6 +161,7 @@ pub struct Report {
     pub missing: Vec<(String, String)>,
     pub questions: Vec<Question>,
     pub no_tasks: bool,
+    pub slow: Vec<SlowVerify>,
 }
 
 impl Report {
@@ -127,12 +226,13 @@ fn counted_runner(cmd: &str) -> bool {
 
 /// A warning for each task whose check proves nothing: a stub command, or a
 /// `baseline: pass` on a command with no counted test runner.
-fn weak_checks(tasks: &[Task]) -> Vec<Finding> {
+fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding> {
     let mut out = Vec::new();
     for t in tasks {
-        let Some(cmd) = t.verify.as_deref() else {
+        let Some(cmd) = filled.get(&t.id.to_string()) else {
             continue;
         };
+        let cmd = cmd.as_str();
         let trivial = trivial_verify(cmd);
         if !trivial && !(t.baseline_pass && !counted_runner(cmd)) {
             continue;
@@ -153,17 +253,27 @@ fn weak_checks(tasks: &[Task]) -> Vec<Finding> {
     out
 }
 
-fn report(change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
+/// Whether the missing-program rule may blame `task`: a task whose runner
+/// fails to fill already gets the runner error from `runner_checks`, so the
+/// raw `@text` must not count as a missing program too.
+fn fill_ok(runners: &BTreeMap<String, crate::template::Runner>, task: &Task) -> bool {
+    crate::template::reference(task.verify.as_deref().unwrap_or("")).is_none() || crate::template::plan(runners, task).is_ok()
+}
+
+fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
+    let runners = config::runners(project).unwrap_or_default();
+    let filled = filled_commands(&runners, &loaded.tasks);
+    let slow = full_suite(project, config, &loaded.tasks, &filled);
     let mut findings = loaded.findings;
+    findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
+    findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
-    findings.extend(weak_checks(&loaded.tasks));
-    Report {
-        missing: missing_programs(top, &loaded.tasks),
-        questions: questions(&loaded.texts),
-        no_tasks: loaded.tasks.is_empty(),
-        findings,
-        change,
-    }
+    findings.extend(weak_checks(&loaded.tasks, &filled));
+    let missing: Vec<(String, String)> = missing_programs_filled(top, &loaded.tasks, &filled)
+        .into_iter()
+        .filter(|(task, _)| loaded.tasks.iter().find(|t| t.id.to_string() == *task).is_none_or(|t| fill_ok(&runners, t)))
+        .collect();
+    Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
 }
 
 /// Checks `target`, or every open change whose proposal names the current
@@ -185,10 +295,12 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
             out
         }
     };
+    let home = crate::hardening::project_home(project)?;
+    let config = config::load(project, &home)?;
     let mut out = Vec::new();
     for d in dirs {
         let loaded = change::load(&d.path, &living)?;
-        out.push(report(d, loaded, &top));
+        out.push(report(project, &config, d, loaded, &top));
     }
     Ok(out)
 }

@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine, Mounted } from 'claude-code/testing'
-import { expect, mock, test } from 'claude-code/testing'
-import { cmd, PLACED, pane, procResult } from './testkit'
+import { expect, mock } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult, test } from './testkit'
 
 const TASK = { id: 'TSK-a1', title: 'Print it', state: 'open' }
 const VIEW = {

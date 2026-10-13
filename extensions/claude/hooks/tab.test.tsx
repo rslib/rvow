@@ -1,5 +1,5 @@
-import { expect, mock, test } from 'claude-code/testing'
-import { cmd, PLACED, pane, procResult } from './testkit'
+import { expect, mock } from 'claude-code/testing'
+import { cmd, PLACED, pane, procResult, test } from './testkit'
 
 const PLAN = {
   id: 'CHG-1',

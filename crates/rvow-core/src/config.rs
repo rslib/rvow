@@ -100,6 +100,8 @@ pub struct File {
     pub agent: Option<String>,
     pub context: Option<String>,
     pub rules: Option<Rules>,
+    /// The `[runners.<name>]` templates a task verify can name with `@<name>`.
+    pub runners: Option<BTreeMap<String, crate::template::Runner>>,
 }
 
 /// The settings in force. Every field except `machine` is part of the vow.
@@ -335,6 +337,14 @@ pub fn tools(project: &Project, home: &Path) -> Result<Vec<String>> {
         Mode::Repo => File::default(),
     };
     Ok(local.tools.or(global.tools).unwrap_or_default())
+}
+
+/// The `[runners]` table of the project config, which a task verify names
+/// with `@<runner> key=value`. It stays out of `Config` on purpose: `Config`
+/// is what a vow hashes as the effective config, and a runner edit is its own
+/// runner drift per task, not a `config changed` item.
+pub fn runners(project: &Project) -> Result<BTreeMap<String, crate::template::Runner>> {
+    Ok(read_file(&project.root.join(CONFIG_FILE))?.runners.unwrap_or_default())
 }
 
 /// How the gate rerun uses its cache.

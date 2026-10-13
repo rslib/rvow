@@ -33,6 +33,8 @@ pub enum Rule {
     ClarifyForm,
     WideScope,
     WeakVerify,
+    Runner,
+    ConfigureInVerify,
 }
 
 impl Rule {
@@ -49,7 +51,8 @@ impl Rule {
             | Rule::LedgerTail
             | Rule::ClarifyForm
             | Rule::WideScope
-            | Rule::WeakVerify => Severity::Warning,
+            | Rule::WeakVerify
+            | Rule::ConfigureInVerify => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -80,6 +83,8 @@ impl Rule {
             Rule::ClarifyForm => "clarify-form",
             Rule::WideScope => "wide-scope",
             Rule::WeakVerify => "weak-verify",
+            Rule::Runner => "runner",
+            Rule::ConfigureInVerify => "configure-in-verify",
         }
     }
 
@@ -110,6 +115,12 @@ impl Rule {
             Rule::WideScope => "list the files the task changes in files:, so a change elsewhere does not make its proof stale",
             Rule::WeakVerify => {
                 "make the verify command run the check that fails today, and use a counted test runner when it sets baseline: pass"
+            }
+            Rule::Runner => {
+                "fix the @runner verify: name a runner the config holds, pass each {param} a value it allows, and keep values to runner-safe chars"
+            }
+            Rule::ConfigureInVerify => {
+                "build with `cmake --build --preset ...` and keep the configure step in a `setup` entry or a configured build dir"
             }
         }
     }

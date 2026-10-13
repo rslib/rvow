@@ -244,22 +244,29 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
 /// that the Claude mod reads to bind the subagent.
 pub fn delegate_brief(d: &crate::lease::Delegation) -> String {
     let l = &d.lease;
-    format!(
+    let mut out = format!(
         "lease: {task}\n\
          You hold one task of {change}: {title}\n\
          Edit only: {files}\n\
-         Prove it with: {verify}\n\
-         Rules:\n\
-         - The hook denies edits outside those files and names this task.\n\
-         - When done run `rvow prove {task}`. If it cannot pass as written run `rvow block {task} --reason \"...\"`.\n\
-         - rvow accept and confirm belong to the user.\n\
-         - A terminal tool gets a private socket (`tmux -L <name>`). Never run a bare tmux or kill-server.\n",
+         Prove it with: {verify}\n",
         task = l.task,
         change = l.change,
         title = d.title,
         files = l.files.join(", "),
         verify = d.verify,
-    )
+    );
+    if let Some(run) = &d.run {
+        out.push_str(&format!("run: {run}\n"));
+    }
+    out.push_str(&format!(
+        "Rules:\n\
+             - The hook denies edits outside those files and names this task.\n\
+             - When done run `rvow prove {task}`. If it cannot pass as written run `rvow block {task} --reason \"...\"`.\n\
+             - rvow accept and confirm belong to the user.\n\
+             - A terminal tool gets a private socket (`tmux -L <name>`). Never run a bare tmux or kill-server.\n",
+        task = l.task,
+    ));
+    out
 }
 
 #[cfg(test)]

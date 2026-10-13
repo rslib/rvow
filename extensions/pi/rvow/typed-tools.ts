@@ -1,5 +1,15 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { run, SLOW_MS } from "./tools.ts";
+import {
+  acceptTimeoutMs,
+  createAcceptMemory,
+  declinedAcceptReason,
+  GATE_MS,
+  planBudget,
+  repeatAcceptResult,
+  run,
+  SLOW_MS,
+  shortReview,
+} from "./tools.ts";
 import type { ToolOutput, View } from "./types.ts";
 
 export type ViewInput = { target?: "view" | "status" | "show"; id?: string };
@@ -228,6 +238,7 @@ const outputSchema = {
 
 export function registerTypedTools(pi: ExtensionAPI, execute = run) {
   const queue = serialQueue();
+  const acceptMemory = createAcceptMemory();
   const result = async (
     args: string[],
     cwd: string,
@@ -307,12 +318,50 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
       if (!ctx.hasUI) throw new Error("rvow: only the user can accept, and no one is here to ask");
       const review = await queue(() => result(["review", change], ctx.cwd, signal, SLOW_MS));
       if (review.details.kind !== "decision") return review;
+      const reviewText = text(review);
+      // A repeat while the plan is unchanged asks nothing: the earlier reason stands.
+      const remembered = acceptMemory.remembered(change, reviewText);
+      if (remembered) {
+        const out = repeatAcceptResult(remembered.reason, change);
+        return remembered.declined
+          ? declined(out)
+          : {
+              content: [{ type: "text" as const, text: out }],
+              details: {
+                kind: "failure" as const,
+                code: 1,
+                error: remembered.reason,
+                stdout: "",
+              },
+              isError: true as const,
+            };
+      }
       const yes = await ctx.ui.confirm(
         `rvow ${change}`,
-        `${text(review).trim()}\n\nAccept ${change}?`,
+        `${shortReview(reviewText, change).trim()}\n\nAccept ${change}?`,
       );
-      if (!yes) return declined(`The user did not accept ${change}; it stays a plan.`);
-      return queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, 10 * 60_000));
+      if (!yes) {
+        const reason = declinedAcceptReason(change);
+        acceptMemory.remember(change, reviewText, reason, true);
+        return declined(repeatAcceptResult(reason, change));
+      }
+      // The wait covers every baseline check of the plan, not a fixed ten minutes.
+      // A view that cannot be read keeps the fixed wait.
+      const seen = await queue(() =>
+        result(["hook", "view"], ctx.cwd, signal, SLOW_MS).catch(() => null),
+      );
+      const view = seen?.details.kind === "view" ? seen.details.data : null;
+      const wait = acceptTimeoutMs(planBudget(view, change));
+      const done = await queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, wait));
+      if (done.details.kind === "decision") {
+        acceptMemory.forget(change);
+        return done;
+      }
+      const [first] = done.content;
+      const reason =
+        first && first.type === "text" && first.text.trim() ? first.text : "rvow accept failed";
+      acceptMemory.remember(change, reviewText, reason, false);
+      return done;
     },
   });
   pi.registerTool({
@@ -344,8 +393,11 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         `rvow ${change}`,
         `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
       );
-      if (!yes) return declined(`The user did not archive ${change}; it stays active.`);
-      return queue(() => result(["archive", change], ctx.cwd, signal, SLOW_MS));
+      if (!yes)
+        return declined(
+          `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
+        );
+      return queue(() => result(["archive", change], ctx.cwd, signal, GATE_MS));
     },
   });
   pi.registerTool({
@@ -368,7 +420,10 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         "rvow confirm",
         `${text(list).trim()}\n\n${decision === "accept" ? "Accept" : "Reject"} all of these?`,
       );
-      if (!yes) return declined("The user did not decide, so the plan edits are still pending.");
+      if (!yes)
+        return declined(
+          "The user did not decide, so the plan edits are still pending. The user can run /rvow-confirm to decide them.",
+        );
       return queue(() =>
         result(["confirm", `--${decision}`, "--all", digest], ctx.cwd, signal, SLOW_MS),
       );
@@ -411,4 +466,5 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
       return queue(() => result(args, ctx.cwd, signal, SLOW_MS));
     },
   });
+  return acceptMemory;
 }

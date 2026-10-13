@@ -100,9 +100,18 @@ enum Cmd {
     Show {
         /// A REQ, TSK or CHG id or a unique prefix of it.
         id: String,
+        /// One part of a change: `proposal`, `tasks` or `spec:<name>`.
+        part: Option<String>,
         /// Print long text in full in TOON.
         #[arg(long)]
         full: bool,
+    },
+    /// Replace one part of a change, or one task or requirement block, with the text on stdin.
+    Put {
+        /// A CHG id with `part`, or a TSK or REQ id whose block the stdin replaces.
+        target: String,
+        /// One part of a change: `proposal`, `tasks` or `spec:<name>`.
+        part: Option<String>,
     },
     /// Read the living specs.
     Spec {
@@ -337,7 +346,25 @@ enum Cmd {
         #[arg(long)]
         sign: bool,
     },
+    /// Fill the grammar cache, or show the pinned languages and their cache state.
+    Grammar {
+        #[command(subcommand)]
+        cmd: GrammarCmd,
+    },
 }
+
+#[derive(Subcommand)]
+enum GrammarCmd {
+    /// Download pinned grammars into the cache; without names, every pinned language.
+    Fetch {
+        /// Language names from `rvow grammar list`.
+        #[arg(num_args = 0..)]
+        langs: Vec<String>,
+    },
+    /// Show each pinned language and whether the cache holds its grammar.
+    List,
+}
+/// The change id or a unique prefix of it.
 
 #[derive(Subcommand)]
 enum SpecCmd {
@@ -419,7 +446,19 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         }
         Cmd::Ls => read::ls(),
         Cmd::Path { id } => read::path(&id),
-        Cmd::Show { id, full } => read::show(&id, full),
+        Cmd::Show { id, part, full } => match part {
+            Some(part) => match read::show_part(&id, part.as_str(), full) {
+                Ok(r) => Ok(r),
+                Err(e) if e.code == "part" => return part_usage_error(&e, toon),
+                Err(e) => Err(e),
+            },
+            None => read::show(&id, full),
+        },
+        Cmd::Put { target, part } => match plan::put(&target, part.as_deref()) {
+            Ok(r) => Ok(r),
+            Err(e) if e.code == "part" => return part_usage_error(&e, toon),
+            Err(e) => Err(e),
+        },
         Cmd::Spec { cmd: SpecCmd::List } => read::spec_list(),
         Cmd::Import { cmd: ImportCmd::Openspec { from, dry_run } } => plan::import_openspec(from, dry_run),
         Cmd::Export { cmd: ExportCmd::Openspec { to, dry_run } } => export::export_openspec(to, dry_run),
@@ -471,6 +510,8 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
         Cmd::Ingest { file } => cmd::ingest::ingest(&file),
         Cmd::Attest { change, out, sign } => attest::attest(&change, &out, sign),
+        Cmd::Grammar { cmd: GrammarCmd::Fetch { langs } } => cmd::grammar::fetch(&langs),
+        Cmd::Grammar { cmd: GrammarCmd::List } => cmd::grammar::list(),
         Cmd::Archive { change } => lifecycle::archive(&change),
         Cmd::Drop { change, reason } => lifecycle::drop_change(&change, &reason),
         Cmd::Supersede { old, by, reason } => lifecycle::supersede(&old, &by, &reason),
@@ -497,6 +538,18 @@ fn finish(result: Result<Reply>, toon: bool) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// A wrong part of a change on stdout with exit 2, listing the parts the
+/// change does have.
+fn part_usage_error(e: &rvow_core::error::Error, toon: bool) -> ExitCode {
+    if toon {
+        println!("{}", output::error(&e.message, vec![e.fix.clone()], e.code));
+    } else {
+        println!("error[{}]: {}", e.code, e.message);
+        println!("  fix: {}", e.fix);
+    }
+    ExitCode::from(2)
 }
 
 /// A clap parse error on stdout with exit 2, naming the valid flags or

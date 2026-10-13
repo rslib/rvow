@@ -1,0 +1,4 @@
+# Every test process and every rvow child it starts gets the flag, so the
+# syntax-drift tests and the prove/gate children stay off the network.
+[env]
+RVOW_GRAMMAR_OFFLINE = "1"

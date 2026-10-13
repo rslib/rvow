@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
-import { procResult } from './testkit'
+import { expect } from 'claude-code/testing'
+import { procResult, test } from './testkit'
 
 const ASK = JSON.stringify({
   hookSpecificOutput: {

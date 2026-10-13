@@ -23,7 +23,10 @@ const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-p
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
 const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.tsx");
 /// Modules `register.tsx` imports; the engine cannot follow `$` or an atom across an import, so these hold pure code.
-const MOD_MODULES: [(&str, &str); 1] = [("format.ts", include_str!("../../../extensions/claude/hooks/format.ts"))];
+const MOD_MODULES: [(&str, &str); 2] = [
+    ("format.ts", include_str!("../../../extensions/claude/hooks/format.ts")),
+    ("accept.tsx", include_str!("../../../extensions/claude/hooks/accept.tsx")),
+];
 const MOD_TYPES: &str = include_str!("../../../extensions/claude/types/index.d.ts");
 pub const MARKETPLACE_DIR: &str = "claude-plugin";
 const MARK: &str = "rvow-managed sha256:";

@@ -203,9 +203,30 @@ pub(super) fn changed_files(top: &Path, mb: &str) -> Result<Vec<String>> {
     files.dedup();
     Ok(files)
 }
+/// What the rerun ran: the filled command, whether its junit check failed,
+/// and the runner stamp `rvow prove` records.
+pub(super) struct Reran<'a> {
+    pub cmd: &'a str,
+    pub junit_failed: bool,
+    pub runner: Option<&'a str>,
+}
+
 /// The Prove event data for one rerun, matching what `rvow prove` records, so
 /// an imported run is recognized as a proof. Computed in the rerun tree.
-pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, inputs: &fingerprint::Inputs) -> Map<String, Value> {
+/// A failed junit check fails the proof even when the command passed, and
+/// the runner stamp keeps an ingested rerun of an `@runner` task proved
+/// instead of stale.
+pub(super) fn prove_data(
+    c: &Active,
+    t: &Task,
+    o: &runner::Outcome,
+    now: &Now,
+    inputs: &fingerprint::Inputs,
+    ran: &Reran,
+) -> Map<String, Value> {
+    let cmd = ran.cmd;
+    let junit_failed = ran.junit_failed;
+    let runner = ran.runner;
     let thash = crate::vow::task_hash(t);
     let reqs = proof::covered(t, &c.loaded, now.living);
     let env_key = now.env.key();
@@ -214,8 +235,8 @@ pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, i
     data.insert("task".into(), t.id.to_string().into());
     data.insert("task_hash".into(), thash.into());
     data.insert("requirements".into(), serde_json::json!(reqs));
-    data.insert("verify".into(), t.verify.clone().unwrap_or_default().into());
-    data.insert("proved".into(), (o.passed() && o.tests_run != Some(0)).into());
+    data.insert("verify".into(), cmd.into());
+    data.insert("proved".into(), (o.passed() && o.tests_run != Some(0) && !junit_failed).into());
     data.insert("exit".into(), serde_json::json!(o.exit));
     data.insert("timed_out".into(), o.timed_out.into());
     data.insert("tests_run".into(), serde_json::json!(o.tests_run));
@@ -228,7 +249,8 @@ pub(super) fn prove_data(c: &Active, t: &Task, o: &runner::Outcome, now: &Now, i
     data.insert("env".into(), serde_json::json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
-    data.insert("programs".into(), serde_json::json!(proof::verify_programs(t.verify.as_deref().unwrap_or(""))));
+    data.insert("runner".into(), serde_json::json!(runner));
+    data.insert("programs".into(), serde_json::json!(proof::verify_programs(cmd)));
     data.insert(
         "run".into(),
         serde_json::json!({ "invocation": invocation(), "rvow": env!("CARGO_PKG_VERSION"), "machine": proof::machine(now.config), "agent": proof::agent(now.config), "head": git::run(now.top, &["rev-parse", "HEAD"]).unwrap_or_default(), "branch": git::branch(now.top).ok().flatten(), "ci": fingerprint::ci() }),

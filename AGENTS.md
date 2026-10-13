@@ -10,10 +10,10 @@ Rust, from the repository root (the toolchain is pinned in `rust-toolchain.toml`
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
-cargo test --locked <name>          # one test, by name substring
+cargo test --locked <name>          # one test, by name substring; the integration tests are one binary, so there is no --test <file>
 ```
 
-`cargo test --all-targets` also runs the pi audit tests, which call `npm --prefix extensions run typecheck:pi` and `test:pi:*`, so run `npm --prefix extensions ci` first.
+The pi audit tests call `npm --prefix extensions run typecheck:pi` and `test:pi:*`; they are `#[ignore]`, so a plain `cargo test --locked` skips them and CI runs `cargo test --all-targets --locked -- --include-ignored`. To run them, run `npm --prefix extensions ci` first and add `-- --include-ignored`.
 
 Extensions, from the repository root (run `npm --prefix extensions ci` once):
 
@@ -41,6 +41,13 @@ evals/agent/run.sh haiku --case next-task --runs 1   # one live case, a few cent
 evals/agent/run.sh                                   # the full suite, capped at $5
 ```
 
+Trigger evals (needs the `claude` CLI and a built binary):
+
+```sh
+evals/triggers/run.sh haiku --case chg-next --runs 1   # one live case, a few cents
+evals/triggers/run.sh                                  # the full suite, capped at $3
+```
+
 ## Where things go
 
 | Area | Home | Rule |
@@ -51,7 +58,8 @@ evals/agent/run.sh                                   # the full suite, capped at
 | Agent skill | `skills/rvow/SKILL.md.tmpl` | Rendered by `crates/rvow/src/skill.rs` at install. Write each command as `{{cmd:<args>}}`; a command or flag the CLI lacks fails the render and `cargo test`. |
 | Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-core/src/install.rs`. |
 | pi extension | `extensions/pi/rvow/*.ts` (`extensions/pi/rvow.ts` only re-exports it) | `extensions/pi/rvow/index.ts` is `PI_EXTENSION`; every other file is in `PI_MODULES` of `crates/rvow-core/src/install.rs`. |
-| Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. |
+| Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. Each case keeps its eval store inside its scaffold at `.git/rvow-eval/home`, where the agent can write it. |
+| Trigger evals | `evals/triggers/` | `evals/triggers/run.sh` renders the skill into a skill-only plugin in a throwaway home; each case holds `prompt.md` and `graders/fires.md`; results stay local. |
 
 Update this section in the change that moves an area.
 
@@ -82,7 +90,8 @@ Update this section in the change that moves an area.
 ## Tests and proof
 
 - A bug fix adds a test that fails without the fix.
-- CLI behavior tests live in `crates/rvow/tests/cli.rs`. They run in temporary git repositories, so the git hook must not leak `GIT_*` variables into them (see `.pre-commit-config.yaml`).
+- The integration tests build as one binary, `crates/rvow/tests/main.rs`, with one `#[path]` module per file in `crates/rvow/tests/suite/`. A new test file needs a `mod` entry there. Tests in the binary share one process, so a test that sets an env var holds a lock.
+- CLI behavior tests live in `crates/rvow/tests/suite/cli.rs`. They run in temporary git repositories, so the git hook must not leak `GIT_*` variables into them (see `.pre-commit-config.yaml`).
 - The native pi codemode proof is skipped unless `RVOW_NATIVE_SDK` is set. From `extensions/`, with a built binary: `RVOW_NATIVE_SDK=$PWD/node_modules/@earendil-works/pi-coding-agent RVOW_NATIVE_BIN=<repo>/target/debug/rvow node --test pi/native-codemode.test.ts`.
 - A change under `extensions/claude` is proven by `npm --prefix extensions run typecheck:claude` and `npm --prefix extensions run test:claude` together.
 

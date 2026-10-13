@@ -45,7 +45,20 @@ import {
 import { judgeArgs, judgeRun } from "./judge.ts";
 import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
-import { BIN, FAST_MS, run, SLOW_MS } from "./tools.ts";
+import {
+  type AcceptMemoryStore,
+  acceptTimeoutMs,
+  BIN,
+  baselineNotice,
+  createAcceptMemory,
+  FAST_MS,
+  GATE_MS,
+  type PlanBudget,
+  planBudget,
+  run,
+  SLOW_MS,
+  shortReview,
+} from "./tools.ts";
 import { registerTypedTools, yoloArgs } from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
@@ -234,6 +247,9 @@ export default function (pi: ExtensionAPI) {
   // hook, so the judge runs with read-only tools and no rvow extension.
   if (process.env.RVOW_JUDGE === "1") return;
   let toolsRegistered = false;
+  // The accept tool's memory of failed and declined reviews, read here so a
+  // repeat failure after /rvow-accept sends no followUp the agent already has.
+  let acceptMemory: AcceptMemoryStore = createAcceptMemory();
   let epoch = 0;
   let background = new AbortController();
   let stopRefresh = () => {};
@@ -701,7 +717,7 @@ export default function (pi: ExtensionAPI) {
       S.notice = { tone: "ok", text: await ask(ctx) };
       await refresh(ctx);
     } else if (exit.act === "accept") settle(await acceptPlan(ctx, exit.id));
-    else settle(await decide(ctx, [exit.act, exit.id]));
+    else settle(await decide(ctx, [exit.act, exit.id], exit.act === "archive" ? GATE_MS : SLOW_MS));
     return true;
   }
 
@@ -984,7 +1000,7 @@ export default function (pi: ExtensionAPI) {
   // These handlers only update the status line, so pi never waits for a slow rvow.
   pi.on("session_start", (_event, ctx) => {
     if (!toolsRegistered) {
-      registerTypedTools(pi);
+      acceptMemory = registerTypedTools(pi);
       toolsRegistered = true;
     }
     epoch++;
@@ -1221,15 +1237,20 @@ export default function (pi: ExtensionAPI) {
     return choice === undefined ? undefined : shown.get(choice);
   }
 
-  async function rvow(ctx: ExtensionContext, argv: string[]) {
-    const r = await run(argv, ctx.cwd, "", SLOW_MS);
+  async function rvow(ctx: ExtensionContext, argv: string[], timeoutMs = SLOW_MS) {
+    const r = await run(argv, ctx.cwd, "", timeoutMs);
     if (!r) ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
     return r;
   }
 
-  async function decide(ctx: ExtensionContext, argv: string[]) {
+  async function decide(
+    ctx: ExtensionContext,
+    argv: string[],
+    timeoutMs = SLOW_MS,
+    failedFollowUp = true,
+  ) {
     ctx.ui.setStatus("rvow", `rvow ${argv.join(" ")} ...`);
-    const r = await rvow(ctx, argv);
+    const r = await rvow(ctx, argv, timeoutMs);
     if (r) {
       ctx.ui.notify(
         r.out.trim() || `rvow ${argv.join(" ")}: done`,
@@ -1241,7 +1262,9 @@ export default function (pi: ExtensionAPI) {
           : argv[0] === "yolo"
             ? null
             : failedPrompt(argv, r.out);
-      if (prompt) pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+      // A repeat the memory caught tells the agent nothing new, so it sends no followUp.
+      if (prompt && (r.code === 0 || failedFollowUp))
+        pi.sendUserMessage(prompt, { deliverAs: "followUp" });
     }
     await refresh(ctx);
     return r;
@@ -1255,8 +1278,25 @@ export default function (pi: ExtensionAPI) {
       pi.sendUserMessage(failedPrompt(["review", id], r.out), { deliverAs: "followUp" });
       return r;
     }
-    if (!(await ctx.ui.confirm(`rvow ${id}`, `${r.out.trim()}\n\nAccept ${id}?`))) return;
-    return decide(ctx, ["accept", id]);
+    // A repeat the memory caught still runs and still asks: the user typed it. Its failure sends no
+    // followUp, since the agent already holds the reason from the accept tool.
+    const repeat = acceptMemory.remembered(id, r.out) !== null;
+    if (!(await ctx.ui.confirm(`rvow ${id}`, `${shortReview(r.out, id).trim()}\n\nAccept ${id}?`)))
+      return;
+    // The notice names the baseline count from the view, and the wait covers the
+    // plan's own budget: the sum of its task timeouts.
+    await refresh(ctx);
+    let budget: PlanBudget | null = null;
+    try {
+      budget = planBudget(S.view, id);
+    } catch {}
+    ctx.ui.notify(
+      budget
+        ? baselineNotice(budget.tasks)
+        : "rvow accept: baseline checks will run; this can take a while",
+      "info",
+    );
+    return decide(ctx, ["accept", id], budget ? acceptTimeoutMs(budget) : SLOW_MS, !repeat);
   }
 
   userCommand(
@@ -1295,7 +1335,7 @@ export default function (pi: ExtensionAPI) {
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
-    await decide(ctx, ["archive", arg]);
+    await decide(ctx, ["archive", arg], GATE_MS);
   });
 
   userCommand(

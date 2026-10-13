@@ -21,6 +21,107 @@ use crate::vow::{self, protected_files, requirement_hash, sha256_hex};
 /// text in an amendment so the user can review the change.
 const SHOW_LIMIT: usize = 8 * 1024;
 
+/// How long prove or gate waits for one missing grammar. A vendored or LAN
+/// base answers at once; a hung host fails fast, and drift keeps its strict
+/// rule and fetch hint.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Fetches the missing pinned grammars of the changed protected files into
+/// the cache, so the syntax compare can run. Only prove and gate call this;
+/// hooks, the view and amend stay cache-only. Every failure is ignored: a
+/// grammar that cannot load keeps the strict item and its fetch hint.
+pub fn fetch_missing_grammars(project: &Project, top: &Path, home: &Path, config: &Config, change: &Active) {
+    let base = std::env::var(crate::syntax::grammar::URL_VAR).ok().filter(|v| !v.is_empty());
+    if base.is_none() && crate::syntax::grammar::offline() {
+        return;
+    }
+    let Ok(protected_now) = protected_files(top, config) else { return };
+    let Ok(protected_then) = baseline_protected(project, change) else { return };
+    for (rel, hash) in &protected_then {
+        let Some(path) = protected_now.get(rel) else { continue };
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if &sha256_hex(&bytes) == hash {
+            continue;
+        }
+        let Some(entry) = crate::syntax::grammar::for_file(rel) else { continue };
+        if crate::syntax::grammar::cached(home, entry).is_some() {
+            continue;
+        }
+        // A failed fetch in the last hour is not retried here; the language
+        // stays like one with no grammar, and only `rvow grammar fetch` asks
+        // again.
+        let now = crate::ledger::now_ms();
+        if crate::syntax::grammar::fetch_recently_failed(home, entry, now, crate::syntax::grammar::FETCH_RETRY_WINDOW) {
+            continue;
+        }
+        match crate::syntax::grammar::acquire_with_timeout(home, entry, base.as_deref(), FETCH_TIMEOUT) {
+            Ok(_) => crate::syntax::grammar::clear_fetch_failure(home, entry),
+            Err(_) => crate::syntax::grammar::record_fetch_failure(home, entry, now),
+        }
+    }
+}
+
+/// The protected files and their hashes at the vow's baseline snapshot.
+fn baseline_protected(project: &Project, change: &Active) -> Result<BTreeMap<String, String>> {
+    let Some(base) = change.baseline() else {
+        return Ok(BTreeMap::new());
+    };
+    base.get("protected")
+        .and_then(Value::as_str)
+        .map(|h| object(project, h))
+        .transpose()?
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .map(Ok)
+        .unwrap_or(Ok(BTreeMap::new()))
+}
+
+/// How the syntax comparison of a protected file came out: same form (not
+/// drift), keeps the raw rule, or a grammar that could not load with the
+/// fix the drift item names.
+enum Syntax {
+    Same,
+    Raw,
+    Missing(&'static str, String),
+}
+
+/// Compares the syntax trees of a changed protected file. A file without a
+/// pinned grammar, or one that does not parse cleanly, keeps the raw rule.
+/// Never lets a missing grammar weaken drift: a load failure names the fix
+/// instead of reporting same.
+fn same_syntax(rel: &str, home: Option<&Path>, before: Option<&str>, after: Option<&str>) -> Syntax {
+    let Some(entry) = crate::syntax::grammar::for_file(rel) else {
+        return Syntax::Raw;
+    };
+    let (Some(before), Some(after)) = (before, after) else {
+        return Syntax::Raw;
+    };
+    let Some(home) = home else {
+        return Syntax::Missing(&entry.name, "rvow has no home; set RVOW_HOME to the rvow store".to_string());
+    };
+    // The comparison stays offline: compare only with a cached grammar. One
+    // that is missing keeps the raw rule and asks the user to fetch it.
+    if crate::syntax::grammar::cached(home, entry).is_none() {
+        return Syntax::Missing(
+            &entry.name,
+            format!(
+                "run `rvow grammar fetch {}`, or check {} when the download base is overridden",
+                entry.name,
+                crate::syntax::grammar::URL_VAR
+            ),
+        );
+    }
+    let base = std::env::var(crate::syntax::grammar::URL_VAR).ok().filter(|v| !v.is_empty());
+    let mut session = match crate::syntax::grammar::Session::new() {
+        Ok(s) => s,
+        Err(e) => return Syntax::Missing(&entry.name, e.fix),
+    };
+    match crate::syntax::canonical::compare(&mut session, home, entry, base.as_deref(), before, after) {
+        Ok(crate::syntax::canonical::Compare::Same) => Syntax::Same,
+        Ok(_) => Syntax::Raw,
+        Err(e) => Syntax::Missing(&entry.name, e.fix),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
@@ -136,6 +237,33 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
         let class = if new.files.iter().all(|g| inside(g, &scope)) { Class::Free } else { Class::Confirm };
         out.push(item(class, format!("{} added with files {}", new.id, new.files.join(", "))));
     }
+}
+
+/// A changed runner is weaken drift for each accepted task that uses it: the
+/// task's verify still says `@name`, but the command it runs is now what the
+/// config says, not what the user accepted. Only a runner the baseline
+/// recorded counts, so a runner no task uses changes freely. The runner edit
+/// is not a `config changed` item: the `[runners]` table stays out of the
+/// canonical config.
+fn runner_items(project: &Project, base: &Map<String, Value>, tasks: &[Task]) -> Vec<Item> {
+    let recorded = base.get("runners").and_then(Value::as_object);
+    let runners = crate::config::runners(project).unwrap_or_default();
+    let mut out = Vec::new();
+    for (task, names) in recorded.into_iter().flat_map(|m| m.iter()) {
+        // A task whose verify no longer names a runner changed its verify,
+        // which task_items already reports.
+        let uses = tasks.iter().any(|t| &t.id.to_string() == task && t.verify.as_deref().is_some_and(|v| v.starts_with('@')));
+        if !uses {
+            continue;
+        }
+        for (name, hash) in names.as_object().into_iter().flatten() {
+            let now = runners.get(name).map(|r| r.hash());
+            if now.as_deref() != hash.as_str() {
+                out.push(item(Class::Weaken, format!("{task} runner {name} changed")));
+            }
+        }
+    }
+    out
 }
 
 fn delta_map(files: &BTreeMap<String, String>) -> BTreeMap<String, (DeltaOp, String)> {
@@ -263,6 +391,14 @@ fn user_config_changed(config: &Config, base: &Map<String, Value>, before: &str,
 
 /// Every difference between the change's files and its baseline, weaken first.
 pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) -> Result<Vec<Item>> {
+    let home = crate::store::home_dir().ok();
+    drift_with_home(project, home.as_deref(), top, config, change)
+}
+
+/// Like `drift`, with the rvow home passed in. Callers that hold the home
+/// and tests with a temporary home use this and skip the `RVOW_HOME`
+/// lookup. A home of `None` keeps the missing-home item per file.
+pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, config: &Config, change: &Active) -> Result<Vec<Item>> {
     let Some(base) = change.baseline() else {
         return Ok(Vec::new());
     };
@@ -285,6 +421,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
 
     let old_tasks = baseline_tasks(project, change)?;
     task_items(&old_tasks, &loaded.tasks, &mut out);
+    out.extend(runner_items(project, base, &loaded.tasks));
 
     let prefix = format!("{DELTAS}/");
     let old_deltas: BTreeMap<String, String> =
@@ -313,13 +450,7 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
         }
     }
 
-    let protected_then: BTreeMap<String, String> = base
-        .get("protected")
-        .and_then(Value::as_str)
-        .map(|h| object(project, h))
-        .transpose()?
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+    let protected_then = baseline_protected(project, change)?;
     let protected_now = protected_files(top, config)?;
     let tests = globset(&config.test_globs)?;
     for (rel, hash) in &protected_then {
@@ -339,6 +470,16 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
                         && crate::guard::preserved(rel, o, n)
                     {
                         continue;
+                    }
+                    // A protected file whose two texts parse to the same
+                    // syntax tree only lost trivia, not code. It is not drift.
+                    match same_syntax(rel, home, old.as_deref(), new.as_deref()) {
+                        Syntax::Same => continue,
+                        Syntax::Missing(lang, hint) => {
+                            out.push(item(Class::Weaken, format!("{what} (the {lang} grammar could not load: {hint})")));
+                            continue;
+                        }
+                        Syntax::Raw => {}
                     }
                     out.push(match (old, new) {
                         (Some(o), Some(n)) if o.len() + n.len() <= SHOW_LIMIT => changed(Class::Weaken, what, &o, &n),
@@ -369,13 +510,16 @@ mod tests {
     use crate::git;
     use crate::proof::{self, tests::accepted};
 
-    fn drift_of(p: &Project, repo: &Path) -> Vec<(Class, String)> {
-        let home = p.root.parent().unwrap().parent().unwrap();
+    fn home_of(p: &Project) -> &Path {
+        p.root.parent().unwrap().parent().unwrap()
+    }
+
+    fn drift_of(p: &Project, home: &Path, repo: &Path) -> Vec<(Class, String)> {
         let (living, _) = change::load_living(p).unwrap();
         let changes = proof::active(p, &living).unwrap();
         let top = git::toplevel(repo).unwrap();
         let cfg = config::load(p, home).unwrap();
-        drift(p, &top, &cfg, &changes[0]).unwrap().into_iter().map(|i| (i.class, i.what)).collect()
+        drift_with_home(p, Some(home), &top, &cfg, &changes[0]).unwrap().into_iter().map(|i| (i.class, i.what)).collect()
     }
 
     fn active_dir(p: &Project) -> std::path::PathBuf {
@@ -403,7 +547,7 @@ mod tests {
     #[test]
     fn no_drift_right_after_accept() {
         let (_tmp, p, repo, _) = accepted();
-        assert_eq!(drift_of(&p, &repo), []);
+        assert_eq!(drift_of(&p, home_of(&p), &repo), []);
     }
 
     #[test]
@@ -418,7 +562,7 @@ mod tests {
         text.push_str("- TSK-new1 Inside\n  verify: true\n  files: out.txt\n");
         text.push_str("- TSK-new2 Outside\n  verify: true\n  files: **\n");
         std::fs::write(&tasks, text).unwrap();
-        let got = drift_of(&p, &repo);
+        let got = drift_of(&p, home_of(&p), &repo);
         assert_eq!(
             got,
             [
@@ -441,7 +585,7 @@ mod tests {
         std::fs::write(dir.join("specs/out.md"), text).unwrap();
         edit(&dir.join(PROPOSAL), "branch: main", "branch: other");
         std::fs::write(p.root.join("config.toml"), "base = \"trunk\"\n").unwrap();
-        let got: Vec<String> = drift_of(&p, &repo).into_iter().map(|(c, w)| format!("{}: {w}", c.name())).collect();
+        let got: Vec<String> = drift_of(&p, home_of(&p), &repo).into_iter().map(|(c, w)| format!("{}: {w}", c.name())).collect();
         assert!(got.contains(&"weaken: config changed".to_string()), "{got:?}");
         assert!(got.contains(&"weaken: new delta Remove REQ-zzzzzz".to_string()), "{got:?}");
         assert!(got.iter().any(|g| g.starts_with("confirm: requirement REQ-")), "{got:?}");
@@ -462,11 +606,21 @@ mod tests {
         let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         vow::commit(&p, prepared).unwrap();
 
-        assert_eq!(drift_of(&p, &repo), []);
+        // The bash grammar is not in a fresh grammar cache, so the changed
+        // protected file keeps the drift item and names the fetch command.
+        let cache_home = tmp.0.join("empty-grammar-home");
+        std::fs::create_dir_all(&cache_home).unwrap();
+        assert_eq!(drift_of(&p, &cache_home, &repo), []);
         std::fs::write(repo.join("tests/t.sh"), "exit 0 # weaker").unwrap();
         std::fs::write(repo.join("tests/new.sh"), "exit 0").unwrap();
-        assert_eq!(drift_of(&p, &repo), [(Class::Weaken, "protected file tests/t.sh changed".to_string())]);
+        assert_eq!(
+            drift_of(&p, &cache_home, &repo),
+            [(
+                Class::Weaken,
+                "protected file tests/t.sh changed (the bash grammar could not load: run `rvow grammar fetch bash`, or check RVOW_GRAMMAR_URL when the download base is overridden)".to_string()
+            )]
+        );
         std::fs::remove_file(repo.join("tests/t.sh")).unwrap();
-        assert_eq!(drift_of(&p, &repo), [(Class::Weaken, "protected file tests/t.sh removed".to_string())]);
+        assert_eq!(drift_of(&p, &cache_home, &repo), [(Class::Weaken, "protected file tests/t.sh removed".to_string())]);
     }
 }

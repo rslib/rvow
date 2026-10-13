@@ -121,6 +121,8 @@ pub struct Prepared {
     pub base_commit: String,
     pub config: Config,
     pub baseline: Vec<Baseline>,
+    /// The failed test names each task's JUnit report named, by task id.
+    pub junit: BTreeMap<String, Vec<String>>,
 }
 
 fn findings_error(code: &'static str, what: &str, items: &[String], fix: &str) -> Error {
@@ -205,10 +207,12 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
         ));
     }
 
-    let missing: Vec<String> = crate::plan::missing_programs(&top, &loaded.tasks)
-        .into_iter()
-        .map(|(task, prog)| format!("{task} runs {prog}, which is neither on PATH nor in the repository"))
-        .collect();
+    let runners = config::runners(project)?;
+    let missing: Vec<String> =
+        crate::plan::missing_programs_filled(&top, &loaded.tasks, &crate::plan::filled_commands(&runners, &loaded.tasks))
+            .into_iter()
+            .map(|(task, prog)| format!("{task} runs {prog}, which is neither on PATH nor in the repository"))
+            .collect();
     if !missing.is_empty() {
         return Err(findings_error(
             "missing-program",
@@ -220,12 +224,21 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
     let config = config::load(project, home)?;
     let base_commit = base_commit(&top, &config.base)?;
     let mut baseline = Vec::new();
+    let mut junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut refused = Vec::new();
     for task in &loaded.tasks {
-        let cmd = task.verify_command()?;
+        let plan = crate::template::plan(&runners, task)?;
+        if let Some(path) = plan.missing_need(&top) {
+            return Err(Error::new(
+                "needs",
+                format!("{} needs {}, which does not exist", task.id, path),
+                format!("configure {} first (for example with `cmake --preset ...`), then run rvow accept again", path),
+            ));
+        }
+        let cmd = plan.command.as_str();
         let _ = writeln!(echo, "baseline {}: {cmd}", task.id);
-        let timeout = task.timeout.unwrap_or(config.timeout());
-        let outcome = runner::run(cmd, &top, &[], timeout, echo)?;
+        let timeout = task.timeout.or(plan.timeout).unwrap_or(config.timeout());
+        let outcome = runner::run(cmd, &top, &plan.env, timeout, echo)?;
         let ran_tests = outcome.tests_run != Some(0);
         if outcome.passed() && ran_tests && !task.baseline_pass {
             refused.push(format!(
@@ -237,6 +250,33 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
         if task.baseline_pass && !outcome.passed() {
             refused.push(format!("{} says baseline: pass but fails now: {cmd}", task.id));
         }
+        // A runner that names {junit} writes a report: the failed test names
+        // it holds are the task's proof target, so it must name at least one.
+        // A `baseline: pass` task instead needs a report with at least one
+        // passed case and no failed one, and records no names.
+        if let Some(report) = &plan.junit {
+            match crate::junit::read(report) {
+                Ok(cases) if task.baseline_pass => {
+                    if let Some(bad) = cases.iter().find(|c| c.failed) {
+                        refused.push(format!("{}: the test {} failed, but the task says baseline: pass", task.id, bad.name));
+                    } else if cases.is_empty() {
+                        refused.push(format!("{}: its JUnit report names no test cases, but the task says baseline: pass", task.id));
+                    }
+                    junit.insert(task.id.to_string(), Vec::new());
+                }
+                Ok(cases) => {
+                    let failed: Vec<String> = cases.iter().filter(|c| c.failed).map(|c| c.name.clone()).collect();
+                    if failed.is_empty() {
+                        refused.push(format!("{}: its JUnit report names no failed test, so no test is the proof target", task.id));
+                    }
+                    junit.insert(task.id.to_string(), failed);
+                }
+                Err(e) => {
+                    refused.push(format!("{}: {}", task.id, e.message));
+                    junit.insert(task.id.to_string(), Vec::new());
+                }
+            }
+        }
         baseline.push(Baseline { task: task.id.clone(), outcome });
     }
     if !refused.is_empty() {
@@ -247,7 +287,7 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
             "make each check fail before the work, or mark a check that must stay green with baseline: pass",
         ));
     }
-    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline })
+    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit })
 }
 
 /// The result of a vow.
@@ -369,7 +409,23 @@ pub fn snapshot(project: &Project, top: &Path, config: &Config, loaded: &Loaded,
     data.insert("tasks".into(), tasks.into());
     data.insert("requirements".into(), requirements.into());
     data.insert("protected".into(), put_object(project, Value::Object(protected).to_string().as_bytes())?.into());
+    data.insert("runners".into(), runner_record(project, loaded)?);
     Ok(data)
+}
+
+/// The hash of each runner a task names, keyed by task id and runner name,
+/// for runner drift. Only a runner some task uses is recorded, so a runner
+/// that no task names can change with no drift.
+pub fn runner_record(project: &Project, loaded: &Loaded) -> Result<Value> {
+    let runners = config::runners(project)?;
+    let mut out = Map::new();
+    for task in &loaded.tasks {
+        let Some((name, _)) = crate::template::reference(task.verify.as_deref().unwrap_or("")) else { continue };
+        if let Some(runner) = runners.get(name) {
+            out.insert(task.id.to_string(), json!({ name: runner.hash() }));
+        }
+    }
+    Ok(Value::Object(out))
 }
 
 /// The living hash of each requirement that a CHANGE, DEPRECATE, MOVE or
@@ -391,7 +447,7 @@ pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
 
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
-    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline } = prepared;
+    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit } = prepared;
     let lock = project.lock()?;
 
     let minted = mint_placeholders(project, &lock, &change, &loaded)?;
@@ -416,6 +472,14 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     data.insert("base_commit".into(), base_commit.into());
     data.insert("bases".into(), bases(&loaded, &living).into());
     data.insert("baseline".into(), baseline.into());
+    let junit: Map<String, Value> = junit
+        .into_iter()
+        .map(|(task, names)| {
+            let key = minted_names.get(&task).cloned().unwrap_or(task);
+            (key, Value::Array(names.into_iter().map(Value::String).collect()))
+        })
+        .collect();
+    data.insert("junit".into(), junit.into());
     let event = ledger::append(&change.path.join(LEDGER), &lock, Kind::Vow, data)?;
 
     let dest = project.root.join(Stage::Active.dir()).join(change::file_name(&change.path)?);

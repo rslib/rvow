@@ -25,12 +25,14 @@ use crate::yolo::{self, Tier, YOLO_FILE};
 mod rule;
 mod shell;
 mod stop_state;
+mod store_guard;
 mod streak;
 pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
 pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
 use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
+use store_guard::{bash_store_denial, store_denial};
 
 use rule::denial;
 
@@ -131,27 +133,42 @@ fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
     (!config.allowed_signers.is_empty()).then(|| top.join(&config.allowed_signers))
 }
 
-/// True when `path` is a committed test file: a regular file, not a symlink,
-/// inside the repository at `top`, that matches the config test globs, is
-/// tracked and has no staged or unstaged change against HEAD. The path is
-/// resolved against `cwd`, canonicalized, and must lie inside `top`. Any
-/// failure means false, so the text check still runs.
-fn committed_test_file(project: &Project, top: Option<&Path>, path: &Path) -> bool {
-    let Some(top) = top else { return false };
+/// The text of `path` that the owner-command check reads: `None` for a clean
+/// committed test file, only the lines added against HEAD for a tracked
+/// test-glob file with changes, and the whole file for every other case. The
+/// path is resolved against `cwd`, canonicalized, and must lie inside `top`.
+/// Any path failure or git failure means the whole file, so the check fails
+/// closed.
+fn committed_test_text(project: &Project, top: Option<&Path>, path: &Path) -> Option<String> {
+    let whole = || std::fs::read_to_string(path).ok();
+    let Some(top) = top else { return whole() };
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return false;
+        return whole();
     }
-    let Ok(path) = path.canonicalize() else { return false };
-    let Ok(top) = top.canonicalize() else { return false };
-    let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return false };
-    let Ok(home) = crate::store::home_dir() else { return false };
-    let Ok(config) = config::load(project, &home) else { return false };
-    let Ok(tests) = fingerprint::globset(&config.test_globs) else { return false };
+    let Ok(path) = path.canonicalize() else { return whole() };
+    let Ok(top) = top.canonicalize() else { return whole() };
+    let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return whole() };
+    let Ok(home) = crate::store::home_dir() else { return whole() };
+    let Ok(config) = config::load(project, &home) else { return whole() };
+    let Ok(tests) = fingerprint::globset(&config.test_globs) else { return whole() };
     if !tests.is_match(rel) {
-        return false;
+        return whole();
     }
-    git::run(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).is_ok()
-        && git::run(&top, &["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", rel]).is_ok()
+    if git::run(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).is_err() {
+        return whole();
+    }
+    match git::run(&top, &["--literal-pathspecs", "diff", "--no-color", "-U0", "HEAD", "--", rel]) {
+        // A clean committed test file is data; none of it is read.
+        Ok(diff) if diff.is_empty() => None,
+        Ok(diff) => Some(added_lines(&diff)),
+        Err(_) => whole(),
+    }
+}
+
+/// The '+' lines of a unified diff without the '+++' header, each without its
+/// '+' prefix.
+fn added_lines(diff: &str) -> String {
+    diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).map(|l| &l[1..]).collect::<Vec<_>>().join("\n")
 }
 
 /// Files outside any repository that enforce rvow: the installed mod, Claude
@@ -542,10 +559,11 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
         let top = git::toplevel(&cwd).ok();
         let trust = top.as_deref().and_then(|t| signers_path(project, t));
-        let committed = |path: &Path| committed_test_file(project, top.as_deref(), path);
+        let committed = |path: &Path| committed_test_text(project, top.as_deref(), path);
         let found = bash_rule(c)
             .or_else(|| shell::script_rule_committed(c, &cwd, &committed))
             .or_else(|| glob_denial(c, &cwd, top.as_deref(), trust.as_deref()))
+            .or_else(|| bash_store_denial(project, &cwd, c))
             .or_else(|| bash_secret_rule(c, &secret_paths()))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
         return match (found, input.get("agent_id").and_then(Value::as_str)) {
@@ -554,11 +572,14 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
     }
     let files = file_args(&args);
-    // The hidden checks are closed to every tool. The stats, lease, yolo and cache files are only closed to writes.
+    // The hidden checks are closed to every tool. The plan files of the store are closed to direct
+    // reads, and the stats, lease, yolo and cache files are only closed to writes.
     let writer = writes_files(tool);
-    if let Some(found) =
-        files.iter().find_map(|f| secret_denial(&cwd, f).or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten()))
-    {
+    if let Some(found) = files.iter().find_map(|f| {
+        secret_denial(&cwd, f)
+            .or_else(|| (!writer).then(|| store_denial(project, &cwd, f, false)).flatten())
+            .or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten())
+    }) {
         return Ok(Some(found));
     }
     if !writes_files(tool) {
@@ -567,6 +588,9 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
     let agent = input.get("agent_id").and_then(Value::as_str);
     for f in &files {
         let mut found = edit_rule(project, &git::toplevel(&cwd)?, &cwd, f)?;
+        if found.is_none() {
+            found = store_denial(project, &cwd, f, true);
+        }
         if found.is_none()
             && let Some(agent) = agent
         {
@@ -700,8 +724,11 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
         if pending.iter().any(|p| p.change == c.dir.id) {
             continue;
         }
-        let blocking: Vec<String> =
-            drift::drift(project, &top, &config, c)?.into_iter().filter(|i| i.class.blocks()).map(|i| i.what).collect();
+        let blocking: Vec<String> = drift::drift_with_home(project, Some(home), &top, &config, c)?
+            .into_iter()
+            .filter(|i| i.class.blocks())
+            .map(|i| i.what)
+            .collect();
         if !blocking.is_empty() {
             let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
             let mut shown = blocking[..blocking.len() - more].join("; ");
@@ -816,7 +843,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
                 proved += 1;
             }
         }
-        drift_count += drift::drift(project, &top, &config, c)?.iter().filter(|i| i.class.blocks()).count();
+        drift_count += drift::drift_with_home(project, Some(home), &top, &config, c)?.iter().filter(|i| i.class.blocks()).count();
     }
     let pending = amend::pending(&changes).len();
     let name = match queue.as_slice() {
@@ -982,7 +1009,9 @@ mod tests {
         let denied = edit(&p, &repo, "src/lib.rs").unwrap();
         let reason = denied["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
         assert!(reason.contains(&c.id.to_string()), "{reason}");
-        assert_eq!(edit(&p, &repo, c.path.join("tasks.md").to_str().unwrap()), None);
+        let plan_file = edit(&p, &repo, c.path.join("tasks.md").to_str().unwrap()).unwrap();
+        let reason = plan_file["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("rvow put"), "{reason}");
 
         std::fs::write(c.path.join("tasks.md"), "- TSK-new1 T\n  verify: false\n  files: src/**\n").unwrap();
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
@@ -1079,7 +1108,7 @@ mod tests {
         let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
         let home = tmp.0.join("home");
         let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
-        let c = change::new(&p, "T", "main", true).unwrap();
+        let _c = change::new(&p, "T", "main", true).unwrap();
         // An edit before the plan is accepted is enforced and is not tampering, so the backstop applies.
         let denied = || call(&p, &repo, "src/lib.rs", "s2");
         assert_eq!(decision(&denied()), Some("deny"));
@@ -1087,7 +1116,10 @@ mod tests {
         assert_eq!(decision(&denied()), Some("deny"));
         assert_eq!(decision(&denied()), Some("ask"));
         assert_eq!(decision(&denied()), Some("deny"), "the streak starts again after a question");
-        assert_eq!(call(&p, &repo, c.path.join("tasks.md").to_str().unwrap(), "s2"), None);
+        // A read is still allowed before accept, and it ends the streak.
+        let allowed =
+            json!({"cwd": repo.to_str().unwrap(), "session_id": "s2", "tool_name": "Read", "tool_input": {"file_path": "src/lib.rs"}});
+        assert_eq!(claude_pre_tool_use(&p, &allowed).unwrap(), None);
         assert_eq!(decision(&denied()), Some("deny"));
         assert_eq!(stats::counts(&p, 1, crate::ledger::now_ms()).asks, 1);
     }
@@ -1117,7 +1149,8 @@ mod tests {
 
         assert_eq!(edit(&p, &repo, "tests/new.sh"), None);
         assert_eq!(edit(&p, &repo, "src/lib.rs"), None);
-        assert_eq!(edit(&p, &repo, vowed.path.join("tasks.md").to_str().unwrap()), None);
+        let plan_file = edit(&p, &repo, vowed.path.join("tasks.md").to_str().unwrap()).unwrap();
+        assert!(plan_file["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("rvow put"));
 
         let bash = json!({"cwd": repo.to_str().unwrap(), "tool_name": "Bash", "tool_input": {"command": "rvow accept x"}});
         let out = claude_pre_tool_use(&p, &bash).unwrap().unwrap();
@@ -1156,7 +1189,7 @@ mod tests {
         let archived = reason(p.root.join("archive/done/2026-10-01-CHG-7k2mq8-x/tasks.md"));
         assert!(archived.unwrap().contains("history"));
         let c = change::new(&p, "T", "main", false).unwrap();
-        assert_eq!(reason(c.path.join("specs/cap.md")), None);
+        assert!(reason(c.path.join("specs/cap.md")).unwrap().contains("rvow put"));
     }
 
     #[test]

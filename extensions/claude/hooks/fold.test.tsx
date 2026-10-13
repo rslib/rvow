@@ -1,5 +1,6 @@
 import type { MountTarget } from 'claude-code/testing'
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
+import { test } from './testkit'
 
 const row = (command: string, text: string): MountTarget<'terminal', 'CommandOutput'> => ({
   plugin: 'rvow',

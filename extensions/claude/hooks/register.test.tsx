@@ -1,8 +1,8 @@
 import type { On } from 'claude-code'
 import type { Engine, Mounted } from 'claude-code/testing'
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock } from 'claude-code/testing'
 import { decisionPrompt, REFINE_STEPS } from './format'
-import { band, cmd, PLACED, pane, procResult } from './testkit'
+import { band, cmd, PLACED, pane, procResult, test } from './testkit'
 
 const CHANGE = {
   id: 'CHG-1',

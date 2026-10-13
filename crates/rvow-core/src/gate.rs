@@ -22,7 +22,7 @@ mod signature;
 
 use check::check_backlog_scope;
 use check::check_scope;
-use rerun::{Lazy, Scope, changed_files, prove_data};
+use rerun::{Lazy, Reran, Scope, changed_files, prove_data};
 
 #[cfg(test)]
 use crate::change::Stage;
@@ -60,6 +60,14 @@ impl Report {
     }
 }
 
+/// Whether the gate may read its cache and whether it may write a new check
+/// pass. Archive holds the project lock and must not write.
+#[derive(Debug, Clone, Copy)]
+struct Caching {
+    use_cache: bool,
+    record: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     pub strict: bool,
@@ -70,12 +78,12 @@ pub struct Options {
 
 /// Checks the active changes of the current branch.
 pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, true, echo)
+    gate_for(project, home, cwd, opts, None, Caching { use_cache: true, record: true }, echo)
 }
 
 /// Like `gate`, but a rerun runs every task and ignores the cache.
 pub fn gate_uncached(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, false, echo)
+    gate_for(project, home, cwd, opts, None, Caching { use_cache: false, record: true }, echo)
 }
 
 fn gate_for(
@@ -84,9 +92,10 @@ fn gate_for(
     cwd: &Path,
     opts: Options,
     target: Option<&crate::id::Id>,
-    use_cache: bool,
+    caching: Caching,
     echo: &mut dyn Write,
 ) -> Result<Report> {
+    let (use_cache, record) = (caching.use_cache, caching.record);
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -116,6 +125,7 @@ fn gate_for(
     r.changes = queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)).count();
 
     let config = config::load(project, home)?;
+    let runners = config::runners(project)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         check_change(project, c, &now, &opts, &mut r)?;
@@ -134,11 +144,11 @@ fn gate_for(
     }
 
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
+    let policy = config::cache_policy(project, home)?;
     let mut run_dir = top.clone();
     let scope;
     let _keep_tree;
     if opts.rerun {
-        let policy = config::cache_policy(project, home)?;
         let links = config::rerun_links(project, home)?;
         let linked = !links.is_empty() && !policy.with_links;
         if use_cache && opts.out.is_none() && linked {
@@ -186,7 +196,7 @@ fn gate_for(
                             && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
                             && ignored.is_none();
                         let sealed = seal_key.as_deref().is_some_and(|key| sealed_proof(c, &t.id.to_string(), key));
-                        let mismatch = if trusted && sealed { program_mismatch(c, t) } else { None };
+                        let mismatch = if trusted && sealed { program_mismatch(c, t, &runners) } else { None };
                         if trusted && !sealed {
                             r.warnings.push(format!("{}: the newest proof has no valid seal, so it is rerun", t.id));
                         } else if let Some(name) = &mismatch {
@@ -247,16 +257,59 @@ fn gate_for(
             }
             let Some(dir) = lazy.dir(&mut r, echo)? else { return Ok(r) };
             let inputs = run_projection.as_ref().map(|(_, now)| now.inputs(t)).transpose()?;
-            let cmd = t.verify.as_deref().unwrap_or("");
+            let plan = match crate::template::plan(&runners, t) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    r.failures.push(format!("{id} cannot fill its runner verify: {}", e.message));
+                    continue;
+                }
+            };
+            if let Some(path) = plan.missing_need(&dir) {
+                r.failures.push(format!("{id} needs {path}, which does not exist; configure it first"));
+                continue;
+            }
+            let cmd = plan.command.clone();
+            let mut env = env.clone();
+            env.extend(plan.env.iter().cloned());
             let _ = writeln!(echo, "rerun {id}: {cmd}");
-            let o = runner::run(cmd, &dir, &env, t.timeout.unwrap_or(config.timeout()), echo)?;
+            let o = runner::run(&cmd, &dir, &env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), echo)?;
+            // A runner that names {junit} answers by the same rule as prove:
+            // the recorded names must pass and no case may fail. A junit
+            // failure caches nothing, so the next gate runs it again.
+            // A `baseline: pass` task holds the same rule as at prove: the
+            // report must name a passed case and no failed one.
+            let junit_error: Option<String> = match &plan.junit {
+                Some(report) => {
+                    let check = if t.baseline_pass {
+                        crate::junit::check_baseline_pass(report)
+                    } else {
+                        crate::junit::check(report, &proof::junit_recorded(c, &id))
+                    };
+                    match check {
+                        crate::junit::Check::Passed => None,
+                        crate::junit::Check::Failed(why) => Some(why),
+                    }
+                }
+                None => None,
+            };
+            if let Some(why) = &junit_error {
+                r.failures.push(format!("{id} failed on rerun (junit: {why})"));
+            }
             r.timings.push((id.clone(), o.duration_ms));
-            if let (Some(cache), Some(key)) = (&mut cache, key) {
+            if junit_error.is_none()
+                && let (Some(cache), Some(key)) = (&mut cache, key)
+            {
                 let lock = project.lock()?;
                 cache.record_pass(&lock, &id, key, &o, &proof::machine(&config).to_string())?;
             }
             if let (Some((folder, run_now)), Some(inputs)) = (&run_projection, &inputs) {
-                r.runs.push(Run { project: folder.clone(), change: c.dir.id.to_string(), data: prove_data(c, t, &o, run_now, inputs) });
+                let stamp = proof::runner_stamp(&runners, t);
+                let ran = Reran { cmd: &cmd, junit_failed: junit_error.is_some(), runner: stamp.as_deref() };
+                r.runs.push(Run {
+                    project: folder.clone(),
+                    change: c.dir.id.to_string(),
+                    data: prove_data(c, t, &o, run_now, inputs, &ran),
+                });
             }
             if !(o.passed() && o.tests_run != Some(0)) {
                 let why = if o.timed_out {
@@ -278,23 +331,76 @@ fn gate_for(
         scope = Scope::new(&top, &config.base, &[])?;
         _keep_tree = None;
     }
+    // The check cache shares the task cache file, so it opens after the rerun
+    // block has closed its own handle. It applies only to a check that ran in
+    // the repository itself, not in the clean rerun worktree.
+    let check_on = use_cache && !policy.off && run_dir == top;
+    let check_tools = if check_on { cache::tool_fingerprint(project, home)? } else { None };
+    let mut check_cache = if check_on { Some(cache::Cache::open(project, home)?) } else { None };
+    if let Some(cache) = &check_cache
+        && !opts.rerun
+    {
+        r.warnings.extend(cache.warnings().iter().cloned());
+    }
+    let dirty = if check_on { changed_files(&top, "HEAD")? } else { Vec::new() };
     for step in &config.checks {
         if !scope.wants(step)? {
             continue;
         }
         let cmd = step.run();
+        let clean = clean_in_scope(step, &dirty)?;
+        let key = if clean { cache::check_key(&top, cmd, check_tools.as_ref())? } else { None };
+        if let (Some(cache), Some(key)) = (&check_cache, &key)
+            && cache.lookup(cmd, key, crate::ledger::now_ms(), policy.max_age.as_millis() as u64).is_some()
+        {
+            let _ = writeln!(echo, "cached check: {cmd}");
+            continue;
+        }
         let _ = writeln!(echo, "check: {cmd}");
         let o = runner::run(cmd, &run_dir, &env, config.timeout(), echo)?;
+        let _ = writeln!(echo, "check done: {cmd} ({} ms)", o.duration_ms);
         if !o.passed() {
             r.failures.push(format!("check failed: {cmd}"));
+        } else if clean
+            && record
+            && let (Some(cache), Some(key)) = (&mut check_cache, &key)
+        {
+            let lock = project.lock()?;
+            cache.record_pass(&lock, cmd, key, &o, &proof::machine(&config).to_string())?;
         }
     }
     Ok(r)
 }
+
+/// Whether `step`'s scope has no uncommitted change, counting new untracked
+/// files: its own `files` globs, or the whole tree for a plain check.
+fn clean_in_scope(step: &config::Step, dirty: &[String]) -> Result<bool> {
+    match step.files() {
+        Some(globs) => {
+            let set = fingerprint::globset(globs)?;
+            Ok(!dirty.iter().any(|f| set.is_match(f)))
+        }
+        None => Ok(dirty.is_empty()),
+    }
+}
 /// Checks repository integrity and scope while requiring proofs only for the
 /// selected change, so other unfinished changes can remain on the branch.
 pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Result<Report> {
-    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, &mut std::io::sink())
+    change_gate_echo(project, home, cwd, c, &mut std::io::sink())
+}
+
+/// Like `change_gate`, with the echo the checks stream to: archive passes
+/// stderr, so the user sees each check while it runs instead of silence.
+pub fn change_gate_echo(project: &Project, home: &Path, cwd: &Path, c: &Active, echo: &mut dyn Write) -> Result<Report> {
+    gate_for(
+        project,
+        home,
+        cwd,
+        Options { strict: true, rerun: false, out: None },
+        Some(&c.dir.id),
+        Caching { use_cache: true, record: false },
+        echo,
+    )
 }
 
 /// The first git-ignored file that matches `t`'s `files:` outside every
@@ -353,12 +459,12 @@ fn sealed_proof(c: &Active, id: &str, key: &[u8]) -> bool {
 /// The first program of `t`'s verify command whose resolved path or content
 /// differs from the newest proof. A missing `programs` record counts as a
 /// mismatch, so a proof from before programs existed reruns.
-fn program_mismatch(c: &Active, t: &crate::tasks::Task) -> Option<String> {
+fn program_mismatch(c: &Active, t: &crate::tasks::Task, runners: &BTreeMap<String, crate::template::Runner>) -> Option<String> {
     let recorded: BTreeMap<String, serde_json::Value> = newest_prove(c, &t.id.to_string())
         .and_then(|e| e.data.get("programs"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let current = proof::verify_programs(t.verify.as_deref().unwrap_or(""));
+    let current = proof::verify_programs(&crate::template::plan(runners, t).map(|p| p.command.clone()).unwrap_or_default());
     if recorded == current {
         return None;
     }

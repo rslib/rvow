@@ -1,5 +1,18 @@
 import type { CommandRunInput, OpEventResult, ProcessRunResult, PromptOrigin } from 'claude-code'
-import type { MountTarget } from 'claude-code/testing'
+import type { MountTarget, TestRest } from 'claude-code/testing'
+import { test as kitTest } from 'claude-code/testing'
+
+export const TEST_MS = 30_000
+
+export const test: (name: string, ...rest: TestRest) => void = (name, ...rest) => {
+  if (rest.length === 1) {
+    const [body] = rest
+    kitTest(name, { timeoutMs: TEST_MS }, body)
+  } else {
+    const [options, body] = rest
+    kitTest(name, { timeoutMs: TEST_MS, ...options }, body)
+  }
+}
 
 export const COMPOSER: PromptOrigin = { kind: 'composer' }
 

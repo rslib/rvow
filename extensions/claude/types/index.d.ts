@@ -59,6 +59,8 @@ declare module 'claude-code' {
       view: RvowView | null
       /** Plan ids whose card shows the review checklist. */
       review: Record<string, boolean>
+      /** Last failed or declined accept per plan: the review text and the reason. */
+      'accept-memory': Record<string, { review: string; reason: string }>
       /** The `rvow confirm` listing while the amendments are under review. */
       amendments: string | null
       notice: RvowNotice | null

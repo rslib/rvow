@@ -192,7 +192,17 @@ pub fn path(id: &str) -> Result<Reply> {
 
 pub fn show(id: &str, full: bool) -> Result<Reply> {
     let home = store::home_dir()?;
-    Ok(Reply::long(show::show(&project(&home)?, id)?, full, &format!("rvow show {id}")))
+    let cwd = cwd()?;
+    Ok(Reply::long(show::show_full(&project(&home)?, &home, &cwd, id)?, full, &format!("rvow show {id}")))
+}
+
+/// The full text of one part of a change, or a usage error on exit 2.
+pub fn show_part(id: &str, part: &str, full: bool) -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let dir = change::resolve(&p, id)?;
+    let text = show::change_part(&p, &dir, part)?;
+    Ok(Reply::long(text, full, &format!("rvow show {id} {part}")))
 }
 
 pub fn spec_list() -> Result<Reply> {

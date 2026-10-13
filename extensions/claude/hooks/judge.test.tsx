@@ -1,8 +1,8 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import { JUDGE_AGENT, JUDGE_KEPT, JUDGE_NO_FINDINGS, JudgeInbox } from './format'
-import { cmd, procResult } from './testkit'
+import { cmd, procResult, test } from './testkit'
 
 const ID = 'CHG-judge1'
 const PACKET = 'pkt-abc123'

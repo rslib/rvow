@@ -19,7 +19,8 @@ use crate::tasks::Task;
 use crate::vow::{sha256_hex, task_hash};
 
 pub const CACHE_FILE: &str = "rerun-cache.jsonl";
-const KEY_FORMAT: u32 = 1;
+const KEY_FORMAT: u32 = 2;
+const CHECK_KEY_FORMAT: u32 = 1;
 const BAD_MAC: &str = "has an invalid MAC";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +181,26 @@ fn tool_hash(name: &str) -> Option<String> {
     tool_id(name).map(|(_, hash)| hash)
 }
 
+/// The `tools` map shared by the task and check cache keys. `None` when a
+/// listed tool is missing, so the caller must not cache.
+pub fn tool_fingerprint(project: &Project, home: &Path) -> Result<Option<BTreeMap<String, String>>> {
+    let mut tools = BTreeMap::new();
+    for name in config::tools(project, home)? {
+        let Some(hash) = tool_hash(&name) else { return Ok(None) };
+        tools.insert(name, hash);
+    }
+    Ok(Some(tools))
+}
+
+/// The key of a check result: the command text, the HEAD tree id and the tool
+/// fingerprint. `None` when a listed tool is missing.
+pub fn check_key(top: &Path, cmd: &str, tools: Option<&BTreeMap<String, String>>) -> Result<Option<String>> {
+    let Some(tools) = tools else { return Ok(None) };
+    let tree = git::run(top, &["rev-parse", "HEAD^{tree}"])?;
+    let value = serde_json::json!([CHECK_KEY_FORMAT, env!("CARGO_PKG_VERSION"), cmd, tree.trim(), tools]);
+    Ok(Some(sha256_hex(value.to_string().as_bytes())))
+}
+
 /// The cache key of a task, or `None` when the task must not be cached: an
 /// `env` command failed or a listed tool is missing. The tree comes from HEAD,
 /// which the gate's clean worktree matches, so no file is read.
@@ -195,11 +216,7 @@ pub fn cache_key(
     if env.commands.values().any(|v| v.starts_with("failed: ")) {
         return Ok(None);
     }
-    let mut tools = BTreeMap::new();
-    for name in config::tools(project, home)? {
-        let Some(hash) = tool_hash(&name) else { return Ok(None) };
-        tools.insert(name, hash);
-    }
+    let Some(tools) = tool_fingerprint(project, home)? else { return Ok(None) };
     let listing = git::run(top, &["ls-tree", "-r", "-z", "HEAD"])?;
     let tree: Vec<(&str, &str, &str)> = listing
         .split('\0')
@@ -223,6 +240,11 @@ pub fn cache_key(
     globs.extend(config.inputs.iter().cloned());
     let scope = fingerprint::globset(&globs)?;
     let files: Vec<&(&str, &str, &str)> = tree.iter().filter(|(_, _, path)| scope.is_match(path)).collect();
+    // A runner change keeps the verify text but runs a new command, so the
+    // runner stamp keys the entry: the old proof's cache entry goes stale.
+    // A verify that names no known runner keys on nothing, as before.
+    let runners = config::runners(project)?;
+    let runner = crate::proof::runner_stamp(&runners, task);
     let value = serde_json::json!([
         KEY_FORMAT,
         env!("CARGO_PKG_VERSION"),
@@ -235,6 +257,7 @@ pub fn cache_key(
         env.vars,
         config.rerun_env,
         tools,
+        runner,
     ]);
     Ok(Some(sha256_hex(value.to_string().as_bytes())))
 }

@@ -74,6 +74,9 @@ pub(crate) fn check_record(project: &Project, living: &[CapSpec], r: &mut Report
 }
 
 pub(crate) fn check_change(project: &Project, c: &Active, now: &Now, opts: &Options, r: &mut Report) -> Result<()> {
+    if let Ok(home) = crate::store::home_dir() {
+        drift::fetch_missing_grammars(project, now.top, &home, now.config, c);
+    }
     let id = &c.dir.id;
     for (path, d) in c.loaded.errors() {
         r.failures.push(format!("{id}: {path}:{}: {}", d.line, d.message));

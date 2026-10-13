@@ -169,7 +169,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         ));
     }
 
-    let r = gate::change_gate(project, home, cwd, c)?;
+    let r = gate::change_gate_echo(project, home, cwd, c, &mut std::io::stderr())?;
     if !r.passed() {
         return Err(Error::new(
             "gate",

@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { expect, mock, test } from 'claude-code/testing'
-import { cmd, procResult } from './testkit'
+import { expect, mock } from 'claude-code/testing'
+import { cmd, procResult, test } from './testkit'
 
 let clock: { advance: (ms: number) => Promise<void> }
 

@@ -1,0 +1,402 @@
+# Pinned tree-sitter grammars. Every entry names a prebuilt .wasm uploaded to
+# a GitHub release and the sha256 of the exact bytes, recomputed from a fresh
+# download. rvow loads a grammar only when the hash of the cache file or the
+# download matches, so a wrong or tampered file is refused. Languages whose
+# releases hold no loadable .wasm are left out on purpose.
+
+[[grammar]]
+name = "agda"
+ext = ["agda"]
+url = "https://github.com/tree-sitter/tree-sitter-agda/releases/download/v1.3.3/tree-sitter-agda.wasm"
+sha256 = "8d88926c064b19b756814b6633090e0a63674675e6663ff81b6cf16ec7c60d6e"
+
+[[grammar]]
+name = "arduino"
+ext = ["ino"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-arduino/releases/download/v0.24.0/tree-sitter-arduino.wasm"
+sha256 = "905a6e00a8c6baa9a2159a6a92f844a9baba8eebad5601ab7da8a2ee9713725c"
+
+[[grammar]]
+name = "bash"
+ext = ["bash", "sh"]
+url = "https://github.com/tree-sitter/tree-sitter-bash/releases/download/v0.25.1/tree-sitter-bash.wasm"
+sha256 = "8292919c88a0f7d3fb31d0cd0253ca5a9531bc1ede82b0537f2c63dd8abe6a7a"
+
+[[grammar]]
+name = "bicep"
+ext = ["bicep"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-bicep/releases/download/v1.1.0/tree-sitter-bicep.wasm"
+sha256 = "96ccf664c9253400fffff0f4aae9b510e5b8b2f5d1f6f96ef5f7c235da2ca4e7"
+
+[[grammar]]
+name = "c"
+ext = ["c", "h"]
+url = "https://github.com/tree-sitter/tree-sitter-c/releases/download/v0.24.2/tree-sitter-c.wasm"
+sha256 = "83e8d7902b9d7f8c7c5cd4bd9acb5c7eb5faf42c09f85546b183964d3b5f48f9"
+
+[[grammar]]
+name = "c_sharp"
+ext = ["cs"]
+url = "https://github.com/tree-sitter/tree-sitter-c-sharp/releases/download/v0.23.5/tree-sitter-c_sharp.wasm"
+sha256 = "6f69e1cae44e1c32c1eccc170dc5a9778fb94ff716f71113fe1f8c4299aa2f40"
+
+[[grammar]]
+name = "chatito"
+ext = ["chatito"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-chatito/releases/download/v0.5.0/tree-sitter-chatito.wasm"
+sha256 = "55446cb3ed40cf8ab9855ce45f0f4aef628bf7f08bd5b582324bb1b24a9f64fe"
+
+[[grammar]]
+name = "chatl"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-chatito/releases/download/v0.5.0/tree-sitter-chatl.wasm"
+sha256 = "65274be2ee9d6af7df5625405a100466a67cb2b34fae72458f6161e3ea605a71"
+
+[[grammar]]
+name = "cpp"
+ext = ["cc", "cpp", "cxx", "hpp", "hxx"]
+url = "https://github.com/tree-sitter/tree-sitter-cpp/releases/download/v0.23.4/tree-sitter-cpp.wasm"
+sha256 = "174eb0deb75b2ec7881bcacda9f995648d8e683956e5c2267e69ab6dc503fcbf"
+
+[[grammar]]
+name = "css"
+ext = ["css"]
+url = "https://github.com/tree-sitter/tree-sitter-css/releases/download/v0.25.0/tree-sitter-css.wasm"
+sha256 = "8a23977fe271357cce6f254ef88c9bebf3854602d8046605aef6a45c02135c59"
+
+[[grammar]]
+name = "cst"
+ext = ["cst"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-cst/releases/download/v0.1.0/tree-sitter-cst.wasm"
+sha256 = "e9665d2d59c9db9c68ee82831f157effa759aac9477c2dbab79c982b591823cb"
+
+[[grammar]]
+name = "diff"
+ext = ["diff", "patch"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-diff/releases/download/v0.2.0/tree-sitter-diff.wasm"
+sha256 = "81235a285f2964d33767cc76e9511c6694050b73a099afe4c3e401e5f87f9587"
+
+[[grammar]]
+name = "dtd"
+ext = ["dtd"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-xml/releases/download/v0.7.0/tree-sitter-dtd.wasm"
+sha256 = "f39eb96806823775859ba55c777e38c5d94cbf8d4e07631f60d77d8bda920501"
+
+[[grammar]]
+name = "embedded_template"
+ext = ["ejs", "erb"]
+url = "https://github.com/tree-sitter/tree-sitter-embedded-template/releases/download/v0.25.0/tree-sitter-embedded_template.wasm"
+sha256 = "d15bbf3cb90901d0372b5599761c7a1ada344a0f11573c173ace7042636a6174"
+
+[[grammar]]
+name = "go"
+ext = ["go"]
+url = "https://github.com/tree-sitter/tree-sitter-go/releases/download/v0.25.0/tree-sitter-go.wasm"
+sha256 = "9504573f352b20be7f2f1911754d710622aedc15afff16d5ed8fb5645681aee7"
+
+[[grammar]]
+name = "haskell"
+ext = ["hs"]
+url = "https://github.com/tree-sitter/tree-sitter-haskell/releases/download/v0.24.1/tree-sitter-haskell.wasm"
+sha256 = "ea89cb1199b1ca2102e273b27239e795baff17248128a9bcd3c3825ac17d8cc0"
+
+[[grammar]]
+name = "hcl"
+ext = ["hcl"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-hcl/releases/download/v1.2.0/tree-sitter-hcl.wasm"
+sha256 = "2f9acf63e7c263215f283e2cf0f4ebbb9bfa77f58e18fa42b91094be201372a7"
+
+[[grammar]]
+name = "html"
+ext = ["html"]
+url = "https://github.com/tree-sitter/tree-sitter-html/releases/download/v0.23.2/tree-sitter-html.wasm"
+sha256 = "c48fcd82c7ea8bf943180088ba7f28c48b2bb5287874179168bf9d31e394cf85"
+
+[[grammar]]
+name = "hyprlang"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-hyprlang/releases/download/v3.1.0/tree-sitter-hyprlang.wasm"
+sha256 = "02f8c01b97f9c95613535a91228d299a40b98dad5d7556a3f2ee01ab97d4ab32"
+
+[[grammar]]
+name = "java"
+ext = ["java"]
+url = "https://github.com/tree-sitter/tree-sitter-java/releases/download/v0.23.5/tree-sitter-java.wasm"
+sha256 = "4fdeac4ca6ca089f06c6f7e562abcac1733cd465728cc7031ebb73c2019122c4"
+
+[[grammar]]
+name = "javascript"
+ext = ["cjs", "js", "jsx", "mjs"]
+url = "https://github.com/tree-sitter/tree-sitter-javascript/releases/download/v0.25.0/tree-sitter-javascript.wasm"
+sha256 = "5fb488d0cabb4775a594bab85682de5ad6ce83c0d6ac997a9f82dd084d571240"
+
+[[grammar]]
+name = "jsdoc"
+ext = []
+url = "https://github.com/tree-sitter/tree-sitter-jsdoc/releases/download/v0.25.0/tree-sitter-jsdoc.wasm"
+sha256 = "5530e630fd42424b1c026ec4b2b260ff1b73b78b7040239ac33d4be22a9b2271"
+
+[[grammar]]
+name = "json"
+ext = ["json"]
+url = "https://github.com/tree-sitter/tree-sitter-json/releases/download/v0.24.8/tree-sitter-json.wasm"
+sha256 = "d2119fb98d5912719b13f9458574f8608d2d29dfbe45f6be1f860ea1fe2a2405"
+
+[[grammar]]
+name = "julia"
+ext = ["jl"]
+url = "https://github.com/tree-sitter/tree-sitter-julia/releases/download/v0.25.0/tree-sitter-julia.wasm"
+sha256 = "b20da9dc7d7334e2cae034ca4974dd09c94be8c0a524df1fc194b545bc2f49f5"
+
+[[grammar]]
+name = "kconfig"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-kconfig/releases/download/v1.3.0/tree-sitter-kconfig.wasm"
+sha256 = "c2ed002da2cc07247773fec5aea0e8fc1cd662d5e6f557eef2044d9f9d9ed1f8"
+
+[[grammar]]
+name = "kdl"
+ext = ["kdl"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-kdl/releases/download/v2.0.0/tree-sitter-kdl.wasm"
+sha256 = "e3166919a4b6bee8ab7dcb6894166007e5cb90f58441ffd5b76fba873c156f45"
+
+[[grammar]]
+name = "kotlin"
+ext = ["kt", "kts"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-kotlin/releases/download/v1.1.0/tree-sitter-kotlin.wasm"
+sha256 = "7009d69453bc8735e438b2818a633efb21c88f99782769abba60dffedfab73f7"
+
+[[grammar]]
+name = "lua"
+ext = ["lua"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-lua/releases/download/v0.5.0/tree-sitter-lua.wasm"
+sha256 = "df08a1704e504c70b8dba4a3e6f8e0c99a4fb94e1b1693d2969f53141d09f0d4"
+
+[[grammar]]
+name = "luau"
+ext = ["luau"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-luau/releases/download/v1.2.0/tree-sitter-luau.wasm"
+sha256 = "f1647052518f2bdfae8e8c0b033ffdeca1193d69d11c78ba20f84c8374fd0fe3"
+
+[[grammar]]
+name = "make"
+ext = ["mk"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-make/releases/download/v1.1.1/tree-sitter-make.wasm"
+sha256 = "1254d1e5787be8bb944d55d1f6552b6b2b7908272ed498013bfdc07bd7d042dd"
+
+[[grammar]]
+name = "markdown"
+ext = ["md"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-markdown/releases/download/v0.5.3/tree-sitter-markdown.wasm"
+sha256 = "dd9fc12ac2804d7c7da787e4774125b32e4fb3c244e5e7031a77cb7dd8036020"
+
+[[grammar]]
+name = "markdown_inline"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-markdown/releases/download/v0.5.3/tree-sitter-markdown_inline.wasm"
+sha256 = "d47e5c43683c39b645ced8720ab90c3b3f467e715d3426b29ef3f69984d88c15"
+
+[[grammar]]
+name = "objc"
+ext = ["m"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-objc/releases/download/v3.0.2/tree-sitter-objc.wasm"
+sha256 = "155bf61fc94941fa9d07c86cd46895f14dfb2549fb7f646faeb83765af05c970"
+
+[[grammar]]
+name = "ocaml"
+ext = ["ml"]
+url = "https://github.com/tree-sitter/tree-sitter-ocaml/releases/download/v0.26.0/tree-sitter-ocaml.wasm"
+sha256 = "bfa3eef92b9d3cc1117aa486d46ecb06c98a3a28c1747660aaa5851df5e4530c"
+
+[[grammar]]
+name = "ocaml_interface"
+ext = []
+url = "https://github.com/tree-sitter/tree-sitter-ocaml/releases/download/v0.26.0/tree-sitter-ocaml_interface.wasm"
+sha256 = "3ce03850c36618e3530292372aae9156a45b5a923210a87c285539d7f13b0354"
+
+[[grammar]]
+name = "ocaml_type"
+ext = []
+url = "https://github.com/tree-sitter/tree-sitter-ocaml/releases/download/v0.26.0/tree-sitter-ocaml_type.wasm"
+sha256 = "3216412ee2300b8029a230208c57a2f62eadb5737d5632d35cc953516905df6f"
+
+[[grammar]]
+name = "odin"
+ext = ["odin"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-odin/releases/download/v1.3.0/tree-sitter-odin.wasm"
+sha256 = "4a3c9f50ac2356d2284d26e92322c554b276ad6bf6bce87a8594cff95d2ed6f1"
+
+[[grammar]]
+name = "php"
+ext = ["php"]
+url = "https://github.com/tree-sitter/tree-sitter-php/releases/download/v0.25.1/tree-sitter-php.wasm"
+sha256 = "bd5e2bf8d42306b7aa32e6b7e39ae9fd9543c62a875ad8b2bc3d488242f72817"
+
+[[grammar]]
+name = "php_only"
+ext = []
+url = "https://github.com/tree-sitter/tree-sitter-php/releases/download/v0.25.1/tree-sitter-php_only.wasm"
+sha256 = "605c2b17407985e708a5a01e7ad67acbe6de8fc6c75f3ec82d9b4c70bc6a915f"
+
+[[grammar]]
+name = "poe_filter"
+ext = ["filter"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-poe-filter/releases/download/v0.4.0/tree-sitter-poe_filter.wasm"
+sha256 = "917575ac76e593e9f797139dc74623db6d3599f5f3acfa4174106424caa238ed"
+
+[[grammar]]
+name = "printf"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-printf/releases/download/v0.5.1/tree-sitter-printf.wasm"
+sha256 = "63b36c64338ddb324b2a34e0aa2d5068e96ea04fe1ab717b626216cc22d8a48d"
+
+[[grammar]]
+name = "properties"
+ext = ["ini", "properties"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-properties/releases/download/v0.3.0/tree-sitter-properties.wasm"
+sha256 = "817743f1f33c15e315f10a59595127813806bbf7104dc1974feaabb9e38da908"
+
+[[grammar]]
+name = "puppet"
+ext = ["pp"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-puppet/releases/download/v1.3.0/tree-sitter-puppet.wasm"
+sha256 = "6698ac3087d0a35208f30cf9340e0c78aab54036f604224dd5590fb6ca7a89a0"
+
+[[grammar]]
+name = "pymanifest"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-pymanifest/releases/download/v0.6.0/tree-sitter-pymanifest.wasm"
+sha256 = "598a3a15069c8d1d591bd60301cd84634b39fc34ff354bec5cc194f60aeb26c3"
+
+[[grammar]]
+name = "python"
+ext = ["py", "pyi"]
+url = "https://github.com/tree-sitter/tree-sitter-python/releases/download/v0.25.0/tree-sitter-python.wasm"
+sha256 = "16108b50df4ee9a30168794252ab55e7c93bfc5765d7fa0aa3e335752c515f47"
+
+[[grammar]]
+name = "ql"
+ext = ["ql"]
+url = "https://github.com/tree-sitter/tree-sitter-ql/releases/download/v0.23.1/tree-sitter-ql.wasm"
+sha256 = "f7f01c27f942a76ffceb30cb194fe669f81a21971126a57d9bf876bdaffa85dc"
+
+[[grammar]]
+name = "ql_dbscheme"
+ext = ["dbscheme"]
+url = "https://github.com/tree-sitter/tree-sitter-ql/releases/download/v0.23.1/tree-sitter-ql_dbscheme.wasm"
+sha256 = "c3e3c839c45eca3def8aed27c5205ec1fceed80d2b85a7d65f23747549ba0355"
+
+[[grammar]]
+name = "query"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-query/releases/download/v0.8.0/tree-sitter-query.wasm"
+sha256 = "c3458fa2de98b4470f3e650a43f7601c97a73eafc02cce553d7c430637f262b2"
+
+[[grammar]]
+name = "regex"
+ext = ["regexp"]
+url = "https://github.com/tree-sitter/tree-sitter-regex/releases/download/v0.25.0/tree-sitter-regex.wasm"
+sha256 = "e63c28e3a023614e14f2086b0d818e190239ebe5b2fcce7e64a9940091d83a79"
+
+[[grammar]]
+name = "requirements"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-requirements/releases/download/v0.6.1/tree-sitter-requirements.wasm"
+sha256 = "35af73ba57bb324b588dc48ce7b788a5081e415cdd92062fda830eb3d14f3eb9"
+
+[[grammar]]
+name = "ruby"
+ext = ["rb"]
+url = "https://github.com/tree-sitter/tree-sitter-ruby/releases/download/v0.23.1/tree-sitter-ruby.wasm"
+sha256 = "09a96427d7c72f0613ed470cd9812223fc4a91d6a9c025c0235cc6bd59ff96f4"
+
+[[grammar]]
+name = "rust"
+ext = ["rs"]
+url = "https://github.com/tree-sitter/tree-sitter-rust/releases/download/v0.24.2/tree-sitter-rust.wasm"
+sha256 = "24c89bd9252255e4aebbcbd7d2d308bd92c86dd95a130fdc80efa49577b8d738"
+
+[[grammar]]
+name = "scala"
+ext = ["scala"]
+url = "https://github.com/tree-sitter/tree-sitter-scala/releases/download/v0.26.2/tree-sitter-scala.wasm"
+sha256 = "37d7fe5a91ca98941dc05493b0c05a0df0f36df5035890fa00b02497c68aaac3"
+
+[[grammar]]
+name = "ssh_config"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-ssh-config/releases/download/v0.5.0/tree-sitter-ssh_config.wasm"
+sha256 = "e12cb3d2a80713d7a83d08dfb421827a276874fa10bde8065af7870e2c5da7b9"
+
+[[grammar]]
+name = "starlark"
+ext = ["star"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-starlark/releases/download/v1.3.0/tree-sitter-starlark.wasm"
+sha256 = "fbc8daea386fbd963b198e7942d9a020b8c74d4d875d1c075af540f2b6b3278d"
+
+[[grammar]]
+name = "terraform"
+ext = ["tf"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-hcl/releases/download/v1.2.0/tree-sitter-terraform.wasm"
+sha256 = "59dbcbb0f08eb78b78f37510834559a48ce5c9d4866c978d62c6390796461cb5"
+
+[[grammar]]
+name = "test"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-test/releases/download/v0.3.0/tree-sitter-test.wasm"
+sha256 = "2330be1c868fefe3e7bdd2330dff2d8dbb21ceff2ba185a6fa5a6513e6152f5f"
+
+[[grammar]]
+name = "toml"
+ext = ["toml"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-toml/releases/download/v0.7.0/tree-sitter-toml.wasm"
+sha256 = "1ac6a83826c35a68857f8325e00c78f6bcbef4eb6db3931a6cf3041f76e5e09f"
+
+[[grammar]]
+name = "tsx"
+ext = ["tsx"]
+url = "https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.2/tree-sitter-tsx.wasm"
+sha256 = "79e5da75ea62855a0cd67177685f0164eac87d5f630b3cbe1e0a099751ad30f8"
+
+[[grammar]]
+name = "typescript"
+ext = ["cts", "mts", "ts"]
+url = "https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.2/tree-sitter-typescript.wasm"
+sha256 = "778025db5a8be0e70f8ccc3671e486dfeddd048c25d9e8a70c26de2e1bf6f97d"
+
+[[grammar]]
+name = "verilog"
+ext = ["sv"]
+url = "https://github.com/tree-sitter/tree-sitter-verilog/releases/download/v1.0.3/tree-sitter-verilog.wasm"
+sha256 = "fd6d2b9785df8fb2966c184d491da3e043081ed5cce5b50de8d5879e639f8b00"
+
+[[grammar]]
+name = "vim"
+ext = ["vim"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-vim/releases/download/v0.8.1/tree-sitter-vim.wasm"
+sha256 = "93cc332cbd093d163ba3d3b7ff223eacc023e6f5135088018a1c5e86ca627bec"
+
+[[grammar]]
+name = "xcompose"
+ext = []
+url = "https://github.com/tree-sitter-grammars/tree-sitter-xcompose/releases/download/v0.4.0/tree-sitter-xcompose.wasm"
+sha256 = "3b3dde8d1363083c455200f4329f2ae54ed8030389c657613ef891587e0b06bd"
+
+[[grammar]]
+name = "xml"
+ext = ["xml"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-xml/releases/download/v0.7.0/tree-sitter-xml.wasm"
+sha256 = "9950327f8542a3d563fe4192aa05986a53e6fd6adca518cbb1a1699cbc8970ad"
+
+[[grammar]]
+name = "yaml"
+ext = ["yaml", "yml"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-yaml/releases/download/v0.7.2/tree-sitter-yaml.wasm"
+sha256 = "0a0e5ebcfeb0b2bf272d071396eeed107b2c4b2617b69d5959b13f78b357a4d6"
+
+[[grammar]]
+name = "zig"
+ext = ["zig"]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-zig/releases/download/v1.1.2/tree-sitter-zig.wasm"
+sha256 = "54b3b83dd9c62da5815f06132bc3fc914d9dcc780370b32416446a0b7969e8c6"
+

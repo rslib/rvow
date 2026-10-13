@@ -85,6 +85,21 @@ The gate makes its rerun worktree and runs `setup` only when something needs the
 When the cache or a current proof answers every task, it makes no worktree and runs no `setup`.
 The `checks` that remain then run in the repository itself.
 
+## Running each check once per commit
+
+A `checks` entry that passes records its result in the same gate cache as a
+rerun task, so a commit that already passed the check does not run it again.
+The key is the command text, the id of the HEAD tree and the tool fingerprint,
+so a new commit or a changed tool runs the check again.
+When the key holds a pass and the check's scope has no uncommitted change, the
+gate skips the check and prints `cached check: <cmd>` on the same stream as
+`check:` and `check done:`.
+A plain check has the whole tree as its scope, new untracked files included; a
+`{ run, files }` entry has the files its globs match.
+An uncommitted change in the check's scope runs the check and records nothing,
+so a pass never counts for content that is not committed.
+`rerun_cache = "off"` turns the check cache off too, so every check runs.
+
 ## How long a cached pass lasts
 
 An entry in the gate cache stops answering for a task after `max_age`, which a task sets with a `max_age:` line such as `max_age: 24h`.
@@ -107,3 +122,72 @@ A tool that is missing makes the task uncacheable, so the gate runs it.
 
 A clean checkout never contains the user's `machine`, `signing_key` or `agent`.
 Send those through the environment or a separate global file instead.
+
+## The grammar cache
+
+rvow compares protected files with the syntax tree of their text, so a file whose only edit lost a blank line is not drift.
+A comment counts as code: adding, removing or changing a comment is drift, while reindenting one or changing only the spaces inside it is not.
+For that it needs a tree-sitter grammar for the file's language.
+rvow keeps prebuilt `.wasm` grammars in the grammar cache, the `grammars/` folder inside the rvow home.
+The pinned list of languages and their download URLs and hashes ships inside the rvow binary.
+`rvow grammar fetch` fills the cache from the pinned list, checks every download's sha256 against the pin and writes the file only when it matches.
+`rvow grammar fetch json` fills one language.
+`rvow grammar list` shows each pinned language and whether the cache holds it.
+Set `RVOW_GRAMMAR_URL` to move the download base from the pinned GitHub release URLs to a folder or a file:// URL or an HTTP(S) base.
+The file name of the download stays the pinned one, so a mirror folder of `tree-sitter-<lang>.wasm` files is enough.
+The drift check in a hook, the view or amend does not download at check time: it compares only with a grammar the cache already holds.
+`rvow prove` and `rvow gate` fetch first: the prove and gate fetch fills the cache with the missing pinned grammars of the changed protected files, waiting about 10 s per grammar.
+A failed fetch keeps the raw rules and names `rvow grammar fetch`, so a missing grammar never weakens drift.
+For one hour after a fetch fails in prove or gate, neither tries that language again and both treat it as a language with no grammar, so the drift item keeps the raw rule and the `rvow grammar fetch` hint.
+`rvow grammar fetch` always tries, and a success clears the one-hour record.
+Each compare result is saved in the `grammars/` folder, keyed by the hash of each text and the grammar hash, and the next compare of the same two texts reuses it without parsing.
+
+## Choosing the git binary
+
+rvow runs the git it finds on `PATH`.
+Set `RVOW_GIT` to the path of a git binary to run that one for every git call instead.
+Set it when the git on `PATH` cannot run, such as a sandbox where `/usr/bin/git` is a launcher shim that the sandbox stops.
+An empty value falls back to `PATH`.
+The agent eval runner passes the same path as `EVAL_RVOW_GIT`, which is the only spelling that reaches inside the eval sandbox.
+## Runners
+
+The `[runners]` table of the project config holds a named command template, and a task verify names it with `verify: @<runner> key=value`.
+
+```toml
+[runners.cpp]
+run     = "cmake --build --preset {preset} --target {target} && ctest --preset {preset} -R '{test}' --no-tests=error --output-junit {junit}"
+params  = { preset = ["tests", "asan", "tsan"] }
+default = { preset = "tests" }
+needs   = ["build/build-{preset}"]
+env     = { CPM_SOURCE_CACHE = "/tmp/cpm" }
+timeout = "5m"
+```
+
+Every key except `run` is optional.
+
+Each `{param}` of `run` gets its value from the task's `key=value` pairs or from `default`, and `{junit}` is filled by rvow itself with a fresh report path, quoted for the shell.
+Write `{junit}` without quotes in `run`; `rvow check` refuses a runner that quotes it.
+The report goes in the system temp dir, or in the dir that the runner's `env` sets as `RVOW_JUNIT_DIR`, and rvow removes it after it reads it.
+A task key that `run` does not use, a value outside `params`, and a param with no value are `rvow check` errors.
+Each value lands inside a shell command, so it may hold only `A-Z a-z 0-9 _ . : / + = * ^ $` and `-`; rvow refuses any other char, at check time and again before a run, and names the char.
+A `default` value follows the same char rule and the same `params` list.
+A task's own `timeout:` wins over the runner's `timeout`.
+
+When `run` holds `{junit}`, accept reads the JUnit report after the baseline run, records the failed test names in the vow and refuses when the report names no failed test.
+A case is failed when it holds a `<failure>` or an `<error>` child, and its name is the `name` attribute, or `classname.name` when both are there.
+At prove and at the gate rerun the proof passes only when the command exits 0, the report exists, each recorded name is there and passed, and no test case failed.
+An amendment that adds or changes such a task records its failed names at the amend baseline, and the recorded names hold after the amendment.
+A `baseline: pass` task on such a runner records no names: its report must hold at least one passed case and no failed case, at accept and at each prove.
+
+Each path of `needs` is filled with the same params and must exist before anything runs: accept, prove and the gate rerun run no command and name the missing path, so configure that build dir first.
+
+`rvow check` warns with `configure-in-verify` when a plain verify or a runner's `run` configures CMake: the words `cmake --preset`, `cmake -S`, `cmake -B` or any `--fresh`.
+`cmake --build --preset` only builds and does not warn.
+
+When the output of a verify run holds `Re-running CMake`, the prove result notes that the build reconfigured and, when the runner has a `needs` path, names it: `run ninja -C <dir> -d explain to see why`.
+
+The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`).
+A changed runner is weaken drift for each task that uses it, like a changed verify, and a runner that no task uses can change with no drift.
+The runner hash is also part of the proof key and the gate cache key, so a confirmed runner change makes the old proofs stale.
+`rvow review` and `rvow show` print the filled command as a `run:` line under the `verify:` line.
+A bundle refuses a task with an `@<runner>` verify; give a bundled task a plain verify.

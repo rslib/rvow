@@ -62,10 +62,11 @@ pub fn packet_for(project: &Project, home: &Path, cwd: &Path, target: &str) -> R
     for (path, body) in &loaded.texts {
         text.push_str(&format!("\n--- {path} ---\n{body}\n"));
     }
+    let runners = crate::config::runners(project)?;
     let mut identities = Vec::new();
     let mut globs = Vec::new();
     for task in &loaded.tasks {
-        text.push_str(&format!("\n{}", proof::render_task(task, &loaded, &living)));
+        text.push_str(&format!("\n{}", proof::render_task_filled(task, &loaded, &living, &runners)));
         identities.push(json!([
             crate::vow::task_hash(task),
             proof::covered(task, &loaded, &living),
