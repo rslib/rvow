@@ -5,6 +5,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// The item text a protected-file change gets when its grammar is not in
+/// the grammar cache: an empty temporary home keeps it deterministic.
+fn grammar_hint(lang: &str) -> String {
+    format!(
+        "(the {lang} grammar could not load: run `rvow grammar fetch {lang}`, or check RVOW_GRAMMAR_URL when the download base is overridden)"
+    )
+}
+
 use rvow_core::{change, config, drift, git, proof, store, vow};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -72,7 +80,9 @@ fn drift_items(s: &Setup) -> Vec<(drift::Class, String)> {
     let active = proof::active(&s.project, &living).unwrap().remove(0);
     let top = git::toplevel(&s.repo).unwrap();
     let cfg = config::load(&s.project, &s.home).unwrap();
-    drift::drift(&s.project, &top, &cfg, &active).unwrap().into_iter().map(|i| (i.class, i.what)).collect()
+    // The setup home holds no grammar cache, so the syntax-aware rule never
+    // applies here: a protected change keeps the fetch hint.
+    drift::drift_with_home(&s.project, Some(&s.home), &top, &cfg, &active).unwrap().into_iter().map(|i| (i.class, i.what)).collect()
 }
 
 #[test]
@@ -90,7 +100,7 @@ fn protected_growth_rust_loss_is_weaken() {
     let s = setup("rust-loss");
     std::fs::write(s.repo.join("tests/cli.rs"), "// no tests here\n").unwrap();
     let items = drift_items(&s);
-    assert!(items.contains(&(drift::Class::Weaken, "protected file tests/cli.rs changed".into())), "{items:?}");
+    assert!(items.contains(&(drift::Class::Weaken, format!("protected file tests/cli.rs changed {}", grammar_hint("rust")))), "{items:?}");
 }
 
 #[test]
@@ -110,5 +120,5 @@ fn protected_growth_infra_gain_is_weaken() {
     text.push_str("# a comment\n");
     std::fs::write(s.repo.join("tox.ini"), text).unwrap();
     let items = drift_items(&s);
-    assert!(items.contains(&(drift::Class::Weaken, "protected file tox.ini changed".into())), "{items:?}");
+    assert!(items.contains(&(drift::Class::Weaken, format!("protected file tox.ini changed {}", grammar_hint("properties")))), "{items:?}");
 }

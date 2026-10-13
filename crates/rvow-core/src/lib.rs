@@ -36,6 +36,7 @@ pub mod show;
 pub mod spec;
 pub mod stats;
 pub mod store;
+pub mod syntax;
 pub mod tasks;
 pub mod view;
 pub mod vow;

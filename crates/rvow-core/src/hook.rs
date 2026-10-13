@@ -715,8 +715,11 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
         if pending.iter().any(|p| p.change == c.dir.id) {
             continue;
         }
-        let blocking: Vec<String> =
-            drift::drift(project, &top, &config, c)?.into_iter().filter(|i| i.class.blocks()).map(|i| i.what).collect();
+        let blocking: Vec<String> = drift::drift_with_home(project, Some(home), &top, &config, c)?
+            .into_iter()
+            .filter(|i| i.class.blocks())
+            .map(|i| i.what)
+            .collect();
         if !blocking.is_empty() {
             let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
             let mut shown = blocking[..blocking.len() - more].join("; ");
@@ -831,7 +834,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
                 proved += 1;
             }
         }
-        drift_count += drift::drift(project, &top, &config, c)?.iter().filter(|i| i.class.blocks()).count();
+        drift_count += drift::drift_with_home(project, Some(home), &top, &config, c)?.iter().filter(|i| i.class.blocks()).count();
     }
     let pending = amend::pending(&changes).len();
     let name = match queue.as_slice() {

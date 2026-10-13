@@ -337,7 +337,25 @@ enum Cmd {
         #[arg(long)]
         sign: bool,
     },
+    /// Fill the grammar cache, or show the pinned languages and their cache state.
+    Grammar {
+        #[command(subcommand)]
+        cmd: GrammarCmd,
+    },
 }
+
+#[derive(Subcommand)]
+enum GrammarCmd {
+    /// Download pinned grammars into the cache; without names, every pinned language.
+    Fetch {
+        /// Language names from `rvow grammar list`.
+        #[arg(num_args = 0..)]
+        langs: Vec<String>,
+    },
+    /// Show each pinned language and whether the cache holds its grammar.
+    List,
+}
+/// The change id or a unique prefix of it.
 
 #[derive(Subcommand)]
 enum SpecCmd {
@@ -471,6 +489,8 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
         Cmd::Ingest { file } => cmd::ingest::ingest(&file),
         Cmd::Attest { change, out, sign } => attest::attest(&change, &out, sign),
+        Cmd::Grammar { cmd: GrammarCmd::Fetch { langs } } => cmd::grammar::fetch(&langs),
+        Cmd::Grammar { cmd: GrammarCmd::List } => cmd::grammar::list(),
         Cmd::Archive { change } => lifecycle::archive(&change),
         Cmd::Drop { change, reason } => lifecycle::drop_change(&change, &reason),
         Cmd::Supersede { old, by, reason } => lifecycle::supersede(&old, &by, &reason),

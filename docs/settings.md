@@ -108,6 +108,23 @@ A tool that is missing makes the task uncacheable, so the gate runs it.
 A clean checkout never contains the user's `machine`, `signing_key` or `agent`.
 Send those through the environment or a separate global file instead.
 
+## The grammar cache
+
+rvow compares protected files with the syntax tree of their text, so a file whose only edit lost a blank line is not drift.
+A comment counts as code: adding, removing or changing a comment is drift, while reindenting one or changing only the spaces inside it is not.
+For that it needs a tree-sitter grammar for the file's language.
+rvow keeps prebuilt `.wasm` grammars in the grammar cache, the `grammars/` folder inside the rvow home.
+The pinned list of languages and their download URLs and hashes ships inside the rvow binary.
+`rvow grammar fetch` fills the cache from the pinned list, checks every download's sha256 against the pin and writes the file only when it matches.
+`rvow grammar fetch json` fills one language.
+`rvow grammar list` shows each pinned language and whether the cache holds it.
+Set `RVOW_GRAMMAR_URL` to move the download base from the pinned GitHub release URLs to a folder or a file:// URL or an HTTP(S) base.
+The file name of the download stays the pinned one, so a mirror folder of `tree-sitter-<lang>.wasm` files is enough.
+The drift check in a hook, the view or amend does not download at check time: it compares only with a grammar the cache already holds.
+`rvow prove` and `rvow gate` fetch first: the prove and gate fetch fills the cache with the missing pinned grammars of the changed protected files, waiting about 10 s per grammar.
+A failed fetch keeps the raw rules and names `rvow grammar fetch`, so a missing grammar never weakens drift.
+Each compare result is saved in the `grammars/` folder, keyed by the hash of each text and the grammar hash, and the next compare of the same two texts reuses it without parsing.
+
 ## Choosing the git binary
 
 rvow runs the git it finds on `PATH`.

@@ -455,6 +455,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         ));
     }
     let config = config::load(project, home)?;
+    crate::drift::fetch_missing_grammars(project, &top, home, &config, change);
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let inputs = now.inputs(task)?;
     let tree = fingerprint::worktree(&top, project)?;

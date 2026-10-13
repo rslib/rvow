@@ -331,7 +331,7 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
             None => {
                 crate::vow::mint_placeholders(project, &lock, &c.dir, &c.loaded)?;
                 c.loaded = change::load(&c.dir.path, &living)?;
-                let items = drift::drift(project, &top, &config, c)?;
+                let items = drift::drift_with_home(project, Some(home), &top, &config, c)?;
                 if items.is_empty() {
                     continue;
                 }

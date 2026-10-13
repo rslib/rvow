@@ -139,8 +139,10 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
                 "reasons": reasons,
             }));
         }
-        let drift: Vec<Value> =
-            drift::drift(project, &top, &config, c)?.into_iter().map(|i| json!({"class": i.class.name(), "what": i.what})).collect();
+        let drift: Vec<Value> = drift::drift_with_home(project, Some(home), &top, &config, c)?
+            .into_iter()
+            .map(|i| json!({"class": i.class.name(), "what": i.what}))
+            .collect();
         let pending: Vec<Value> =
             amend::pending(std::slice::from_ref(c)).into_iter().map(|p| json!({"id": p.id.to_string(), "reason": p.reason})).collect();
         amendments += pending.len();

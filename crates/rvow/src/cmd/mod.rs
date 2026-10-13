@@ -7,6 +7,7 @@ use rvow_core::store::{self, Project};
 pub mod attest;
 pub mod delegate;
 pub mod export;
+pub mod grammar;
 pub mod ingest;
 pub mod lifecycle;
 pub mod plan;
