@@ -245,6 +245,13 @@ pub fn check(target: Option<&str>) -> Result<Reply> {
         let id = &c.change.id;
         r.line(format!("{id} ({})", c.change.stage.name()));
         let mut found = problems("", &c.findings);
+        found.extend(c.slow.iter().map(|s| Problem {
+            at: s.task.clone(),
+            level: "warning",
+            code: "full-suite",
+            message: s.message.clone(),
+            fix: "move the whole-suite commands into the project `checks`, keep a targeted verify on the task",
+        }));
         found.extend(c.missing.iter().map(|(task, prog)| Problem {
             at: task.clone(),
             level: "error",

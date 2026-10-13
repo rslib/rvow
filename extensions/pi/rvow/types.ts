@@ -16,6 +16,10 @@ export type Plan = {
   questions?: number;
   issues?: number;
   path?: string;
+  /** Each task's timeout in seconds, 0 when it uses the configured default. */
+  task_timeouts_secs?: number[];
+  /** The configured default timeout in seconds. */
+  default_timeout_secs?: number;
 };
 export type Question = { change: string; question: string; recommended?: string | null };
 export type Archived = { id: string; title: string; outcome: string; date?: string };

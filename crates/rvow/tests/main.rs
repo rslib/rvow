@@ -1,5 +1,7 @@
 //! The integration tests of the rvow crate, built as one binary. Each module is one former test file; the files live in suite/.
 
+#[path = "suite/accept_speed.rs"]
+mod accept_speed;
 #[path = "suite/agent_mode.rs"]
 mod agent_mode;
 #[path = "suite/amend_baseline.rs"]

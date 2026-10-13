@@ -285,6 +285,7 @@ fn gate_for(
         let cmd = step.run();
         let _ = writeln!(echo, "check: {cmd}");
         let o = runner::run(cmd, &run_dir, &env, config.timeout(), echo)?;
+        let _ = writeln!(echo, "check done: {cmd} ({} ms)", o.duration_ms);
         if !o.passed() {
             r.failures.push(format!("check failed: {cmd}"));
         }
@@ -294,7 +295,13 @@ fn gate_for(
 /// Checks repository integrity and scope while requiring proofs only for the
 /// selected change, so other unfinished changes can remain on the branch.
 pub fn change_gate(project: &Project, home: &Path, cwd: &Path, c: &Active) -> Result<Report> {
-    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, &mut std::io::sink())
+    change_gate_echo(project, home, cwd, c, &mut std::io::sink())
+}
+
+/// Like `change_gate`, with the echo the checks stream to: archive passes
+/// stderr, so the user sees each check while it runs instead of silence.
+pub fn change_gate_echo(project: &Project, home: &Path, cwd: &Path, c: &Active, echo: &mut dyn Write) -> Result<Report> {
+    gate_for(project, home, cwd, Options { strict: true, rerun: false, out: None }, Some(&c.dir.id), true, echo)
 }
 
 /// The first git-ignored file that matches `t`'s `files:` outside every

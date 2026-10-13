@@ -45,7 +45,16 @@ import {
 import { judgeArgs, judgeRun } from "./judge.ts";
 import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
-import { BIN, FAST_MS, run, SLOW_MS } from "./tools.ts";
+import {
+  acceptTimeoutMs,
+  BIN,
+  baselineNotice,
+  FAST_MS,
+  type PlanBudget,
+  planBudget,
+  run,
+  SLOW_MS,
+} from "./tools.ts";
 import { registerTypedTools, yoloArgs } from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
@@ -1221,15 +1230,15 @@ export default function (pi: ExtensionAPI) {
     return choice === undefined ? undefined : shown.get(choice);
   }
 
-  async function rvow(ctx: ExtensionContext, argv: string[]) {
-    const r = await run(argv, ctx.cwd, "", SLOW_MS);
+  async function rvow(ctx: ExtensionContext, argv: string[], timeoutMs = SLOW_MS) {
+    const r = await run(argv, ctx.cwd, "", timeoutMs);
     if (!r) ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
     return r;
   }
 
-  async function decide(ctx: ExtensionContext, argv: string[]) {
+  async function decide(ctx: ExtensionContext, argv: string[], timeoutMs = SLOW_MS) {
     ctx.ui.setStatus("rvow", `rvow ${argv.join(" ")} ...`);
-    const r = await rvow(ctx, argv);
+    const r = await rvow(ctx, argv, timeoutMs);
     if (r) {
       ctx.ui.notify(
         r.out.trim() || `rvow ${argv.join(" ")}: done`,
@@ -1256,7 +1265,20 @@ export default function (pi: ExtensionAPI) {
       return r;
     }
     if (!(await ctx.ui.confirm(`rvow ${id}`, `${r.out.trim()}\n\nAccept ${id}?`))) return;
-    return decide(ctx, ["accept", id]);
+    // The notice names the baseline count from the view, and the wait covers the
+    // plan's own budget: the sum of its task timeouts.
+    await refresh(ctx);
+    let budget: PlanBudget | null = null;
+    try {
+      budget = planBudget(S.view, id);
+    } catch {}
+    ctx.ui.notify(
+      budget
+        ? baselineNotice(budget.tasks)
+        : "rvow accept: baseline checks will run; this can take a while",
+      "info",
+    );
+    return decide(ctx, ["accept", id], budget ? acceptTimeoutMs(budget) : SLOW_MS);
   }
 
   userCommand(

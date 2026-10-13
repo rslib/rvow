@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import { atom, read, update } from 'claude-code'
-
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
+import { acceptTimeoutMs, baselineNotice, type PlanBudget, planBudget } from './accept'
 import {
   ACCENT,
   ACCEPT,
@@ -183,8 +183,103 @@ async function refresh($: EngineInterface) {
   await refreshStatus($)
 }
 
+/** Runs `rvow accept` with the plan's own budget: a notice first, then a
+ *  wait that covers every baseline check, so a long plan is not cut off. */
+async function acceptPlan($: EngineInterface, argv: string[]): Promise<RvowNotice> {
+  const seen = await tellOut($, ['hook', 'claude', 'view'])
+  let budget: PlanBudget | null = null
+  try {
+    budget = planBudget(JSON.parse(seen.out), argv[1] ?? '')
+  } catch {}
+  // The notice names the count when the view answers; either way the user knows accept is slow.
+  const notice = budget
+    ? baselineNotice(budget.tasks)
+    : 'rvow accept: baseline checks will run; this can take a while'
+  await update($, noticeAtom, () => ({ tone: 'busy', text: notice }))
+  // The host caps a one-shot process.run at ten minutes and a plan's baseline can
+  // outlast that, so accept streams as a child bounded by the plan's own budget.
+  const streamed = await acceptStreamed($, argv, budget)
+  if (streamed) return streamed
+  return acceptRun($, argv, budget)
+}
+
+/** `rvow accept` as a streamed child, or null when the engine offers no child. */
+async function acceptStreamed(
+  $: EngineInterface,
+  argv: string[],
+  budget: PlanBudget | null,
+): Promise<RvowNotice | null> {
+  let stdout = ''
+  let stderr = ''
+  let saw = false
+  let tick: { cancel: () => void } | undefined
+  try {
+    const cwd = await $.session.cwd()
+    const parts = $.process.spawn({ argv: [BIN, ...argv], cwd })[Symbol.asyncIterator]()
+    // The deadline is set before the first pull, and each pull races the remaining
+    // time, so a child that goes quiet still ends the wait.
+    const deadline = (await $.clock.now()) + acceptTimeoutMs(budget)
+    for (;;) {
+      const remaining = Math.max(deadline - (await $.clock.now()), 0)
+      let fired = false
+      const overdue = new Promise<'overdue'>((resolve) => {
+        tick = $.clock.after(remaining, () => {
+          fired = true
+          resolve('overdue')
+        })
+      })
+      const step = await Promise.race([parts.next(), overdue])
+      if (!fired) tick?.cancel()
+      if (step === 'overdue') {
+        // Ending the stream kills the child; rvow also bounds each baseline run itself.
+        await (parts.return as ((value?: unknown) => Promise<unknown>) | undefined)?.(undefined)
+        return {
+          tone: 'fail',
+          text: `rvow ${argv.join(' ')}: the plan's task timeouts passed before accept finished`,
+        }
+      }
+      if (step.done) {
+        const end = step.value as { code?: number | null } | undefined
+        const code = end && typeof end === 'object' ? (end.code ?? null) : null
+        await refresh($)
+        // stderr holds the live output of the baseline; it shows only when there is no result.
+        const text = stdout.trim() || stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
+        return { tone: code === 0 ? 'ok' : 'fail', text: text || 'no output' }
+      }
+      saw = true
+      const piece = step.value
+      if (piece.stream === 'stdout') stdout += piece.text
+      else stderr += piece.text
+    }
+  } catch (err) {
+    // A child that already spoke does not restart; an engine without one falls back.
+    if (saw) return { tone: 'fail', text: `cannot run ${BIN}: ${String(err)}` }
+    return null
+  }
+}
+
+/** The capped one-shot run, for an engine without a streamed child. */
+async function acceptRun(
+  $: EngineInterface,
+  argv: string[],
+  budget: PlanBudget | null,
+): Promise<RvowNotice> {
+  try {
+    const r = await $.process.run([BIN, ...argv], {
+      cwd: await $.session.cwd(),
+      timeoutMs: Math.min(acceptTimeoutMs(budget), 600_000),
+    })
+    await refresh($)
+    const text = r.stdout.trim() || r.stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
+    return { tone: r.exitCode === 0 ? 'ok' : 'fail', text: text || 'no output' }
+  } catch (err) {
+    return { tone: 'fail', text: `cannot run ${BIN}: ${String(err)}` }
+  }
+}
+
 /** Runs `rvow <argv>`; the timeout covers `accept`, whose baseline runs every verify command. */
 async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
+  if (argv[0] === 'accept') return acceptPlan($, argv)
   try {
     const r = await $.process.run([BIN, ...argv], {
       cwd: await $.session.cwd(),
@@ -657,8 +752,8 @@ export const register: Register = (on) => {
       return {
         result: `The user did not accept ${change}; it stays a plan. The user can run /rvow-accept ${change} to start it.`,
       }
-    const done = await tellOut($, ['accept', change, '--yes'])
-    return { result: done.ok ? done.out : failedText(['accept', change], done.out) }
+    const done = await acceptPlan($, ['accept', change, '--yes'])
+    return { result: done.tone === 'ok' ? done.text : failedText(['accept', change], done.text) }
   })
 
   on('tool.call', { tool: ARCHIVE }, async ($, e) => {

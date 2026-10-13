@@ -551,6 +551,30 @@ test("a on a ready plan asks to confirm, then runs rvow accept and tells the age
   assert.equal(modDecision(["accept", "CHG-a"], "accepted\nnext: TSK-1 first\n"), t.users()[0]);
 });
 
+test("a on a ready plan shows the baseline-check notice before accept runs", async () => {
+  const t = setup({
+    "view.json": json({
+      ...WAITING(),
+      backlog: [
+        plan("CHG-a", "A", {
+          tasks: 3,
+          task_timeouts_secs: [600, 600, 600],
+          default_timeout_secs: 600,
+        }),
+      ],
+    }),
+    "review.txt": "the checklist",
+  });
+  await t.status((p) => press(p, "a"));
+  assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
+  const notes = t.notes();
+  assert.match(notes[0] ?? "", /3 baseline checks/);
+  assert.ok(
+    notes.indexOf("rvow accept: 3 baseline checks; this can take a while") < notes.length - 1,
+    "the notice comes before the result",
+  );
+});
+
 test("an accept that fails tells the agent what failed and why", async () => {
   const t = setup({
     "view.json": json(WAITING({ id: "CHG-a", title: "A" })),

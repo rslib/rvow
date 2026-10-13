@@ -8,7 +8,8 @@
 //!                  "reasons": [..] } ],
 //!                  "drift": [ { "class", "what" } ],
 //!                  "pending": [ { "id", "reason" } ] } ],
-//!   "plans": [ { "id", "title", "tasks", "questions", "issues", "ready", "path" } ],
+//!   "plans": [ { "id", "title", "tasks", "questions", "issues", "ready", "path",
+//!                 "task_timeouts_secs": [..], "default_timeout_secs" } ],
 //!   "backlog": [ { ...plan fields, "branch", "here" } ],  (every plan, this branch first)
 //!   "archive": [ { "id", "title", "outcome", "date" } ],  (newest first, at most 10)
 //!   "questions": [ { "change", "question", "recommended" } ],
@@ -55,6 +56,7 @@ pub fn view(project: &Project, home: &Path, cwd: &Path) -> Result<Option<Value>>
 pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     let top = git::toplevel(cwd)?;
     let branch = git::branch(&top)?;
+    let config = config::load(project, home)?;
     let (living, _) = change::load_living(project)?;
     let active = proof::active(project, &living)?;
     let queue = match &branch {
@@ -91,6 +93,14 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
             "issues": errors + missing,
             "ready": asked.is_empty() && errors + missing == 0 && !loaded.tasks.is_empty(),
             "path": c.path.display().to_string(),
+            // The accept budget of the plan: each task's timeout, 0 when it
+            // uses the configured default, so a harness can size its accept run.
+            "task_timeouts_secs": loaded
+                .tasks
+                .iter()
+                .map(|t| t.timeout.map(|d| d.as_secs()).unwrap_or(0))
+                .collect::<Vec<u64>>(),
+            "default_timeout_secs": config.timeout_secs,
         });
         if here {
             plans.push(entry.clone());
@@ -119,7 +129,6 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
         })
         .collect();
 
-    let config = config::load(project, home)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let mut changes = Vec::new();
     let mut blocked = 0;
@@ -221,5 +230,20 @@ mod tests {
         let v = view(&p, &home, &repo).unwrap().unwrap();
         assert_eq!(v["archive"][0]["outcome"], "dropped");
         assert_eq!(v["archive"][0]["title"], "Later");
+    }
+
+    #[test]
+    fn view_carries_the_accept_budget_of_each_plan() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let plan = change::new(&p, "Budget", "main", true).unwrap();
+        std::fs::write(
+            plan.path.join("tasks.md"),
+            "- TSK-new1 One\n  verify: true\n  files: a\n  timeout: 20m\n- TSK-new2 Two\n  verify: true\n  files: a\n- TSK-new3 Three\n  verify: true\n  files: a\n  timeout: 90s\n",
+        )
+        .unwrap();
+        let v = view(&p, &home, &repo).unwrap().unwrap();
+        assert_eq!(v["plans"][0]["task_timeouts_secs"], json!([1200, 0, 90]));
+        assert_eq!(v["plans"][0]["default_timeout_secs"], json!(600));
     }
 }
