@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
+  A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.
+- A runner that fills `{junit}` writes a JUnit report that accept and prove read: accept records the failed test names and refuses when the report names none, and a proof passes only when each recorded name passes and no test case failed.
+  A missing `needs` path refuses the run and names the path, `rvow check` warns `configure-in-verify` about a CMake configure step in a verify, and a `Re-running CMake` output adds a note to the prove result.
+
 - `rvow show <change>` prints an outline of the change (each proposal section with its word count, each requirement with its title, each task with its state, and the parts), and `rvow show <change> <part>` prints the full text of one part: `proposal`, `tasks` or `spec:<name>`.
 - `rvow put` replaces one part of an open change, or one task or requirement block, with the text on stdin, writes it atomically and prints `ok` or the check findings of the change.
 - The hooks deny a direct read, write or search of the plan files in the rvow store of a home-mode project, and the reason names the `rvow show` or `rvow put` command for the need; a search from the root names `rvow ls` and `rvow show`.

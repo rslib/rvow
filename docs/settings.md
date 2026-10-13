@@ -149,3 +149,37 @@ Set `RVOW_GIT` to the path of a git binary to run that one for every git call in
 Set it when the git on `PATH` cannot run, such as a sandbox where `/usr/bin/git` is a launcher shim that the sandbox stops.
 An empty value falls back to `PATH`.
 The agent eval runner passes the same path as `EVAL_RVOW_GIT`, which is the only spelling that reaches inside the eval sandbox.
+## Runners
+
+The `[runners]` table of the project config holds a named command template, and a task verify names it with `verify: @<runner> key=value`.
+
+```toml
+[runners.cpp]
+run     = "cmake --build --preset {preset} --target {target} && ctest --preset {preset} -R '{test}' --no-tests=error --output-junit {junit}"
+params  = { preset = ["tests", "asan", "tsan"] }
+default = { preset = "tests" }
+needs   = ["build/build-{preset}"]
+env     = { CPM_SOURCE_CACHE = "/tmp/cpm" }
+timeout = "5m"
+```
+
+Every key except `run` is optional.
+
+Each `{param}` of `run` gets its value from the task's `key=value` pairs or from `default`, and `{junit}` is filled by rvow itself with a fresh report path.
+A task key that `run` does not use, a value outside `params`, and a param with no value are `rvow check` errors.
+Each value lands inside a shell command, so it may hold only `A-Z a-z 0-9 _ . : / + = * ^ $` and `-`; rvow refuses any other char, at check time and again before a run, and names the char.
+A task's own `timeout:` wins over the runner's `timeout`.
+
+When `run` holds `{junit}`, accept reads the JUnit report after the baseline run, records the failed test names in the vow and refuses when the report names no failed test.
+A case is failed when it holds a `<failure>` or an `<error>` child, and its name is the `name` attribute, or `classname.name` when both are there.
+At prove and at the gate rerun the proof passes only when the command exits 0, the report exists, each recorded name is there and passed, and no test case failed.
+
+Each path of `needs` is filled with the same params and must exist before anything runs: accept, prove and the gate rerun run no command and name the missing path, so configure that build dir first.
+
+`rvow check` warns with `configure-in-verify` when a plain verify or a runner's `run` configures CMake: the words `cmake --preset`, `cmake -S`, `cmake -B` or any `--fresh`.
+`cmake --build --preset` only builds and does not warn.
+
+When the output of a verify run holds `Re-running CMake`, the prove result notes that the build reconfigured and, when the runner has a `needs` path, names it: `run ninja -C <dir> -d explain to see why`.
+
+The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`).
+A changed runner is weaken drift for each task that uses it, like a changed verify, and a runner that no task uses can change with no drift.

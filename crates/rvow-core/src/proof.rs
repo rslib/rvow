@@ -289,8 +289,24 @@ fn next_with<'a>(queue: &[&'a Active], now: &Now, context: Option<(&Project, &Pa
 
 /// A task in full: id, title, command, scope and the text of what it covers.
 pub fn render_task(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> String {
-    let mut out =
-        format!("{} {}\n  verify: {}\n  files: {}\n", task.id, task.title, task.verify.as_deref().unwrap_or(""), task.files.join(", "));
+    render_task_verify(task, loaded, living, task.verify.as_deref().unwrap_or(""))
+}
+
+/// Like `render_task`, with a `@runner` verify shown as the filled command
+/// that rvow runs.
+pub fn render_task_filled(task: &Task, loaded: &Loaded, living: &[CapSpec], runners: &BTreeMap<String, crate::template::Runner>) -> String {
+    let verify = match task.verify.as_deref() {
+        Some(v) => match crate::template::plan(runners, task) {
+            Ok(plan) => plan.command,
+            Err(_) => v.to_string(),
+        },
+        None => String::new(),
+    };
+    render_task_verify(task, loaded, living, &verify)
+}
+
+fn render_task_verify(task: &Task, loaded: &Loaded, living: &[CapSpec], verify: &str) -> String {
+    let mut out = format!("{} {}\n  verify: {}\n  files: {}\n", task.id, task.title, verify, task.files.join(", "));
     for r in &task.covers {
         match find_requirement(r, loaded, living) {
             Some(req) => {
@@ -351,12 +367,31 @@ pub struct Proved {
     pub outcome: Outcome,
     pub mutants: Option<Outcome>,
     pub private_check: Option<crate::hardening::PrivateResult>,
+    /// The JUnit check of the run, when the runner's run names {junit}.
+    pub junit: Option<crate::junit::Check>,
+    /// A note for the result, such as a CMake reconfigure the run printed.
+    pub note: Option<String>,
     pub proved: bool,
     pub event: String,
     /// The same failure repeated, so a block is worth considering.
     pub looping: bool,
     pub lfs_pointers: Vec<String>,
     pub next: Option<String>,
+}
+
+/// The failed test names the accepted baseline recorded for `task`, which a
+/// JUnit report must show passed for a proof.
+pub fn junit_recorded(change: &Active, task: &str) -> Vec<String> {
+    change
+        .baseline()
+        .and_then(|b| b.get("junit"))
+        .and_then(Value::as_object)
+        .and_then(|m| m.get(task))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
 }
 
 /// Finds a task id among the active changes by a unique prefix.
@@ -454,9 +489,21 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let inputs = now.inputs(task)?;
     let tree = fingerprint::worktree(&top, project)?;
-    let cmd = task.verify_command()?;
+    let runners = config::runners(project)?;
+    let plan = crate::template::plan(&runners, task)?;
+    if let Some(path) = plan.missing_need(&top) {
+        return Err(Error::new(
+            "needs",
+            format!("{} needs {}, which does not exist", task.id, path),
+            format!("configure {} first (for example with `cmake --preset ...`), then run rvow prove again", path),
+        ));
+    }
+    let cmd = plan.command.clone();
     let started = ledger::now_ms();
-    let outcome = runner::run(cmd, &top, &[], task.timeout.unwrap_or(config.timeout()), echo)?;
+    let mut watch = Watch { inner: echo, reconfigured: false };
+    let outcome = runner::run(&cmd, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut watch)?;
+    let note = watch.note(&plan);
+    let junit = plan.junit.as_ref().map(|report| crate::junit::check(report, &junit_recorded(change, &task.id.to_string())));
     let mutants = task
         .mutants
         .as_deref()
@@ -483,7 +530,8 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let proved = outcome.passed()
         && outcome.tests_run != Some(0)
         && mutants.as_ref().is_none_or(Outcome::passed)
-        && private_check.as_ref().is_none_or(|c| c.passed);
+        && private_check.as_ref().is_none_or(|c| c.passed)
+        && junit.as_ref().is_none_or(|c| *c == crate::junit::Check::Passed);
 
     let thash = task_hash(task);
     let reqs = covered(task, &change.loaded, &living);
@@ -493,7 +541,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("task".into(), task.id.to_string().into());
     data.insert("task_hash".into(), thash.into());
     data.insert("requirements".into(), json!(reqs));
-    data.insert("verify".into(), cmd.into());
+    data.insert("verify".into(), cmd.clone().into());
     data.insert("proved".into(), proved.into());
     if let Some(check) = &mutants {
         let mut value = json!(check);
@@ -511,6 +559,16 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("exit".into(), json!(outcome.exit));
     data.insert("timed_out".into(), outcome.timed_out.into());
     data.insert("tests_run".into(), json!(outcome.tests_run));
+    if let Some(check) = &junit {
+        let (passed, reason) = match check {
+            crate::junit::Check::Passed => (true, None),
+            crate::junit::Check::Failed(why) => (false, Some(why.clone())),
+        };
+        data.insert(
+            "junit".into(),
+            json!({ "recorded": junit_recorded(change, &task.id.to_string()), "passed": passed, "reason": reason }),
+        );
+    }
     data.insert("started".into(), started.into());
     data.insert("duration_ms".into(), outcome.duration_ms.into());
     data.insert("tail".into(), json!(outcome.tail));
@@ -521,7 +579,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.into());
     data.insert("key".into(), key.into());
-    data.insert("programs".into(), json!(verify_programs(cmd)));
+    data.insert("programs".into(), json!(verify_programs(&cmd)));
     if proved {
         data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
     }
@@ -553,19 +611,56 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let changes = active(project, &living)?;
     let branch = change_branch(&changes, &change.dir.id);
     let queue = on_branch(&changes, &branch);
-    let next = next_for(project, home, &queue, &now)?.map(|(c, t, s)| format!("[{}] {}", s.name(), render_task(t, &c.loaded, &living)));
+    let next = next_for(project, home, &queue, &now)?
+        .map(|(c, t, s)| format!("[{}] {}", s.name(), render_task_filled(t, &c.loaded, &living, &runners)));
     Ok(Proved {
         change: change.dir.id.clone(),
         task: task.id.clone(),
         outcome,
         mutants,
         private_check,
+        junit,
+        note,
         proved,
         event: event.hash,
         looping,
         lfs_pointers: inputs.lfs_pointers,
         next,
     })
+}
+
+/// Streams a verify run to `inner` and watches the output for a CMake
+/// reconfigure, so the result can tell the user why the build was cold.
+struct Watch<'a> {
+    inner: &'a mut dyn Write,
+    reconfigured: bool,
+}
+
+impl Write for Watch<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.windows(b"Re-running CMake".len()).any(|w| w == b"Re-running CMake") {
+            self.reconfigured = true;
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Watch<'_> {
+    /// The note the prove result shows: the build reconfigured, and with a
+    /// needs path, where to ask ninja why.
+    fn note(&self, plan: &crate::template::Plan) -> Option<String> {
+        if !self.reconfigured {
+            return None;
+        }
+        Some(match plan.needs.first() {
+            Some(dir) => format!("the build reconfigured; run `ninja -C {dir} -d explain` to see why"),
+            None => "the build reconfigured".to_string(),
+        })
+    }
 }
 
 /// Writes `diff` to a temp file for `RVOW_DIFF`. The caller removes it after

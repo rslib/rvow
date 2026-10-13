@@ -1,5 +1,6 @@
 //! `rvow check`: a read-only report on a plan before the user accepts it.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -37,10 +38,30 @@ fn on_path(name: &str) -> bool {
 /// Tasks whose verify command starts with a program that neither exists on
 /// PATH nor as a file in the repository. Such a command fails for the wrong
 /// reason, so its failing baseline proves nothing.
+/// The command each task runs, with a `@runner` verify filled from the
+/// project config. A task whose fill fails keeps its raw verify text;
+/// `runner_checks` reports the fill error itself.
+pub fn filled_commands(runners: &BTreeMap<String, crate::template::Runner>, tasks: &[Task]) -> BTreeMap<String, String> {
+    tasks
+        .iter()
+        .map(|t| {
+            let cmd = crate::template::plan(runners, t).map(|p| p.command).unwrap_or_else(|_| t.verify.clone().unwrap_or_default());
+            (t.id.to_string(), cmd)
+        })
+        .collect()
+}
+
 pub fn missing_programs(top: &Path, tasks: &[Task]) -> Vec<(String, String)> {
+    let raw: BTreeMap<String, String> = tasks.iter().map(|t| (t.id.to_string(), t.verify.clone().unwrap_or_default())).collect();
+    missing_programs_filled(top, tasks, &raw)
+}
+
+/// Like `missing_programs`, with each task's command already filled from its
+/// runner, when it names one.
+pub fn missing_programs_filled(top: &Path, tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for t in tasks {
-        let Some(cmd) = t.verify.as_deref() else {
+        let Some(cmd) = filled.get(&t.id.to_string()).map(String::as_str) else {
             continue;
         };
         let Some(prog) = program(cmd) else {
@@ -101,10 +122,10 @@ fn last_run_ms(project: &Project, cmd: &str) -> Option<u64> {
 /// A warning for each task whose verify runs the full suite instead of one
 /// target: it chains commands, repeats a configured check, or ran slowly the
 /// last time the same command was proved in this project.
-pub fn full_suite(project: &Project, config: &Config, tasks: &[Task]) -> Vec<SlowVerify> {
+pub fn full_suite(project: &Project, config: &Config, tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<SlowVerify> {
     let mut out = Vec::new();
     for t in tasks {
-        let Some(cmd) = t.verify.as_deref().map(str::trim) else { continue };
+        let Some(cmd) = filled.get(&t.id.to_string()).map(|s| s.trim()) else { continue };
         let mut why = Vec::new();
         let chained = chained_commands(cmd);
         if chained >= CHAINED_COMMANDS {
@@ -205,12 +226,13 @@ fn counted_runner(cmd: &str) -> bool {
 
 /// A warning for each task whose check proves nothing: a stub command, or a
 /// `baseline: pass` on a command with no counted test runner.
-fn weak_checks(tasks: &[Task]) -> Vec<Finding> {
+fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding> {
     let mut out = Vec::new();
     for t in tasks {
-        let Some(cmd) = t.verify.as_deref() else {
+        let Some(cmd) = filled.get(&t.id.to_string()) else {
             continue;
         };
+        let cmd = cmd.as_str();
         let trivial = trivial_verify(cmd);
         if !trivial && !(t.baseline_pass && !counted_runner(cmd)) {
             continue;
@@ -232,12 +254,16 @@ fn weak_checks(tasks: &[Task]) -> Vec<Finding> {
 }
 
 fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
-    let slow = full_suite(project, config, &loaded.tasks);
+    let runners = config::runners(project).unwrap_or_default();
+    let filled = filled_commands(&runners, &loaded.tasks);
+    let slow = full_suite(project, config, &loaded.tasks, &filled);
     let mut findings = loaded.findings;
+    findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
+    findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
-    findings.extend(weak_checks(&loaded.tasks));
+    findings.extend(weak_checks(&loaded.tasks, &filled));
     Report {
-        missing: missing_programs(top, &loaded.tasks),
+        missing: missing_programs_filled(top, &loaded.tasks, &filled),
         questions: questions(&loaded.texts),
         no_tasks: loaded.tasks.is_empty(),
         findings,

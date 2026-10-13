@@ -118,5 +118,7 @@ mod syntax_drift;
 mod syntax_grammar;
 #[path = "suite/tamper_holes.rs"]
 mod tamper_holes;
+#[path = "suite/verify_runners.rs"]
+mod verify_runners;
 #[path = "suite/yolo.rs"]
 mod yolo;

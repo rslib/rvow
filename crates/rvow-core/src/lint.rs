@@ -2,7 +2,7 @@
 //! Writing Requirements (R7, R8, R9, R17, R24, R34), the sentence form follows
 //! EARS and the keywords follow RFC 2119 and RFC 8174.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::diag::{Diagnostic, Rule};
 use crate::id::{Id, Ref};
@@ -188,6 +188,61 @@ pub struct Question {
     pub why: Option<String>,
     /// The marker exactly as written, so `rvow answer` can remove it.
     pub marker: String,
+}
+
+/// One check per task whose `@runner` verify does not fill: an unknown
+/// runner, a param with no value, a task key the run does not use, a value
+/// outside the runner's `params`, or a value with a char that is not safe in
+/// a shell command. The message of each fill error already names the task.
+pub fn runner_checks(runners: &BTreeMap<String, crate::template::Runner>, tasks: &[Task]) -> Vec<Finding> {
+    tasks
+        .iter()
+        .filter(|t| t.verify.as_deref().is_some_and(|v| v.starts_with('@')))
+        .filter_map(|t| match crate::template::plan(runners, t) {
+            Ok(_) => None,
+            Err(e) => Some(("tasks.md".to_string(), Diagnostic::new(Rule::Runner, t.line, format!("{}: {}", t.id, e.message)))),
+        })
+        .collect()
+}
+
+/// Whether the words of a command configure CMake: `cmake --preset`,
+/// `cmake -S`, `cmake -B` or any `--fresh`. `cmake --build --preset` builds an
+/// already configured dir and does not warn.
+fn configures(cmd: &str) -> bool {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    words.windows(2).any(|w| w[0] == "cmake" && matches!(w[1], "--preset" | "-S" | "-B")) || words.contains(&"--fresh")
+}
+
+/// A warning for each verify that would configure CMake: a plain verify names
+/// the task, a runner names the runner its task uses. A configure step in a
+/// verify makes every accept and prove a cold build.
+pub fn configure_warnings(runners: &BTreeMap<String, crate::template::Runner>, tasks: &[Task]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for t in tasks {
+        match t.verify.as_deref().and_then(crate::template::reference) {
+            Some((name, _)) => {
+                if runners.get(name).is_some_and(|r| configures(&r.run)) {
+                    out.push((
+                        "tasks.md".to_string(),
+                        Diagnostic::new(
+                            Rule::ConfigureInVerify,
+                            t.line,
+                            format!("{} uses runner {name}, whose run configures CMake", t.id),
+                        ),
+                    ));
+                }
+            }
+            None => {
+                if t.verify.as_deref().is_some_and(configures) {
+                    out.push((
+                        "tasks.md".to_string(),
+                        Diagnostic::new(Rule::ConfigureInVerify, t.line, format!("{} configures CMake in its verify", t.id)),
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Every `[NEEDS CLARIFICATION` marker outside code. `accept` refuses a

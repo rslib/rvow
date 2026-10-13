@@ -125,6 +125,7 @@ fn gate_for(
     r.changes = queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)).count();
 
     let config = config::load(project, home)?;
+    let runners = config::runners(project)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         check_change(project, c, &now, &opts, &mut r)?;
@@ -195,7 +196,7 @@ fn gate_for(
                             && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
                             && ignored.is_none();
                         let sealed = seal_key.as_deref().is_some_and(|key| sealed_proof(c, &t.id.to_string(), key));
-                        let mismatch = if trusted && sealed { program_mismatch(c, t) } else { None };
+                        let mismatch = if trusted && sealed { program_mismatch(c, t, &runners) } else { None };
                         if trusted && !sealed {
                             r.warnings.push(format!("{}: the newest proof has no valid seal, so it is rerun", t.id));
                         } else if let Some(name) = &mismatch {
@@ -256,9 +257,29 @@ fn gate_for(
             }
             let Some(dir) = lazy.dir(&mut r, echo)? else { return Ok(r) };
             let inputs = run_projection.as_ref().map(|(_, now)| now.inputs(t)).transpose()?;
-            let cmd = t.verify.as_deref().unwrap_or("");
+            let plan = match crate::template::plan(&runners, t) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    r.failures.push(format!("{id} cannot fill its runner verify: {}", e.message));
+                    continue;
+                }
+            };
+            if let Some(path) = plan.missing_need(&dir) {
+                r.failures.push(format!("{id} needs {path}, which does not exist; configure it first"));
+                continue;
+            }
+            let cmd = plan.command.clone();
+            let mut env = env.clone();
+            env.extend(plan.env.iter().cloned());
             let _ = writeln!(echo, "rerun {id}: {cmd}");
-            let o = runner::run(cmd, &dir, &env, t.timeout.unwrap_or(config.timeout()), echo)?;
+            let o = runner::run(&cmd, &dir, &env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), echo)?;
+            // A runner that names {junit} answers by the same rule as prove:
+            // the recorded names must pass and no case may fail.
+            if let Some(report) = &plan.junit
+                && let crate::junit::Check::Failed(why) = crate::junit::check(report, &proof::junit_recorded(c, &id))
+            {
+                r.failures.push(format!("{id} failed on rerun (junit: {why})"));
+            }
             r.timings.push((id.clone(), o.duration_ms));
             if let (Some(cache), Some(key)) = (&mut cache, key) {
                 let lock = project.lock()?;
@@ -415,12 +436,12 @@ fn sealed_proof(c: &Active, id: &str, key: &[u8]) -> bool {
 /// The first program of `t`'s verify command whose resolved path or content
 /// differs from the newest proof. A missing `programs` record counts as a
 /// mismatch, so a proof from before programs existed reruns.
-fn program_mismatch(c: &Active, t: &crate::tasks::Task) -> Option<String> {
+fn program_mismatch(c: &Active, t: &crate::tasks::Task, runners: &BTreeMap<String, crate::template::Runner>) -> Option<String> {
     let recorded: BTreeMap<String, serde_json::Value> = newest_prove(c, &t.id.to_string())
         .and_then(|e| e.data.get("programs"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let current = proof::verify_programs(t.verify.as_deref().unwrap_or(""));
+    let current = proof::verify_programs(&crate::template::plan(runners, t).map(|p| p.command).unwrap_or_default());
     if recorded == current {
         return None;
     }

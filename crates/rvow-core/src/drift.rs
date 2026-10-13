@@ -239,6 +239,33 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
     }
 }
 
+/// A changed runner is weaken drift for each accepted task that uses it: the
+/// task's verify still says `@name`, but the command it runs is now what the
+/// config says, not what the user accepted. Only a runner the baseline
+/// recorded counts, so a runner no task uses changes freely. The runner edit
+/// is not a `config changed` item: the `[runners]` table stays out of the
+/// canonical config.
+fn runner_items(project: &Project, base: &Map<String, Value>, tasks: &[Task]) -> Vec<Item> {
+    let recorded = base.get("runners").and_then(Value::as_object);
+    let runners = crate::config::runners(project).unwrap_or_default();
+    let mut out = Vec::new();
+    for (task, names) in recorded.into_iter().flat_map(|m| m.iter()) {
+        // A task whose verify no longer names a runner changed its verify,
+        // which task_items already reports.
+        let uses = tasks.iter().any(|t| &t.id.to_string() == task && t.verify.as_deref().is_some_and(|v| v.starts_with('@')));
+        if !uses {
+            continue;
+        }
+        for (name, hash) in names.as_object().into_iter().flatten() {
+            let now = runners.get(name).map(|r| r.hash());
+            if now.as_deref() != hash.as_str() {
+                out.push(item(Class::Weaken, format!("{task} runner {name} changed")));
+            }
+        }
+    }
+    out
+}
+
 fn delta_map(files: &BTreeMap<String, String>) -> BTreeMap<String, (DeltaOp, String)> {
     let mut map = BTreeMap::new();
     for text in files.values() {
@@ -394,6 +421,7 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
 
     let old_tasks = baseline_tasks(project, change)?;
     task_items(&old_tasks, &loaded.tasks, &mut out);
+    out.extend(runner_items(project, base, &loaded.tasks));
 
     let prefix = format!("{DELTAS}/");
     let old_deltas: BTreeMap<String, String> =
