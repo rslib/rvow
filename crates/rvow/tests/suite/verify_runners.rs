@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use rvow_core::{change, config, drift, gate, ledger, plan, proof, review, store, vow};
+use rvow_core::{amend, change, config, drift, gate, ledger, plan, proof, review, store, vow};
 use serde_json::Value;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -554,4 +554,435 @@ needs = [\"build-tests\"]
     let task = accept(&f, backlog(&f, "@c", ""));
     std::fs::write(f.repo.join("out.txt"), "ok\n").unwrap();
     assert_eq!(prove(&f, &task).note, None);
+}
+
+/// Confirms the one pending amendment of the change.
+fn amend_accept(f: &Fx, reason: &str) {
+    amend::amend(&f.project, &f.home, &f.repo, None, reason, None).unwrap();
+    let a = active(f);
+    let pend = amend::pending(std::slice::from_ref(&a));
+    assert_eq!(pend.len(), 1, "{pend:?}");
+    let id = pend[0].id.to_string();
+    amend::confirm(&f.project, &[id], amend::Decision::Accept, None).unwrap();
+}
+
+#[test]
+fn runners_fix_amend_junit_holds_after_amendment() {
+    // A title-only amendment carries the recorded names forward: a prove
+    // whose report lacks the recorded test still fails and names it.
+    let f = fx_junit("amend-junit", RUNNER_JUNIT);
+    let task = accept(&f, backlog(&f, "@t", ""));
+    edit_tasks(&f, "Run the runner", "Run the runner now");
+    amend_accept(&f, "clearer title");
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    let proved = prove(&f, &task);
+    assert!(!proved.proved, "a missing recorded test must fail after an amendment");
+    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the recorded test c.Seek is missing from the report".into())));
+}
+
+#[test]
+fn runners_fix_amend_baseline_fills_runner() {
+    // The amend baseline runs the filled command: amending to an
+    // always-passing runner refuses, while the raw "@always" text would fail
+    // as a shell command and wrongly allow the amendment.
+    let cfg = "[runners.always]\nrun = \"echo 'test result: ok. 1 passed; 0 failed;'\"\n";
+    let f = fx("amend-fill", cfg);
+    let plain = "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
+    let c = backlog(&f, plain, "");
+    accept(&f, c);
+    edit_tasks(&f, &format!("verify: {plain}"), "verify: @always");
+    let err = match amend::amend(&f.project, &f.home, &f.repo, None, "use runner", None) {
+        Err(e) => e,
+        Ok(_) => panic!("an amendment to an always-passing runner must refuse at the baseline"),
+    };
+    assert_eq!(err.code, "baseline", "{err}");
+    assert!(err.message.contains("passes on the base commit"), "{err}");
+}
+
+#[test]
+fn runners_fix_amend_changed_task_records_junit_names() {
+    // An amendment that moves a task onto a {junit} runner records the failed
+    // names at the amend baseline, by the same rule as accept.
+    let f = fx_junit("amend-chg", RUNNER_JUNIT);
+    let plain = "grep -q pass out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
+    let c = backlog(&f, plain, "");
+    let task = accept(&f, c);
+    edit_tasks(&f, &format!("verify: {plain}"), "verify: @t");
+    amend_accept(&f, "use the junit runner");
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    let proved = prove(&f, &task);
+    assert!(!proved.proved, "the amend baseline must record the failed names");
+    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the recorded test c.Seek is missing from the report".into())));
+}
+
+#[test]
+fn runners_fix_gate_junit_failure_caches_nothing() {
+    // A rerun whose junit check fails records no cache entry, so the next
+    // gate runs the task again instead of answering from the cache.
+    let f = fx_junit("gate-cache", &format!("rerun_proven = true\n{RUNNER_JUNIT}"));
+    let task = accept(&f, backlog(&f, "@t", ""));
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt", "pass.xml"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let opts = gate::Options { strict: true, rerun: true, out: None };
+    let r1 = gate::gate(&f.project, &f.home, &f.repo, opts.clone(), &mut std::io::sink()).unwrap();
+    assert!(r1.failures.iter().any(|x| x.contains("junit") && x.contains("c.Seek")), "{r1:?}");
+    assert!(r1.timings.iter().any(|(id, _)| id == &task), "{r1:?}");
+    let r2 = gate::gate(&f.project, &f.home, &f.repo, opts, &mut std::io::sink()).unwrap();
+    assert!(r2.timings.iter().any(|(id, _)| id == &task), "a junit failure must not be cached: {r2:?}");
+    assert!(!r2.cached.iter().any(|id| id == &task), "{r2:?}");
+}
+
+#[test]
+fn runners_fix_gate_runner_change_stales_proof() {
+    // A confirmed runner `run` change stales the old proof: the verify text
+    // is the same, but the command it runs is not.
+    let f = fx("gate-stale", RUNNER_CPP);
+    let task = accept(&f, backlog(&f, "@cpp test=Seek", ""));
+    std::fs::write(f.repo.join("out.txt"), "tests Seek\n").unwrap();
+    assert!(prove(&f, &task).proved);
+    edit_config(&f, "grep -q '{preset} {test}' out.txt", "grep -q '{test}' out.txt");
+    amend_accept(&f, "simpler grep");
+    let s = proof::status(&f.project, &f.home, &f.repo, false).unwrap();
+    assert!(matches!(&s[0].tasks[0].state, proof::State::Stale(r) if r.contains(&"runner-changed")), "{:?}", s[0].tasks[0].state);
+}
+
+#[test]
+fn runners_fix_gate_rerun_run_records_filled_verify_and_junit() {
+    // A rerun run records the filled command as verify, the programs of the
+    // filled command as programs, and proved false when the junit check fails.
+    // The runner writes the fail report first, then the pass report when the
+    // work is there, so the filled command starts with plain programs.
+    let cfg = "[runners.t]\nrun = \"cp fail.xml {junit}; grep -q pass out.txt && cp pass.xml {junit}\"\n";
+    let f = fx_junit("gate-run", &format!("rerun_proven = true\n{cfg}"));
+    let c = change::new(&f.project, "Run", "main", false).unwrap();
+    std::fs::write(c.path.join("tasks.md"), "- TSK-new1 Run the runner\n  covers: REQ-new1\n  verify: @t\n  files: out.txt, pass.xml\n")
+        .unwrap();
+    std::fs::write(c.path.join("specs/out.md"), SPEC).unwrap();
+    let task = accept(&f, c);
+    std::fs::write(f.repo.join("pass.xml"), XML_FAIL).unwrap();
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt", "pass.xml"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let out = f._tmp.join("runs.jsonl");
+    let opts = gate::Options { strict: true, rerun: true, out: Some(out) };
+    let r = gate::gate(&f.project, &f.home, &f.repo, opts, &mut std::io::sink()).unwrap();
+    assert!(r.failures.iter().any(|x| x.contains("junit") && x.contains("c.Seek")), "{r:?}");
+    let run = r.runs.iter().find(|run| run.data.get("task").and_then(Value::as_str) == Some(&task)).unwrap();
+    let verify = run.data.get("verify").and_then(Value::as_str).unwrap();
+    assert!(verify.contains("pass.xml") && !verify.contains("@t"), "{verify}");
+    let programs = run.data.get("programs").and_then(Value::as_object).unwrap();
+    assert!(programs.contains_key("grep") && programs.contains_key("cp"), "{programs:?}");
+    assert_eq!(run.data.get("proved"), Some(&Value::Bool(false)), "{:?}", run.data.get("proved"));
+}
+
+#[test]
+fn runners_fix_show_good_runner_plan_is_ready() {
+    // `rvow ls` counts missing programs on the filled command, so a good
+    // runner plan is ready instead of missing its `@text` program.
+    let f = fx("show-ready", RUNNER_CPP);
+    let c = backlog(&f, "@cpp test=Seek", "");
+    let v = rvow_core::view::view(&f.project, &f.home, &f.repo).unwrap().unwrap();
+    let plan = v["backlog"].as_array().unwrap().iter().find(|p| p["id"] == c.id.to_string()).unwrap();
+    assert_eq!(plan["ready"], true, "{plan}");
+    assert_eq!(plan["issues"], 0, "{plan}");
+}
+
+#[test]
+fn runners_fix_show_check_reports_only_the_runner_error() {
+    // A task whose runner fails to fill gets only the runner error, not also
+    // a missing-program for the raw `@text`.
+    let f = fx("show-check", RUNNER_CPP);
+    let c = backlog(&f, "@nope test=Seek", "");
+    let r = plan::check(&f.project, &f.repo, Some(&c.id.to_string())).unwrap().remove(0);
+    assert!(r.findings.iter().any(|(_, d)| d.rule.code() == "runner"), "{r:?}");
+    assert!(r.missing.is_empty(), "{r:?}");
+
+    let c = backlog(&f, "@cpp test='Seek", "");
+    let r = plan::check(&f.project, &f.repo, Some(&c.id.to_string())).unwrap().remove(0);
+    assert!(r.findings.iter().any(|(_, d)| d.rule.code() == "runner"), "{r:?}");
+    assert!(r.missing.is_empty(), "{r:?}");
+
+    let c = backlog(&f, "@cpp test=Seek", "");
+    let r = plan::check(&f.project, &f.repo, Some(&c.id.to_string())).unwrap().remove(0);
+    assert!(r.missing.is_empty(), "{r:?}");
+    assert!(!r.blocking(), "{r:?}");
+}
+
+#[test]
+fn runners_fix_show_review_and_show_print_the_filled_run() {
+    // `rvow review` and `rvow show` keep the `verify:` line and print the
+    // filled command as `run:` after it.
+    let f = fx("show-run", RUNNER_CPP);
+    let task = accept(&f, backlog(&f, "@cpp test=Seek", ""));
+    let out = rvow_core::show::show(&f.project, &task).unwrap();
+    assert!(out.contains("  verify: @cpp test=Seek\n"), "{out}");
+    assert!(out.contains("  run: grep -q 'tests Seek' out.txt"), "{out}");
+
+    let id = active(&f).dir.id.to_string();
+    let out = rvow_core::show::review(&f.project, &id).unwrap();
+    assert!(out.contains("  verify: @cpp test=Seek\n"), "{out}");
+    assert!(out.contains("  run: grep -q 'tests Seek' out.txt"), "{out}");
+}
+
+#[test]
+fn runners_fix_show_delegate_brief_prints_the_filled_run() {
+    // The delegate brief keeps `Prove it with:` and adds the filled command.
+    let f = fx("show-brief", RUNNER_CPP);
+    let task = accept(&f, backlog(&f, "@cpp test=Seek", ""));
+    let d = rvow_core::lease::issue(&f.project, &f.home, &f.repo, &task).unwrap();
+    let text = rvow_core::brief::delegate_brief(&d);
+    assert!(text.contains("Prove it with: @cpp test=Seek"), "{text}");
+    assert!(text.contains("run: grep -q 'tests Seek' out.txt"), "{text}");
+}
+
+#[test]
+fn runners_fix_show_prove_verdict_names_junit() {
+    // The command passed but the junit check failed: the verdict names the
+    // report, it does not claim 0 tests ran.
+    let f = fx_junit("show-verdict", RUNNER_JUNIT);
+    let task = accept(&f, backlog(&f, "@t", ""));
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rvow"))
+        .current_dir(&f.repo)
+        .env("HOME", &f._tmp)
+        .env("RVOW_HOME", &f.home)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["prove", &task])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("failed: junit report: the recorded test c.Seek is missing from the report"), "{stdout}");
+    assert!(!stdout.contains("ran 0 tests"), "{stdout}");
+}
+
+#[test]
+fn runners_fix_safe_bad_default_is_reported() {
+    // A runner default gets the same checks as a task value: an unsafe char
+    // and a value outside `params` are check errors that name the runner.
+    let cfg = "[runners.cpp]\nrun = \"grep -q '{preset} {test}' out.txt && echo 'test result: ok. 1 passed; 0 failed;'\"\ndefault = { preset = \"te'sts\" }\n";
+    let f = fx("safe-default", cfg);
+    let found = runner_findings(&f, &backlog(&f, "@cpp test=Seek", ""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("cpp") && found[0].contains('\''), "{found:?}");
+
+    let cfg = "[runners.cpp]\nrun = \"grep -q '{preset} {test}' out.txt && echo 'test result: ok. 1 passed; 0 failed;'\"\nparams = { preset = [\"tests\", \"tsan\"] }\ndefault = { preset = \"dev\" }\n";
+    let f = fx("safe-default2", cfg);
+    let found = runner_findings(&f, &backlog(&f, "@cpp test=Seek", ""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("cpp") && found[0].contains("dev"), "{found:?}");
+}
+
+#[test]
+fn runners_fix_safe_tmpdir_with_space_and_report_removed() {
+    // A report dir with a space works: the {junit} path is quoted for the
+    // shell. After accept, prove and the gate have read the report, no report
+    // file of this task is left behind. The spaced dir reaches the runner
+    // through its `env`, with no process env var set.
+    let spaced = std::env::temp_dir().join(format!("rvow space dir-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&spaced).unwrap();
+    let cfg = format!("{RUNNER_JUNIT}env = {{ RVOW_JUNIT_DIR = \"{}\" }}\n", spaced.display());
+    let f = fx_junit("safe-space", &cfg);
+    let task = accept(&f, backlog(&f, "@t", ""));
+    let reports = || {
+        std::fs::read_dir(&spaced)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("rvow-junit-{task}")))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(reports().is_empty(), "{:?}", reports());
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    assert!(prove(&f, &task).proved);
+    assert!(reports().is_empty(), "{:?}", reports());
+    git_cmd(&f.repo, &["add", "out.txt"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let r = gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: true, rerun: true, out: None }, &mut std::io::sink()).unwrap();
+    assert!(r.passed(), "{r:?}");
+    assert!(reports().is_empty(), "{:?}", reports());
+    let _ = std::fs::remove_dir_all(&spaced);
+}
+
+#[test]
+fn runners_fix_safe_baseline_pass_with_junit() {
+    // A `baseline: pass` task on a {junit} runner accepts when the report
+    // holds a passed case and no failed one, and records no names. Prove
+    // holds the same rule: a failed case or an empty report fails it.
+    let f = fx_junit("safe-pass", RUNNER_JUNIT);
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let task = accept(&f, backlog(&f, "@t", "  baseline: pass\n"));
+    let data = vow_data(&f);
+    assert_eq!(data["junit"][&task], serde_json::json!([]), "{:?}", data["junit"]);
+    assert!(prove(&f, &task).proved);
+
+    std::fs::write(f.repo.join("pass.xml"), XML_FAIL).unwrap();
+    let proved = prove(&f, &task);
+    assert!(!proved.proved, "a failed case fails a baseline: pass proof");
+    assert!(matches!(proved.junit, Some(rvow_core::junit::Check::Failed(_))), "{:?}", proved.junit);
+
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite></testsuite>\n").unwrap();
+    let proved = prove(&f, &task);
+    assert!(!proved.proved, "a report with no passed case fails a baseline: pass proof");
+}
+
+#[test]
+fn runners_fix_bundle_refuses_runner_verify() {
+    // A bundle export refuses a task with an `@runner` verify before it
+    // writes anything: the portable run would run the raw `@text`.
+    let f = fx("bundle", RUNNER_CPP);
+    let task = accept(&f, backlog(&f, "@cpp test=Seek", ""));
+    let err = match rvow_core::bundle::export(&f.project, &f.home, &f.repo) {
+        Err(e) => e,
+        Ok(_) => panic!("a bundle of a runner task must refuse"),
+    };
+    assert_eq!(err.code, "bundle-runner", "{err}");
+    assert!(err.message.contains(&task) && err.message.contains("cpp"), "{err}");
+    assert!(err.fix.contains("plain verify"), "{err}");
+
+    // A plain verify still exports.
+    let f = fx("bundle2", "");
+    accept(&f, backlog(&f, "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'", ""));
+    assert!(rvow_core::bundle::export(&f.project, &f.home, &f.repo).is_ok());
+}
+
+#[test]
+fn runners_fix_amend_baseline_pass_junit_task_is_recorded() {
+    // An amendment that adds a `baseline: pass` task on a {junit} runner is
+    // recorded: the amend baseline holds the same rule as accept, and no
+    // names are recorded for it.
+    let f = fx_junit("amend-pass", RUNNER_JUNIT);
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let plain = "grep -q done out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
+    let task = accept(&f, backlog(&f, plain, ""));
+    let tasks = task_dir(&f).join("tasks.md");
+    let mut text = std::fs::read_to_string(&tasks).unwrap();
+    text.push_str("- TSK-new2 Pass runner\n  verify: @t\n  files: out.txt\n  baseline: pass\n");
+    std::fs::write(&tasks, text).unwrap();
+    amend_accept(&f, "stay-green runner check");
+    let text = std::fs::read_to_string(&tasks).unwrap();
+    let added = text.lines().find(|l| l.starts_with("- ") && !l.contains(&task)).unwrap();
+    let added_id = added.split_whitespace().nth(1).unwrap().to_string();
+    let a = active(&f);
+    let junit = a.baseline().and_then(|b| b.get("junit")).and_then(|v| v.as_object()).unwrap();
+    assert_eq!(junit.get(&added_id), Some(&Value::Array(vec![])), "{junit:?}");
+}
+
+#[test]
+fn runners_fix_gate_ingested_rerun_is_proved() {
+    // A rerun run carries the runner stamp, so an ingested rerun of an
+    // `@runner` task is proved instead of stale with runner-changed.
+    let f = fx("gate-ingest", RUNNER_CPP);
+    let task = accept(&f, backlog(&f, "@cpp test=Seek", ""));
+    std::fs::write(f.repo.join("out.txt"), "tests Seek\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let out = f._tmp.join("runs.jsonl");
+    let opts = gate::Options { strict: true, rerun: true, out: Some(out) };
+    let r = gate::gate(&f.project, &f.home, &f.repo, opts, &mut std::io::sink()).unwrap();
+    let run = r.runs.iter().find(|run| run.data.get("task").and_then(Value::as_str) == Some(&task)).unwrap().clone();
+    ledger::ingest_run(&f.project.root, &run).unwrap();
+    let s = proof::status(&f.project, &f.home, &f.repo, false).unwrap();
+    assert!(matches!(&s[0].tasks[0].state, proof::State::Proved), "{:?}", s[0].tasks[0].state);
+}
+
+#[test]
+fn runners_fix_gate_baseline_pass_empty_report_fails_rerun() {
+    // The gate rerun holds the same rule as prove for a `baseline: pass`
+    // task: an empty report fails the rerun even though the command passed.
+    let cfg = "[runners.t]\nrun = \"cp fail.xml {junit}; grep -q pass out.txt && cp pass.xml {junit}\"\n";
+    let f = fx_junit("gate-pass", &format!("rerun_proven = true\n{cfg}"));
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let c = change::new(&f.project, "Run", "main", false).unwrap();
+    std::fs::write(
+        c.path.join("tasks.md"),
+        "- TSK-new1 Run the runner\n  covers: REQ-new1\n  verify: @t\n  files: out.txt, pass.xml\n  baseline: pass\n",
+    )
+    .unwrap();
+    std::fs::write(c.path.join("specs/out.md"), SPEC).unwrap();
+    accept(&f, c);
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite></testsuite>\n").unwrap();
+    git_cmd(&f.repo, &["add", "pass.xml"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "empty report"]);
+    let r = gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: true, rerun: true, out: None }, &mut std::io::sink()).unwrap();
+    assert!(r.failures.iter().any(|x| x.contains("junit") && x.contains("no test cases")), "{r:?}");
+}
+
+#[test]
+fn runners_fix_gate_runner_change_misses_cache() {
+    // The gate cache keys on the runner: after a runner change the old entry
+    // misses and the task reruns instead of answering cached.
+    let f = fx("gate-key", RUNNER_CPP);
+    let task = accept(&f, backlog(&f, "@cpp test=Seek", ""));
+    std::fs::write(f.repo.join("out.txt"), "tests Seek\n").unwrap();
+    git_cmd(&f.repo, &["add", "out.txt"]);
+    git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
+    let opts = || gate::Options { strict: true, rerun: true, out: None };
+    let r1 = gate::gate(&f.project, &f.home, &f.repo, opts(), &mut std::io::sink()).unwrap();
+    assert!(r1.passed(), "{r1:?}");
+    assert!(r1.timings.iter().any(|(id, _)| id == &task), "{r1:?}");
+    let r2 = gate::gate(&f.project, &f.home, &f.repo, opts(), &mut std::io::sink()).unwrap();
+    assert!(r2.cached.iter().any(|id| id == &task), "the passing rerun is cached: {r2:?}");
+
+    // A runner change that leaves the command text alone still changes the key.
+    edit_config(
+        &f,
+        "params = { preset = [\"tests\", \"asan\", \"tsan\"] }",
+        "params = { preset = [\"tests\", \"asan\", \"tsan\", \"dev\"] }",
+    );
+    let r3 = gate::gate(&f.project, &f.home, &f.repo, opts(), &mut std::io::sink()).unwrap();
+    assert!(r3.timings.iter().any(|(id, _)| id == &task), "a runner change must miss the cache: {r3:?}");
+    assert!(!r3.cached.iter().any(|id| id == &task), "{r3:?}");
+}
+
+#[test]
+fn runners_fix_safe_quoted_junit_is_refused() {
+    // A runner whose `run` quotes {junit} is a check error that names the
+    // runner: rvow quotes the path itself.
+    let cfgs = ["[runners.q]\nrun = \"cp fail.xml '{junit}' && exit 1\"\n", "[runners.q]\nrun = 'cp fail.xml \"{junit}\" && exit 1'\n"];
+    for cfg in cfgs {
+        let f = fx("safe-quote", cfg);
+        let found = runner_findings(&f, &backlog(&f, "@q", ""));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("runner") && found[0].contains("{junit}") && found[0].contains("quotes"), "{found:?}");
+    }
+}
+
+#[test]
+fn runners_fix_show_prove_verdict_exit_beats_junit() {
+    // A non-zero exit keeps "failed: exit N" even when the junit check also
+    // failed; the junit verdict shows only when the command passed.
+    let f = fx_junit("show-exit", RUNNER_JUNIT);
+    let task = accept(&f, backlog(&f, "@t", ""));
+    let run_prove = |fx: &Fx| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_rvow"))
+            .current_dir(&fx.repo)
+            .env("HOME", &fx._tmp)
+            .env("RVOW_HOME", &fx.home)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["prove", &task])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let stdout = run_prove(&f);
+    assert!(stdout.contains("failed: exit 1"), "{stdout}");
+    assert!(!stdout.contains("junit report"), "{stdout}");
+
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
+    let stdout = run_prove(&f);
+    assert!(stdout.contains("failed: junit report: the recorded test c.Seek is missing from the report"), "{stdout}");
 }

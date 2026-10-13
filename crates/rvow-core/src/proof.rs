@@ -189,17 +189,18 @@ fn is_proved(e: &Event) -> bool {
 pub fn state(change: &Active, task: &Task, now: &Now) -> Result<State> {
     match crate::hardening::owned_context(&change.dir.path)? {
         Some((project, home)) => state_for(&project, &home, change, task, now),
-        None => state_with_policy(change, task, now, None),
+        None => state_with_policy(change, task, now, None, None),
     }
 }
 
 /// State lookup with explicit private storage context. No ambient home lookup.
 pub fn state_for(project: &Project, home: &Path, change: &Active, task: &Task, now: &Now) -> Result<State> {
     let policy = crate::hardening::task_policy_digest(project, home, task)?;
-    state_with_policy(change, task, now, policy.as_deref())
+    let runners = crate::config::runners(project)?;
+    state_with_policy(change, task, now, policy.as_deref(), runner_stamp(&runners, task).as_deref())
 }
 
-fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&str>) -> Result<State> {
+fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&str>, runner: Option<&str>) -> Result<State> {
     let id = task.id.to_string();
     let mine: Vec<&Event> =
         change.events.iter().filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id).collect();
@@ -239,6 +240,9 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     }
     if str_of(last, "env_key") != now.env.key() {
         reasons.push("env-changed");
+    }
+    if last.data.get("runner").and_then(Value::as_str) != runner {
+        reasons.push("runner-changed");
     }
     if dependency_changed(change, task, last, now) {
         reasons.push("dependency-changed");
@@ -297,7 +301,7 @@ pub fn render_task(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> String {
 pub fn render_task_filled(task: &Task, loaded: &Loaded, living: &[CapSpec], runners: &BTreeMap<String, crate::template::Runner>) -> String {
     let verify = match task.verify.as_deref() {
         Some(v) => match crate::template::plan(runners, task) {
-            Ok(plan) => plan.command,
+            Ok(plan) => plan.command.clone(),
             Err(_) => v.to_string(),
         },
         None => String::new(),
@@ -380,18 +384,33 @@ pub struct Proved {
 }
 
 /// The failed test names the accepted baseline recorded for `task`, which a
-/// JUnit report must show passed for a proof.
+/// JUnit report must show passed for a proof. An amendment snapshot from
+/// before the names were carried forward holds none, so it falls back to the
+/// vow event that recorded them.
 pub fn junit_recorded(change: &Active, task: &str) -> Vec<String> {
-    change
-        .baseline()
-        .and_then(|b| b.get("junit"))
-        .and_then(Value::as_object)
-        .and_then(|m| m.get(task))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect()
+    let names = |data: &Map<String, Value>| {
+        data.get("junit")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get(task))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    if let Some(base) = change.baseline() {
+        let found = names(base);
+        if !found.is_empty() {
+            return found;
+        }
+        // A baseline with a junit map that names other tasks still means
+        // this task recorded nothing; only a baseline with no junit map at
+        // all is from before the carry-forward.
+        if base.get("junit").and_then(Value::as_object).is_some() {
+            return found;
+        }
+    }
+    change.vow().map(|e| names(&e.data)).unwrap_or_default()
 }
 
 /// Finds a task id among the active changes by a unique prefix.
@@ -414,18 +433,29 @@ pub fn find_task<'a>(changes: &'a [Active], input: &str) -> Result<(&'a Active, 
         .ok_or_else(|| Error::new("task", "task vanished", "run rvow status"))
 }
 
-/// Shared identity for local and portable runs. Without private policy this
-/// retains the original four-element proof key byte-for-byte.
+/// The name and hash of the runner a task's verify names, when it names one
+/// the project config holds. A runner change keeps the verify text but runs
+/// a new command, so proofs and the gate cache key on this.
+pub fn runner_stamp(runners: &BTreeMap<String, crate::template::Runner>, task: &Task) -> Option<String> {
+    let (name, _) = crate::template::reference(task.verify.as_deref().unwrap_or(""))?;
+    runners.get(name).map(|r| format!("{name}:{}", r.hash()))
+}
+
+/// Shared identity for local and portable runs. Without private policy and
+/// without a runner this retains the original four-element proof key
+/// byte-for-byte.
 pub(crate) fn run_key(
     task_hash: &str,
     requirements: &BTreeMap<String, String>,
     inputs: &str,
     env_key: &str,
     private_policy: Option<&str>,
+    runner: Option<&str>,
 ) -> String {
-    let value = match private_policy {
-        Some(digest) => json!([task_hash, requirements, inputs, env_key, digest]),
-        None => json!([task_hash, requirements, inputs, env_key]),
+    let value = match (private_policy, runner) {
+        (None, None) => json!([task_hash, requirements, inputs, env_key]),
+        (Some(digest), None) => json!([task_hash, requirements, inputs, env_key, digest]),
+        (policy, run) => json!([task_hash, requirements, inputs, env_key, policy, run]),
     };
     sha256_hex(value.to_string().as_bytes())
 }
@@ -503,7 +533,16 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let mut watch = Watch { inner: echo, reconfigured: false };
     let outcome = runner::run(&cmd, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut watch)?;
     let note = watch.note(&plan);
-    let junit = plan.junit.as_ref().map(|report| crate::junit::check(report, &junit_recorded(change, &task.id.to_string())));
+    // A `baseline: pass` task holds the same rule as at accept: the report
+    // must name a passed case and no failed one. Any other task needs its
+    // recorded names to pass.
+    let junit = plan.junit.as_ref().map(|report| {
+        if task.baseline_pass {
+            crate::junit::check_baseline_pass(report)
+        } else {
+            crate::junit::check(report, &junit_recorded(change, &task.id.to_string()))
+        }
+    });
     let mutants = task
         .mutants
         .as_deref()
@@ -536,12 +575,14 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let thash = task_hash(task);
     let reqs = covered(task, &change.loaded, &living);
     let env_key = now.env.key();
-    let key = run_key(&thash, &reqs, &inputs.hash, &env_key, private_policy.as_deref());
+    let stamp = runner_stamp(&runners, task);
+    let key = run_key(&thash, &reqs, &inputs.hash, &env_key, private_policy.as_deref(), stamp.as_deref());
     let mut data = Map::new();
     data.insert("task".into(), task.id.to_string().into());
     data.insert("task_hash".into(), thash.into());
     data.insert("requirements".into(), json!(reqs));
     data.insert("verify".into(), cmd.clone().into());
+    data.insert("runner".into(), json!(stamp));
     data.insert("proved".into(), proved.into());
     if let Some(check) = &mutants {
         let mut value = json!(check);

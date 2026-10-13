@@ -45,7 +45,7 @@ pub fn filled_commands(runners: &BTreeMap<String, crate::template::Runner>, task
     tasks
         .iter()
         .map(|t| {
-            let cmd = crate::template::plan(runners, t).map(|p| p.command).unwrap_or_else(|_| t.verify.clone().unwrap_or_default());
+            let cmd = crate::template::plan(runners, t).map(|p| p.command.clone()).unwrap_or_else(|_| t.verify.clone().unwrap_or_default());
             (t.id.to_string(), cmd)
         })
         .collect()
@@ -253,6 +253,13 @@ fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding
     out
 }
 
+/// Whether the missing-program rule may blame `task`: a task whose runner
+/// fails to fill already gets the runner error from `runner_checks`, so the
+/// raw `@text` must not count as a missing program too.
+fn fill_ok(runners: &BTreeMap<String, crate::template::Runner>, task: &Task) -> bool {
+    crate::template::reference(task.verify.as_deref().unwrap_or("")).is_none() || crate::template::plan(runners, task).is_ok()
+}
+
 fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
     let runners = config::runners(project).unwrap_or_default();
     let filled = filled_commands(&runners, &loaded.tasks);
@@ -262,14 +269,11 @@ fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded,
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
-    Report {
-        missing: missing_programs_filled(top, &loaded.tasks, &filled),
-        questions: questions(&loaded.texts),
-        no_tasks: loaded.tasks.is_empty(),
-        findings,
-        change,
-        slow,
-    }
+    let missing: Vec<(String, String)> = missing_programs_filled(top, &loaded.tasks, &filled)
+        .into_iter()
+        .filter(|(task, _)| loaded.tasks.iter().find(|t| t.id.to_string() == *task).is_none_or(|t| fill_ok(&runners, t)))
+        .collect();
+    Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
 }
 
 /// Checks `target`, or every open change whose proposal names the current

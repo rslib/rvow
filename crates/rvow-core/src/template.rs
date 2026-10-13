@@ -66,16 +66,31 @@ impl Runner {
     }
 }
 
+/// The first char of `value` that is not safe inside a shell command, if any.
+fn bad_char(value: &str) -> Option<char> {
+    value.chars().find(|c| !(c.is_ascii_alphanumeric() || "_./+=*^$-:".contains(*c)))
+}
+
 /// Whether `value` holds only chars that are safe inside a shell command.
 /// Anything outside [A-Za-z0-9_.:/+=*^$-] is refused, and the char is named.
 pub fn value_ok(value: &str) -> Result<()> {
-    match value.chars().find(|c| !(c.is_ascii_alphanumeric() || "_./+=*^$-:".contains(*c))) {
+    match bad_char(value) {
         None => Ok(()),
         Some(c) => Err(Error::new(
             "runner-value",
             format!("the runner value {value:?} holds the char {c:?}, which is not allowed"),
             "write the value with only A-Z a-z 0-9 _ . : / + = * ^ $ and -",
         )),
+    }
+}
+
+/// Quotes `path` for the shell when it holds a char outside the safe set, so
+/// a TMPDIR with a space works. A path without one passes through unchanged.
+fn shell_quote(path: &str) -> String {
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || "_./:+-".contains(c)) {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
     }
 }
 
@@ -106,6 +121,17 @@ pub struct Plan {
     pub needs: Vec<String>,
 }
 
+impl Drop for Plan {
+    /// Removes the run's JUnit report, when the run wrote one. Prove,
+    /// accept, the amend baseline and the gate read the report first, and
+    /// the temp file must not pile up. A missing file is not an error.
+    fn drop(&mut self) {
+        if let Some(report) = self.junit.take() {
+            let _ = std::fs::remove_file(report);
+        }
+    }
+}
+
 impl Plan {
     /// The first `needs` path that does not exist in `dir`, params filled.
     /// The caller refuses before it runs anything.
@@ -124,6 +150,17 @@ impl Plan {
 /// `params`, every `{param}` of `run` must get a value, and every task key
 /// must be one the `run` uses.
 pub fn plan(runners: &BTreeMap<String, Runner>, task: &Task) -> Result<Plan> {
+    plan_inner(runners, task, false)
+}
+
+/// Like `plan`, but a `{junit}` placeholder stays as `{junit}` for display:
+/// `review`, `show`, `brief` and the delegate brief show the command without
+/// a run's temp path. The returned plan holds no junit path.
+pub fn plan_display(runners: &BTreeMap<String, Runner>, task: &Task) -> Result<Plan> {
+    plan_inner(runners, task, true)
+}
+
+fn plan_inner(runners: &BTreeMap<String, Runner>, task: &Task, display: bool) -> Result<Plan> {
     let verify = task.verify_command()?;
     let Some((name, args)) = reference(verify) else {
         return Ok(Plan::plain(verify));
@@ -135,6 +172,15 @@ pub fn plan(runners: &BTreeMap<String, Runner>, task: &Task) -> Result<Plan> {
             format!("add a [runners.{name}] table with a run command to config.toml, or drop @{name} from the verify"),
         )
     })?;
+    // rvow quotes the {junit} path itself, so a quoted placeholder would
+    // reach the shell wrapped twice.
+    if runner.run.contains("'{junit}'") || runner.run.contains("\"{junit}\"") {
+        return Err(Error::new(
+            "runner",
+            format!("runner {name:?} quotes {{junit}} in its run"),
+            "write {junit} without quotes in the runner's run",
+        ));
+    }
 
     let mut given: BTreeMap<String, String> = BTreeMap::new();
     for token in args.split_whitespace() {
@@ -190,35 +236,63 @@ pub fn plan(runners: &BTreeMap<String, Runner>, task: &Task) -> Result<Plan> {
         if param == JUNIT {
             continue;
         }
-        let value = given.get(param).or_else(|| runner.default.get(param)).ok_or_else(|| {
+        let from_task = given.get(param);
+        let value = from_task.or_else(|| runner.default.get(param)).ok_or_else(|| {
             Error::new(
                 "runner",
                 format!("{}: the param {{{param}}} of runner {name:?} gets no value", task.id),
                 format!("pass {param}=... in the verify, or set runners.{name}.default.{param}"),
             )
         })?;
+        // A runner default gets the same checks as a task value: only the
+        // shell-safe chars, and only a value the runner allows.
+        if from_task.is_none() {
+            if let Some(c) = bad_char(value) {
+                return Err(Error::new(
+                    "runner-value",
+                    format!("the default {param}={value} of runner {name:?} holds the char {c:?}, which is not allowed"),
+                    "write the default with only A-Z a-z 0-9 _ . : / + = * ^ $ and -",
+                ));
+            }
+            if let Some(allowed) = runner.params.get(param)
+                && !allowed.contains(value)
+            {
+                return Err(Error::new(
+                    "runner",
+                    format!("the default {param}={value} of runner {name:?} is not allowed; its {param} allows {}", allowed.join(", ")),
+                    format!("use one of {} for the default {param}", allowed.join(", ")),
+                ));
+            }
+        }
         values.insert(param.clone(), value.clone());
     }
 
-    let junit = used.iter().any(|p| p == JUNIT).then(|| junit_path(task));
+    let junit = used.iter().any(|p| p == JUNIT).then(|| if display { PathBuf::from("{junit}") } else { junit_path(task, runner) });
 
     let mut filled = values.clone();
     if let Some(path) = &junit {
-        filled.insert(JUNIT.to_string(), path.display().to_string());
+        let rendered = path.display().to_string();
+        filled.insert(JUNIT.to_string(), if display { rendered } else { shell_quote(&rendered) });
     }
     let command = fill(&runner.run, &filled, &format!("the run of runner {name:?}"))?;
     let needs =
         runner.needs.iter().map(|need| fill(need, &values, &format!("a needs path of runner {name:?}"))).collect::<Result<Vec<_>>>()?;
     let env = runner.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    Ok(Plan { command, env, timeout: runner.timeout, runner: Some(name.to_string()), junit, needs })
+    Ok(Plan { command, env, timeout: runner.timeout, runner: Some(name.to_string()), junit: if display { None } else { junit }, needs })
 }
 
-/// A fresh path in the system temp dir for one run's JUnit report.
-fn junit_path(task: &Task) -> PathBuf {
+/// The dir one run's JUnit report goes in: the runner's `RVOW_JUNIT_DIR`
+/// when it sets one, else the system temp dir.
+fn junit_dir(runner: &Runner) -> PathBuf {
+    runner.env.get("RVOW_JUNIT_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
+}
+
+/// A fresh path in the report dir for one run's JUnit report.
+fn junit_path(task: &Task, runner: &Runner) -> PathBuf {
     let hex = Error::random::<8>()
         .map(|b| b.iter().map(|x| format!("{x:02x}")).collect::<String>())
         .unwrap_or_else(|_| format!("pid-{}", std::process::id()));
-    std::env::temp_dir().join(format!("rvow-junit-{}-{hex}", task.id))
+    junit_dir(runner).join(format!("rvow-junit-{}-{hex}", task.id))
 }
 
 /// Each distinct `{name}` of a template, in order of first use.

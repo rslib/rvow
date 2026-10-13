@@ -81,7 +81,9 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
                 }));
             }
         }
-        let missing = crate::plan::missing_programs(&top, &loaded.tasks).len();
+        let runners = config::runners(project).unwrap_or_default();
+        let filled = crate::plan::filled_commands(&runners, &loaded.tasks);
+        let missing = crate::plan::missing_programs_filled(&top, &loaded.tasks, &filled).len();
         let errors = loaded.errors().count();
         let entry = json!({
             "id": c.id.to_string(),

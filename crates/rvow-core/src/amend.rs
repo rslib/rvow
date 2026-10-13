@@ -1,6 +1,7 @@
 //! `rvow amend` proposes the current content of a change as its new baseline,
 //! and `rvow confirm` lets the user accept or reject each proposal.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -206,10 +207,20 @@ fn tests_word(tests_run: Option<u64>) -> String {
     }
 }
 
+/// The amend baseline: one run record per candidate task, with the failed
+/// JUnit names each `{junit}` runner recorded.
+struct BaselineOut {
+    runs: Vec<Value>,
+    junit: BTreeMap<String, Vec<String>>,
+}
+
 /// Runs each candidate verify command on the vow's base commit, in a clean
 /// worktree set up the same way as the gate rerun (setup, rerun_links,
 /// rerun_env), and refuses a check that would pass before any work starts.
-/// Returns one record per run for the amendment event.
+/// A `@runner` verify runs filled from the project config, with the runner
+/// env, timeout and needs check, as `vow::prepare` runs it. Returns one
+/// record per run for the amendment event, with the failed JUnit names each
+/// `{junit}` runner recorded, by the same rule as accept.
 fn baseline(
     project: &Project,
     home: &Path,
@@ -217,9 +228,9 @@ fn baseline(
     config: &config::Config,
     change: &Active,
     candidates: &[&Task],
-) -> Result<Vec<Value>> {
+) -> Result<BaselineOut> {
     if candidates.is_empty() {
-        return Ok(Vec::new());
+        return Ok(BaselineOut { runs: Vec::new(), junit: BTreeMap::new() });
     }
     let base_commit = change.base_commit().ok_or_else(|| {
         Error::new(
@@ -248,10 +259,22 @@ fn baseline(
             ));
         }
     }
+    let runners = config::runners(project)?;
     let mut runs = Vec::new();
+    let mut junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for t in candidates {
-        let cmd = t.verify_command()?;
-        let o = runner::run(cmd, &tree.path, &env, t.timeout.unwrap_or(config.timeout()), &mut sink)?;
+        let plan = crate::template::plan(&runners, t)?;
+        if let Some(path) = plan.missing_need(&tree.path) {
+            return Err(Error::new(
+                "needs",
+                format!("{} needs {}, which does not exist", t.id, path),
+                format!("configure {} first (for example with `cmake --preset ...`), then amend again", path),
+            ));
+        }
+        let cmd = plan.command.clone();
+        let mut run_env = env.clone();
+        run_env.extend(plan.env.iter().cloned());
+        let o = runner::run(&cmd, &tree.path, &run_env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut sink)?;
         let ran_tests = o.tests_run != Some(0);
         if o.passed() && ran_tests && !t.baseline_pass {
             return Err(Error::new(
@@ -267,9 +290,49 @@ fn baseline(
                 "fix the check so it passes before the work, or drop the baseline: pass flag",
             ));
         }
+        if let Some(report) = &plan.junit {
+            // A `baseline: pass` task holds the same rule as at accept: the
+            // report must name a passed case and no failed one, and no names
+            // are recorded for it.
+            if t.baseline_pass {
+                match crate::junit::check_baseline_pass(report) {
+                    crate::junit::Check::Passed => {
+                        junit.insert(t.id.to_string(), Vec::new());
+                    }
+                    crate::junit::Check::Failed(why) => {
+                        return Err(Error::new(
+                            "baseline",
+                            format!("{}: {why}", t.id),
+                            "fix the check so it passes before the work, or drop the baseline: pass flag",
+                        ));
+                    }
+                }
+            } else {
+                match crate::junit::read(report) {
+                    Ok(cases) => {
+                        let failed: Vec<String> = cases.iter().filter(|c| c.failed).map(|c| c.name.clone()).collect();
+                        if failed.is_empty() {
+                            return Err(Error::new(
+                                "baseline",
+                                format!("{}: its JUnit report names no failed test, so no test is the proof target", t.id),
+                                "make the check fail before the work, or mark a check that must stay green with baseline: pass",
+                            ));
+                        }
+                        junit.insert(t.id.to_string(), failed);
+                    }
+                    Err(e) => {
+                        return Err(Error::new(
+                            "baseline",
+                            format!("{}: {}", t.id, e.message),
+                            "check that the runner's run writes its report to the {junit} path",
+                        ));
+                    }
+                }
+            }
+        }
         runs.push(json!({"task": t.id.to_string(), "exit": o.exit, "tests_run": o.tests_run, "timed_out": o.timed_out}));
     }
-    Ok(runs)
+    Ok(BaselineOut { runs, junit })
 }
 
 #[derive(Debug)]
@@ -337,8 +400,19 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                 }
                 let before = drift::baseline_tasks(project, c)?;
                 let candidates = baseline_candidates(&before, &c.loaded.tasks);
-                let runs = baseline(project, home, &top, &config, c, &candidates)?;
-                data.insert("snapshot".into(), Value::Object(drift::snapshot_now(project, &top, &config, c)?));
+                let out = baseline(project, home, &top, &config, c, &candidates)?;
+                let (runs, junit_new) = (out.runs, out.junit);
+                let mut snapshot = drift::snapshot_now(project, &top, &config, c)?;
+                // The recorded JUnit names hold after the amendment: the
+                // old baseline's names carry forward, with the amended
+                // tasks' fresh names on top.
+                let mut junit: Map<String, Value> =
+                    c.baseline().and_then(|b| b.get("junit")).and_then(Value::as_object).cloned().unwrap_or_default();
+                for (task, names) in junit_new {
+                    junit.insert(task, Value::Array(names.into_iter().map(Value::String).collect()));
+                }
+                snapshot.insert("junit".into(), Value::Object(junit));
+                data.insert("snapshot".into(), Value::Object(snapshot));
                 data.insert("baseline".into(), Value::Array(runs));
                 items
             }

@@ -67,6 +67,19 @@ pub fn export(project: &store::Project, home: &Path, cwd: &Path) -> Result<Bundl
     if queue.is_empty() {
         return Err(Error::new("no-change", format!("{branch} has no accepted changes to export"), "accept a change on this branch first"));
     }
+    // A bundled task runs without the project runners, so a task with an
+    // `@runner` verify is refused here, before anything is written.
+    for c in &queue {
+        for t in &c.loaded.tasks {
+            if let Some((name, _)) = t.verify.as_deref().and_then(crate::template::reference) {
+                return Err(Error::new(
+                    "bundle-runner",
+                    format!("{} names the runner {name:?}, which a bundle cannot carry", t.id),
+                    "use a plain verify command for a bundled task",
+                ));
+            }
+        }
+    }
     let now = proof::Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let mut report = gate::Report::default();
     gate::check_lifecycle(project, &mut report)?;

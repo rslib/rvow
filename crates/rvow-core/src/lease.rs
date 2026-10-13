@@ -52,6 +52,8 @@ pub struct Delegation {
     pub lease: Lease,
     pub title: String,
     pub verify: String,
+    /// The filled runner command, when the verify names a runner that fills.
+    pub run: Option<String>,
 }
 
 impl Lease {
@@ -130,7 +132,9 @@ pub fn issue(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<
         &Event::Issue { task: lease.task.clone(), change: lease.change.clone(), files: lease.files.clone(), time: lease.issued },
     )?;
     drop(lock);
-    Ok(Delegation { lease, title: task.title.clone(), verify: task.verify.clone().unwrap_or_default() })
+    let runners = crate::config::runners(project).unwrap_or_default();
+    let run = crate::template::plan_display(&runners, task).ok().filter(|p| p.runner.is_some()).map(|p| p.command.clone());
+    Ok(Delegation { lease, title: task.title.clone(), verify: task.verify.clone().unwrap_or_default(), run })
 }
 
 /// Binds a subagent id to the newest unbound lease of `task`. Returns whether a lease took it.

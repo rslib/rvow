@@ -22,7 +22,7 @@ mod signature;
 
 use check::check_backlog_scope;
 use check::check_scope;
-use rerun::{Lazy, Scope, changed_files, prove_data};
+use rerun::{Lazy, Reran, Scope, changed_files, prove_data};
 
 #[cfg(test)]
 use crate::change::Stage;
@@ -274,19 +274,42 @@ fn gate_for(
             let _ = writeln!(echo, "rerun {id}: {cmd}");
             let o = runner::run(&cmd, &dir, &env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), echo)?;
             // A runner that names {junit} answers by the same rule as prove:
-            // the recorded names must pass and no case may fail.
-            if let Some(report) = &plan.junit
-                && let crate::junit::Check::Failed(why) = crate::junit::check(report, &proof::junit_recorded(c, &id))
-            {
+            // the recorded names must pass and no case may fail. A junit
+            // failure caches nothing, so the next gate runs it again.
+            // A `baseline: pass` task holds the same rule as at prove: the
+            // report must name a passed case and no failed one.
+            let junit_error: Option<String> = match &plan.junit {
+                Some(report) => {
+                    let check = if t.baseline_pass {
+                        crate::junit::check_baseline_pass(report)
+                    } else {
+                        crate::junit::check(report, &proof::junit_recorded(c, &id))
+                    };
+                    match check {
+                        crate::junit::Check::Passed => None,
+                        crate::junit::Check::Failed(why) => Some(why),
+                    }
+                }
+                None => None,
+            };
+            if let Some(why) = &junit_error {
                 r.failures.push(format!("{id} failed on rerun (junit: {why})"));
             }
             r.timings.push((id.clone(), o.duration_ms));
-            if let (Some(cache), Some(key)) = (&mut cache, key) {
+            if junit_error.is_none()
+                && let (Some(cache), Some(key)) = (&mut cache, key)
+            {
                 let lock = project.lock()?;
                 cache.record_pass(&lock, &id, key, &o, &proof::machine(&config).to_string())?;
             }
             if let (Some((folder, run_now)), Some(inputs)) = (&run_projection, &inputs) {
-                r.runs.push(Run { project: folder.clone(), change: c.dir.id.to_string(), data: prove_data(c, t, &o, run_now, inputs) });
+                let stamp = proof::runner_stamp(&runners, t);
+                let ran = Reran { cmd: &cmd, junit_failed: junit_error.is_some(), runner: stamp.as_deref() };
+                r.runs.push(Run {
+                    project: folder.clone(),
+                    change: c.dir.id.to_string(),
+                    data: prove_data(c, t, &o, run_now, inputs, &ran),
+                });
             }
             if !(o.passed() && o.tests_run != Some(0)) {
                 let why = if o.timed_out {
@@ -441,7 +464,7 @@ fn program_mismatch(c: &Active, t: &crate::tasks::Task, runners: &BTreeMap<Strin
         .and_then(|e| e.data.get("programs"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let current = proof::verify_programs(&crate::template::plan(runners, t).map(|p| p.command).unwrap_or_default());
+    let current = proof::verify_programs(&crate::template::plan(runners, t).map(|p| p.command.clone()).unwrap_or_default());
     if recorded == current {
         return None;
     }

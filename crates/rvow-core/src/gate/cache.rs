@@ -19,7 +19,7 @@ use crate::tasks::Task;
 use crate::vow::{sha256_hex, task_hash};
 
 pub const CACHE_FILE: &str = "rerun-cache.jsonl";
-const KEY_FORMAT: u32 = 1;
+const KEY_FORMAT: u32 = 2;
 const CHECK_KEY_FORMAT: u32 = 1;
 const BAD_MAC: &str = "has an invalid MAC";
 
@@ -240,6 +240,11 @@ pub fn cache_key(
     globs.extend(config.inputs.iter().cloned());
     let scope = fingerprint::globset(&globs)?;
     let files: Vec<&(&str, &str, &str)> = tree.iter().filter(|(_, _, path)| scope.is_match(path)).collect();
+    // A runner change keeps the verify text but runs a new command, so the
+    // runner stamp keys the entry: the old proof's cache entry goes stale.
+    // A verify that names no known runner keys on nothing, as before.
+    let runners = config::runners(project)?;
+    let runner = crate::proof::runner_stamp(&runners, task);
     let value = serde_json::json!([
         KEY_FORMAT,
         env!("CARGO_PKG_VERSION"),
@@ -252,6 +257,7 @@ pub fn cache_key(
         env.vars,
         config.rerun_env,
         tools,
+        runner,
     ]);
     Ok(Some(sha256_hex(value.to_string().as_bytes())))
 }

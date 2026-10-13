@@ -252,18 +252,30 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
         }
         // A runner that names {junit} writes a report: the failed test names
         // it holds are the task's proof target, so it must name at least one.
+        // A `baseline: pass` task instead needs a report with at least one
+        // passed case and no failed one, and records no names.
         if let Some(report) = &plan.junit {
-            let failed = match crate::junit::read(report) {
-                Ok(cases) => cases.iter().filter(|c| c.failed).map(|c| c.name.clone()).collect::<Vec<_>>(),
+            match crate::junit::read(report) {
+                Ok(cases) if task.baseline_pass => {
+                    if let Some(bad) = cases.iter().find(|c| c.failed) {
+                        refused.push(format!("{}: the test {} failed, but the task says baseline: pass", task.id, bad.name));
+                    } else if cases.is_empty() {
+                        refused.push(format!("{}: its JUnit report names no test cases, but the task says baseline: pass", task.id));
+                    }
+                    junit.insert(task.id.to_string(), Vec::new());
+                }
+                Ok(cases) => {
+                    let failed: Vec<String> = cases.iter().filter(|c| c.failed).map(|c| c.name.clone()).collect();
+                    if failed.is_empty() {
+                        refused.push(format!("{}: its JUnit report names no failed test, so no test is the proof target", task.id));
+                    }
+                    junit.insert(task.id.to_string(), failed);
+                }
                 Err(e) => {
                     refused.push(format!("{}: {}", task.id, e.message));
-                    Vec::new()
+                    junit.insert(task.id.to_string(), Vec::new());
                 }
-            };
-            if failed.is_empty() {
-                refused.push(format!("{}: its JUnit report names no failed test, so no test is the proof target", task.id));
             }
-            junit.insert(task.id.to_string(), failed);
         }
         baseline.push(Baseline { task: task.id.clone(), outcome });
     }

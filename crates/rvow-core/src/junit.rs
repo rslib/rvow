@@ -57,6 +57,23 @@ pub enum Check {
     Failed(String),
 }
 
+/// Checks the report at `path` for a `baseline: pass` task: the report must
+/// exist, hold at least one passed test case, and no failed one. Nothing is
+/// recorded for such a task.
+pub fn check_baseline_pass(path: &Path) -> Check {
+    let cases = match read(path) {
+        Ok(cases) => cases,
+        Err(e) => return Check::Failed(e.message),
+    };
+    if let Some(c) = cases.iter().find(|c| c.failed) {
+        return Check::Failed(format!("the test {} failed", c.name));
+    }
+    if cases.is_empty() {
+        return Check::Failed("the JUnit report names no test cases".into());
+    }
+    Check::Passed
+}
+
 /// Checks the report at `path` against the failed names the vow recorded.
 /// A missing or unreadable report fails, with a message that says so.
 pub fn check(path: &Path, recorded: &[String]) -> Check {

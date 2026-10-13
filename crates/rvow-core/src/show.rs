@@ -62,7 +62,8 @@ fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks
         let loaded = change::load(&dir.path, &living)?;
         open.push((dir, loaded));
     }
-    if id.kind() == Kind::Req { show_requirement(project, &id, &living, &open) } else { show_task(&id, &living, &open) }
+    let runners = crate::config::runners(project).unwrap_or_default();
+    if id.kind() == Kind::Req { show_requirement(project, &id, &living, &open) } else { show_task(&id, &living, &open, &runners) }
 }
 
 fn not_listed(id: &Id) -> Error {
@@ -120,18 +121,24 @@ fn duration(d: Duration) -> String {
     }
 }
 
-fn render_task(task: &Task) -> String {
-    format!("- {} {}\n{}", task.id, task.title, task_fields(task))
+fn render_task(task: &Task, runners: &BTreeMap<String, crate::template::Runner>) -> String {
+    format!("- {} {}\n{}", task.id, task.title, task_fields(task, runners))
 }
 
 /// The indented fields under a task: covers, verify, files and the optional ones.
-fn task_fields(task: &Task) -> String {
+/// A `@runner` verify keeps its text and gains the filled command as `run:`.
+fn task_fields(task: &Task, runners: &BTreeMap<String, crate::template::Runner>) -> String {
     let mut out = String::new();
     if !task.covers.is_empty() {
         let covers: Vec<String> = task.covers.iter().map(Ref::to_string).collect();
         let _ = writeln!(out, "  covers: {}", covers.join(", "));
     }
     let _ = writeln!(out, "  verify: {}", task.verify.as_deref().unwrap_or(""));
+    if crate::template::reference(task.verify.as_deref().unwrap_or("")).is_some()
+        && let Ok(filled) = crate::template::plan_display(runners, task)
+    {
+        let _ = writeln!(out, "  run: {}", filled.command);
+    }
     let _ = writeln!(out, "  files: {}", task.files.join(", "));
     if task.baseline_pass {
         out.push_str("  baseline: pass\n");
@@ -145,11 +152,16 @@ fn task_fields(task: &Task) -> String {
     out
 }
 
-fn show_task(id: &Id, living: &[CapSpec], open: &[(ChangeDir, Loaded)]) -> Result<String> {
+fn show_task(
+    id: &Id,
+    living: &[CapSpec],
+    open: &[(ChangeDir, Loaded)],
+    runners: &BTreeMap<String, crate::template::Runner>,
+) -> Result<String> {
     let want = Ref::Id(id.clone());
     let (dir, loaded, task) =
         open.iter().find_map(|(d, l)| Some((d, l, l.tasks.iter().find(|t| t.id == want)?))).ok_or_else(|| not_listed(id))?;
-    let mut out = render_task(task);
+    let mut out = render_task(task, runners);
     let _ = writeln!(out, "change: {}", dir.id);
     for r in &task.covers {
         match find_requirement(r, loaded, living) {
@@ -352,6 +364,7 @@ fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDi
     }
     if !loaded.tasks.is_empty() {
         out.push_str("tasks:\n");
+        let runners = crate::config::runners(project).unwrap_or_default();
         for t in &loaded.tasks {
             let _ = writeln!(out, "  {} {}", t.id, t.title);
             if let (Some(now), Some((home, _))) = (&now, states) {
@@ -359,7 +372,7 @@ fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDi
                 let _ = writeln!(out, "    state: {}", state.name());
             }
             if checks {
-                for line in task_fields(t).lines() {
+                for line in task_fields(t, &runners).lines() {
                     let _ = writeln!(out, "  {line}");
                 }
             }

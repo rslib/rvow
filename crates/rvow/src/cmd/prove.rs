@@ -21,7 +21,10 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
     } else if o.timed_out {
         "failed: timed out".to_string()
     } else if o.passed() {
-        "failed: the command passed but ran 0 tests".to_string()
+        match &p.junit {
+            Some(rvow_core::junit::Check::Failed(why)) => format!("failed: junit report: {why}"),
+            _ => "failed: the command passed but ran 0 tests".to_string(),
+        }
     } else {
         format!("failed: exit {}", o.exit.map_or("signal".into(), |e| e.to_string()))
     };
