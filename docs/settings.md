@@ -85,6 +85,21 @@ The gate makes its rerun worktree and runs `setup` only when something needs the
 When the cache or a current proof answers every task, it makes no worktree and runs no `setup`.
 The `checks` that remain then run in the repository itself.
 
+## The test count
+
+A pass with 0 tests run is not a proof, so rvow reads the number of tests from the summary line that the runner prints.
+
+| Runner | Summary line rvow reads |
+|--------|-------------------------|
+| `cargo test` | each `test result:` line, summed |
+| `pytest` | the final `=== N passed ... ===` line |
+| `cargo nextest` | each `Summary [` line, summed |
+| `jest` | each `Tests:` line, the `total` count |
+| `go test` | each package line, with `[no tests to run]` and `[no test files]` as 0 |
+| `node --test` | the `tests N` line of the spec reporter (after the info glyph) or of the TAP reporter (`# tests N`); the last one wins. Node reports a file in which no test ran, such as when `--test-name-pattern` matches nothing in it, as one passing test named by the file; rvow does not count that result |
+| `vitest` | the `Tests` line, the total in the parentheses: `Tests  1 failed | 3 passed (4)` is 4 |
+| `mocha` | the `N passing` line plus the `N failing` line; `pending` tests do not count |
+
 ## The full-suite warning
 
 `rvow check` warns with `full-suite` about a task whose verify chains three or more commands with `&&` or `;`, repeats a `checks` entry, or took more than one minute on its last recorded run.

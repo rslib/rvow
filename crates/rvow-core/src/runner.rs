@@ -40,12 +40,40 @@ impl Outcome {
 /// package lines (`[no tests to run]` and `[no test files]` count as zero).
 /// Nextest, jest and go lines count only where the tool prints them: a line
 /// that a test prints itself is indented, or too far indented, and is ignored.
+/// Node `--test` summaries (`\u{2139} tests N` or TAP `# tests N`, the last one
+/// wins), vitest `Tests  ... (T)` totals and mocha `N passing` plus `N failing`
+/// lines count the same way. Node reports a file whose tests a filter left out
+/// as one passing test named by the file, so those results do not count.
+/// A top-level node `--test` result named by a test file, which node prints
+/// for a file in which no test ran: `\u{2139}`-style `\u{2714} a.test.ts (5ms)` or
+/// TAP `ok 2 - a.test.ts`.
+fn node_file_result(line: &str) -> bool {
+    let name = if let Some(rest) = line.strip_prefix("\u{2714} ") {
+        rest.rsplit_once(" (").map_or(rest, |(name, _)| name)
+    } else if let Some(rest) = line.strip_prefix("ok ") {
+        let Some((num, name)) = rest.split_once(" - ") else { return false };
+        if !num.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        name
+    } else {
+        return false;
+    };
+    let ext = name.rsplit_once('.').map(|(_, e)| e);
+    !name.contains(char::is_whitespace) && matches!(ext, Some("js" | "mjs" | "cjs" | "ts" | "mts" | "cts"))
+}
+
 #[derive(Debug, Default)]
 struct TestCount {
     libtest: Option<u64>,
     pytest: Option<u64>,
     nextest: Option<u64>,
     jest: Option<u64>,
+    node: Option<u64>,
+    node_files: u64,
+    vitest: Option<u64>,
+    mocha_passing: Option<u64>,
+    mocha_failing: Option<u64>,
     go_empty: u64,
     go_real: u64,
 }
@@ -87,6 +115,37 @@ impl TestCount {
             *self.jest.get_or_insert(0) += count_before(t, &["total"]);
             return;
         }
+        if node_file_result(line) {
+            self.node_files += 1;
+            return;
+        }
+        if let Some(n) =
+            line.strip_prefix("\u{2139} tests ").or_else(|| line.strip_prefix("# tests ")).and_then(|r| r.trim().parse::<u64>().ok())
+        {
+            self.node = Some(n);
+            return;
+        }
+        if t.starts_with("Tests  ") && t.ends_with(')') {
+            // vitest: "Tests  1 failed | 3 passed (4)".
+            if let Some(n) = t.rfind('(').and_then(|i| t[i + 1..t.len() - 1].trim().parse::<u64>().ok()) {
+                self.vitest = Some(n);
+                return;
+            }
+        }
+        if indent(line) <= 2 {
+            // mocha: "  2 passing (5ms)" and "  1 failing".
+            let mut tokens = t.splitn(3, ' ');
+            let (n, word, rest) = (tokens.next().and_then(|n| n.parse::<u64>().ok()), tokens.next(), tokens.next());
+            let tail_ok = rest.is_none_or(|r| r.starts_with('(') && r.ends_with(')'));
+            if let (Some(n), Some(word), true) = (n, word, tail_ok) {
+                match word {
+                    "passing" => self.mocha_passing = Some(n),
+                    "failing" => self.mocha_failing = Some(n),
+                    _ => {}
+                }
+                return;
+            }
+        }
         if line.starts_with("ok  \t") {
             // go test: "ok  \tpkg\t0.1s", with a marker when nothing ran.
             if t.contains("[no tests to run]") {
@@ -104,7 +163,16 @@ impl TestCount {
             return Some(0);
         }
         let go = (self.go_empty > 0 && self.go_real == 0).then_some(0);
-        self.libtest.or(self.pytest).or(self.nextest).or(self.jest).or(go)
+        // Mocha always prints `N passing`, so a lone `N failing` line is not its summary.
+        let mocha = self.mocha_passing.map(|p| p + self.mocha_failing.unwrap_or(0));
+        self.libtest
+            .or(self.pytest)
+            .or(self.nextest)
+            .or(self.jest)
+            .or(self.node.map(|n| n.saturating_sub(self.node_files)))
+            .or(self.vitest)
+            .or(mocha)
+            .or(go)
     }
 }
 
@@ -406,6 +474,62 @@ mod tests {
         assert_eq!(jest.tests_run, Some(13), "jest counts its total");
         let go = quiet("echo 'ok  \texample \t0.006s [no tests to run]'", Duration::from_secs(10));
         assert_eq!(go.tests_run, Some(0), "go with no tests to run is zero");
+    }
+
+    #[test]
+    fn counts_node_spec_and_tap_summaries() {
+        let t = Duration::from_secs(10);
+        let spec = quiet("echo '\u{2139} tests 3'; echo '\u{2139} pass 3'", t);
+        assert_eq!(spec.tests_run, Some(3), "node spec summary");
+        let tap = quiet("echo '# tests 5'; echo '# pass 5'", t);
+        assert_eq!(tap.tests_run, Some(5), "node tap summary");
+        let zero = quiet("echo '\u{2139} tests 0'", t);
+        assert_eq!(zero.tests_run, Some(0), "node spec zero");
+        let last = quiet("echo '# tests 2'; echo '\u{2139} tests 7'", t);
+        assert_eq!(last.tests_run, Some(7), "the last summary wins");
+        let nested = quiet("echo '    \u{2139} tests 9'", t);
+        assert_eq!(nested.tests_run, None, "an indented line is test output");
+    }
+
+    #[test]
+    fn counts_node_filter_that_left_a_file_empty() {
+        let t = Duration::from_secs(10);
+        let spec = quiet("echo '\u{2714} extensions/pi/lease.test.ts (125.1ms)'; echo '\u{2139} tests 1'", t);
+        assert_eq!(spec.tests_run, Some(0), "node names an empty file as a test");
+        let tap = quiet("echo 'ok 1 - a.test.mjs'; echo '# tests 1'", t);
+        assert_eq!(tap.tests_run, Some(0), "the same in TAP");
+        let mixed = quiet("echo '\u{2714} one (0.3ms)'; echo '\u{2714} b.test.mjs (44ms)'; echo '\u{2139} tests 2'", t);
+        assert_eq!(mixed.tests_run, Some(1), "only the real test counts");
+        let named = quiet("echo '\u{2714} reads the config (1ms)'; echo '\u{2139} tests 1'", t);
+        assert_eq!(named.tests_run, Some(1), "a test with a plain name counts");
+    }
+
+    #[test]
+    fn counts_node_mocha_needs_the_summary_shape() {
+        let t = Duration::from_secs(10);
+        assert_eq!(quiet("echo '0 failing cases were found'", t).tests_run, None, "not a mocha summary");
+        assert_eq!(quiet("echo '0 failing'", t).tests_run, None, "mocha always prints a passing line");
+        assert_eq!(quiet("echo '  3 failing cases'; echo '  4 passing (2ms)'", t).tests_run, Some(4), "a suite title is not a count");
+    }
+
+    #[test]
+    fn counts_node_vitest_total() {
+        let t = Duration::from_secs(10);
+        let ok = quiet("echo '      Tests  4 passed (4)'", t);
+        assert_eq!(ok.tests_run, Some(4));
+        let mixed = quiet("echo ' Tests  1 failed | 3 passed (4)'", t);
+        assert_eq!(mixed.tests_run, Some(4), "vitest counts the total");
+    }
+
+    #[test]
+    fn counts_node_mocha_passing() {
+        let t = Duration::from_secs(10);
+        let ok = quiet("echo '  2 passing (5ms)'", t);
+        assert_eq!(ok.tests_run, Some(2));
+        let mixed = quiet("echo '  2 passing (5ms)'; echo '  1 pending'; echo '  3 failing'", t);
+        assert_eq!(mixed.tests_run, Some(5), "passing and failing count, pending does not");
+        let zero = quiet("echo '  0 passing (1ms)'", t);
+        assert_eq!(zero.tests_run, Some(0));
     }
 
     #[test]

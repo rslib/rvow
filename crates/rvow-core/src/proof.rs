@@ -886,6 +886,40 @@ pub(crate) mod tests {
         let _ = std::fs::remove_file(&flag);
     }
 
+    fn prove_with_summary(summary: &str) -> Proved {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let active_dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+        let tasks = active_dir.join("tasks.md");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
+        std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: echo '{summary}'"))).unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap()
+    }
+
+    #[test]
+    fn node_zero_spec_summary_is_not_a_proof() {
+        let r = prove_with_summary("\u{2139} tests 0");
+        assert!(r.outcome.passed());
+        assert_eq!(r.outcome.tests_run, Some(0), "the result says 0 tests ran");
+        assert!(!r.proved, "a node --test run of 0 tests is not a proof");
+    }
+
+    #[test]
+    fn node_zero_tap_summary_is_not_a_proof() {
+        let r = prove_with_summary("# tests 0");
+        assert!(r.outcome.passed());
+        assert_eq!(r.outcome.tests_run, Some(0), "the result says 0 tests ran");
+        assert!(!r.proved, "a node --test run of 0 tests is not a proof");
+    }
+
+    #[test]
+    fn node_zero_three_tests_still_prove() {
+        let r = prove_with_summary("# tests 3");
+        assert_eq!(r.outcome.tests_run, Some(3));
+        assert!(r.proved, "{:?}", r.outcome);
+    }
+
     #[test]
     fn repeated_failures_suggest_a_block() {
         let (tmp, p, repo, task) = accepted();

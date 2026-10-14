@@ -158,6 +158,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- A `node --test`, vitest or mocha verify that ran 0 tests no longer proves a task.
 - End every lease of a task when the task is proved or blocked, bound or not, so a lease no longer comes back when the task goes stale.
 - Let a pi session take the next lease from a later `lease:` line once its old lease ended, and refuse the bind with a `reason` while the old lease is live.
 - Fix the hook reading owner command text as data from a committed test file.

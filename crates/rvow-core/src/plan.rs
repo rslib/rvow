@@ -229,7 +229,14 @@ fn trivial_verify(cmd: &str) -> bool {
 fn counted_runner(cmd: &str) -> bool {
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let pair = |a: &str, b: &str| words.windows(2).any(|w| w == [a, b]);
-    pair("cargo", "test") || pair("cargo", "nextest") || pair("go", "test") || words.contains(&"pytest") || words.contains(&"jest")
+    pair("cargo", "test")
+        || pair("cargo", "nextest")
+        || pair("go", "test")
+        || words.contains(&"pytest")
+        || words.contains(&"jest")
+        || words.contains(&"vitest")
+        || words.contains(&"mocha")
+        || (words.contains(&"node") && words.contains(&"--test"))
 }
 
 /// A warning for each task whose check proves nothing: a stub command, or a
@@ -252,7 +259,7 @@ fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding
             )
         } else {
             format!(
-                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest or go test",
+                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest, vitest, mocha, node --test or go test",
                 t.id
             )
         };
