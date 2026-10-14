@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Compare a protected file by its syntax tree when both texts parse with the grammar of its language, so a file that only lost a blank line or a comment is not drift.
   `rvow grammar fetch [<lang>...]` fills the grammar cache with pinned checksummed `.wasm` grammars and `rvow grammar list` shows each pinned language and whether the cache holds it.
 - Count comment text in the syntax compare, fetch missing grammars in prove and gate with a short timeout, and save each compare result under `grammars/` for reuse.
+- Name tests in Java, Kotlin, C#, Ruby and PHP: shipped queries mark JUnit, xUnit/NUnit/MSTest, RSpec/Minitest and PHPUnit tests, so a new test is free and a changed test is named in the drift item, while setup and teardown hooks and a test with an extra annotation such as `@Disabled` stay drift.
 
 ### Changed
 
@@ -158,6 +159,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- A new test that calls a process exit or abort, such as `std::process::exit`, `sys.exit`, `process.exit`, `os.Exit` or `exit()`, or that focuses the run with `focus: true` or `{ only: true }`, is drift in a protected test file, and rvow removes saved syntax compare results older than 30 days.
 - A `node --test`, vitest or mocha verify that ran 0 tests no longer proves a task.
 - End every lease of a task when the task is proved or blocked, bound or not, so a lease no longer comes back when the task goes stale.
 - Let a pi session take the next lease from a later `lease:` line once its old lease ended, and refuse the bind with a `reason` while the old lease is live.

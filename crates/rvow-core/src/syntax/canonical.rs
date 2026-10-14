@@ -2,6 +2,7 @@
 //! every comment kept as its own token.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use tree_sitter::Node;
 
@@ -56,7 +57,36 @@ pub enum Compare {
 /// The saved-result file for one compare: under `<home>/grammars`, keyed by
 /// the sha256 of each text and the grammar sha256.
 pub fn result_file(home: &Path, entry: &Entry, before: &str, after: &str) -> PathBuf {
-    home.join("grammars").join(format!("syntax-{}-{}-{}", sha256_hex(before.as_bytes()), sha256_hex(after.as_bytes()), entry.sha256))
+    home.join("grammars").join(format!(
+        "{RESULT_PREFIX}{}-{}-{}",
+        sha256_hex(before.as_bytes()),
+        sha256_hex(after.as_bytes()),
+        entry.sha256
+    ))
+}
+
+/// Saved compare results last changed longer ago than this are removed.
+const RESULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The file name prefix of a saved compare result.
+const RESULT_PREFIX: &str = "syntax-";
+
+/// Removes the saved compare results in `dir` that were last changed more
+/// than `RESULT_MAX_AGE` ago. Only files named like a result are touched,
+/// and a file that cannot be read or removed is left for the next save.
+fn prune_results(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(RESULT_PREFIX) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let age = meta.modified().ok().and_then(|modified| now.duration_since(modified).ok());
+        if meta.is_file() && age.is_some_and(|age| age > RESULT_MAX_AGE) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The canonical form of one node with the byte range `omit` left out: the
@@ -127,14 +157,16 @@ fn read_result(home: &Path, entry: &Entry, before: &str, after: &str) -> Option<
     parse_result(&text)
 }
 
-/// Saves the compare result. A write failure is ignored: the caller still
-/// returns the computed outcome, and the next compare tries again.
+/// Saves the compare result, and removes saved results older than 30 days.
+/// A write failure is ignored: the caller still returns the computed
+/// outcome, and the next compare tries again.
 fn write_result(home: &Path, entry: &Entry, before: &str, after: &str, outcome: Compare) {
     let file = result_file(home, entry, before, after);
     let Some(dir) = file.parent() else { return };
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
+    prune_results(dir);
     let tmp = dir.join(format!(".rvow-compare-{}.tmp", std::process::id()));
     if std::fs::write(&tmp, result_text(outcome)).is_err() {
         return;
@@ -271,4 +303,74 @@ fn push_text(source: &[u8], piece: std::ops::Range<usize>, out: &mut String) {
     out.push_str(&text.len().to_string());
     out.push(']');
     out.push_str(&text);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    fn entry() -> Entry {
+        Entry { name: "json".to_string(), ext: vec![], url: "https://example.test/json.wasm".to_string(), sha256: "0".repeat(64) }
+    }
+
+    fn home(name: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("rvow-canonical-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("grammars")).unwrap();
+        home
+    }
+
+    fn aged(path: &Path, days: u64) {
+        std::fs::write(path, "same").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - DAY * days as u32).unwrap();
+    }
+
+    #[test]
+    fn prune_removes_a_result_31_days_old_and_keeps_the_new_one() {
+        let home = home("prune-old");
+        let old = home.join("grammars/syntax-old");
+        aged(&old, 31);
+        write_result(&home, &entry(), "a", "b", Compare::Different);
+        assert!(!old.exists(), "a result 31 days old is removed");
+        assert!(result_file(&home, &entry(), "a", "b").is_file(), "the new result is saved");
+    }
+
+    #[test]
+    fn prune_keeps_a_result_29_days_old() {
+        let home = home("prune-recent");
+        let recent = home.join("grammars/syntax-recent");
+        aged(&recent, 29);
+        write_result(&home, &entry(), "a", "b", Compare::Different);
+        assert!(recent.is_file(), "a result 29 days old stays");
+        assert!(result_file(&home, &entry(), "a", "b").is_file());
+    }
+
+    #[test]
+    fn prune_leaves_files_rvow_did_not_write() {
+        let home = home("prune-other");
+        let wasm = home.join("grammars/tree-sitter-json.wasm");
+        let failures = home.join("grammars/fetch-failures.json");
+        aged(&wasm, 90);
+        aged(&failures, 90);
+        write_result(&home, &entry(), "a", "b", Compare::Different);
+        assert!(wasm.is_file() && failures.is_file(), "only compare results are pruned");
+    }
+
+    #[test]
+    fn prune_skips_a_folder_named_like_a_result() {
+        let home = home("prune-dir");
+        let dir = home.join("grammars/syntax-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("keep"), "x").unwrap();
+        aged(&home.join("grammars/syntax-old"), 31);
+        write_result(&home, &entry(), "a", "b", Compare::Different);
+        assert!(dir.join("keep").is_file(), "a folder is not a result file");
+        assert!(!home.join("grammars/syntax-old").exists(), "a failure on one entry does not stop the rest");
+        assert!(result_file(&home, &entry(), "a", "b").is_file());
+    }
 }

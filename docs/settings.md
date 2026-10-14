@@ -162,16 +162,23 @@ A failed fetch keeps the raw rules and names `rvow grammar fetch`, so a missing 
 For one hour after a fetch fails in prove or gate, neither tries that language again and both treat it as a language with no grammar, so the drift item keeps the raw rule and the `rvow grammar fetch` hint.
 `rvow grammar fetch` always tries, and a success clears the one-hour record.
 Each compare result is saved in the `grammars/` folder, keyed by the hash of each text and the grammar hash, and the next compare of the same two texts reuses it without parsing.
+When rvow saves a compare result, it removes the saved compare results older than 30 days; it removes only the result files it wrote, and a file it cannot remove never fails the save.
 
 ## Syntax units and query files
 
 A protected test file is not compared line by line when its grammar is in the cache: rvow splits it into syntax units and compares units instead.
 A unit is an item together with the attribute, decorator and comment siblings right before it: in Rust `#[test] fn a` is one unit, so removing `#[test]` or adding `#[ignore]` to it changes the unit.
-A body container that is not a function splits into a header unit plus one unit per body item: a Rust module, a Python class, a C++ namespace, and a call a query marks `@group`, such as `describe(...)`.
+A body container that is not a function splits into a header unit plus one unit per body item: a Rust module, a Python class, a C++ namespace, a Java, Kotlin, C# or PHP class or namespace, and a call a query marks `@group`, such as `describe(...)`.
 The header unit is the container without its body, so renaming the module is drift; the body of a function never splits, so a statement added inside a test changes that test's unit.
 A unit keeps its container: its form starts with the headers of the containers around it, so moving a test into another module, class or describe block is drift.
 The compare counts: each old unit must keep its canonical form in the new text at least as many times as before, so deleting one of two identical tests is drift.
 A new unit is free only when a shipped query marks it a test, its name is one the old text does not use, and every attribute above it is a test attribute (`#[test]`, `#[tokio::test...]`, `#[should_panic...]` or `@pytest.mark.*`).
+A Java, Kotlin, C# or PHP test also needs every annotation or attribute it holds to be a test one (see the shipped queries below).
+A new test that calls a function that ends the process is drift, even when a query marks it: a process exit or abort such as `std::process::exit`, `sys.exit`, `os._exit`, `exit()`, `process.exit`, `os.Exit`, `log.Fatal*`, `System.exit`, `Environment.Exit` or PHP `exit`.
+rvow reads the names in the syntax tree, so a string `"exit"` or a variable named `exit` is not a process exit, but a qualified or indirect call such as `java.lang.System.exit(0)`, `(process.exit)(0)`, `dbg!(std::process::exit(0))` or a bare Ruby `exit if done` is.
+`exit`, `abort` and `terminate` count only when they are called bare or on a process-like object (`process`, `sys`, `os`, `System`, `Environment`, `Kernel`, `Runtime`, `std`, `libc`), so `controller.abort()` stays free.
+A call made through a string, such as `getattr(sys, "exit")()`, is not caught.
+A new test call that focuses the run on itself, with RSpec `focus: true` or `:focus` or a node test `{ only: true }` option, is drift too, because it makes the runner skip every other test.
 A comment above it is free only after the first old unit of the file.
 A new helper, hook, fixture, import or `macro_rules!` is drift: record it with `rvow amend`.
 Moving a unit inside its container is not drift.
@@ -180,6 +187,16 @@ A file whose grammar does not load, or whose text does not parse cleanly, keeps 
 
 The drift item names the test that changed when a query file marks its unit.
 Each shipped query marks the test units of the common frameworks: `test(...)`, `it(...)` and `describe(...)` calls for JavaScript and TypeScript, pytest and unittest `test_*` functions for Python, `#[test]` functions for Rust, GoogleTest `TEST`, `TEST_F` and `TEST_P` macros for C++, named `Suite.Name`, and `func TestX` for Go.
+The queries for Java, Kotlin, C#, Ruby and PHP mark these as tests:
+
+| Language | Marked as a test | Never free |
+|----------|------------------|------------|
+| Java and Kotlin (JUnit) | methods with `@Test`, `@ParameterizedTest`, `@RepeatedTest` or `@TestFactory`; classes are containers | `@BeforeEach`, `@BeforeAll`, `@AfterEach`, `@AfterAll`, `@Before`, `@After`, and a test with another annotation such as `@Disabled` or `@Timeout` |
+| C# (xUnit, NUnit, MSTest) | methods with `[Fact]`, `[Theory]`, `[Test]`, `[TestCase(...)]` or `[TestMethod]`; classes and namespaces are containers | `[SetUp]`, `[TearDown]`, `[TestInitialize]`, `[ClassInitialize]`, and a test with another attribute such as `[Skip]` or `Skip = ...` |
+| Ruby (RSpec, Minitest) | `it`, `specify`, `example` and `test "..."` calls; `describe` and `context` blocks are `@group` containers | `before`, `after`, `let`, `subject` and `around` |
+| PHP (PHPUnit) | methods named `test*`, and methods with `#[Test]` or a `/** @test */` docblock; classes are containers | `setUp`, `tearDown`, `setUpBeforeClass` and every helper |
+
+A new test in these languages that calls a process exit (`System.exit`, `Runtime...halt`, `exitProcess`, `Environment.Exit`, `exit`, `abort`, `Process.exit`, `die`) is drift too.
 A project adds its own query file per language with `test_queries` in the project config:
 
 ```toml

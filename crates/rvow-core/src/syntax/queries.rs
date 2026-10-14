@@ -23,6 +23,11 @@ const SHIPPED: &[(&str, &str)] = &[
     ("rust", include_str!("queries/rust.scm")),
     ("cpp", include_str!("queries/cpp.scm")),
     ("go", include_str!("queries/go.scm")),
+    ("java", include_str!("queries/java.scm")),
+    ("kotlin", include_str!("queries/kotlin.scm")),
+    ("c_sharp", include_str!("queries/c_sharp.scm")),
+    ("ruby", include_str!("queries/ruby.scm")),
+    ("php", include_str!("queries/php.scm")),
 ];
 
 /// One compiled query. A shipped query is the one `SHIPPED` holds; a project

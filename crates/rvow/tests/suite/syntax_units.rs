@@ -437,3 +437,94 @@ fn syntax_units_renamed_mod_header_is_drift() {
     let got = weaken_for(&s, "tests/unit.rs");
     assert_eq!(got, ["test tests/unit.rs changed a".to_string()], "the renamed mod is drift");
 }
+
+fn exit_drift(name: &str, file: &str, lang: &str, old: &str, new: &str) {
+    let s = setup_with(name, &[(file, old), ("tests/t.sh", T_SH)]);
+    prime(&s.home, lang);
+    assert!(items(&s).is_empty());
+    rewrite_at(&s, file, new);
+    assert_eq!(weaken_for(&s, file), [format!("protected file {file} changed")], "a new test that exits is drift");
+}
+
+#[test]
+fn syntax_units_exit_rust_test_is_drift() {
+    for (i, call) in ["std::process::exit(0)", "process::exit(0)", "std::process::abort()", "::std::process::exit(1)"].iter().enumerate() {
+        let new = format!("{UNIT_RS}\n#[test]\nfn c() {{\n    {call};\n}}\n");
+        exit_drift(&format!("exit-rs-{i}"), "tests/unit.rs", "rust", UNIT_RS, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_python_test_is_drift() {
+    for (i, call) in ["sys.exit(0)", "os._exit(1)", "os.abort()", "exit()", "quit()"].iter().enumerate() {
+        let new = format!("{PY_TEST}\ndef test_b():\n    {call}\n");
+        exit_drift(&format!("exit-py-{i}"), "tests/test_app.py", "python", PY_TEST, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_js_test_is_drift() {
+    for (i, call) in ["process.exit(1)", "process.abort()", "process.reallyExit(1)"].iter().enumerate() {
+        let new = format!("{DESCRIBE_JS}it('b', () => {{\n  {call};\n}});\n");
+        exit_drift(&format!("exit-js-{i}"), "tests/app.test.js", "javascript", DESCRIBE_JS, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_js_test_inside_describe_is_drift() {
+    let new = "describe('group', () => {\n  it('a', () => {\n    expect(1).toBe(1);\n  });\n  it('b', () => {\n    process.exit(1);\n  });\n});\n";
+    exit_drift("exit-js-group", "tests/app.test.js", "javascript", DESCRIBE_JS, new);
+}
+
+#[test]
+fn syntax_units_exit_cpp_test_is_drift() {
+    let old = "TEST(Calc, Adds) {\n  EXPECT_EQ(1, 1);\n}\n";
+    for (i, call) in ["exit(1)", "_exit(1)", "_Exit(1)", "quick_exit(1)", "abort()", "std::exit(1)", "std::abort()"].iter().enumerate() {
+        let new = format!("{old}\nTEST(Calc, Subtracts) {{\n  {call};\n}}\n");
+        exit_drift(&format!("exit-cpp-{i}"), "tests/calc_test.cpp", "cpp", old, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_only_named_is_no_drift() {
+    let s = setup("exit-named");
+    prime_rust(&s.home);
+    assert!(items(&s).is_empty());
+    let added = format!("{UNIT_RS}\n#[test]\nfn c() {{\n    assert_eq!(code(\"exit\"), 1);\n}}\n");
+    rewrite(&s, "unit.rs", &added);
+    assert!(items(&s).is_empty(), "a test that only names exit is free: {:?}", items(&s));
+}
+
+#[test]
+fn syntax_units_exit_variable_named_exit_is_no_drift() {
+    let s = setup("exit-variable");
+    prime_rust(&s.home);
+    let added = format!("{UNIT_RS}\n#[test]\nfn c() {{\n    let exit = 1;\n    assert_eq!(exit, 1);\n}}\n");
+    rewrite(&s, "unit.rs", &added);
+    assert!(items(&s).is_empty(), "a variable named exit is no call: {:?}", items(&s));
+}
+
+#[test]
+fn syntax_units_exit_other_spellings_are_drift() {
+    let rust =
+        ["dbg!(std::process::exit(0))", "println!(\"{}\", std::process::exit(0))", "(std::process::exit)(0)", "unsafe { libc::_exit(0) }"];
+    for (i, call) in rust.iter().enumerate() {
+        let new = format!("{UNIT_RS}\n#[test]\nfn c() {{\n    {call};\n}}\n");
+        exit_drift(&format!("exit-rs-more-{i}"), "tests/unit.rs", "rust", UNIT_RS, &new);
+    }
+    for (i, call) in ["pytest.exit('x', returncode=0)", "__import__('os')._exit(0)"].iter().enumerate() {
+        let new = format!("{PY_TEST}\ndef test_b():\n    {call}\n");
+        exit_drift(&format!("exit-py-more-{i}"), "tests/test_app.py", "python", PY_TEST, &new);
+    }
+    let js = [
+        "globalThis.process.exit(0)",
+        "require('process').exit(0)",
+        "process.exit?.(0)",
+        "process.exit.call(process, 0)",
+        "(process.exit)(0)",
+    ];
+    for (i, call) in js.iter().enumerate() {
+        let new = format!("{DESCRIBE_JS}it('b', () => {{\n  {call};\n}});\n");
+        exit_drift(&format!("exit-js-more-{i}"), "tests/app.test.js", "javascript", DESCRIBE_JS, &new);
+    }
+}
