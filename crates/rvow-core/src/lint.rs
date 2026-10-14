@@ -3,7 +3,9 @@
 //! EARS and the keywords follow RFC 2119 and RFC 8174.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 
+use crate::config::Config;
 use crate::diag::{Diagnostic, Rule};
 use crate::id::{Id, Ref};
 use crate::spec::{DeltaFile, DeltaOp, Requirement, Spec, StepKind};
@@ -194,6 +196,38 @@ pub struct Question {
 /// runner, a param with no value, a task key the run does not use, a value
 /// outside the runner's `params`, or a value with a char that is not safe in
 /// a shell command. The message of each fill error already names the task.
+/// A warning for each project query file that is missing or does not
+/// compile, so a typo only costs the exact test name, never silently. The
+/// check needs the grammar of the language; one that is not in the cache
+/// skips its file without a warning.
+pub fn test_query_checks(home: &Path, top: &Path, config: &Config) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (lang, rel) in &config.test_queries {
+        let Some(entry) = crate::syntax::grammar::by_name(lang) else {
+            out.push((
+                "config.toml".to_string(),
+                Diagnostic::new(Rule::TestQuery, 0, format!("test_queries names {lang}, which has no pinned grammar")),
+            ));
+            continue;
+        };
+        if crate::syntax::grammar::cached(home, entry).is_none() {
+            // Without the grammar the file cannot be judged here; the drift
+            // check keeps the report unnamed instead.
+            continue;
+        }
+        let Ok(mut session) = crate::syntax::grammar::Session::new() else { continue };
+        if session.parse(home, entry, None, "").is_err() {
+            continue;
+        }
+        let Some(language) = session.language(entry) else { continue };
+        let path = top.join(rel);
+        if let Err(e) = crate::syntax::queries::validate(&language, &path) {
+            out.push(("config.toml".to_string(), Diagnostic::new(Rule::TestQuery, 0, format!("test_queries[{lang}]: {}", e.message))));
+        }
+    }
+    out
+}
+
 pub fn runner_checks(runners: &BTreeMap<String, crate::template::Runner>, tasks: &[Task]) -> Vec<Finding> {
     tasks
         .iter()

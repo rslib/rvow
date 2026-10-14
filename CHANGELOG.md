@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 - A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
   A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.
+- Compare a protected test file by syntax unit when its grammar is in the cache: a unit is an item with the attributes, decorators and comments right before it, and a module, class, namespace or `@group` call splits into a header unit plus one unit per body item.
+  Each old unit must keep its canonical form as many times as before, and a unit keeps its container.
+  A new unit is free only when a shipped query marks it a test with a name the old text does not use, and its attributes are test attributes: a moved test and a new test are not drift, while a new helper, hook, fixture, import or shadowing macro, a removed `#[test]`, a changed assert and a deleted duplicate are. Record such drift with `rvow amend`.
+  A file whose grammar does not load or whose text does not parse cleanly keeps the raw rules.
+- Query files name the changed test: shipped queries mark the test units of JavaScript and TypeScript, Python, Rust, C++ and Go, and `test_queries = { <lang> = "<path>" }` in the project config adds a query file per language.
+  A gtest `TEST(Suite, Name)` is named `Suite.Name`, and a `@group` capture marks a call as a container that splits into a header plus its body items.
+  The drift item prints the test's title or function name, a unit no query marks keeps today's item text, and `rvow check` warns with `test-query` about a query file that is missing or does not compile.
 - A runner that fills `{junit}` writes a JUnit report that accept and prove read: accept records the failed test names and refuses when the report names none, and a proof passes only when each recorded name passes and no test case failed.
   A missing `needs` path refuses the run and names the path, `rvow check` warns `configure-in-verify` about a CMake configure step in a verify, and a `Re-running CMake` output adds a note to the prove result.
 

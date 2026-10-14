@@ -25,8 +25,22 @@ pub fn canonical(session: &mut Session, home: &Path, entry: &Entry, base: Option
     let mut extras = Vec::new();
     collect_extras(root, &mut extras);
     let mut out = String::new();
-    walk(root, text.as_bytes(), &extras, &mut out);
+    walk(root, text.as_bytes(), &extras, &mut out, None, false);
     Ok(Some(out))
+}
+
+/// The canonical form of one node of a tree that `canonical` or `units`
+/// parsed from `text`, the same form the whole-text writer writes: no
+/// whitespace, leaf text written as `kind[len]text`. Callers use it to key
+/// one unit of a split file. Plain Rust `//` comments are left out, as
+/// guard_rust ignores them; other comments are kept.
+pub fn write_node(node: Node, text: &[u8], out: &mut String) {
+    if plain_line_comment(node, text) {
+        return;
+    }
+    let mut extras = Vec::new();
+    collect_extras(node, &mut extras);
+    walk(node, text, &extras, out, None, true);
 }
 
 /// What a canonical comparison of two texts decided: equal forms, forms
@@ -45,11 +59,20 @@ pub fn result_file(home: &Path, entry: &Entry, before: &str, after: &str) -> Pat
     home.join("grammars").join(format!("syntax-{}-{}-{}", sha256_hex(before.as_bytes()), sha256_hex(after.as_bytes()), entry.sha256))
 }
 
+/// The canonical form of one node with the byte range `omit` left out: the
+/// header of a body container, the node minus its body.
+pub fn write_node_omitting(node: Node, omit: std::ops::Range<usize>, text: &[u8], out: &mut String) {
+    let mut extras = Vec::new();
+    collect_extras(node, &mut extras);
+    walk(node, text, &extras, out, Some((omit.start, omit.end)), true);
+}
+
 /// Compares the canonical forms of `before` and `after`. The result is saved
 /// under `<home>/grammars`, keyed by the hash of each text and the grammar
-/// hash, and a saved result answers without parsing. A corrupt or unreadable
-/// result file means compare again. A parse with error nodes has no form; a
-/// grammar failure fails with code "grammar".
+/// hash, and a saved result answers without parsing; equal texts compare
+/// same without parsing too. A corrupt or unreadable result file means
+/// compare again. A parse with error nodes has no form; a grammar failure
+/// fails with code "grammar".
 pub fn compare(
     session: &mut Session,
     home: &Path,
@@ -60,6 +83,10 @@ pub fn compare(
 ) -> std::result::Result<Compare, Error> {
     if let Some(saved) = read_result(home, entry, before, after) {
         return Ok(saved);
+    }
+    if before == after {
+        write_result(home, entry, before, after, Compare::Same);
+        return Ok(Compare::Same);
     }
     let outcome = match (canonical(session, home, entry, base, before), canonical(session, home, entry, base, after)) {
         (Ok(Some(a)), Ok(Some(b))) => {
@@ -136,7 +163,16 @@ fn collect_extras(node: Node, extras: &mut Vec<(usize, usize)>) {
     }
 }
 
-fn walk(node: Node, source: &[u8], extras: &[(usize, usize)], out: &mut String) {
+/// Whether a node is a plain Rust `//` comment: a line comment that is not a
+/// `///` or `//!` doc comment. Only tree-sitter-rust names a comment
+/// `line_comment`; the other grammars name it `comment`.
+fn plain_line_comment(node: Node, source: &[u8]) -> bool {
+    node.kind() == "line_comment" && node.utf8_text(source).is_ok_and(|text| !text.starts_with("///") && !text.starts_with("//!"))
+}
+
+/// Writes one node. With `units` set, a plain Rust `//` comment is left out
+/// of the form.
+fn walk(node: Node, source: &[u8], extras: &[(usize, usize)], out: &mut String, omit: Option<(usize, usize)>, units: bool) {
     out.push('(');
     out.push_str(node.kind());
     if node.is_extra() {
@@ -147,14 +183,20 @@ fn walk(node: Node, source: &[u8], extras: &[(usize, usize)], out: &mut String) 
         let mut covered = node.start_byte();
         for i in 0..node.child_count() {
             let Some(child) = node.child(i) else { continue };
+            if omit.is_some_and(|(start, end)| child.start_byte() >= start && child.end_byte() <= end) {
+                continue;
+            }
             if child.start_byte() > covered {
-                push_gap(source, covered..child.start_byte(), extras, out);
+                push_gap(source, covered..child.start_byte(), extras, omit, out);
             }
             covered = covered.max(child.end_byte());
-            walk(child, source, extras, out);
+            if units && plain_line_comment(child, source) {
+                continue;
+            }
+            walk(child, source, extras, out, omit, units);
         }
         if node.end_byte() > covered {
-            push_gap(source, covered..node.end_byte(), extras, out);
+            push_gap(source, covered..node.end_byte(), extras, omit, out);
         }
     }
     out.push(')');
@@ -165,9 +207,16 @@ fn walk(node: Node, source: &[u8], extras: &[(usize, usize)], out: &mut String) 
 /// example), so the gap is token text in the form unless it is whitespace
 /// or the span of an extra: extras leave the gap out and walk writes each
 /// one as its own token instead.
-fn push_gap(source: &[u8], range: std::ops::Range<usize>, extras: &[(usize, usize)], out: &mut String) {
+fn push_gap(source: &[u8], range: std::ops::Range<usize>, extras: &[(usize, usize)], omit: Option<(usize, usize)>, out: &mut String) {
     let mut rest = Vec::new();
     sub_extras(range, extras, &mut rest);
+    if let Some(omit) = omit {
+        let mut left = Vec::new();
+        for piece in rest {
+            sub_extras(piece, &[omit], &mut left);
+        }
+        rest = left;
+    }
     for piece in rest {
         push_if_visible(source, piece, out);
     }

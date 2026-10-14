@@ -142,6 +142,47 @@ For one hour after a fetch fails in prove or gate, neither tries that language a
 `rvow grammar fetch` always tries, and a success clears the one-hour record.
 Each compare result is saved in the `grammars/` folder, keyed by the hash of each text and the grammar hash, and the next compare of the same two texts reuses it without parsing.
 
+## Syntax units and query files
+
+A protected test file is not compared line by line when its grammar is in the cache: rvow splits it into syntax units and compares units instead.
+A unit is an item together with the attribute, decorator and comment siblings right before it: in Rust `#[test] fn a` is one unit, so removing `#[test]` or adding `#[ignore]` to it changes the unit.
+A body container that is not a function splits into a header unit plus one unit per body item: a Rust module, a Python class, a C++ namespace, and a call a query marks `@group`, such as `describe(...)`.
+The header unit is the container without its body, so renaming the module is drift; the body of a function never splits, so a statement added inside a test changes that test's unit.
+A unit keeps its container: its form starts with the headers of the containers around it, so moving a test into another module, class or describe block is drift.
+The compare counts: each old unit must keep its canonical form in the new text at least as many times as before, so deleting one of two identical tests is drift.
+A new unit is free only when a shipped query marks it a test, its name is one the old text does not use, and every attribute above it is a test attribute (`#[test]`, `#[tokio::test...]`, `#[should_panic...]` or `@pytest.mark.*`).
+A comment above it is free only after the first old unit of the file.
+A new helper, hook, fixture, import or `macro_rules!` is drift: record it with `rvow amend`.
+Moving a unit inside its container is not drift.
+Plain Rust `//` comments are left out of unit forms; doc comments and comments in other languages are kept.
+A file whose grammar does not load, or whose text does not parse cleanly, keeps the raw rules: the line rule for most files and the Rust test-module rule for `.rs`.
+
+The drift item names the test that changed when a query file marks its unit.
+Each shipped query marks the test units of the common frameworks: `test(...)`, `it(...)` and `describe(...)` calls for JavaScript and TypeScript, pytest and unittest `test_*` functions for Python, `#[test]` functions for Rust, GoogleTest `TEST`, `TEST_F` and `TEST_P` macros for C++, named `Suite.Name`, and `func TestX` for Go.
+A project adds its own query file per language with `test_queries` in the project config:
+
+```toml
+test_queries = { javascript = "tests/queries/chai.scm" }
+```
+
+The path is repo-relative and the query adds to the shipped one for that language.
+Inside the query, a `@test` capture marks a unit as a test when it spans the whole unit, and a `@name` capture holds the title or function name the item prints; several `@name` captures join with `.`.
+Only the shipped queries split a `@group` container and make a new unit free; a project query only names tests in drift items.
+A `@group` capture marks a call as a container that splits into a header unit plus one unit per body item.
+
+```scheme
+(
+  (call_expression
+    function: (identifier) @fn
+    arguments: (arguments (string (string_fragment) @name))) @test
+  (#eq? @fn "check")
+)
+```
+
+A unit no query marks keeps the unnamed item text.
+A missing or broken query file never weakens the check: the report just loses the name, and `rvow check` warns with `test-query` and names the file.
+Without `test_queries`, only the shipped queries name tests.
+
 ## Choosing the git binary
 
 rvow runs the git it finds on `PATH`.

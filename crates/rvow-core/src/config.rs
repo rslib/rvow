@@ -102,6 +102,9 @@ pub struct File {
     pub rules: Option<Rules>,
     /// The `[runners.<name>]` templates a task verify can name with `@<name>`.
     pub runners: Option<BTreeMap<String, crate::template::Runner>>,
+    /// Per language, a repo-relative path to a tree-sitter query file that
+    /// marks test units and names them, added to the shipped query.
+    pub test_queries: Option<BTreeMap<String, String>>,
 }
 
 /// The settings in force. Every field except `machine` is part of the vow.
@@ -136,6 +139,9 @@ pub struct Config {
     pub context: String,
     #[serde(default, skip_serializing_if = "Rules::is_empty")]
     pub rules: Rules,
+    /// Per language, a repo-relative path to a tree-sitter query file that
+    /// marks test units and names them, added to the shipped query.
+    pub test_queries: BTreeMap<String, String>,
     /// The keys that the user's config files set; the rest are defaults of
     /// this rvow version. Outside the canonical form, like `machine`.
     #[serde(skip)]
@@ -257,6 +263,7 @@ pub fn load(project: &Project, home: &Path) -> Result<Config> {
         }),
         checks: pick!(checks).unwrap_or_default(),
         setup: pick!(setup).unwrap_or_default(),
+        test_queries: pick!(test_queries).unwrap_or_default(),
         rerun_env: pick!(rerun_env).unwrap_or_default(),
         env: pick!(env).unwrap_or_default(),
         env_vars: pick!(env_vars).unwrap_or_default(),

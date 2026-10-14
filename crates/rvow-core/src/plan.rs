@@ -300,7 +300,9 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
     let mut out = Vec::new();
     for d in dirs {
         let loaded = change::load(&d.path, &living)?;
-        out.push(report(project, &config, d, loaded, &top));
+        let mut r = report(project, &config, d, loaded, &top);
+        r.findings.extend(crate::lint::test_query_checks(&home, &top, &config));
+        out.push(r);
     }
     Ok(out)
 }

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 
 use rvow_core::store::{self, Project};
 use rvow_core::syntax::canonical::{self, Compare};
@@ -16,12 +16,10 @@ fn fixtures() -> String {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grammars").display().to_string()
 }
 
-/// wxo tests in this binary share the process env, so every one that sets
-/// RVOW_GRAMMAR_URL holds this lock.
-static ENV: OnceLock<Mutex<()>> = OnceLock::new();
-
+/// Tests in this binary share the process env, so every one that sets
+/// RVOW_GRAMMAR_URL holds the shared lock of the test binary.
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV.get_or_init(|| Mutex::new(())).lock().unwrap()
+    crate::env_lock::lock()
 }
 
 struct Setup {
