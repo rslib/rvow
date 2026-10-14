@@ -29,6 +29,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Count only the segments that are not a file check (`grep`, `rg`, `test`, `[`, `diff`, `cmp`) toward the `full-suite` chain warning, so a verify of file checks before one test no longer warns.
+- Refuse a blank required proposal section: `rvow check` reports a structure error that names the section and its line, and one word is enough.
+- Count the issues of a backlog plan in the dashboard with the same function as `rvow check`, so a task whose runner fails to fill counts once and the plan is not ready.
+- Build the release binary with symbols stripped, thin LTO and one codegen unit, which cuts it from 20.7 MB to 13.7 MB.
 - Skip a configured `checks` command that already passed on the same commit, keyed by the command text, the HEAD tree id and the tool fingerprint, and print `cached check: <cmd>` on the check stream.
   An uncommitted change in the check's scope runs the check again and records nothing, and `rerun_cache = "off"` turns the check cache off.
 - Do not try a grammar fetch again for one hour after it fails in prove or gate, treating the language as one with no grammar; `rvow grammar fetch` always tries and a success clears the record.

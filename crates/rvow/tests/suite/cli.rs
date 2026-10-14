@@ -425,6 +425,8 @@ fn check_warns_weak_verify() {
     let out = r.ok(&["new", "--spec", "Out"]);
     let id = field(&out, "created").to_owned();
     let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(dir.join("proposal.md"), "branch: main\n\n# Out\n\n## Why\nw\n\n## What changes\nw\n\n## Out of scope\nNone.\n")
+        .unwrap();
 
     std::fs::write(
         dir.join("tasks.md"),

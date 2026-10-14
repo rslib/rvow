@@ -95,9 +95,17 @@ pub const CHAINED_COMMANDS: usize = 3;
 /// A verify whose last recorded run took longer than this is a full suite.
 pub const SLOW_PROOF_SECS: u64 = 60;
 
-/// The commands a verify chains with `&&` or `;`.
+/// Programs that only look at files, so chaining them does not make a suite.
+const FILE_CHECKS: [&str; 6] = ["grep", "rg", "test", "[", "diff", "cmp"];
+
+/// The program of a segment, after any leading `!` words.
+fn segment_program(segment: &str) -> Option<&str> {
+    program(segment.trim_start().trim_start_matches(['!', ' ']))
+}
+
+/// The commands a verify chains with `&&` or `;`, not counting file checks.
 pub fn chained_commands(cmd: &str) -> usize {
-    cmd.replace("&&", ";").split(';').filter(|s| !s.trim().is_empty()).count()
+    cmd.replace("&&", ";").split(';').filter_map(segment_program).filter(|p| !FILE_CHECKS.contains(p)).count()
 }
 
 /// The duration of the newest recorded proof of `cmd` in this project, in ms.
@@ -260,19 +268,67 @@ fn fill_ok(runners: &BTreeMap<String, crate::template::Runner>, task: &Task) -> 
     crate::template::reference(task.verify.as_deref().unwrap_or("")).is_none() || crate::template::plan(runners, task).is_ok()
 }
 
+/// The missing programs that `check` blames on a task: those of tasks whose
+/// runner fills, since a failed fill already gets the runner error.
+pub fn blamed_programs(
+    top: &Path,
+    tasks: &[Task],
+    runners: &BTreeMap<String, crate::template::Runner>,
+    filled: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    missing_programs_filled(top, tasks, filled)
+        .into_iter()
+        .filter(|(task, _)| tasks.iter().find(|t| t.id.to_string() == *task).is_none_or(|t| fill_ok(runners, t)))
+        .collect()
+}
+
+const REQUIRED_SECTIONS: [&str; 3] = ["Why", "What changes", "Out of scope"];
+
+/// A structure error for each required proposal section that holds no words.
+/// Only `rvow check` runs it: the `rvow new` scaffold is blank by design.
+fn blank_sections(src: &str) -> Vec<crate::diag::Diagnostic> {
+    let mut sections: Vec<(&str, usize, usize)> = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        if let Some(name) = line.strip_prefix("## ") {
+            sections.push((name.trim(), i + 1, 0));
+        } else if !line.starts_with('#')
+            && let Some(last) = sections.last_mut()
+        {
+            last.2 += line.split_whitespace().count();
+        }
+    }
+    sections
+        .into_iter()
+        .filter(|(name, _, n)| *n == 0 && REQUIRED_SECTIONS.contains(name))
+        .map(|(name, line, _)| {
+            crate::diag::Diagnostic::new(crate::diag::Rule::Structure, line, format!("proposal section `## {name}` is empty"))
+        })
+        .collect()
+}
+
+/// The blank-section errors of a loaded change's proposal, keyed by the
+/// proposal file. `rvow check` and the dashboard both count them.
+pub fn proposal_blanks(loaded: &Loaded) -> Vec<(String, crate::diag::Diagnostic)> {
+    loaded
+        .texts
+        .iter()
+        .find(|(path, _)| path == change::PROPOSAL)
+        .map(|(_, text)| blank_sections(text).into_iter().map(|d| (change::PROPOSAL.to_string(), d)).collect())
+        .unwrap_or_default()
+}
+
 fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
     let runners = config::runners(project).unwrap_or_default();
     let filled = filled_commands(&runners, &loaded.tasks);
     let slow = full_suite(project, config, &loaded.tasks, &filled);
+    let blanks = proposal_blanks(&loaded);
     let mut findings = loaded.findings;
+    findings.extend(blanks);
     findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
-    let missing: Vec<(String, String)> = missing_programs_filled(top, &loaded.tasks, &filled)
-        .into_iter()
-        .filter(|(task, _)| loaded.tasks.iter().find(|t| t.id.to_string() == *task).is_none_or(|t| fill_ok(&runners, t)))
-        .collect();
+    let missing = blamed_programs(top, &loaded.tasks, &runners, &filled);
     Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
 }
 
@@ -419,5 +475,20 @@ mod tests {
         assert_eq!(wide.len(), 1, "{:?}", r.findings);
         assert!(wide[0].1.message.contains("src/**") && wide[0].1.message.contains("goes stale"), "{}", wide[0].1.message);
         assert_eq!(wide[0].1.rule.severity(), crate::diag::Severity::Warning);
+    }
+
+    #[test]
+    fn blank_why_is_an_error_that_names_why() {
+        let diags = blank_sections("branch: b\n## Why\n## What changes\nx\n## Out of scope\nNone.\n");
+        let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(msgs, ["proposal section `## Why` is empty"]);
+        assert_eq!(diags[0].line, 2);
+        assert_eq!(diags[0].rule, crate::diag::Rule::Structure);
+    }
+
+    #[test]
+    fn blank_out_of_scope_with_one_word_is_no_error() {
+        let diags = blank_sections("branch: b\n## Why\nx\n## What changes\nx\n## Out of scope\nNone.\n");
+        assert!(diags.is_empty(), "{diags:?}");
     }
 }

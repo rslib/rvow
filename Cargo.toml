@@ -9,6 +9,11 @@ rust-version = "1.98"
 license = "MIT"
 publish = false
 
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
 # Optimize the wasm engine in debug builds: the syntax tests run it.
 [profile.dev.package.cranelift-assembler-x64]
 opt-level = 2

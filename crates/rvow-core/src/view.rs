@@ -83,8 +83,12 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
         }
         let runners = config::runners(project).unwrap_or_default();
         let filled = crate::plan::filled_commands(&runners, &loaded.tasks);
-        let missing = crate::plan::missing_programs_filled(&top, &loaded.tasks, &filled).len();
-        let errors = loaded.errors().count();
+        let missing = crate::plan::blamed_programs(&top, &loaded.tasks, &runners, &filled).len();
+        let runner_errors = crate::lint::runner_checks(&runners, &loaded.tasks)
+            .iter()
+            .filter(|(_, d)| d.severity() == crate::diag::Severity::Error)
+            .count();
+        let errors = loaded.errors().count() + runner_errors + crate::plan::proposal_blanks(&loaded).len();
         let entry = json!({
             "id": c.id.to_string(),
             "title": loaded.proposal.title,
@@ -247,5 +251,41 @@ mod tests {
         let v = view(&p, &home, &repo).unwrap().unwrap();
         assert_eq!(v["plans"][0]["task_timeouts_secs"], json!([1200, 0, 90]));
         assert_eq!(v["plans"][0]["default_timeout_secs"], json!(600));
+    }
+
+    #[test]
+    fn dashboard_counts_an_unknown_runner_once() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let plan = change::new(&p, "Runner", "main", true).unwrap();
+        std::fs::write(
+            plan.path.join("proposal.md"),
+            "branch: main\n\n# Runner\n\n## Why\nw\n\n## What changes\nw\n\n## Out of scope\nNone.\n",
+        )
+        .unwrap();
+        std::fs::write(plan.path.join("tasks.md"), "- TSK-new1 One\n  verify: @nope\n  files: a\n").unwrap();
+        let v = view(&p, &home, &repo).unwrap().unwrap();
+        assert_eq!(v["plans"][0]["issues"], 1);
+        assert_eq!(v["plans"][0]["ready"], false);
+    }
+
+    #[test]
+    fn dashboard_counts_a_blank_proposal_section() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let plan = change::new(&p, "Blank", "main", true).unwrap();
+        std::fs::write(
+            plan.path.join("proposal.md"),
+            "branch: main\n\n# Blank\n\n## Why\n\n## What changes\nw\n\n## Out of scope\nNone.\n",
+        )
+        .unwrap();
+        std::fs::write(plan.path.join("tasks.md"), "- TSK-new1 One\n  verify: cargo test one\n  files: a\n").unwrap();
+        let v = view(&p, &home, &repo).unwrap().unwrap();
+        assert_eq!(v["plans"][0]["issues"], 1);
+        assert_eq!(v["plans"][0]["ready"], false);
     }
 }

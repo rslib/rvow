@@ -85,6 +85,12 @@ The gate makes its rerun worktree and runs `setup` only when something needs the
 When the cache or a current proof answers every task, it makes no worktree and runs no `setup`.
 The `checks` that remain then run in the repository itself.
 
+## The full-suite warning
+
+`rvow check` warns with `full-suite` about a task whose verify chains three or more commands with `&&` or `;`, repeats a `checks` entry, or took more than one minute on its last recorded run.
+A file check does not count toward the chain: a segment whose first word is `grep`, `rg`, `test`, `[`, `diff` or `cmp`, after any leading `!` and `NAME=value` words.
+So `grep -q x a.md && grep -q y b.md && cargo test --test main docs::` chains one command and does not warn.
+
 ## Running each check once per commit
 
 A `checks` entry that passes records its result in the same gate cache as a
