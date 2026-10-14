@@ -642,6 +642,9 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         let key = crate::seal::key(home)?;
         ledger::append_sealed(&ledger_path, &lock, Kind::Prove, data, Some(&key))?
     };
+    if proved {
+        crate::lease::end_task(project, &task.id.to_string())?;
+    }
 
     let (events, _) = ledger::read(&ledger_path)?;
     let id = task.id.to_string();

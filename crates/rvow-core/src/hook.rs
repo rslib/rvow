@@ -662,7 +662,14 @@ pub fn claude_lease_bind(project: &Project, input: &Value) -> Result<Option<Valu
     let (Some(agent), Some(task)) = (text("agent_id"), text("prompt").and_then(lease::marker)) else {
         return Ok(None);
     };
-    Ok(Some(json!({"bound": lease::bind(project, &task, agent)?, "task": task})))
+    Ok(Some(match lease::bind_checked(project, &task, agent)? {
+        lease::Bound::Holds(held) => json!({
+            "bound": false,
+            "task": task,
+            "reason": format!("this session still holds the lease of {held}; prove or block {held}, or start a new session for {task}"),
+        }),
+        bound => json!({"bound": bound == lease::Bound::Yes, "task": task}),
+    }))
 }
 
 /// The Claude mod's `SubagentStop`: ends the lease that the stopping subagent holds.

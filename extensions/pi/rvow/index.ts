@@ -947,12 +947,13 @@ export default function (pi: ExtensionAPI) {
     return { handled: true };
   }
 
-  // A subagent runs in a session of its own that loads this extension, so it can bind itself: when its
-  // first prompt starts with the `lease:` line of `rvow delegate`, the hook then judges its edits and
-  // its `rvow prove` by the leased task, as it does for a bound Claude subagent.
+  // A subagent runs in a session of its own that loads this extension, so it can bind itself: when a
+  // prompt starts with the `lease:` line of `rvow delegate`, the hook then judges its edits and its
+  // `rvow prove` by the leased task, as it does for a bound Claude subagent. A later `lease:` line binds
+  // the next lease once the old one ended; while the old one is live the hook refuses with a reason.
   let leaseAgent: string | undefined;
   pi.on("before_agent_start", async (event, ctx) => {
-    if (leaseAgent || !/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
+    if (!/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
     const id = ctx.sessionManager?.getSessionId?.();
     if (!id) return;
     const out = await hook(
@@ -965,6 +966,7 @@ export default function (pi: ExtensionAPI) {
       enforcementOff(ctx),
     );
     if (out?.bound === true) leaseAgent = id;
+    else if (typeof out?.reason === "string" && ctx.hasUI) ctx.ui.notify(out.reason, "warning");
   });
 
   pi.on("tool_call", async (event, ctx) => {

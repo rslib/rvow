@@ -158,6 +158,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- End every lease of a task when the task is proved or blocked, bound or not, so a lease no longer comes back when the task goes stale.
+- Let a pi session take the next lease from a later `lease:` line once its old lease ended, and refuse the bind with a `reason` while the old lease is live.
 - Fix the hook reading owner command text as data from a committed test file.
   A committed test file with no change against HEAD runs, and every changed, untracked or non-test script still gets the check.
 - Fix the gate counting the files of every done change of the branch, so a done change whose work is already in the base no longer widens the scope.

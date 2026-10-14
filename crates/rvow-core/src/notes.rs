@@ -8,6 +8,7 @@ use crate::change::{self, LEDGER};
 use crate::error::{Error, Result};
 use crate::git;
 use crate::id::Id;
+use crate::lease;
 use crate::ledger::{self, Kind};
 use crate::proof;
 use crate::store::Project;
@@ -48,6 +49,8 @@ pub fn block(project: &Project, input: &str, reason: &str) -> Result<(Id, String
     data.insert("reason".into(), reason.trim().into());
     let lock = project.lock()?;
     ledger::append(&c.dir.path.join(LEDGER), &lock, Kind::Block, data)?;
+    drop(lock);
+    lease::end_task(project, &task.id.to_string())?;
     Ok((c.dir.id.clone(), task.id.to_string()))
 }
 

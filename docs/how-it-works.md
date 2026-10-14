@@ -188,10 +188,13 @@ A subagent meets the same rules as the main agent, but it does not know which ta
 `rvow delegate <task>` records a lease for one task and prints a short brief.
 The first line of the brief is `lease: <task id>`, so put the brief at the start of the subagent's prompt.
 The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
-In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from the first prompt of that session and binds the session id.
+In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from a prompt of that session and binds the session id.
 From then on the hook denies that subagent's edits of files outside the task's `files:`, and the reason names the task.
 It also denies an `rvow prove` of any other task or `rvow prove --stale`, so one subagent cannot prove another's work.
 A lease ends when its task is proved or blocked, when the subagent stops or after 4 hours.
+A prove or block ends the lease for good, bound or not, so the task going stale later does not bring it back.
+A pi session takes the next lease from a later `lease:` line when its old lease ended: the hook binds the session to the new task and judges its edits by that task.
+When the old lease is still live, the hook refuses the bind, the session stays on the old task and the user sees "this session still holds the lease of <task>; prove or block <task>, or start a new session".
 The lease file is closed to agents, like the gate cache.
 
 Two limits stay.
