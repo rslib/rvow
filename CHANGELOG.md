@@ -172,6 +172,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Hold no session for the files it only named in plan or note text: heredoc and quoted text count for changed files only when an interpreter or a shell runs it, and an `rvow` command records no file.
 - Fix the session record counting formatter runs, folders and code words as changes: a formatter run records nothing beyond the files it names, folders are never recorded, and script text counts only for an existing file or a path with a `/` in an existing folder.
 
 - Fix `rvow check` and `rvow clarify` reading the worktree of the current checkout for a change named by id: they now read the worktree of that change's branch, so a check from the main checkout reports the same as a check from the worktree of the branch.

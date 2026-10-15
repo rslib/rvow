@@ -1531,6 +1531,46 @@ mod tests {
     }
 
     #[test]
+    fn record_text_of_rvow_put_is_data() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        let cmd = "rvow put CHG-abc123 tasks <<'EOF'\n- TSK-new1 x\n  files: out.txt\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(!touched.contains("out.txt"), "{touched:?}");
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "naming a task file in plan text is no edit");
+    }
+
+    #[test]
+    fn record_text_of_a_note_is_data() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "rvow note \"pi edits out.txt next\""})), None);
+        assert!(session_files::load(&p, "s1").iter().all(|f| f.starts_with(':')), "{:?}", session_files::load(&p, "s1"));
+    }
+
+    #[test]
+    fn record_text_of_a_python_script_counts() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        let cmd = "python3 - <<'EOF'\nopen('out.txt', 'w').write('b')\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        assert!(session_files::load(&p, "s1").contains("out.txt"));
+    }
+
+    #[test]
+    fn record_text_of_cat_into_a_file_counts_only_the_target() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        std::fs::write(repo.join("other.txt"), "a").unwrap();
+        let cmd = "cat > other.txt <<'EOF'\nsee out.txt\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(touched.contains("other.txt") && !touched.contains("out.txt"), "{touched:?}");
+    }
+
+    #[test]
     fn record_only_each_path_once() {
         let (_tmp, p, repo, _task) = accepted();
         std::fs::write(repo.join("out.txt"), "a").unwrap();

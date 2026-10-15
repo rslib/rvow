@@ -774,24 +774,40 @@ pub(super) fn bash_changes(cmd: &str, cwd: &Path) -> Changes {
             || name == "cd"
             || (name == "sed" && !inv.iter().any(|w| w.starts_with("-i") || w.starts_with("--in-place")))
     };
-    if !invs.is_empty() && !writes_files(&invs, cmd) && invs.iter().all(quiet) {
-        return Changes::default();
+    let mut out = Changes {
+        plan: invs.iter().any(|inv| base_name(&inv[0]) == "rvow" && inv.get(1).is_some_and(|w| w == "put")),
+        ..Changes::default()
+    };
+    // An rvow command writes only its own store, never a repository file.
+    let rvow = |inv: &&[String]| base_name(&inv[0]) == "rvow";
+    if !invs.is_empty() && !writes_files(&invs, cmd) && invs.iter().all(|inv| quiet(inv) || rvow(inv)) {
+        return out;
     }
-    let mut out = Changes::default();
     for inv in &invs {
         let name = base_name(&inv[0]);
         if name == "cd" {
             out.dirs.extend(inv.get(1).cloned());
         }
-        if name == "rvow" && inv.get(1).is_some_and(|w| w == "put") {
-            out.plan = true;
-        }
     }
     out.paths = changed_words(cmd);
     out.paths.extend(glob_paths(cmd, cwd).into_iter().filter_map(|p| p.to_str().map(String::from)));
+    // The value of an option such as `--out=report.txt` may name the file it writes.
+    for inv in invs.iter().filter(|inv| !rvow(inv)) {
+        out.paths
+            .extend(inv[1..].iter().filter(|w| w.starts_with('-')).filter_map(|w| w.split_once('=')).map(|(_, value)| value.to_string()));
+    }
     // Heredoc bodies and quoted scripts are not shell words, so read the raw
-    // text for anything shaped like a path. The caller keeps only the ones that
-    // name an existing file, or a path with a `/` whose folder exists.
+    // text for anything shaped like a path, but only when an interpreter or a
+    // shell runs that text: for `rvow put`, `cat` or `git commit -m` it is data.
+    // The caller keeps only the ones that name an existing file, or a path with
+    // a `/` whose folder exists.
+    let runs_script = invs.iter().any(|inv| {
+        let name = base_name(&inv[0]);
+        is_interpreter(name) || is_shell(name) || name == "eval"
+    });
+    if !runs_script {
+        return out;
+    }
     let is_path_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '/' | '-');
     for piece in cmd.split(|c: char| !is_path_char(c)) {
         let piece = piece.strip_prefix("./").unwrap_or(piece).trim_end_matches(['.', '-']);
