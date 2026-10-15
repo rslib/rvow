@@ -99,6 +99,13 @@ A pass with 0 tests run is not a proof, so rvow reads the number of tests from t
 | `node --test` | the `tests N` line of the spec reporter (after the info glyph) or of the TAP reporter (`# tests N`); the last one wins. Node reports a file in which no test ran, such as when `--test-name-pattern` matches nothing in it, as one passing test named by the file; rvow does not count that result |
 | `vitest` | the `Tests` line, the total in the parentheses: `Tests  1 failed | 3 passed (4)` is 4 |
 | `mocha` | the `N passing` line plus the `N failing` line; `pending` tests do not count |
+| `ctest` | the `N% tests passed, F tests failed out of M` line, the `M`; `No tests were found!!!` is 0 |
+| doctest | each `[doctest] test cases: N | ...` line, summed; the `[doctest] assertions:` line does not count |
+| GoogleTest | each `[==========] N tests from M test suites ran.` line, summed, and the singular `1 test from 1 test suite ran.`; the `Running` line does not count |
+| Unity | each `N Tests F Failures I Ignored` line, `N` less the ignored `I`, summed |
+
+rvow counts only a summary line at the start of a line, like the other runners, so a line that a test prints itself, indented or with a prefix, does not count.
+A doctest or GoogleTest binary has no fixed name, so rvow reads its output wherever it appears; `ctest` is the one C or C++ runner that the `baseline: pass` check knows by name.
 
 ## The full-suite warning
 
@@ -194,7 +201,7 @@ A file whose grammar does not load, or whose text does not parse cleanly, keeps 
 
 The drift item names the test that changed when a query file marks its unit.
 Each shipped query marks the test units of the common frameworks: `test(...)`, `it(...)` and `describe(...)` calls for JavaScript and TypeScript, pytest and unittest `test_*` functions for Python, `#[test]` functions for Rust, GoogleTest `TEST`, `TEST_F` and `TEST_P` macros for C++, named `Suite.Name`, and `func TestX` for Go.
-The queries for Java, Kotlin, C#, Ruby and PHP mark these as tests:
+The queries for Java, Kotlin, C#, Ruby, PHP, C++ (doctest and Catch2) and C (Unity) mark these as tests:
 
 | Language | Marked as a test | Never free |
 |----------|------------------|------------|
@@ -202,7 +209,15 @@ The queries for Java, Kotlin, C#, Ruby and PHP mark these as tests:
 | C# (xUnit, NUnit, MSTest) | methods with `[Fact]`, `[Theory]`, `[Test]`, `[TestCase(...)]` or `[TestMethod]`; classes and namespaces are containers | `[SetUp]`, `[TearDown]`, `[TestInitialize]`, `[ClassInitialize]`, and a test with another attribute such as `[Skip]` or `Skip = ...` |
 | Ruby (RSpec, Minitest) | `it`, `specify`, `example` and `test "..."` calls; `describe` and `context` blocks are `@group` containers | `before`, `after`, `let`, `subject` and `around` |
 | PHP (PHPUnit) | methods named `test*`, and methods with `#[Test]` or a `/** @test */` docblock; classes are containers | `setUp`, `tearDown`, `setUpBeforeClass` and every helper |
+| C++ (doctest, Catch2) | `TEST_CASE`, `TEST_CASE_FIXTURE`, `TEST_CASE_METHOD`, `TEST_CASE_TEMPLATE`, `TEMPLATE_TEST_CASE` and `SCENARIO` blocks, named by their string; `TEST_SUITE` blocks are `@group` containers; `SUBCASE` and `SECTION` stay inside their case, so a change in one names the case | a case with a `skip()`, `may_fail()`, `should_fail()` or `expected_failures()` decorator or a Catch2 tag `[.]`, `[hide]`, `[!hide]`, `[!mayfail]` or `[!shouldfail]`, and every helper |
+| C (Unity) | `test_*` functions of a file that includes `unity.h`, and the `RUN_TEST(test_name)` lines of a `main` that holds a `RUN_TEST` line | `setUp`, `tearDown`, every helper, a `RUN_TEST` of a name the old text already uses, and a test that calls `TEST_IGNORE` |
 
+In C and C++ a new test that holds a preprocessor directive (`#define`, `#undef`, `#include`) is drift, since it can switch off the asserts of later tests, and naming `exit`, `abort` or `quick_exit` counts as a process exit even without a call, as does `::exit`, `raise` or `kill`.
+The statements of a Unity `main` keep their order: moving `return UNITY_END();` above a `RUN_TEST` line is drift.
+A doctest or Catch2 macro such as `TEST_CASE("adds") { ... }` has no `;`, so tree-sitter-cpp parses it as a header with a missing `;` followed by a block, and the parse holds an error.
+rvow accepts that error in a C++ file, joins the header and its block into one unit, and keeps every other parse error as a reason for the raw rules, so a file with an unrelated error keeps them.
+A `RUN_TEST` rule applies to a `main` that holds at least one `RUN_TEST` line: the header of `main` is one unit and each statement is its own unit, so a new `RUN_TEST(test_name);` line for a new free `test_` function is free and a removed line is drift.
+A `main` of any other C file stays one unit, and a `.h` file frees no new unit unless it includes `unity.h`.
 A new test in these languages that calls a process exit (`System.exit`, `Runtime...halt`, `exitProcess`, `Environment.Exit`, `exit`, `abort`, `Process.exit`, `die`) is drift too.
 A project adds its own query file per language with `test_queries` in the project config:
 
@@ -212,7 +227,10 @@ test_queries = { javascript = "tests/queries/chai.scm" }
 
 The path is repo-relative and the query adds to the shipped one for that language.
 Inside the query, a `@test` capture marks a unit as a test when it spans the whole unit, and a `@name` capture holds the title or function name the item prints; several `@name` captures join with `.`.
-Only the shipped queries split a `@group` container and make a new unit free; a project query only names tests in drift items.
+A project query file named in `test_queries` is a protected file, like a test file: it is in the protected set at accept, and a later change to it is drift (`protected file <path> changed`).
+A trusted query can split a `@group` container and make a new unit free under the same rules as a shipped mark: the unit needs a `@name`, a name the old text does not use, test attributes only, no process exit and no focus.
+A query is trusted when its file was protected at accept and is unchanged.
+A query file that was not there at accept, or that was named in `test_queries` after accept, is not trusted: the config change is drift already, and the query only names tests in drift items.
 A `@group` capture marks a call as a container that splits into a header unit plus one unit per body item.
 
 ```scheme

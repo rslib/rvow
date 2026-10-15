@@ -1,8 +1,10 @@
 //! Framework queries: the tree-sitter queries that mark a unit as a test,
 //! name it, or mark a call as a group container. A shipped query per pinned
 //! language names the common frameworks; a project adds its own per language
-//! in `config.toml`. A missing or bad query file never decides a check: it
-//! only leaves the drift item unnamed.
+//! in `config.toml`. A shipped query is trusted. A project query is trusted
+//! only when its file was protected at accept and is unchanged. A missing or
+//! bad query file never decides a check: it only leaves the drift item
+//! unnamed.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,6 +24,7 @@ const SHIPPED: &[(&str, &str)] = &[
     ("python", include_str!("queries/python.scm")),
     ("rust", include_str!("queries/rust.scm")),
     ("cpp", include_str!("queries/cpp.scm")),
+    ("c", include_str!("queries/c.scm")),
     ("go", include_str!("queries/go.scm")),
     ("java", include_str!("queries/java.scm")),
     ("kotlin", include_str!("queries/kotlin.scm")),
@@ -30,11 +33,12 @@ const SHIPPED: &[(&str, &str)] = &[
     ("php", include_str!("queries/php.scm")),
 ];
 
-/// One compiled query. A shipped query is the one `SHIPPED` holds; a project
-/// query only names tests and never decides a split or a free unit.
+/// One compiled query. A trusted query can decide a split or a free unit:
+/// the one `SHIPPED` holds, or a project query whose file was protected at
+/// accept. Any other project query only names tests.
 struct Compiled {
     query: Query,
-    shipped: bool,
+    trusted: bool,
 }
 
 /// The queries of one language: the shipped source first, then the project's.
@@ -43,15 +47,23 @@ pub struct Queries {
 }
 
 /// Compiles the shipped query of `lang` and every project file `config`
-/// names for it. `top` resolves the repo-relative project paths. A query
+/// names for it. `top` resolves the repo-relative project paths. `protected`
+/// holds the files protected at accept, keyed by path, with the hash of each:
+/// a project query file is trusted when it is there with its hash. A query
 /// source that fails to compile is a problem, never a check failure: the
 /// caller keeps the queries that did compile and warns.
-pub fn load(lang: &str, language: &Language, top: &Path, config: &BTreeMap<String, String>) -> Queries {
+pub fn load(
+    lang: &str,
+    language: &Language,
+    top: &Path,
+    config: &BTreeMap<String, String>,
+    protected: Option<&BTreeMap<String, String>>,
+) -> Queries {
     let mut compiled = Vec::new();
     if let Some(source) = SHIPPED.iter().find(|(name, _)| *name == lang).map(|(_, s)| *s)
         && let Ok(query) = Query::new(language, source)
     {
-        compiled.push(Compiled { query, shipped: true });
+        compiled.push(Compiled { query, trusted: true });
     }
     let Some(rel) = config.get(lang) else { return Queries { compiled } };
     let file = top.join(rel);
@@ -61,7 +73,10 @@ pub fn load(lang: &str, language: &Language, top: &Path, config: &BTreeMap<Strin
     // A query that fails to compile is a problem rvow check reports; the
     // drift check keeps the queries that did compile.
     if let Ok(query) = Query::new(language, &source) {
-        compiled.push(Compiled { query, shipped: false });
+        let trusted = protected
+            .and_then(|files| files.get(crate::vow::query_key(rel)?.as_str()))
+            .is_some_and(|hash| *hash == crate::vow::sha256_hex(source.as_bytes()));
+        compiled.push(Compiled { query, trusted });
     }
     Queries { compiled }
 }
@@ -78,26 +93,37 @@ impl Queries {
         (!names.is_empty()).then(|| names.join("."))
     }
 
-    /// The name that a shipped query gives the test `item` holds, or `None`
-    /// when no shipped query marks it or it has no name. Only shipped queries
-    /// can make a new unit free.
-    pub fn shipped_name(&self, item: Node, text: &[u8]) -> Option<String> {
-        let names = self.marked_names(item, text, true)?;
-        (!names.is_empty()).then(|| names.join("."))
+    /// The name of the test `item` holds from a trusted query, the last
+    /// `@name` capture: `Name` for a GoogleTest `Suite.Name`. `None` when no
+    /// trusted query marks it or it has no name. Only trusted queries can
+    /// make a new unit free.
+    pub fn trusted_test_name(&self, item: Node, text: &[u8]) -> Option<String> {
+        self.marked_names(item, text, true)?.pop()
     }
 
-    /// Whether a shipped query marks a call inside `item` as a group: a
+    /// Whether a trusted query marks the whole of `item` as a group. A
+    /// function-like item splits only this way: a C `main` that holds
+    /// `RUN_TEST` lines.
+    pub fn group_spanning(&self, item: Node, text: &[u8]) -> bool {
+        self.group_where(item, text, |cap| cap.start_byte() == item.start_byte() && cap.end_byte() == item.end_byte())
+    }
+
+    /// Whether a trusted query marks a call inside `item` as a group: a
     /// container that splits into a header unit plus one unit per body item,
-    /// such as a JavaScript `describe(...)`. A project query never splits.
+    /// such as a JavaScript `describe(...)`. An untrusted project query never splits.
     pub fn group(&self, item: Node, text: &[u8]) -> bool {
+        self.group_where(item, text, |cap| cap.start_byte() >= item.start_byte() && cap.end_byte() <= item.end_byte())
+    }
+
+    fn group_where(&self, item: Node, text: &[u8], within: impl Fn(Node) -> bool) -> bool {
         let mut cursor = QueryCursor::new();
-        for c in self.compiled.iter().filter(|c| c.shipped) {
+        for c in self.compiled.iter().filter(|c| c.trusted) {
             let names = c.query.capture_names();
             let mut matches = cursor.matches(&c.query, item, text);
             while let Some(m) = matches.next() {
                 for cap in m.captures() {
                     let what = names.get(cap.index as usize).copied().unwrap_or("");
-                    if what == "group" && cap.node.start_byte() >= item.start_byte() && cap.node.end_byte() <= item.end_byte() {
+                    if what == "group" && within(cap.node) {
                         return true;
                     }
                 }
@@ -111,8 +137,8 @@ impl Queries {
     /// tree that holds the item, rooted at its parent, so a pattern can
     /// match the attribute siblings of a Rust item. A decorated Python test
     /// is marked by its definition, which the decorators wrap. With
-    /// `shipped_only` set, project queries are skipped.
-    fn marked_names(&self, item: Node, text: &[u8], shipped_only: bool) -> Option<Vec<String>> {
+    /// `trusted_only` set, untrusted project queries are skipped.
+    fn marked_names(&self, item: Node, text: &[u8], trusted_only: bool) -> Option<Vec<String>> {
         // A statement wrapper (`expression_statement` in JavaScript) ends in
         // a `;` the call inside does not cover.
         let span_end = match text.get(item.end_byte().saturating_sub(1)..item.end_byte()) {
@@ -122,7 +148,7 @@ impl Queries {
         let target = super::units::undecorated(item);
         let root = item.parent().unwrap_or(item);
         let mut cursor = QueryCursor::new();
-        for c in self.compiled.iter().filter(|c| c.shipped || !shipped_only) {
+        for c in self.compiled.iter().filter(|c| c.trusted || !trusted_only) {
             let names = c.query.capture_names();
             let mut matches = cursor.matches(&c.query, root, text);
             while let Some(m) = matches.next() {

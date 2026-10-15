@@ -27,9 +27,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   `rvow grammar fetch [<lang>...]` fills the grammar cache with pinned checksummed `.wasm` grammars and `rvow grammar list` shows each pinned language and whether the cache holds it.
 - Count comment text in the syntax compare, fetch missing grammars in prove and gate with a short timeout, and save each compare result under `grammars/` for reuse.
 - Name tests in Java, Kotlin, C#, Ruby and PHP: shipped queries mark JUnit, xUnit/NUnit/MSTest, RSpec/Minitest and PHPUnit tests, so a new test is free and a changed test is named in the drift item, while setup and teardown hooks and a test with an extra annotation such as `@Disabled` stay drift.
+- Name doctest, Catch2 and Unity tests: the shipped C++ query marks `TEST_CASE`, `TEST_CASE_FIXTURE`, `TEST_CASE_METHOD`, `TEST_CASE_TEMPLATE`, `TEMPLATE_TEST_CASE` and `SCENARIO` blocks by their string and `TEST_SUITE` as a container, and a new C query marks the `test_` functions and `RUN_TEST` lines of a Unity file.
+  A new case or `RUN_TEST` line is free and a changed case is named in the drift item, while a `SUBCASE` or `SECTION` change names its case, and a new case that exits, skips or hides itself with `doctest::skip()` or a Catch2 `[.]` tag stays drift.
+  A doctest macro parses with a missing `;`, and rvow accepts that one error in a C++ file instead of falling back to the raw rules.
+- Count the tests of `ctest`, doctest, GoogleTest and Unity runs from their summary lines, so a `ctest` run that finds no tests (`No tests were found!!!`) is 0 tests and no proof, and `ctest` is a counted runner for `baseline: pass`.
 
 ### Changed
 
+- Let a project query free a test: a query file named in `test_queries` is protected at accept, a change to it is drift, and a unit that a trusted query marks `@test` with a fresh name is free under the same rules as a shipped mark.
+  A query file that was not protected at accept, such as one named after accept, still only names tests.
 - Free a new `mod NAME;` line in a protected Rust test file when its module file is new since accept, its only attributes are `#[path = "..."]` and `#[cfg(test)]`, and the module file calls no process exit and focuses no run.
 - Hold a stop only for the work of the session: a session is held only for a task or drift item whose file it changed, a pending amendment of a change releases its stop, and stale proofs no longer hold a stop and are left to the push gate; `rvow stats` lists the stop blocks by reason, `drift`, `no-proof` or `unknown`.
 - Count only the segments that are not a file check (`grep`, `rg`, `test`, `[`, `diff`, `cmp`) toward the `full-suite` chain warning, so a verify of file checks before one test no longer warns.

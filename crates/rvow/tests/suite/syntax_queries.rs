@@ -43,6 +43,12 @@ const APP_JS: &str = "function add(a, b) {\n  return a + b;\n}\n\ntest('adds two
 /// `config` is written into the project config before the vow, so a test
 /// that names query files is not itself config drift.
 fn setup(name: &str, file: &str, body: &str, config: &str) -> Setup {
+    setup_with(name, file, body, config, &[])
+}
+
+/// Like `setup`, and `extra` files are written and committed before the
+/// vow, so a project query file in it is protected at accept.
+fn setup_with(name: &str, file: &str, body: &str, config: &str, extra: &[(&str, &str)]) -> Setup {
     let tmp = std::env::temp_dir().join(format!("rvow-syntax-queries-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -54,6 +60,9 @@ fn setup(name: &str, file: &str, body: &str, config: &str) -> Setup {
     std::fs::create_dir_all(repo.join("tests")).unwrap();
     std::fs::write(repo.join(file), body).unwrap();
     std::fs::write(repo.join("a.txt"), "a").unwrap();
+    for (rel, text) in extra {
+        std::fs::write(repo.join(rel), text).unwrap();
+    }
     git_cmd(&repo, &["add", "."]);
     git_cmd(&repo, &["commit", "-q", "-m", "init"]);
 
@@ -478,4 +487,428 @@ fn syntax_queries_more_abort_on_another_object_is_no_drift() {
     free("more-abort-js", "tests/app.test.js", "javascript", APP_JS, &new);
     let new = java_with("    @Test\n    void subtracts() {\n        session.exit();\n    }");
     free("more-exit-method-java", "tests/CalcTest.java", "java", JAVA, &new);
+}
+
+const DOCTEST_FILE: &str = "tests/calc_test.cpp";
+
+const DOCTEST: &str = "TEST_CASE(\"adds\") { CHECK(add(1, 2) == 3); }\n";
+
+const DOCTEST_SUITE: &str = "TEST_SUITE(\"calc\") {\n    TEST_CASE(\"adds\") {\n        CHECK(add(1, 2) == 3);\n    }\n}\n";
+
+const CATCH2: &str = "TEST_CASE(\"calc\", \"[calc]\") {\n    SECTION(\"adds\") {\n        REQUIRE(add(1, 2) == 3);\n    }\n}\n";
+
+/// A real file of dftracer-utils, `tests/test_hex64.cpp`.
+const HEX64: &str = r#"#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/common/hash/hex64.h>
+#include <doctest/doctest.h>
+
+#include <string>
+
+using dftracer::utils::hash::format_hex64;
+using dftracer::utils::hash::parse_hex64;
+
+TEST_SUITE("hex64") {
+    TEST_CASE("hex64 - round trips every value") {
+        for (std::uint64_t v :
+             {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{0xdef456},
+              std::uint64_t{~0ull}, std::uint64_t{0xf07c4ebf132e3799ull}}) {
+            auto text = format_hex64(v);
+            CHECK(text.size() == 16);
+            auto back = parse_hex64(text);
+            REQUIRE(back.has_value());
+            CHECK(*back == v);
+        }
+    }
+
+    TEST_CASE("hex64 - matches what dftracer writes") {
+        CHECK(*parse_hex64("f07c4ebf132e3799") == 0xf07c4ebf132e3799ull);
+        CHECK(format_hex64(0xf07c4ebf132e3799ull) == "f07c4ebf132e3799");
+        CHECK(format_hex64(0) == "0000000000000000");
+    }
+}
+"#;
+
+fn doctest_free(name: &str, old: &str, new: &str) {
+    free(name, DOCTEST_FILE, "cpp", old, new);
+}
+
+fn doctest_drifts(name: &str, old: &str, new: &str) {
+    drifts(name, DOCTEST_FILE, "cpp", old, new);
+}
+
+fn doctest_names(name: &str, old: &str, new: &str) -> Vec<String> {
+    change_of(name, DOCTEST_FILE, "cpp", old, new)
+}
+
+#[test]
+fn syntax_queries_doctest_case_added_is_no_drift() {
+    let new = format!("{DOCTEST}\nTEST_CASE(\"subtracts\") {{ CHECK(sub(2, 1) == 1); }}\n");
+    doctest_free("doctest-added", DOCTEST, &new);
+}
+
+#[test]
+fn syntax_queries_doctest_case_changed_inside_a_suite_names_the_case() {
+    let got = doctest_names("doctest-suite", DOCTEST_SUITE, &DOCTEST_SUITE.replace("== 3", "== 4"));
+    assert_eq!(got, [format!("test {DOCTEST_FILE} changed adds")]);
+}
+
+#[test]
+fn syntax_queries_doctest_case_added_inside_a_suite_and_a_new_suite_are_no_drift() {
+    let inner = DOCTEST_SUITE.replace("    }\n}\n", "    }\n    TEST_CASE(\"subtracts\") {\n        CHECK(sub(2, 1) == 1);\n    }\n}\n");
+    doctest_free("doctest-suite-added", DOCTEST_SUITE, &inner);
+    let outer = format!("{DOCTEST_SUITE}\nTEST_SUITE(\"calc2\") {{\n    TEST_CASE(\"muls\") {{ CHECK(mul(2, 3) == 6); }}\n}}\n");
+    doctest_free("doctest-suite-new", DOCTEST_SUITE, &outer);
+}
+
+#[test]
+fn syntax_queries_doctest_removed_case_names_the_case() {
+    let two = format!("{DOCTEST}TEST_CASE(\"subtracts\") {{ CHECK(sub(2, 1) == 1); }}\n");
+    assert_eq!(doctest_names("doctest-removed", &two, DOCTEST), [format!("test {DOCTEST_FILE} changed subtracts")]);
+}
+
+#[test]
+fn syntax_queries_doctest_fixture_case_added_is_no_drift() {
+    let old = "TEST_CASE_FIXTURE(Calc, \"adds\") { CHECK(add(1, 2) == 3); }\n";
+    let new = format!("{old}TEST_CASE_FIXTURE(Calc, \"subtracts\") {{ CHECK(sub(2, 1) == 1); }}\n");
+    doctest_free("doctest-fixture", old, &new);
+    let got = doctest_names("doctest-fixture-changed", old, &old.replace("== 3", "== 4"));
+    assert_eq!(got, [format!("test {DOCTEST_FILE} changed adds")]);
+}
+
+#[test]
+fn syntax_queries_doctest_template_and_decorated_cases_are_named() {
+    let old = "TEST_CASE_TEMPLATE(\"sizes\", T, int, long) { CHECK(sizeof(T) > 0); }\nTEST_CASE(\"slow\" * doctest::timeout(5)) { CHECK(1 == 1); }\n";
+    let new = format!("{old}TEST_CASE_TEMPLATE(\"widths\", T, char, short) {{ CHECK(sizeof(T) > 0); }}\n");
+    doctest_free("doctest-template", old, &new);
+    let got = doctest_names("doctest-decorated", old, &old.replace("== 1", "== 2"));
+    assert_eq!(got, [format!("test {DOCTEST_FILE} changed slow")]);
+}
+
+#[test]
+fn syntax_queries_doctest_catch2_section_change_names_the_case() {
+    let added = CATCH2.replace("    }\n}\n", "    }\n    SECTION(\"subtracts\") {\n        REQUIRE(sub(2, 1) == 1);\n    }\n}\n");
+    assert_eq!(doctest_names("doctest-section-added", CATCH2, &added), [format!("test {DOCTEST_FILE} changed calc")]);
+    let got = doctest_names("doctest-section", CATCH2, &CATCH2.replace("        REQUIRE(add(1, 2) == 3);\n", ""));
+    assert_eq!(got, [format!("test {DOCTEST_FILE} changed calc")]);
+}
+
+#[test]
+fn syntax_queries_doctest_catch2_scenario_is_a_test() {
+    let old = "SCENARIO(\"adding\") {\n    GIVEN(\"two numbers\") {\n        REQUIRE(add(1, 2) == 3);\n    }\n}\n";
+    let new = format!("{old}SCENARIO(\"subtracting\") {{\n    GIVEN(\"two numbers\") {{\n        REQUIRE(sub(2, 1) == 1);\n    }}\n}}\n");
+    doctest_free("doctest-scenario", old, &new);
+    let got = doctest_names("doctest-scenario-changed", old, &old.replace("== 3", "== 4"));
+    assert_eq!(got, [format!("test {DOCTEST_FILE} changed adding")]);
+}
+
+#[test]
+fn syntax_queries_doctest_new_case_that_exits_is_drift() {
+    let fine = format!("{DOCTEST}TEST_CASE(\"x\") {{ CHECK(1 == 1); }}\n");
+    doctest_free("doctest-exit-control", DOCTEST, &fine);
+    for (i, call) in ["std::exit(0);", "exit(1);", "abort();", "_exit(0);"].iter().enumerate() {
+        let new = format!("{DOCTEST}TEST_CASE(\"x\") {{ {call} }}\n");
+        doctest_drifts(&format!("doctest-exit-{i}"), DOCTEST, &new);
+    }
+    let inner = DOCTEST_SUITE.replace("    }\n}\n", "    }\n    TEST_CASE(\"x\") {\n        std::exit(0);\n    }\n}\n");
+    doctest_drifts("doctest-exit-in-suite", DOCTEST_SUITE, &inner);
+}
+
+#[test]
+fn syntax_queries_doctest_new_case_that_skips_is_drift() {
+    for (i, head) in [
+        "TEST_CASE(\"x\" * doctest::skip())",
+        "TEST_CASE(\"x\" * doctest::may_fail())",
+        "TEST_CASE(\"x\" * doctest::timeout(1) * doctest::skip(true))",
+        "TEST_CASE(\"x\", \"[.]\")",
+        "TEST_CASE(\"x\", \"[slow][!mayfail]\")",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let new = format!("{DOCTEST}{head} {{ CHECK(1 == 1); }}\n");
+        doctest_drifts(&format!("doctest-skip-{i}"), DOCTEST, &new);
+    }
+    let new = format!("{DOCTEST}TEST_CASE(\"x\" * doctest::timeout(1)) {{ CHECK(1 == 1); }}\n");
+    doctest_free("doctest-timeout-is-free", DOCTEST, &new);
+}
+
+#[test]
+fn syntax_queries_doctest_gtest_case_with_a_tag_string_stays_free() {
+    let old = "TEST(Calc, Adds) {\n    EXPECT_EQ(1, 1);\n}\n";
+    let new = format!("{old}\nTEST(Calc, Tags) {{\n    EXPECT_EQ(tag(), \"[.]\");\n}}\n");
+    free("doctest-gtest-tag", "tests/g.cpp", "cpp", old, &new);
+}
+
+#[test]
+fn syntax_queries_doctest_real_dftracer_file_adds_and_names_cases() {
+    let added = HEX64.replace(
+        "        CHECK(format_hex64(0) == \"0000000000000000\");\n    }\n",
+        "        CHECK(format_hex64(0) == \"0000000000000000\");\n    }\n\n    TEST_CASE(\"hex64 - zero parses\") {\n        CHECK(*parse_hex64(\"0000000000000000\") == 0);\n    }\n",
+    );
+    assert_ne!(added, HEX64);
+    free("doctest-real-added", "tests/test_hex64.cpp", "cpp", HEX64, &added);
+    let got = change_of(
+        "doctest-real-changed",
+        "tests/test_hex64.cpp",
+        "cpp",
+        HEX64,
+        &HEX64.replace("CHECK(text.size() == 16);", "CHECK(text.size() == 15);"),
+    );
+    assert_eq!(got, ["test tests/test_hex64.cpp changed hex64 - round trips every value".to_string()]);
+}
+
+const UNITY_FILE: &str = "tests/calc_test.c";
+
+const UNITY: &str = "#include <unity.h>\n\nstatic void test_add(void) {\n    TEST_ASSERT_EQUAL_INT(3, add(1, 2));\n}\n\nint main(void) {\n    UNITY_BEGIN();\n    RUN_TEST(test_add);\n    return UNITY_END();\n}\n";
+
+fn unity_with(function: &str, run: &str) -> String {
+    UNITY
+        .replace("int main(void)", &format!("{function}\nint main(void)"))
+        .replace("    return UNITY_END();", &format!("{run}    return UNITY_END();"))
+}
+
+#[test]
+fn syntax_queries_unity_test_added_with_run_test_is_no_drift() {
+    let new = unity_with("static void test_sub(void) {\n    TEST_ASSERT_EQUAL_INT(1, sub(2, 1));\n}\n", "    RUN_TEST(test_sub);\n");
+    free("unity-added", UNITY_FILE, "c", UNITY, &new);
+    let fn_only = unity_with("static void test_sub(void) {\n    TEST_ASSERT_EQUAL_INT(1, sub(2, 1));\n}\n", "");
+    free("unity-fn-only", UNITY_FILE, "c", UNITY, &fn_only);
+}
+
+#[test]
+fn syntax_queries_unity_run_test_line_removed_names_the_test() {
+    let got = change_of("unity-removed", UNITY_FILE, "c", UNITY, &UNITY.replace("    RUN_TEST(test_add);\n", ""));
+    assert_eq!(got, [format!("test {UNITY_FILE} changed test_add")]);
+}
+
+#[test]
+fn syntax_queries_unity_test_changed_names_the_test() {
+    let got = change_of("unity-changed", UNITY_FILE, "c", UNITY, &UNITY.replace("(3, add(1, 2))", "(4, add(1, 2))"));
+    assert_eq!(got, [format!("test {UNITY_FILE} changed test_add")]);
+}
+
+#[test]
+fn syntax_queries_unity_setup_added_is_drift() {
+    let new = UNITY.replace("static void test_add", "void setUp(void) {\n    reset();\n}\n\nstatic void test_add");
+    drifts("unity-setup", UNITY_FILE, "c", UNITY, &new);
+    let new = unity_with("void tearDown(void) {\n    reset();\n}\n", "");
+    drifts("unity-teardown", UNITY_FILE, "c", UNITY, &new);
+}
+
+#[test]
+fn syntax_queries_unity_new_test_that_exits_is_drift() {
+    for (i, call) in ["exit(0);", "abort();", "_exit(1);"].iter().enumerate() {
+        let new = unity_with(&format!("static void test_sub(void) {{\n    {call}\n}}\n"), "    RUN_TEST(test_sub);\n");
+        drifts(&format!("unity-exit-{i}"), UNITY_FILE, "c", UNITY, &new);
+    }
+}
+
+#[test]
+fn syntax_queries_unity_run_test_of_a_name_in_use_is_drift() {
+    let new = unity_with("", "    RUN_TEST(test_add);\n");
+    drifts("unity-run-twice", UNITY_FILE, "c", UNITY, &new);
+    let new = unity_with("", "    RUN_TEST(setUp);\n");
+    drifts("unity-run-helper", UNITY_FILE, "c", UNITY, &new);
+}
+
+#[test]
+fn syntax_queries_unity_a_file_without_unity_is_not_a_test_file() {
+    let old = "#include \"plugin.h\"\n\nint main(void) {\n    return run();\n}\n";
+    let new = format!("static void test_helper(void) {{\n    run();\n}}\n\n{old}");
+    drifts("unity-none", "tests/plugin_consumer.c", "c", old, &new);
+}
+
+#[test]
+fn syntax_queries_unity_header_files_keep_the_raw_rule() {
+    let old = "#ifndef CALC_H\n#define CALC_H\nint add(int a, int b);\n#endif\n";
+    drifts("unity-header-decl", "tests/calc.h", "c", old, &old.replace("#endif\n", "int sub(int a, int b);\n#endif\n"));
+    let helper = format!("{old}static inline void test_helper(void) {{ run(); }}\n");
+    drifts("unity-header-helper", "tests/calc.h", "c", old, &helper);
+    drifts("unity-header-define", "tests/calc.h", "c", old, &old.replace("CALC_H", "CALC2_H"));
+}
+
+/// A real file of dftracer-utils, `tests/index/test_indexer_abi.c`, cut to
+/// its first test.
+const INDEXER_ABI: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <unity.h>
+
+#include "testing_utilities.h"
+
+static test_environment_handle_t g_env = NULL;
+
+void setUp(void) {
+    g_env = test_environment_create();
+    TEST_ASSERT_NOT_NULL(g_env);
+}
+
+void tearDown(void) {
+    test_environment_destroy(g_env);
+    g_env = NULL;
+}
+
+static void test_open_with_default_options(void) {
+    char* trace = test_environment_create_dft_gzip_file(g_env, 10);
+    dftu_indexer* ix = open_one(trace);
+    dftu_indexer_free(ix);
+    free(trace);
+}
+
+static void test_open_invalid_arguments(void) {
+    const char* one[] = {"x.pfw.gz"};
+    dftu_indexer_open_result b = dftu_indexer_open(one, 0, NULL);
+    TEST_ASSERT_FALSE(DFTU_RESULT_OK(b));
+    TEST_ASSERT_EQUAL_INT(DFTU_COND_INVALID_ARGUMENT,
+                          DFTU_RESULT_ERROR(b).condition);
+}
+
+int main(void) {
+    UNITY_BEGIN();
+    RUN_TEST(test_open_with_default_options);
+    RUN_TEST(test_open_invalid_arguments);
+    return UNITY_END();
+}
+"#;
+
+#[test]
+fn syntax_queries_unity_real_dftracer_file_adds_and_names_tests() {
+    let added = INDEXER_ABI
+        .replace(
+            "int main(void) {",
+            "static void test_free_null(void) {\n    dftu_indexer_free(NULL);\n    TEST_PASS();\n}\n\nint main(void) {",
+        )
+        .replace("    return UNITY_END();", "    RUN_TEST(test_free_null);\n    return UNITY_END();");
+    free("unity-real-added", "tests/test_indexer_abi.c", "c", INDEXER_ABI, &added);
+    let got = change_of(
+        "unity-real-changed",
+        "tests/test_indexer_abi.c",
+        "c",
+        INDEXER_ABI,
+        &INDEXER_ABI.replace("dftu_indexer_open(one, 0, NULL)", "dftu_indexer_open(one, 1, NULL)"),
+    );
+    assert_eq!(got, ["test tests/test_indexer_abi.c changed test_open_invalid_arguments".to_string()]);
+    let setup_changed = change_of(
+        "unity-real-setup",
+        "tests/test_indexer_abi.c",
+        "c",
+        INDEXER_ABI,
+        &INDEXER_ABI.replace("g_env = NULL;\n}", "g_env = NULL;\n    cleanup();\n}"),
+    );
+    assert_eq!(setup_changed, ["protected file tests/test_indexer_abi.c changed".to_string()]);
+}
+
+const CHECK_JS: &str = "check('adds', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
+
+const CHECK_QUERY_CONFIG: &str = "test_queries = { javascript = \"checks.scm\" }\n";
+
+fn check_with(extra: &str) -> String {
+    format!("{CHECK_JS}\n{extra}")
+}
+
+#[test]
+fn syntax_queries_project_trusted_query_frees_a_new_check() {
+    let s = setup_with("trusted-free", "tests/app.check.js", CHECK_JS, CHECK_QUERY_CONFIG, &[("checks.scm", CHECKS_SCM)]);
+    prime(&s.home, "javascript");
+    assert!(items(&s).is_empty());
+
+    let new = check_with("check('subtracts', () => {\n  expect(sub(2, 1)).toBe(1);\n});\n");
+    std::fs::write(s.repo.join("tests/app.check.js"), &new).unwrap();
+    assert!(items(&s).is_empty(), "a new check of a trusted query is free: {:?}", items(&s));
+
+    let exits = check_with("check('leaves', () => {\n  process.exit(0);\n});\n");
+    std::fs::write(s.repo.join("tests/app.check.js"), exits).unwrap();
+    assert_eq!(weaken_items(&s), ["protected file tests/app.check.js changed".to_string()], "the free rules hold for a project mark");
+
+    let reuse = check_with("check('adds', () => {\n  expect(1).toBe(1);\n});\n");
+    std::fs::write(s.repo.join("tests/app.check.js"), reuse).unwrap();
+    assert_eq!(weaken_items(&s), ["protected file tests/app.check.js changed".to_string()], "a used name is not fresh");
+}
+
+#[test]
+fn syntax_queries_project_trusted_query_file_changed_is_drift() {
+    let s = setup_with("trusted-edit", "tests/app.check.js", CHECK_JS, CHECK_QUERY_CONFIG, &[("checks.scm", CHECKS_SCM)]);
+    prime(&s.home, "javascript");
+    assert!(items(&s).is_empty());
+
+    std::fs::write(s.repo.join("checks.scm"), format!("{CHECKS_SCM}; a comment\n")).unwrap();
+    assert_eq!(weaken_items(&s), ["protected file checks.scm changed".to_string()]);
+
+    let new = check_with("check('subtracts', () => {\n  expect(sub(2, 1)).toBe(1);\n});\n");
+    std::fs::write(s.repo.join("tests/app.check.js"), new).unwrap();
+    let got = weaken_items(&s);
+    assert!(got.contains(&"protected file tests/app.check.js changed".to_string()), "an edited query frees nothing: {got:?}");
+}
+
+#[test]
+fn syntax_queries_project_trusted_query_added_after_accept_frees_nothing() {
+    let s = setup("trusted-late", "tests/app.check.js", CHECK_JS, "");
+    prime(&s.home, "javascript");
+    assert!(items(&s).is_empty());
+
+    std::fs::write(s.repo.join("checks.scm"), CHECKS_SCM).unwrap();
+    std::fs::write(s.project.root.join("config.toml"), CHECK_QUERY_CONFIG).unwrap();
+    let new = check_with("check('subtracts', () => {\n  expect(sub(2, 1)).toBe(1);\n});\n");
+    std::fs::write(s.repo.join("tests/app.check.js"), new).unwrap();
+    let got = weaken_items(&s);
+    assert!(got.contains(&"protected file tests/app.check.js changed".to_string()), "the new unit is not free: {got:?}");
+    assert!(got.iter().any(|w| w.starts_with("config changed")), "the config change is drift: {got:?}");
+}
+
+#[test]
+fn syntax_queries_project_trusted_query_named_at_accept_but_missing_frees_nothing() {
+    let s = setup("trusted-missing", "tests/app.check.js", CHECK_JS, CHECK_QUERY_CONFIG);
+    prime(&s.home, "javascript");
+    std::fs::write(s.repo.join("checks.scm"), CHECKS_SCM).unwrap();
+    let new = check_with("check('subtracts', () => {\n  expect(sub(2, 1)).toBe(1);\n});\n");
+    std::fs::write(s.repo.join("tests/app.check.js"), new).unwrap();
+    let got = weaken_items(&s);
+    assert!(
+        got.contains(&"protected file tests/app.check.js changed".to_string()),
+        "a query file that was not there at accept is not trusted: {got:?}"
+    );
+}
+
+#[test]
+fn syntax_queries_doctest_new_case_with_a_directive_is_drift() {
+    let cases = [
+        "TEST_CASE(\"b\") {\n#define REQUIRE(x)\n}\n",
+        "TEST_CASE(\"b\") {\n#undef CHECK\n}\n",
+        "TEST_CASE(\"b\") {\n#include \"evil.h\"\n}\n",
+    ];
+    for (i, case) in cases.iter().enumerate() {
+        doctest_drifts(&format!("doctest-directive-{i}"), DOCTEST, &format!("{case}{DOCTEST}"));
+    }
+    let new = UNITY.replace(
+        "static void test_add",
+        "static void test_sub(void) {\n#undef TEST_ASSERT_EQUAL_INT\n#define TEST_ASSERT_EQUAL_INT(a, b) ((void)0)\n}\n\nstatic void test_add",
+    );
+    drifts("unity-directive", UNITY_FILE, "c", UNITY, &new);
+}
+
+#[test]
+fn syntax_queries_doctest_other_exit_spellings_are_drift() {
+    for (i, call) in ["::exit(0);", "::abort();", "raise(9);", "auto f = &exit; f(0);"].iter().enumerate() {
+        doctest_drifts(&format!("doctest-exit-more-{i}"), DOCTEST, &format!("{DOCTEST}TEST_CASE(\"x\") {{ {call} }}\n"));
+    }
+    let new = unity_with("static void test_sub(void) {\n    kill(getpid(), 9);\n}\n", "    RUN_TEST(test_sub);\n");
+    drifts("unity-kill", UNITY_FILE, "c", UNITY, &new);
+}
+
+#[test]
+fn syntax_queries_doctest_other_skips_are_drift() {
+    for (i, head) in
+        ["TEST_CASE(\"n\" * skip())", "TEST_CASE(\"n\", \"[hide]\")", "TEST_CASE(\"n\" * doctest::expected_failures(9))"].iter().enumerate()
+    {
+        doctest_drifts(&format!("doctest-skip-more-{i}"), DOCTEST, &format!("{DOCTEST}{head} {{ CHECK(1 == 2); }}\n"));
+    }
+    let new = unity_with("static void test_sub(void) {\n    TEST_IGNORE();\n}\n", "    RUN_TEST(test_sub);\n");
+    drifts("unity-ignore", UNITY_FILE, "c", UNITY, &new);
+}
+
+#[test]
+fn syntax_queries_unity_main_keeps_its_order() {
+    let moved = UNITY.replace("    RUN_TEST(test_add);\n    return UNITY_END();", "    return UNITY_END();\n    RUN_TEST(test_add);");
+    drifts("unity-return-first", UNITY_FILE, "c", UNITY, &moved);
+    let added = unity_with("static void test_sub(void) {\n    TEST_ASSERT_EQUAL_INT(1, sub(2, 1));\n}\n", "    RUN_TEST(test_sub);\n");
+    free("unity-order-added", UNITY_FILE, "c", UNITY, &added);
 }

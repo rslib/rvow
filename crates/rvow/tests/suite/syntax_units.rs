@@ -309,9 +309,10 @@ const APP_JS_UNITS: &str =
     "function add(a, b) {\n  return a + b;\n}\n\ntest('adds two numbers', () => {\n  expect(add(1, 2)).toBe(3);\n});\n";
 
 #[test]
-fn syntax_units_project_query_does_not_make_an_assignment_free() {
-    // The project query marks every assignment as a test. Only shipped
-    // queries make a unit free, so global.expect = ... is still drift.
+fn syntax_units_untrusted_project_query_does_not_make_an_assignment_free() {
+    // The project query marks every assignment as a test, but its file is
+    // not there at accept, so it is not protected and only names tests:
+    // global.expect = ... is still drift.
     let cfg = "test_queries = { javascript = \"assign.scm\" }\n";
     let s = setup_cfg("project-assign", &[("tests/app.test.js", APP_JS_UNITS), ("tests/t.sh", T_SH)], cfg);
     prime(&s.home, "javascript");
@@ -319,6 +320,30 @@ fn syntax_units_project_query_does_not_make_an_assignment_free() {
     assert!(items(&s).is_empty());
     rewrite_at(&s, "tests/app.test.js", &format!("{APP_JS_UNITS}global.expect = jest.fn();\n"));
     assert_eq!(weaken_for(&s, "app.test.js"), ["protected file tests/app.test.js changed".to_string()]);
+}
+
+#[test]
+fn syntax_units_trusted_project_query_frees_an_assignment_it_names() {
+    // The same query, committed before accept, is protected and trusted. A
+    // mark with no @name never frees a unit; a mark that names the unit frees
+    // it under the free rules of a shipped mark.
+    let cfg = "test_queries = { javascript = \"assign.scm\" }\n";
+    let unnamed = "(expression_statement (assignment_expression) @test)\n";
+    let s = setup_cfg("trusted-assign", &[("tests/app.test.js", APP_JS_UNITS), ("tests/t.sh", T_SH), ("assign.scm", unnamed)], cfg);
+    prime(&s.home, "javascript");
+    assert!(items(&s).is_empty());
+    rewrite_at(&s, "tests/app.test.js", &format!("{APP_JS_UNITS}global.expect = jest.fn();\n"));
+    assert_eq!(
+        weaken_for(&s, "app.test.js"),
+        ["protected file tests/app.test.js changed".to_string()],
+        "a mark with no name frees nothing"
+    );
+
+    let named = "(expression_statement (assignment_expression left: (member_expression property: (property_identifier) @name)) @test)\n";
+    let s = setup_cfg("trusted-assign-named", &[("tests/app.test.js", APP_JS_UNITS), ("tests/t.sh", T_SH), ("assign.scm", named)], cfg);
+    prime(&s.home, "javascript");
+    rewrite_at(&s, "tests/app.test.js", &format!("{APP_JS_UNITS}global.mocked = jest.fn();\n"));
+    assert!(items(&s).is_empty(), "a trusted mark that names the unit frees it: {:?}", items(&s));
 }
 
 fn rewrite_at(s: &Setup, rel: &str, text: &str) {

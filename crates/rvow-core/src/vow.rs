@@ -300,12 +300,36 @@ pub struct Vowed {
     pub event: String,
 }
 
+/// The key a project query file has in the protected set: its repo-relative
+/// path, or `None` for a path that leaves the repository.
+pub fn query_key(rel: &str) -> Option<String> {
+    let path = Path::new(rel);
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The files a vow protects: the test files, the infra files, the
+/// enforcement files and the project query files `test_queries` names.
 pub fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, PathBuf>> {
     let patterns: Vec<String> =
         config.test_globs.iter().chain(&config.protect_infra).cloned().chain(ENFORCEMENT.iter().map(|s| s.to_string())).collect();
     let set = fingerprint::globset(&patterns)?;
     let mut files: BTreeMap<String, PathBuf> =
         fingerprint::candidate_files(top)?.into_iter().filter(|f| set.is_match(f)).map(|f| (f.clone(), top.join(f))).collect();
+    for rel in config.test_queries.values() {
+        if let Some(key) = query_key(rel)
+            && top.join(&key).is_file()
+        {
+            files.entry(key.clone()).or_insert_with(|| top.join(&key));
+        }
+    }
     if !config.allowed_signers.is_empty() {
         let given = Path::new(&config.allowed_signers);
         let file = if given.is_absolute() { given.to_path_buf() } else { top.join(given) };

@@ -3,20 +3,24 @@
 //! before it, so `#[test] fn a` is one unit and removing the attribute
 //! changes it. A body container that is not a function splits into a header
 //! unit plus one unit per body item: a Rust module, a Python class (decorated
-//! or not), a C++ namespace, or a call a shipped query marks `@group`, such as
+//! or not), a C++ namespace, or a call a trusted query marks `@group`, such as
 //! `describe(...)`. A function body never splits, so a statement added inside
 //! a test changes that test's unit. A unit keeps its container: its key starts
 //! with the header forms of the containers around it, so moving a test into
 //! another describe, class or module changes its key. The compare counts:
 //! each old key must appear in the new text at least as many times as before.
-//! A new unit is free only when a shipped query marks it a test with a name the
+//! A new unit is free only when a trusted query marks it a test with a name the
 //! old text does not use, every attribute above it is a test attribute, its
 //! body calls no function that ends the process, and it holds no argument
-//! that focuses the run on it. A helper, a hook or an import is drift, and a
-//! project query only names tests in drift items. A new `mod NAME;` line of a
-//! Rust file is free too when `free_mod` accepts it.
+//! that focuses the run on it. A doctest or Catch2 macro such as
+//! `TEST_CASE("adds") { ... }` parses as a header with a missing `;` and a
+//! block; the pair is one unit, and a new case is not free when its header
+//! skips it. A helper, a hook or an import is drift. A project query is
+//! trusted only when its file was protected at accept and is unchanged;
+//! any other project query only names tests in drift items. A new
+//! `mod NAME;` line of a Rust file is free too when `free_mod` accepts it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use tree_sitter::Node;
@@ -69,8 +73,16 @@ struct Unit<'a> {
     /// The prefix siblings plus the item, in source order.
     nodes: Vec<Node<'a>>,
     omit: Option<(usize, usize)>,
+    /// The block right after a macro header that does not end in `;`, such
+    /// as the `{ ... }` of `TEST_CASE("adds")`. tree-sitter-cpp parses the
+    /// pair as two siblings, so the block belongs to the unit of its header.
+    tail: Option<Node<'a>>,
     /// The forms of the containers around the unit, outermost first.
     ctx: String,
+    /// The unit is a statement of a function body that splits, such as a C
+    /// `main` that holds `RUN_TEST`. Statements run in order, so the compare
+    /// keeps their order.
+    ordered: bool,
 }
 
 impl Unit<'_> {
@@ -89,6 +101,9 @@ impl Unit<'_> {
                 canonical::write_node(*node, bytes, &mut out);
             }
         }
+        if let Some(tail) = self.tail.filter(|_| self.omit.is_none()) {
+            canonical::write_node(tail, bytes, &mut out);
+        }
         out
     }
 
@@ -102,56 +117,119 @@ impl Unit<'_> {
 /// comment siblings right before it. A prefix run that no item follows is
 /// its own unit, so a removed or changed trailing attribute is still drift.
 /// `ctx` is the form of the container the body belongs to.
-fn push_units<'a>(parent: Node<'a>, named: Option<&queries::Queries>, bytes: &[u8], ctx: &str, out: &mut Vec<Unit<'a>>) {
+fn push_units<'a>(parent: Node<'a>, named: Option<&queries::Queries>, bytes: &[u8], ctx: &str, ordered: bool, out: &mut Vec<Unit<'a>>) {
     let mut nodes: Vec<Node> = Vec::new();
-    for i in 0..parent.named_child_count() {
-        let Some(child) = parent.named_child(i as u32) else { continue };
+    let count = parent.named_child_count();
+    let mut i = 0;
+    while i < count {
+        let Some(child) = parent.named_child(i as u32) else { break };
+        i += 1;
         nodes.push(child);
         if is_prefix(child.kind()) {
             continue;
         }
-        push_item(std::mem::take(&mut nodes), named, bytes, ctx, out);
+        let tail = macro_body(child);
+        if tail.is_some() {
+            i += 1;
+        }
+        push_item(std::mem::take(&mut nodes), tail, named, bytes, ctx, ordered, out);
     }
     if let Some(item) = nodes.last().copied() {
-        out.push(Unit { item, nodes, omit: None, ctx: ctx.to_string() });
+        out.push(Unit { item, nodes, omit: None, tail: None, ctx: ctx.to_string(), ordered });
     }
 }
 
 /// One item as a unit: a container that is not a function splits into a
 /// header unit plus one unit per body item. The body items key on the form
 /// of the header.
-fn push_item<'a>(nodes: Vec<Node<'a>>, named: Option<&queries::Queries>, bytes: &[u8], ctx: &str, out: &mut Vec<Unit<'a>>) {
+fn push_item<'a>(
+    nodes: Vec<Node<'a>>,
+    tail: Option<Node<'a>>,
+    named: Option<&queries::Queries>,
+    bytes: &[u8],
+    ctx: &str,
+    ordered: bool,
+    out: &mut Vec<Unit<'a>>,
+) {
     let Some(item) = nodes.last().copied() else { return };
-    let body = container_body(item, named, bytes);
+    let body = match tail {
+        Some(tail) => named.filter(|q| q.group(item, bytes)).map(|_| tail),
+        None => container_body(item, named, bytes),
+    };
     let omit = body.map(|body| (body.start_byte(), body.end_byte()));
-    let unit = Unit { item, nodes, omit, ctx: ctx.to_string() };
+    let unit = Unit { item, nodes, omit, tail, ctx: ctx.to_string(), ordered };
     let header = unit.form(bytes);
     out.push(unit);
     if let Some(body) = body {
-        push_units(body, named, bytes, &header, out);
+        let statements = tail.is_none() && is_function_like(undecorated(item).kind());
+        push_units(body, named, bytes, &header, statements, out);
     }
+}
+
+/// The block of a macro header: tree-sitter-cpp parses `TEST_CASE("adds") { ... }`
+/// as an expression statement whose `;` is missing, then a compound
+/// statement. `None` for any other item.
+fn macro_body(item: Node) -> Option<Node> {
+    if item.kind() != "expression_statement" {
+        return None;
+    }
+    let last = item.child(item.child_count().checked_sub(1)?)?;
+    let body = item.next_named_sibling()?;
+    (last.is_missing() && last.kind() == ";" && body.kind() == "compound_statement").then_some(body)
+}
+
+/// Whether the parse errors of a tree are only macro headers with no `;`,
+/// their blocks and what is inside them. The header and the block stay in
+/// the unit form, so errors inside them hide nothing.
+fn only_macro_errors(node: Node) -> bool {
+    if !node.has_error() {
+        return true;
+    }
+    if node.is_error() || node.is_missing() {
+        return false;
+    }
+    let mut skip = None;
+    for i in 0..node.child_count() {
+        let Some(child) = node.child(i) else { continue };
+        if skip == Some(child.id()) {
+            continue;
+        }
+        if let Some(body) = macro_body(child) {
+            skip = Some(body.id());
+        } else if !only_macro_errors(child) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a parse is good enough for the unit compare: no error node, or a
+/// C++ tree whose only errors are doctest and Catch2 macro headers.
+fn usable(tree: &tree_sitter::Tree, lang: &str) -> bool {
+    !tree.root_node().has_error() || (lang == "cpp" && only_macro_errors(tree.root_node()))
 }
 
 /// The units of a parsed file, in source order. A file whose root holds no
 /// named children is its own one unit.
 fn unit_nodes<'a>(root: Node<'a>, named: Option<&queries::Queries>, bytes: &[u8]) -> Vec<Unit<'a>> {
     let mut out = Vec::new();
-    push_units(root, named, bytes, "", &mut out);
+    push_units(root, named, bytes, "", false, &mut out);
     if out.is_empty() {
-        out.push(Unit { item: root, nodes: vec![root], omit: None, ctx: String::new() });
+        out.push(Unit { item: root, nodes: vec![root], omit: None, tail: None, ctx: String::new(), ordered: false });
     }
     out
 }
 
 /// The body a container splits by, or `None` when the item stays one unit.
 /// A function-like item never splits: a statement added inside a test
-/// changes that test's unit. A decorated class splits like its class, and
+/// changes that test's unit, unless a trusted query marks the whole function
+/// a group, as it does for a C `main` that holds `RUN_TEST`. A decorated class splits like its class, and
 /// its header keeps the decorators. A group call splits by the body of its
 /// callback, the first function-like descendant.
 fn container_body<'a>(item: Node<'a>, named: Option<&queries::Queries>, bytes: &[u8]) -> Option<Node<'a>> {
     let def = undecorated(item);
     if is_function_like(def.kind()) {
-        return None;
+        return named.filter(|q| q.group_spanning(item, bytes)).and_then(|_| def.child_by_field_name("body"));
     }
     match def.kind() {
         "mod_item" | "class_definition" | "namespace_definition" | "class_declaration" | "namespace_declaration" => {
@@ -359,7 +437,9 @@ fn exit_leaf(leaf: Node, bytes: &[u8], lang: &str) -> bool {
     }
     let Ok(text) = leaf.utf8_text(bytes) else { return false };
     let text = text.strip_prefix('\\').unwrap_or(text);
-    let receiver = receiver(bytes, leaf.start_byte());
+    // A leading `::` names the global function, like a bare name.
+    let receiver = receiver(bytes, leaf.start_byte()).filter(|r| !r.is_empty());
+    let c_like = matches!(lang, "c" | "cpp");
     let fatal = text.starts_with("Fatal") && receiver.as_deref() == Some("log");
     let known = EXIT_ALWAYS.contains(&text)
         || fatal
@@ -367,8 +447,12 @@ fn exit_leaf(leaf: Node, bytes: &[u8], lang: &str) -> bool {
             && receiver.as_deref().is_none_or(|r| {
                 let r = r.to_ascii_lowercase();
                 EXIT_RECEIVERS.iter().any(|known| r.ends_with(known)) || r.contains("process") || r.contains("runtime")
-            }));
-    known && (called_at(bytes, leaf.end_byte()) || (matches!(lang, "ruby" | "php") && bare_call(leaf, bytes)))
+            }))
+        || (c_like && receiver.is_none() && matches!(text, "raise" | "kill"));
+    // In C and C++ a function name can be taken and called later, as in
+    // `auto f = &exit; f(0);`, so naming it counts.
+    let named_c = c_like && matches!(text, "exit" | "_exit" | "_Exit" | "quick_exit" | "abort");
+    known && (called_at(bytes, leaf.end_byte()) || named_c || (matches!(lang, "ruby" | "php") && bare_call(leaf, bytes)))
 }
 
 /// Whether a node ends the process: a PHP `exit` statement, or a leaf that
@@ -405,18 +489,57 @@ fn focus_argument(node: Node, bytes: &[u8]) -> bool {
     (0..node.child_count()).filter_map(|i| node.child(i)).any(|child| focus_argument(child, bytes))
 }
 
-/// Whether a new unit is free: a shipped query marks it a test, its name is
+/// Doctest decorators that switch a case off or make a failure pass.
+const DOCTEST_SKIPS: &[&str] = &["skip", "may_fail", "should_fail", "expected_failures"];
+
+/// Catch2 tags that hide a case or let it fail: `[.]`, `[.slow]`, `[!hide]`,
+/// `[!mayfail]` and `[!shouldfail]`.
+const CATCH2_SKIP_TAGS: &[&str] = &["[.", "[hide]", "[!hide]", "[!mayfail]", "[!shouldfail]"];
+
+/// Whether the header of a doctest or Catch2 case holds a `doctest::skip()`
+/// style decorator or a Catch2 tag that hides it.
+fn skips_case(header: Node, bytes: &[u8]) -> bool {
+    if header.child_count() == 0 {
+        let Ok(text) = header.utf8_text(bytes) else { return false };
+        if is_text_leaf(header.kind()) {
+            return CATCH2_SKIP_TAGS.iter().any(|tag| text.contains(tag));
+        }
+        return DOCTEST_SKIPS.contains(&text)
+            && receiver(bytes, header.start_byte()).is_none_or(|r| r.is_empty() || r.ends_with("doctest"));
+    }
+    (0..header.child_count()).filter_map(|i| header.child(i)).any(|child| skips_case(child, bytes))
+}
+
+/// Whether a node holds a preprocessor directive: a `#define` or `#undef`
+/// inside a new test can switch off the asserts of every later test.
+fn has_preprocessor(node: Node) -> bool {
+    node.kind().starts_with("preproc_") || (0..node.named_child_count()).filter_map(|i| node.named_child(i as u32)).any(has_preprocessor)
+}
+
+/// Whether a C or C++ test body calls Unity's `TEST_IGNORE` or
+/// `TEST_IGNORE_MESSAGE`, which skips the test.
+fn ignores_test(node: Node, bytes: &[u8]) -> bool {
+    if node.child_count() == 0 {
+        return !is_text_leaf(node.kind()) && node.utf8_text(bytes).is_ok_and(|text| text.starts_with("TEST_IGNORE"));
+    }
+    (0..node.child_count()).filter_map(|i| node.child(i)).any(|child| ignores_test(child, bytes))
+}
+
+/// Whether a new unit is free: a trusted query marks it a test, its name is
 /// one the old text does not use, every node above it is a test prefix, and
 /// its body calls no function that ends the process.
 /// `TestMain` and `init` never free, whatever a query says.
 fn free(unit: &Unit, named: Option<&queries::Queries>, lang: &str, old: &str, bytes: &[u8], before_first_old: bool) -> bool {
-    let Some(name) = named.and_then(|q| q.shipped_name(unit.item, bytes)) else { return false };
-    let short = name.rsplit('.').next().unwrap_or("");
-    if short.is_empty()
-        || matches!(short, "TestMain" | "init")
-        || has_word(old, short)
+    let Some(name) = named.and_then(|q| q.trusted_test_name(unit.item, bytes)) else { return false };
+    if name.is_empty()
+        || matches!(name.as_str(), "TestMain" | "init")
+        || has_word(old, &name)
         || calls_exit(unit.item, bytes, lang)
+        || unit.tail.is_some_and(|tail| calls_exit(tail, bytes, lang) || skips_case(unit.item, bytes))
         || focuses_run(unit.item, bytes)
+        || has_preprocessor(unit.item)
+        || unit.tail.is_some_and(has_preprocessor)
+        || (matches!(lang, "c" | "cpp") && (ignores_test(unit.item, bytes) || unit.tail.is_some_and(|tail| ignores_test(tail, bytes))))
     {
         return false;
     }
@@ -586,16 +709,16 @@ pub fn preserved(
     let base = std::env::var(grammar::URL_VAR).ok().filter(|v| !v.is_empty());
     let mut parse = |text: &str| -> Option<_> {
         let tree = session.parse(home, entry, base.as_deref(), text).ok()?;
-        (!tree.root_node().has_error()).then_some(tree)
+        usable(&tree, entry.name.as_str()).then_some(tree)
     };
     let before_tree = parse(before)?;
     let now_tree = parse(now)?;
     let language = session.language(entry)?;
     let mut parse = |text: &str| -> Option<_> {
         let tree = session.parse(home, entry, base.as_deref(), text).ok()?;
-        (!tree.root_node().has_error()).then_some(tree)
+        usable(&tree, entry.name.as_str()).then_some(tree)
     };
-    let named = repo.map(|repo| queries::load(entry.name.as_str(), &language, repo.top, test_queries));
+    let named = repo.map(|repo| queries::load(entry.name.as_str(), &language, repo.top, test_queries, repo.protected));
     let old = unit_nodes(before_tree.root_node(), named.as_ref(), before.as_bytes());
     let new = unit_nodes(now_tree.root_node(), named.as_ref(), now.as_bytes());
     let old_forms: Vec<String> = old.iter().map(|unit| unit.form(before.as_bytes())).collect();
@@ -622,6 +745,20 @@ pub fn preserved(
             && !names.contains(&name)
         {
             names.push(name);
+        }
+    }
+    // The old statements of a split function must keep their order, or a
+    // `return` moved above a `RUN_TEST` would skip that test.
+    let ordered: BTreeSet<&str> = old.iter().filter(|unit| unit.ordered).map(|unit| unit.ctx.as_str()).collect();
+    for ctx in ordered {
+        let in_ctx = |units: &[Unit], forms: &[String]| -> Vec<String> {
+            units.iter().zip(forms).filter(|(unit, _)| unit.ordered && unit.ctx == ctx).map(|(_, form)| form.clone()).collect()
+        };
+        let old_seq = in_ctx(&old, &old_forms);
+        let new_seq = in_ctx(&new, &new_forms);
+        let mut rest = new_seq.iter();
+        if !old_seq.iter().all(|form| rest.any(|candidate| candidate == form)) {
+            missing = true;
         }
     }
     let kept = kept_units(&new_forms, &old_counts);

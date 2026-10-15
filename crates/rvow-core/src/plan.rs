@@ -236,6 +236,7 @@ fn counted_runner(cmd: &str) -> bool {
         || words.contains(&"jest")
         || words.contains(&"vitest")
         || words.contains(&"mocha")
+        || words.contains(&"ctest")
         || (words.contains(&"node") && words.contains(&"--test"))
 }
 
@@ -259,7 +260,7 @@ fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding
             )
         } else {
             format!(
-                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest, vitest, mocha, node --test or go test",
+                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest, vitest, mocha, node --test, go test or ctest",
                 t.id
             )
         };
@@ -420,6 +421,13 @@ mod tests {
         let text = std::fs::read_to_string(c.path.join(change::PROPOSAL)).unwrap();
         assert!(text.starts_with("branch: main\n"), "{text}");
         assert_eq!(check(&p, &repo, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ctest_is_a_counted_runner_and_a_gtest_binary_is_not() {
+        assert!(counted_runner("ctest --test-dir build -R hex64"));
+        assert!(counted_runner("cmake --build build && ctest --output-on-failure"));
+        assert!(!counted_runner("./build/tests/test_hex64"), "a doctest or gtest binary has no fixed name");
     }
 
     #[test]
