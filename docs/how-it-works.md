@@ -112,6 +112,13 @@ A session is held only for a task or drift item whose file it changed.
 It is held for a task with no proof when it changed a file that the `files:` of the task match.
 It is not held for that task while the task has a live lease that another worker holds, or that no worker took yet: the session handed the task off with `rvow delegate`.
 When the lease ends, the hold comes back, and the session that holds the lease is held as before.
+Around each checked call that may write, the hooks snapshot the work tree with a private git index and object store, and record each changed path with its new git blob id, or deleted, for the session or the subagent of the call.
+The private store lists the repository's own objects as an alternate and lives under the project folder, so nothing is written into the user's `.git`.
+The private objects are transient: the records keep only blob ids, and when the private store passes 64 MiB and no call is in flight, it is deleted and rebuilt from the repository's own objects.
+Records are dropped after 7 days, and a call that never reports back (cancelled or killed) stops counting as in flight after 6 hours.
+A read takes no snapshot.
+A session owns a file only when the file's current blob is the blob its latest call on that file produced, or the file is still gone after the session deleted it, and no call of another session or of a subagent that overlapped that call in time recorded the same path and blob; overlapping same-blob calls leave no owner.
+A session whose hooks send no after-call record, such as an older mod that sent only pre-tool-use, falls back to today's text record.
 It is held for drift when it changed a file that a drift item names or a protected file.
 A session that changed no file, one that only read, a subagent and a call with no session id are never held.
 Each reason is given once to a session.
@@ -403,6 +410,9 @@ Each one is caught later by the gate, or needs a person.
   `require_signature` is the real boundary, and it is off by default.
 - **Hardware signing keys are untested.**
   The tests sign with a software key. A hardware key (`ed25519-sk`) has not been used yet.
+- **The provenance snapshots see only the work tree, not background writes.**
+  A write after a call ends, such as a background command, is not in the before or after snapshot of any call and does not count toward ownership.
+  Submodule content is not seen either.
 - **A timeout stops rvow and not its child.**
   The pi tool `rvow_prove` ends the rvow process after its timeout, and the verify command that rvow started can keep running.
 - **`config.toml` has no edit deny.**

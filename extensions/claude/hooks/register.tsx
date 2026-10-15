@@ -87,6 +87,7 @@ const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*
 
 type Event =
   | 'pre-tool-use'
+  | 'post-tool-use'
   | 'session-start'
   | 'stop'
   | 'status'
@@ -953,6 +954,7 @@ export const register: Register = (on) => {
       tool_input: args,
       session_id: sessionId,
       agent_id: typeof agentId === 'string' ? agentId : undefined,
+      tool_use_id,
     })
     const decision = out?.hookSpecificOutput
     if (decision?.permissionDecision === 'deny') {
@@ -964,9 +966,18 @@ export const register: Register = (on) => {
       const answer = await $.ui.ask(reason, ['Allow', 'Deny']).catch(() => 'Deny')
       if (answer !== 'Allow') return { deny: reason }
     }
-    const ran = await next(e)
-    if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
-    return ran
+    // After the call runs or fails, report its outcome so rvow records the
+    // blobs the call changed. A denied call never ran, so it is not reported.
+    try {
+      return await next(e)
+    } finally {
+      await hook($, 'post-tool-use', {
+        session_id: sessionId,
+        agent_id: typeof agentId === 'string' ? agentId : undefined,
+        tool_use_id,
+      })
+      if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
+    }
   })
 
   // A subagent whose prompt starts with the `lease:` line of `rvow delegate` is bound to that lease, so

@@ -76,6 +76,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         };
         match (harness, event) {
             (Harness::Claude, HookEvent::PreToolUse) => hooks::claude_pre_tool_use(&p, &input),
+            (Harness::Claude, HookEvent::PostToolUse) => hooks::claude_post_tool_use(&p, &input),
             (Harness::Claude, HookEvent::SessionStart) => hooks::claude_session_start(&p, &home, &input),
             (Harness::Claude, HookEvent::Stop) => hooks::claude_stop(&p, &home, &input),
             (Harness::Claude, HookEvent::LeaseBind) => hooks::claude_lease_bind(&p, &input),

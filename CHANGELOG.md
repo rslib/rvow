@@ -43,6 +43,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   A query file that was not protected at accept, such as one named after accept, still only names tests.
 - Free a new `mod NAME;` line in a protected Rust test file when its module file is new since accept, its only attributes are `#[path = "..."]` and `#[cfg(test)]`, and the module file calls no process exit and focuses no run.
 - Hold a stop only for the work of the session: a session is held only for a task or drift item whose file it changed, a pending amendment of a change releases its stop, and stale proofs no longer hold a stop and are left to the push gate; `rvow stats` lists the stop blocks by reason, `drift`, `no-proof` or `unknown`.
+- Hold a stop only for file content the session produced: around each checked call the hooks snapshot the work tree with a private git index and object store and record each changed path with its git blob id, and a session owns a file only when the file's current blob is the blob its latest call produced and no overlapping call of another session recorded the same blob.
+  The Claude mod, the settings hooks and pi send the call id before and after each call; a session with no after-call record keeps the old text record.
 - Count only the segments that are not a file check (`grep`, `rg`, `test`, `[`, `diff`, `cmp`) toward the `full-suite` chain warning, so a verify of file checks before one test no longer warns.
 - Refuse a blank required proposal section: `rvow check` reports a structure error that names the section and its line, and one word is enough.
 - Count the issues of a backlog plan in the dashboard with the same function as `rvow check`, so a task whose runner fails to fill counts once and the plan is not ready.

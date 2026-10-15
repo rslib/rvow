@@ -92,6 +92,8 @@ mod literal_paths;
 mod plan_access;
 #[path = "suite/protected_growth.rs"]
 mod protected_growth;
+#[path = "suite/provenance.rs"]
+mod provenance;
 #[path = "suite/quiet_hooks.rs"]
 mod quiet_hooks;
 #[path = "suite/reach.rs"]

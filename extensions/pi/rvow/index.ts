@@ -983,6 +983,7 @@ export default function (pi: ExtensionAPI) {
           tool_input: input,
           session_id: ctx.sessionManager?.getSessionId?.(),
           agent_id: leaseAgent,
+          tool_use_id: event.toolCallId,
         },
         FAST_MS,
         false,
@@ -1074,7 +1075,22 @@ export default function (pi: ExtensionAPI) {
     later(() => refresh(ctx));
   });
 
-  pi.on("tool_result", (event, ctx) => {
+  pi.on("tool_result", async (event, ctx) => {
+    // After the call returns, report its outcome so rvow records the blobs the
+    // call changed, with the same call id that pre-tool-use carried.
+    await hook(
+      "post-tool-use",
+      ctx.cwd,
+      {
+        session_id: ctx.sessionManager?.getSessionId?.(),
+        agent_id: leaseAgent,
+        tool_use_id: event.toolCallId,
+      },
+      FAST_MS,
+      false,
+      undefined,
+      enforcementOff(ctx),
+    );
     const cmd = (event.input as Record<string, unknown>).command;
     if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd))
       later(() => refresh(ctx));

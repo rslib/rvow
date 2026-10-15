@@ -97,7 +97,7 @@ fn audit_text_design_warning_uses_the_documented_hundred_line_limit() {
 #[test]
 fn audit_text_neutral_hooks_keep_the_claude_alias() {
     let f = Fixture::new("hooks");
-    for event in ["pre-tool-use", "session-start", "stop", "status", "view"] {
+    for event in ["pre-tool-use", "post-tool-use", "session-start", "stop", "status", "view"] {
         let neutral = f.cli(&["hook", event]);
         let old = f.cli(&["hook", "claude", event]);
         assert!(neutral.status.success(), "{}", String::from_utf8_lossy(&neutral.stdout));

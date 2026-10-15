@@ -398,7 +398,9 @@ pub fn stale_managed_files(claude_dir: &Path, rvow_home: &Path, pi_dir: Option<&
 fn is_rvow_command(command: &str) -> bool {
     command.contains("hook claude")
         || (command.contains("rvow")
-            && ["pre-tool-use", "session-start", "stop", "status", "view"].iter().any(|e| command.contains(&format!(" hook {e}"))))
+            && ["pre-tool-use", "post-tool-use", "session-start", "stop", "status", "view"]
+                .iter()
+                .any(|e| command.contains(&format!(" hook {e}"))))
 }
 
 fn is_rvow_entry(entry: &Value) -> bool {
@@ -430,8 +432,13 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
             None => json!({"hooks": [hook]}),
         }
     };
-    let wanted =
-        [("PreToolUse", entry(Some(TOOLS), "pre-tool-use")), ("SessionStart", entry(None, "session-start")), ("Stop", entry(None, "stop"))];
+    let wanted = [
+        ("PreToolUse", entry(Some(TOOLS), "pre-tool-use")),
+        ("PostToolUse", entry(Some(TOOLS), "post-tool-use")),
+        ("PostToolUseFailure", entry(Some(TOOLS), "post-tool-use")),
+        ("SessionStart", entry(None, "session-start")),
+        ("Stop", entry(None, "stop")),
+    ];
     let root = settings.as_object_mut().ok_or_else(|| {
         Error::new(
             "settings",
@@ -587,6 +594,29 @@ mod tests {
         claude_settings(&path, Path::new("/new/rvow")).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2, "old rvow entry replaced");
+    }
+
+    #[test]
+    fn settings_post_tool_use_hooks_are_written_and_recognized() {
+        let tmp = TempDir::new();
+        let path = tmp.0.join("settings.json");
+        let bin = Path::new("/opt/rvow");
+        assert!(matches!(claude_settings(&path, bin).unwrap(), Outcome::Written(_)));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for event in ["PostToolUse", "PostToolUseFailure"] {
+            let arr = v["hooks"][event].as_array().expect(event);
+            assert_eq!(arr.len(), 1, "{event}");
+            assert_eq!(arr[0]["matcher"], TOOLS, "{event}");
+            assert_eq!(arr[0]["hooks"][0]["command"], "'/opt/rvow' hook claude post-tool-use");
+        }
+        assert!(is_rvow_command("'/opt/rvow' hook claude post-tool-use"));
+        assert!(is_rvow_command("'/opt/rvow' hook post-tool-use"));
+        // A repeated install stays stable, and the mod switch removes them.
+        assert!(matches!(claude_settings(&path, bin).unwrap(), Outcome::Unchanged(_)));
+        assert!(matches!(remove_claude_settings(&path).unwrap(), Outcome::Written(_)));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 0);
+        assert_eq!(v["hooks"]["PostToolUseFailure"].as_array().unwrap().len(), 0);
     }
 
     #[test]

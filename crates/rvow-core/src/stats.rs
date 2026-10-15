@@ -14,6 +14,7 @@ pub const STATS_FILE: &str = "hook-stats.jsonl";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hook {
     PreToolUse,
+    PostToolUse,
     Stop,
 }
 
@@ -21,6 +22,7 @@ impl Hook {
     fn name(self) -> &'static str {
         match self {
             Hook::PreToolUse => "pre-tool-use",
+            Hook::PostToolUse => "post-tool-use",
             Hook::Stop => "stop",
         }
     }

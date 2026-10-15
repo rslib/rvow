@@ -627,6 +627,7 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         if let Some(s) = session {
             streak::reset(project, s);
             record_changes(project, s, input);
+            record_before_snapshot(project, s, input);
         }
         return Ok(None);
     };
@@ -728,6 +729,55 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
     }
 }
 
+/// Whether a tool call may write the work tree, so a before snapshot is taken
+/// around it. Read, Grep, Glob and a read-only Bash command are skipped.
+fn may_write(tool: &str, args: &Value) -> bool {
+    if writes_files(tool) {
+        return true;
+    }
+    if tool == "Bash" {
+        return args.get("command").and_then(Value::as_str).is_some_and(|c| !reads_only(c));
+    }
+    false
+}
+
+/// The pre-tool-use provenance: snapshots the work tree before an allowed
+/// write call and stores the before tree per (session, agent, tool_use_id).
+fn record_before_snapshot(project: &Project, session: &str, input: &Value) {
+    let Some(id) = input.get("tool_use_id").and_then(Value::as_str) else {
+        return;
+    };
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    if !may_write(tool, &args) {
+        return;
+    }
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else { return };
+    let agent = input.get("agent_id").and_then(Value::as_str);
+    crate::provenance::before_call(project, &top, session, agent, id);
+}
+
+/// Claude Code `PostToolUse`: snapshots the tree after a checked call, diffs it
+/// against the before snapshot of the same call, and records each changed path
+/// with its new blob id for the session (or its subagent). A call with no
+/// before record (a read) takes no snapshot and records nothing.
+pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
+    let Some(session) = input.get("session_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(id) = input.get("tool_use_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else {
+        return Ok(None);
+    };
+    let agent = input.get("agent_id").and_then(Value::as_str);
+    crate::provenance::after_call(project, &top, session, agent, id);
+    Ok(None)
+}
+
 /// Whether drift item text names `path` as a whole word, so a short name
 /// such as `a` does not match every item.
 fn names_path(what: &str, path: &str) -> bool {
@@ -818,7 +868,21 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
     }
     let pending = amend::pending(&changes);
     let config = config::load(project, home)?;
-    let touched = session.map(|s| session_files::load(project, s)).unwrap_or_default();
+    // The files the session owns: its latest blob record matches the current
+    // blob. A session without after-call records (an older mod) decides from
+    // today's text record.
+    let touched = match session {
+        Some(s) => match crate::provenance::owned(project, &top, s)? {
+            Some(mut set) => {
+                if session_files::load(project, s).contains(session_files::PLAN) {
+                    set.insert(session_files::PLAN.to_string());
+                }
+                set
+            }
+            None => session_files::load(project, s),
+        },
+        None => BTreeSet::new(),
+    };
     let mut protected_files = None;
     for c in &queue {
         if pending.iter().any(|p| p.change == c.dir.id) {
