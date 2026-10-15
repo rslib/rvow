@@ -1158,6 +1158,42 @@ mod tests {
         }
     }
 
+    fn store_search(cmd: &str) -> Option<String> {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        store_guard::bash_store_denial(&p, &repo, cmd).map(|d| d.reason)
+    }
+
+    #[test]
+    fn store_search_own_path_is_the_searchers_argument() {
+        assert_eq!(store_search("tmux send-keys / && tmux capture-pane -p | grep x"), None);
+        assert_eq!(store_search("tmux send-keys / Enter; grep -E 'a|b' notes.txt"), None);
+        assert!(store_search("grep -r secret /").is_some_and(|r| r.contains("covers the rvow store")));
+        assert!(store_search("find / -name x").is_some_and(|r| r.contains("covers the rvow store")));
+        assert!(store_search("echo go && find / -name x").is_some());
+        assert!(store_search("xargs grep -r x /").is_some());
+    }
+
+    #[test]
+    fn store_search_own_cwd_after_cd_is_searched() {
+        assert!(store_search("cd / && ls").is_some_and(|r| r.contains("covers the rvow store")));
+        assert!(store_search("cd / && grep -r secret").is_some());
+        assert_eq!(store_search("ls"), None);
+        assert_eq!(store_search("cd / && echo hi"), None);
+    }
+
+    #[test]
+    fn store_search_own_plan_tree_word_is_denied_for_any_program() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let cmd = format!("cat {}/active/CHG-abcdef-x/proposal.md", p.root.display());
+        assert!(store_guard::bash_store_denial(&p, &repo, &cmd).is_some());
+    }
+
     /// What the rules find for an edit, whatever the rule's mode does with it.
     fn edit(p: &Project, repo: &Path, file: &str) -> Option<Value> {
         let input = json!({

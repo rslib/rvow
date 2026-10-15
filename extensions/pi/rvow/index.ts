@@ -148,8 +148,8 @@ function asked(a: Ask): string {
   return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${a.question}`, ...opts].join("\n");
 }
 
-async function ask(ctx: ExtensionContext): Promise<string> {
-  const r = await run(["clarify", "--json"], ctx.cwd, "", SLOW_MS);
+async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
+  const r = await run(["clarify", ...(change ? [change] : []), "--json"], ctx.cwd, "", SLOW_MS);
   if (r?.code !== 0) return `cannot read the open questions from '${BIN}'`;
   let round: { questions?: Ask[]; remaining?: number };
   try {
@@ -1385,10 +1385,16 @@ export default function (pi: ExtensionAPI) {
     name: "rvow_ask",
     label: "rvow ask",
     description:
-      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Ask in chat only when it is missing.",
-    parameters: { type: "object", properties: {} } as ToolDefinition["parameters"],
-    async execute(_id, _params, _signal, _update, ctx) {
-      return { content: [{ type: "text", text: await ask(ctx) }], details: {} };
+      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.",
+    parameters: {
+      type: "object",
+      properties: { change: { type: "string", pattern: "^CHG-[a-z0-9]+$" } },
+    } as ToolDefinition["parameters"],
+    async execute(_id, params, _signal, _update, ctx) {
+      const change = (params as { change?: unknown } | undefined)?.change;
+      if (change !== undefined && (typeof change !== "string" || !/^CHG-[a-z0-9]+$/.test(change)))
+        throw new Error("rvow: change must be a CHG id");
+      return { content: [{ type: "text", text: await ask(ctx, change) }], details: {} };
     },
   });
 }

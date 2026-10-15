@@ -333,3 +333,71 @@ pub(super) fn preserved(before: &str, now: &str) -> bool {
         })
     })
 }
+
+fn item_name(item: &[&str]) -> String {
+    let mut i = 0;
+    while item.get(i..i + 2) == Some(&["#", "["]) {
+        match item[i + 2..].iter().position(|t| *t == "]") {
+            Some(end) => i += end + 3,
+            None => break,
+        }
+    }
+    while let Some(word) = item.get(i) {
+        match *word {
+            "pub" => {
+                i += 1;
+                if item.get(i) == Some(&"(") {
+                    i += item[i..].iter().position(|t| *t == ")").map_or(1, |p| p + 1);
+                }
+            }
+            "async" | "unsafe" | "extern" | "default" => i += 1,
+            "const" if item.get(i + 1).is_some_and(|n| matches!(*n, "fn" | "unsafe" | "async")) => i += 1,
+            _ => break,
+        }
+    }
+    match item.get(i) {
+        Some(&"impl") | Some(&"use") => item[i..item.len().min(i + 2)].join(" "),
+        Some(_) => item.get(i + 1).copied().unwrap_or("").to_string(),
+        None => String::new(),
+    }
+}
+
+/// The names of the non-test items that `now` adds to the inline test modules
+/// of `before`, or `None` when an old item is lost or changed, or a text does
+/// not parse.
+pub(super) fn added_helpers(before: &str, now: &str) -> Option<Vec<String>> {
+    let (old, new) = (tokens(before)?, tokens(now)?);
+    let (old_ranges, new_ranges) = (ranges(&old)?, ranges(&new)?);
+    if old_ranges.is_empty() {
+        return None;
+    }
+    let &(new_start, _) = new_ranges.first()?;
+    if !old[..old_ranges[0].0].iter().map(|t| t.text).eq(new[..new_start].iter().map(|t| t.text)) {
+        return None;
+    }
+    let mut names = Vec::new();
+    let mut remaining = new_ranges.iter();
+    for &(start, end) in &old_ranges {
+        let open = (start..end).find(|&i| old[i].text == "{")?;
+        let header: Vec<_> = old[start..=open].iter().map(|t| t.text).collect();
+        let found = remaining.find_map(|&(ns, ne)| {
+            let no = (ns..ne).find(|&i| new[i].text == "{")?;
+            if !new[ns..=no].iter().map(|t| t.text).eq(header.iter().copied()) {
+                return None;
+            }
+            let (old_items, new_items) = (items(&old[open + 1..end])?, items(&new[no + 1..ne])?);
+            let mut kept = old_items.iter().peekable();
+            let mut added = Vec::new();
+            for item in &new_items {
+                if kept.peek().is_some_and(|saved| *saved == item) {
+                    kept.next();
+                } else {
+                    added.push(item);
+                }
+            }
+            kept.next().is_none().then_some(added.into_iter().filter(|i| !added_test(i)).map(|i| item_name(i)).collect::<Vec<_>>())
+        })?;
+        names.extend(found);
+    }
+    Some(names)
+}

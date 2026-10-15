@@ -207,7 +207,10 @@ pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
         if let Kept::No(names) =
             preserved(&key, &before, &now, Some(home.as_path()), Some(units::Repo { top, protected: None }), &test_queries, &mut session)
         {
-            let what = if names.is_empty() {
+            let helpers = if names.is_empty() && key.ends_with(RUST_TESTS) { rust::added_helpers(&before, &now) } else { None };
+            let what = if let Some(helpers) = helpers.filter(|h| !h.is_empty()) {
+                format!("test {key} adds helpers {}", helpers.join(", "))
+            } else if names.is_empty() {
                 what("lost or changed lines")
             } else {
                 format!("test {key} changed {} after its first passing proof", names.join(", "))
@@ -270,6 +273,33 @@ mod tests {
         let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
         std::fs::write(repo.join("src/lib.rs"), lib.replace("pub fn f() {}", "pub fn f() { let _ = 1; }")).unwrap();
         assert_eq!(weaken(&p, &repo).len(), 2, "code outside test modules is free");
+    }
+
+    fn lib_weaken(p: &Project, repo: &Path, body: &str) -> Vec<String> {
+        let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), lib.replace("    fn t() { assert_eq!(1, 1); }\n", body)).unwrap();
+        weaken(p, repo).into_iter().filter(|w| w.contains("src/lib.rs#cfg(test)")).collect()
+    }
+
+    #[test]
+    fn cfg_test_names_added_helper_plus_test() {
+        let (_tmp, p, repo, _) = setup();
+        let body = "    fn t() { assert_eq!(1, 1); }\n    fn row_text() -> u8 { 1 }\n    fn row_ids() -> u8 { 2 }\n    #[test]\n    fn u() { assert_eq!(row_ids(), 2); }\n";
+        assert_eq!(lib_weaken(&p, &repo, body), ["test src/lib.rs#cfg(test) adds helpers row_text, row_ids"]);
+    }
+
+    #[test]
+    fn cfg_test_names_removed_assert() {
+        let (_tmp, p, repo, _) = setup();
+        let body = "    fn t() {}\n    fn row_ids() -> u8 { 2 }\n";
+        assert_eq!(lib_weaken(&p, &repo, body), ["test src/lib.rs#cfg(test) lost or changed lines after its first passing proof"]);
+    }
+
+    #[test]
+    fn cfg_test_names_added_tests_only() {
+        let (_tmp, p, repo, _) = setup();
+        let body = "    fn t() { assert_eq!(1, 1); }\n    #[test]\n    fn u() { assert_eq!(2, 2); }\n";
+        assert_eq!(lib_weaken(&p, &repo, body), Vec::<String>::new());
     }
 
     #[test]

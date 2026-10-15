@@ -668,6 +668,49 @@ pub(super) fn path_words(cmd: &str) -> Vec<String> {
         .collect()
 }
 
+/// One program call of a command line, with the path words among its own
+/// arguments and the directory it runs in after the `cd` calls before it.
+pub(super) struct Call {
+    pub program: String,
+    pub paths: Vec<String>,
+    pub dir: PathBuf,
+    pub moved: bool,
+}
+
+/// The program calls of `cmd` in order, each with its own path words. A `cd`
+/// moves the directory of the calls after it; a wrapper such as `xargs` or
+/// `env` adds a call for the program it starts.
+pub(super) fn calls(cmd: &str, cwd: &Path) -> Vec<Call> {
+    let env: HashMap<String, String> =
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    let home = env.get("HOME").cloned();
+    let mut dir = cwd.to_path_buf();
+    let mut moved = false;
+    let mut out = Vec::new();
+    for seg in &parse(cmd, 0, &env).commands {
+        for (n, inv) in invocations(seg).into_iter().enumerate() {
+            let Some((program, args)) = inv.split_first() else {
+                continue;
+            };
+            if n == 0 && base_name(program) == "cd" {
+                if let Some(target) = args.iter().find(|a| !a.starts_with('-')) {
+                    dir = super::real_path(Path::new(&expand_tilde(target, home.as_deref())), &dir);
+                    moved = true;
+                }
+                continue;
+            }
+            let paths = args
+                .iter()
+                .filter(|w| !has_glob(w))
+                .map(|w| expand_tilde(w, home.as_deref()))
+                .filter(|w| w.starts_with('/') || w.starts_with('~') || w.starts_with('.') || w.contains('/'))
+                .collect();
+            out.push(Call { program: program.clone(), paths, dir: dir.clone(), moved });
+        }
+    }
+    out
+}
+
 /// The words of `cmd` that may name a file it changes: the path words, and the
 /// bare file names such as `out.txt` or `Cargo.toml`, which hold a dot but no `/`.
 pub(super) fn changed_words(cmd: &str) -> Vec<String> {

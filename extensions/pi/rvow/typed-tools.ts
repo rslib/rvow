@@ -16,7 +16,7 @@ export type ViewInput = { target?: "view" | "status" | "show"; id?: string };
 export type ProofInput = { task: string };
 export type AcceptInput = { change: string };
 export type ArchiveInput = { change: string };
-export type ConfirmInput = { decision?: "accept" | "reject" };
+export type ConfirmInput = { decision?: "accept" | "reject"; id?: string };
 
 export const ACCEPT_DESCRIPTION =
   "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
@@ -43,7 +43,7 @@ export function archiveBlockers(
 }
 
 export const CONFIRM_DESCRIPTION =
-  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. The result tells you what happened, and when it failed it says why.";
+  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. Pass id to ask only about that one amendment. The result tells you what happened, and when it failed it says why.";
 
 export function acceptArgs(input: unknown): string {
   const value = closed(input, ["change"]);
@@ -52,8 +52,29 @@ export function acceptArgs(input: unknown): string {
   return value.change;
 }
 
+export function confirmId(input: unknown): string | undefined {
+  const value = closed(input, ["decision", "id"]);
+  if (value.id === undefined) return undefined;
+  if (typeof value.id !== "string" || !/^AMD-[a-z0-9]+$/.test(value.id))
+    throw new Error("rvow: id must be an AMD id");
+  return value.id;
+}
+
+/** The lines of one amendment in a `rvow confirm` listing, or undefined when it is not listed. */
+export function amendmentBlock(listing: string, id: string): string | undefined {
+  const lines: string[] = [];
+  let inside = false;
+  for (const line of listing.split("\n")) {
+    if (/^digest \S+$/.test(line) || /^decide with:/.test(line)) break;
+    const head = /^(AMD-[\w-]+) for /.exec(line);
+    if (head) inside = head[1] === id;
+    if (inside && line.trim()) lines.push(line);
+  }
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
 export function confirmDecision(input: unknown): "accept" | "reject" | undefined {
-  const value = closed(input, ["decision"]);
+  const value = closed(input, ["decision", "id"]);
   if (value.decision !== undefined && value.decision !== "accept" && value.decision !== "reject")
     throw new Error("rvow: decision must be accept or reject");
   return value.decision;
@@ -408,11 +429,30 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     parameters: {
       type: "object",
       additionalProperties: false,
-      properties: { decision: { type: "string", enum: ["accept", "reject"] } },
+      properties: {
+        decision: { type: "string", enum: ["accept", "reject"] },
+        id: { type: "string", pattern: "^AMD-[a-z0-9]+$" },
+      },
     } as ToolDefinition["parameters"],
     execute: async (_id, params, signal, _update, ctx) => {
       const decision = confirmDecision(params);
+      const named = confirmId(params);
       const list = await queue(() => result(["confirm"], ctx.cwd, signal, SLOW_MS));
+      if (named !== undefined && decision !== undefined && list.details.kind === "decision") {
+        const block = amendmentBlock(text(list), named);
+        if (!block) return declined(`${named} is not pending.`);
+        if (!ctx.hasUI)
+          throw new Error("rvow: only the user can decide, and no one is here to ask");
+        const yes = await ctx.ui.confirm(
+          "rvow confirm",
+          `${block}\n\n${decision === "accept" ? "Accept" : "Reject"} ${named}?`,
+        );
+        if (!yes)
+          return declined(
+            `The user did not decide ${named}, so it is still pending. The user can run /rvow-confirm to decide it.`,
+          );
+        return queue(() => result(["confirm", named, `--${decision}`], ctx.cwd, signal, SLOW_MS));
+      }
       const digest = /^digest (\S+)$/m.exec(text(list))?.[1];
       if (decision === undefined || list.details.kind !== "decision" || !digest) return list;
       if (!ctx.hasUI) throw new Error("rvow: only the user can decide, and no one is here to ask");

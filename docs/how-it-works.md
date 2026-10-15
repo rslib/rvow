@@ -39,6 +39,7 @@ A model that writes both the code and the claim that the code works grades its o
 The claim is cheap to make and hard to audit.
 So the checks run as ordinary processes, and the result goes into a ledger that the model cannot write to.
 Hooks deny edits to rvow's own files, and they deny `rvow accept` and `rvow confirm` for agents.
+They also deny a search that covers the plan files of the store: a search program is denied when a path among its own arguments covers the store, or when it runs with no path after a `cd` into a covering folder, and another program on the same line does not count.
 This does not make cheating impossible.
 It makes cheating leave a record that a person can read.
 
@@ -83,7 +84,12 @@ Each run's task id, exit code and test count go into the amendment, and `rvow co
 The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
 In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.
-It then decides everything with the digest of the listing that was read, so an edit that arrived later waits for the next round.
+With one amendment pending the dialog is a yes or no question that shows its id, reason and items.
+With more than one pending, the dialog lists each amendment with its id, reason and items and asks about each in turn: accept, reject or later.
+Each answer runs `rvow confirm <AMD-id> --accept` or `--reject`, and a later leaves that amendment pending, so an edit that arrived later waits for the next round.
+The `rvow_confirm` tool takes an optional `id` and then asks only about that amendment.
+`rvow show AMD-x` prints an amendment of an active or archived change with its change, its reason, its items and its decision: pending, accepted or rejected.
+An unknown AMD- id fails with `no id matches`.
 `/rvow-confirm accept <id>` and `/rvow-confirm reject <id>` decide those ids with no dialog.
 A confirm that names an amendment that already has a decision fails with the code `decided` and names the amendment and its decision, such as `AMD-x is already accepted`.
 An unknown id keeps the code `amendment`.

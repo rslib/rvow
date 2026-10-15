@@ -19,6 +19,7 @@ import {
   ARCHIVE_DESCRIPTION,
   ARCHIVE_SCHEMA,
   ASK,
+  ASK_SCHEMA,
   type Asked,
   archiveBlockers,
   BADGE,
@@ -49,6 +50,7 @@ import {
   judgeArgs,
   judgeRecordArgv,
   judgeSpawnPrompt,
+  type Listed,
   MARKS,
   MAX_LINES,
   OPEN,
@@ -58,6 +60,7 @@ import {
   REVIEW,
   RULE,
   refinePrompt,
+  splitListing,
   TABS,
   YOLO,
   YOLO_DESCRIPTION,
@@ -440,7 +443,32 @@ async function decide($: EngineInterface, listing: string, verb: 'accept' | 'rej
   tellAgentOfFailure($, ['confirm', `--${verb}`, '--all', digest], r)
 }
 
-/** `/rvow-confirm` with no argument or `all`: list the pending plan edits and ask once. */
+const EACH_LABEL = { accept: 'Accept', reject: 'Reject' } as const
+
+/**
+ * Asks about each pending amendment in turn and runs `decide` for each accept or reject.
+ * A later, or a dialog the person closed, leaves that amendment pending.
+ */
+async function confirmEach(
+  $: EngineInterface,
+  items: Listed[],
+  first: 'accept' | 'reject',
+  decide: (item: Listed, verb: 'accept' | 'reject') => Promise<string>,
+): Promise<string[]> {
+  const second = first === 'accept' ? 'reject' : 'accept'
+  const options = [EACH_LABEL[first], EACH_LABEL[second], 'Later']
+  const lines: string[] = []
+  for (const [i, item] of items.entries()) {
+    const answer = await $.ui
+      .ask(`${item.text}\n\n${i + 1} of ${items.length}: accept, reject, or decide later?`, options)
+      .catch(() => 'Later')
+    const verb = answer === 'Accept' ? 'accept' : answer === 'Reject' ? 'reject' : null
+    lines.push(verb ? await decide(item, verb) : `${item.id} is still pending.`)
+  }
+  return lines
+}
+
+/** `/rvow-confirm` with no argument or `all`: list the pending plan edits and ask once, or once for each. */
 async function confirmDialog($: EngineInterface, origin: { kind: string }) {
   if (origin.kind !== 'composer')
     return { text: '/rvow-confirm runs only when you type it yourself.' }
@@ -449,6 +477,22 @@ async function confirmDialog($: EngineInterface, origin: { kind: string }) {
   if (listing.tone === 'fail') return { text: listing.text }
   const digest = /^digest (\S+)$/m.exec(listing.text)?.[1]
   if (!digest) return { text: listing.text }
+  const items = splitListing(listing.text)
+  if (items.length > 1) {
+    const prompts: string[] = []
+    const lines = await confirmEach($, items, 'accept', async (item, verb) => {
+      const argv = ['confirm', item.id, `--${verb}`]
+      const done = await rvow($, argv)
+      const prompt = done.tone === 'ok' ? decisionPrompt(argv, done.text) : null
+      if (prompt) prompts.push(prompt)
+      tellAgentOfFailure($, argv, done)
+      return done.text
+    })
+    await refresh($)
+    // The engine refuses a submit made while this hook still holds the command.
+    if (prompts.length > 0) later($, async () => queue($, prompts.join(' ')))
+    return { text: lines.join('\n') }
+  }
   const answer = await $.ui
     .ask(`${listing.text}\n\nAccept all, reject all, or decide later?`, [
       'Accept all',
@@ -611,12 +655,12 @@ async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: 
 }
 
 /** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
-async function ask($: EngineInterface): Promise<string> {
+async function ask($: EngineInterface, change?: string): Promise<string> {
   const cwd = await $.session.cwd()
   const run = (argv: string[]) => $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
   let round: { questions?: Asked[]; remaining?: number }
   try {
-    round = JSON.parse((await run(['clarify', '--json'])).stdout)
+    round = JSON.parse((await run(['clarify', ...(change ? [change] : []), '--json'])).stdout)
   } catch (err) {
     return `cannot read the open questions from ${BIN}: ${String(err)}`
   }
@@ -692,7 +736,8 @@ export const register: Register = (on) => {
     await $.tool.register({
       name: 'rvow_ask',
       description:
-        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Ask in chat only when it is missing.',
+        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.',
+      inputSchema: ASK_SCHEMA,
     })
     await $.tool.register({
       name: 'rvow_accept',
@@ -826,9 +871,41 @@ export const register: Register = (on) => {
     if (decision !== undefined && decision !== 'accept' && decision !== 'reject') {
       return { result: 'rvow: decision must be accept or reject' }
     }
+    const named = (e as Record<string, unknown>).id
+    if (named !== undefined && (typeof named !== 'string' || !/^AMD-[a-z0-9]+$/.test(named))) {
+      return { result: 'rvow: id must be an AMD- id' }
+    }
     const listing = await tellOut($, ['confirm'])
     if (!listing.ok) return { result: failedText(['confirm'], listing.out) }
+    if (named !== undefined) {
+      const item = splitListing(listing.out).find((i) => i.id === named)
+      if (!item) return { result: `${named} is not pending.` }
+      if (decision === undefined) return { result: item.text }
+      const answer = await $.ui
+        .ask(`${item.text}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} ${named}?`, [
+          'Yes',
+          'No',
+        ])
+        .catch(() => 'No')
+      if (answer !== 'Yes') {
+        return {
+          result: `The user did not decide ${named}, so it is still pending. The user can run /rvow-confirm to decide it.`,
+        }
+      }
+      const argv = ['confirm', named, `--${decision}`]
+      const done = await tellOut($, argv)
+      return { result: done.ok ? done.out : failedText(argv, done.out) }
+    }
     if (decision === undefined) return { result: listing.out }
+    const items = splitListing(listing.out)
+    if (items.length > 1) {
+      const lines = await confirmEach($, items, decision, async (item, verb) => {
+        const argv = ['confirm', item.id, `--${verb}`]
+        const done = await tellOut($, argv)
+        return done.ok ? done.out : failedText(argv, done.out)
+      })
+      return { result: lines.join('\n') }
+    }
     const digest = /^digest (\S+)$/m.exec(listing.out)?.[1]
     if (!digest) return { result: listing.out || 'There are no pending plan edits.' }
     const answer = await $.ui
@@ -847,8 +924,12 @@ export const register: Register = (on) => {
     return { result: done.ok ? done.out : failedText(argv, done.out) }
   })
 
-  on('tool.call', { tool: ASK }, async ($) => {
-    const result = await ask($)
+  on('tool.call', { tool: ASK }, async ($, e) => {
+    const change = (e as Record<string, unknown>).change
+    if (change !== undefined && (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change))) {
+      return { result: 'rvow: change must be a CHG- id' }
+    }
+    const result = await ask($, change)
     await refresh($)
     return { result }
   })

@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use super::rule::denial;
-use super::shell::{glob_paths, path_words, reads_only};
-use super::{Denial, Rule, key, programs, real_path};
+use super::shell::{calls, glob_paths, path_words, reads_only};
+use super::{Denial, Rule, key, real_path};
 use crate::store::{Mode, Project};
 
 /// The store trees that hold plans: the stage folders of a change and the living specs.
@@ -70,14 +70,14 @@ pub(crate) fn store_denial(project: &Project, cwd: &Path, file: &str, write: boo
 const SEARCHERS: &[&str] = &["find", "grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "locate", "ls", "tree", "du"];
 
 /// Why a Bash command must not read, write or search the plan files of the
-/// store: it names a path inside them, or a search program covers them.
+/// store: any word names a path inside them, or a search program is given a
+/// path that covers them, or searches a directory that a `cd` moved to.
 pub(crate) fn bash_store_denial(project: &Project, cwd: &Path, cmd: &str) -> Option<Denial> {
     if project.meta.mode != Mode::Home {
         return None;
     }
     let root = key(&real_path(&project.root, cwd));
     let write = !reads_only(cmd);
-    let searches = programs(cmd).iter().any(|p| SEARCHERS.contains(&p.rsplit('/').next().unwrap_or(p).to_lowercase().as_str()));
     for word in path_words(cmd) {
         let path = key(&real_path(Path::new(&word), cwd));
         if let Some(rel) =
@@ -85,13 +85,23 @@ pub(crate) fn bash_store_denial(project: &Project, cwd: &Path, cmd: &str) -> Opt
         {
             return denial(Rule::Store, reason(rel, write));
         }
-        if searches && (root == path || root.starts_with(&path)) {
-            return denial(
-                Rule::Store,
-                format!(
-                    "a search from {word} covers the rvow store at {root}; run `rvow ls` to list the changes and `rvow show <id>` to read one"
-                ),
-            );
+    }
+    for call in calls(cmd, cwd) {
+        let program = call.program.rsplit('/').next().unwrap_or(&call.program).to_lowercase();
+        if !SEARCHERS.contains(&program.as_str()) {
+            continue;
+        }
+        let from: Vec<String> = if call.paths.is_empty() && call.moved { vec![call.dir.display().to_string()] } else { call.paths };
+        for word in from {
+            let path = key(&real_path(Path::new(&word), &call.dir));
+            if root == path || root.starts_with(&path) {
+                return denial(
+                    Rule::Store,
+                    format!(
+                        "a search from {word} covers the rvow store at {root}; run `rvow ls` to list the changes and `rvow show <id>` to read one"
+                    ),
+                );
+            }
         }
     }
     // A glob hides the name from the word rules, so its expansions are checked too.

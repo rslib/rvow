@@ -167,6 +167,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow show AMD-x` saying no id matches: it now prints the amendment of an active or archived change with its reason, its items and whether it is pending, accepted or rejected.
+- Fix the confirm dialog of the mods deciding every pending amendment at once: with more than one pending it asks about each amendment in turn, the `rvow_confirm` tool takes an optional `id` for one amendment, and the `rvow_ask` tool takes an optional `change` to ask the open questions of that change.
+- Fix the drift item of an inline Rust test module that only gained items saying lines were lost: it now names the added helpers, such as `adds helpers row_text, row_ids`.
+- Fix a search denial that took the `/` of `tmux send-keys /` for a search from the root: a search program is denied only for a path among its own arguments, or after a `cd` into a covering folder.
+- Fix the state of a task after two overlapping runs: it now comes from the run that started last, and a failed run whose inputs changed since is stale, so `rvow prove --stale` runs it again.
 - Fix `rvow put` writing the first plan when an id sits in two open plans.
   It now refuses and names both changes.
   Put the whole part instead.

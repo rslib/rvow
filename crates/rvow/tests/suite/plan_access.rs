@@ -356,3 +356,65 @@ fn plan_access_put_refuses_a_bad_spec_name() {
     assert_eq!(code, 2, "{out}");
     assert_eq!(std::fs::read_to_string(dir.join("proposal.md")).unwrap(), before, "nothing was written");
 }
+
+const GATED_VERIFY: &str = "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
+
+/// An accepted change with one pending amendment that widens the files of a
+/// task. Returns the repo, the change id and the amendment id.
+fn amended(name: &str, reason: &str) -> (Repo, String, String) {
+    let (r, root, id, dir) = change(name);
+    let one = format!("- TSK-new1 Do one\n  covers: REQ-new1\n  verify: {GATED_VERIFY}\n  files: out.txt\n");
+    std::fs::write(dir.join("tasks.md"), &one).unwrap();
+    let accept = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap();
+    assert!(accept.status.success(), "{}", String::from_utf8_lossy(&accept.stdout));
+    let active = std::fs::read_dir(root.join("active")).unwrap().next().unwrap().unwrap().path();
+    let accepted = std::fs::read_to_string(active.join("tasks.md")).unwrap();
+    std::fs::write(active.join("tasks.md"), accepted.replace("files: out.txt", "files: out.txt, extra.txt")).unwrap();
+    let out = r.ok(&["amend", "--reason", reason]);
+    let amd = out
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-'))
+        .find(|w| w.starts_with("AMD-"))
+        .unwrap()
+        .to_owned();
+    (r, id, amd)
+}
+
+#[test]
+fn plan_access_show_amendment_pending() {
+    let (r, id, amd) = amended("amd-pending", "widen the files of one");
+    let out = r.ok(&["show", &amd]);
+    assert!(out.contains(&amd), "{out}");
+    assert!(out.contains(&id), "{out}");
+    assert!(out.contains("widen the files of one"), "{out}");
+    assert!(out.contains("pending"), "{out}");
+    assert!(out.contains("scope made wider"), "the items are named: {out}");
+}
+
+#[test]
+fn plan_access_show_amendment_accepted() {
+    let (r, id, amd) = amended("amd-accepted", "widen the files of one");
+    r.ok(&["confirm", &amd, "--accept"]);
+    let out = r.ok(&["show", &amd]);
+    assert!(out.contains(&amd) && out.contains(&id), "{out}");
+    assert!(out.contains("widen the files of one"), "{out}");
+    assert!(out.contains("accepted"), "{out}");
+    assert!(!out.contains("pending"), "{out}");
+}
+
+#[test]
+fn plan_access_show_amendment_rejected() {
+    let (r, _id, amd) = amended("amd-rejected", "widen the files of one");
+    r.ok(&["confirm", &amd, "--reject"]);
+    let out = r.ok(&["show", &amd]);
+    assert!(out.contains("widen the files of one"), "{out}");
+    assert!(out.contains("rejected"), "{out}");
+}
+
+#[test]
+fn plan_access_show_amendment_unknown() {
+    let (r, _id, _amd) = amended("amd-unknown", "widen the files of one");
+    let (out, code) = r.rvow(&["show", "AMD-zzzzzz"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("no id matches"), "{out}");
+}
