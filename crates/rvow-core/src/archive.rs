@@ -169,6 +169,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         ));
     }
 
+    let cwd = &c.branch().and_then(|b| git::top_for_branch(cwd, b).ok().flatten()).unwrap_or_else(|| cwd.to_path_buf());
     let r = gate::change_gate_echo(project, home, cwd, c, &mut std::io::stderr())?;
     if !r.passed() {
         return Err(Error::new(

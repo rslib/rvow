@@ -124,6 +124,8 @@ mod syntax_units;
 mod tamper_holes;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
+#[path = "suite/worktrees.rs"]
+mod worktrees;
 #[path = "suite/yolo.rs"]
 mod yolo;
 

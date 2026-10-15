@@ -34,6 +34,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Run `rvow accept`, `rvow amend`, `rvow archive` and `rvow check` in the worktree where the branch of the change is checked out, so a plan made in a second worktree works from the main checkout.
+  When no worktree has the branch, accept names `git checkout <branch>` and `git worktree add <path> <branch>`.
+- Print one hint when an accept baseline run takes more than 60 seconds and the project sets neither `rerun_env` nor `rerun_links`.
+  The hint names `rerun_env = { CARGO_TARGET_DIR = "<shared dir>" }` and `rerun_links = ["target"]`.
+
 - Let a project query free a test: a query file named in `test_queries` is protected at accept, a change to it is drift, and a unit that a trusted query marks `@test` with a fresh name is free under the same rules as a shipped mark.
   A query file that was not protected at accept, such as one named after accept, still only names tests.
 - Free a new `mod NAME;` line in a protected Rust test file when its module file is new since accept, its only attributes are `#[path = "..."]` and `#[cfg(test)]`, and the module file calls no process exit and focuses no run.

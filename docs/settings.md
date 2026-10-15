@@ -73,6 +73,23 @@ A verify command can write through a link into the real directory, so list only 
 `rerun_links` is not part of the vow, so changing it is not drift.
 The same holds for `rerun_proven`. By default a push trusts a task whose proof is current and whose files are all committed, because it was proved on that very content. A task of an archived change is never rerun, since archiving needs every task proved. Set `rerun_proven = true` when you want a clean-checkout run of proven tasks too.
 
+## A fast baseline for a Rust project
+
+The reruns of `rvow amend` and `rvow gate --rerun` build in a clean temporary worktree.
+A Rust project then compiles from nothing each time.
+Point the build at a shared directory and link `target` in, so the reruns reuse the build:
+
+```toml
+rerun_env = { CARGO_TARGET_DIR = "/Users/me/.cache/rvow-target" }
+rerun_links = ["target"]
+```
+
+Use a directory of your own for `CARGO_TARGET_DIR`.
+The `rvow accept` baseline runs in your own checkout, not in a temporary worktree, so these keys do not speed it up.
+A new git worktree starts with an empty `target/`; export `CARGO_TARGET_DIR` in your shell to share one build folder between worktrees, and the accept baseline uses it.
+`rvow accept` prints one hint that says this when a baseline run takes more than 60 seconds and neither key is set.
+`rerun_links` turns the rerun cache off, as the section on linked build output says.
+
 ## Scoping setup and checks to files
 
 A `setup` or `checks` entry can be a table with `run` and `files`, such as `{ run = "make -C build", files = ["src/**"] }`.

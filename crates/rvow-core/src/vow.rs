@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -123,6 +124,8 @@ pub struct Prepared {
     pub baseline: Vec<Baseline>,
     /// The failed test names each task's JUnit report named, by task id.
     pub junit: BTreeMap<String, Vec<String>>,
+    /// The hint for a slow baseline run, when the project has no rerun setting.
+    pub hint: Option<String>,
 }
 
 fn findings_error(code: &'static str, what: &str, items: &[String], fix: &str) -> Error {
@@ -154,17 +157,16 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
             "only a backlog change can be accepted; run rvow ls to find one",
         ));
     }
-    let top = git::toplevel(cwd)?;
     let (living, living_findings) = change::load_living(project)?;
     let loaded = change::load(&change.path, &living)?;
-    let branch = git::branch(&top)?.ok_or_else(|| Error::new("detached", "HEAD is detached", "check out the change's branch"))?;
-    if branch != loaded.proposal.branch {
-        return Err(Error::new(
+    let branch = loaded.proposal.branch.clone();
+    let top = git::top_for_branch(cwd, &branch)?.ok_or_else(|| {
+        Error::new(
             "branch",
-            format!("the change belongs to {:?} but HEAD is on {branch:?}", loaded.proposal.branch),
-            format!("run git checkout {}", loaded.proposal.branch),
-        ));
-    }
+            format!("the change belongs to {branch:?} but no worktree has it checked out"),
+            format!("run git checkout {branch}, or git worktree add <path> {branch}"),
+        )
+    })?;
 
     let touched_caps: HashSet<String> = {
         let living_view = crate::lint::Living { specs: &living };
@@ -226,6 +228,7 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
     let mut baseline = Vec::new();
     let mut junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut refused = Vec::new();
+    let mut slowest = Duration::ZERO;
     for task in &loaded.tasks {
         let plan = crate::template::plan(&runners, task)?;
         if let Some(path) = plan.missing_need(&top) {
@@ -238,7 +241,9 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
         let cmd = plan.command.as_str();
         let _ = writeln!(echo, "baseline {}: {cmd}", task.id);
         let timeout = task.timeout.or(plan.timeout).unwrap_or(config.timeout());
+        let started = Instant::now();
         let outcome = runner::run(cmd, &top, &plan.env, timeout, echo)?;
+        slowest = slowest.max(started.elapsed());
         let ran_tests = outcome.tests_run != Some(0);
         if outcome.passed() && ran_tests && !task.baseline_pass {
             refused.push(format!(
@@ -287,7 +292,8 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
             "make each check fail before the work, or mark a check that must stay green with baseline: pass",
         ));
     }
-    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit })
+    let hint = crate::amend::baseline_hint(slowest, crate::amend::SLOW_BASELINE, &config.rerun_env, &config::rerun_links(project, home)?);
+    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit, hint })
 }
 
 /// The result of a vow.
@@ -471,7 +477,7 @@ pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
 
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
-    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit } = prepared;
+    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit, hint: _ } = prepared;
     let lock = project.lock()?;
 
     let minted = mint_placeholders(project, &lock, &change, &loaded)?;

@@ -331,6 +331,17 @@ Write the shared intent in each proposal and link the other change by id in the 
 Let each repository gate its own part.
 `rvow bundle --out` and `rvow gate --bundle` carry one repository's checks into CI without the home store.
 
+## Working in git worktrees
+
+In home mode one store serves every worktree of a repository, so a plan made in one worktree shows in all of them.
+`rvow accept`, `rvow amend`, `rvow archive` and `rvow check` run in the worktree where the branch of the change is checked out, even when you start them from another worktree.
+The base commit, the files, the baseline and the fingerprints come from that worktree.
+When no worktree has the branch, accept fails and names `git checkout <branch>` and `git worktree add <path> <branch>`.
+A session in a worktree is judged by the change of that worktree's branch.
+Its hooks, its stop hold and the leases it delegates all use that change, and a change of another branch does not count.
+`rvow confirm` reads no folder, so it works from any worktree.
+`rvow init --in-repo` keeps one `rvow/` folder per checkout, so those checkouts do not share a store.
+
 ## Why one format and no custom schemas
 
 Teams ask for custom schemas for specs, tasks and proposals.

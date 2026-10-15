@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
@@ -199,6 +200,21 @@ fn baseline_candidates<'a>(before: &[Task], after: &'a [Task]) -> Vec<&'a Task> 
         .collect()
 }
 
+/// A baseline run longer than this earns the `rerun_env` and `rerun_links` hint.
+pub const SLOW_BASELINE: Duration = Duration::from_secs(60);
+
+/// The one hint line for a slow baseline: set when the slowest run took
+/// longer than `limit` and the project sets neither `rerun_env` nor
+/// `rerun_links`.
+pub fn baseline_hint(slowest: Duration, limit: Duration, rerun_env: &BTreeMap<String, String>, rerun_links: &[String]) -> Option<String> {
+    (slowest > limit && rerun_env.is_empty() && rerun_links.is_empty()).then(|| {
+        format!(
+            "a baseline run took {} s; a new worktree starts with an empty build folder, so export CARGO_TARGET_DIR=<shared dir> in your shell to share builds between worktrees, and set rerun_env = {{ CARGO_TARGET_DIR = \"<shared dir>\" }} or rerun_links = [\"target\"] in config.toml for gate reruns (see docs/settings.md)",
+            slowest.as_secs()
+        )
+    })
+}
+
 fn tests_word(tests_run: Option<u64>) -> String {
     match tests_run {
         Some(1) => "1 test run".to_string(),
@@ -376,6 +392,7 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
         if !selected {
             continue;
         }
+        let top = c.branch().and_then(|b| git::top_for_branch(cwd, b).ok().flatten()).unwrap_or_else(|| top.clone());
         let mut data = Map::new();
         let items = match unlock {
             // An unlock keeps the current baseline, so accepting it cannot
@@ -649,5 +666,28 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let (drift, pend) = state(&p, &home, &repo);
         assert_eq!((drift, pend.len()), (1, 0));
+    }
+
+    #[test]
+    fn baseline_hint_names_the_settings_for_a_slow_run_with_none_set() {
+        let hint = baseline_hint(Duration::from_secs(90), SLOW_BASELINE, &BTreeMap::new(), &[]).unwrap();
+        assert!(hint.contains("rerun_env") && hint.contains("CARGO_TARGET_DIR") && hint.contains("rerun_links"), "{hint}");
+        assert!(hint.contains("docs/settings.md") && !hint.contains('\n'), "{hint}");
+    }
+
+    #[test]
+    fn baseline_hint_is_silent_when_a_rerun_setting_exists() {
+        let slow = Duration::from_secs(90);
+        let env = BTreeMap::from([("CARGO_TARGET_DIR".to_string(), "/tmp/t".to_string())]);
+        assert_eq!(baseline_hint(slow, SLOW_BASELINE, &env, &[]), None);
+        assert_eq!(baseline_hint(slow, SLOW_BASELINE, &BTreeMap::new(), &["target".to_string()]), None);
+    }
+
+    #[test]
+    fn baseline_hint_is_silent_for_a_fast_run() {
+        assert_eq!(baseline_hint(Duration::from_secs(5), SLOW_BASELINE, &BTreeMap::new(), &[]), None);
+        assert_eq!(baseline_hint(SLOW_BASELINE, SLOW_BASELINE, &BTreeMap::new(), &[]), None);
+        let tiny = Duration::from_millis(1);
+        assert!(baseline_hint(Duration::from_millis(5), tiny, &BTreeMap::new(), &[]).is_some(), "the limit is a parameter");
     }
 }

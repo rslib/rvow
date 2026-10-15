@@ -90,6 +90,43 @@ pub fn branch(dir: &Path) -> Result<Option<String>> {
     Ok((name != "HEAD").then_some(name))
 }
 
+/// The path of the worktree of this repository that has `branch` checked
+/// out, from `git worktree list --porcelain`. Prunable and bare entries are
+/// skipped. `None` when no worktree has the branch.
+pub fn worktree_for_branch(dir: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let want = format!("refs/heads/{branch}");
+    let out = run(dir, &["worktree", "list", "--porcelain"])?;
+    for entry in out.split("\n\n") {
+        let mut path = None;
+        let mut on_branch = false;
+        let mut skip = false;
+        for line in entry.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                on_branch = b == want;
+            } else if line == "bare" || line == "prunable" || line.starts_with("prunable ") {
+                skip = true;
+            }
+        }
+        if on_branch && !skip {
+            return Ok(path);
+        }
+    }
+    Ok(None)
+}
+
+/// The top of the worktree that holds `branch`: the worktree of `dir` when
+/// it is on the branch, else another worktree of the same repository, else
+/// `None`.
+pub fn top_for_branch(dir: &Path, want: &str) -> Result<Option<PathBuf>> {
+    let top = toplevel(dir)?;
+    if branch(&top)?.as_deref() == Some(want) {
+        return Ok(Some(top));
+    }
+    worktree_for_branch(&top, want)
+}
+
 /// The diff of one task's files against a base commit: the unified diff and
 /// the changed paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
