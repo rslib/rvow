@@ -520,6 +520,44 @@ fn syntax_units_exit_only_named_is_no_drift() {
     assert!(items(&s).is_empty(), "a test that only names exit is free: {:?}", items(&s));
 }
 
+const SPEC_RB: &str = "describe('group') do\n  it('a') do\n    expect(1).to eq(1)\n  end\nend\n";
+
+#[test]
+fn syntax_units_exit_by_name_python_getattr_is_drift() {
+    for (i, call) in
+        ["getattr(sys, \"exit\")(0)", "getattr(os, \"_exit\")(1)", "getattr(__import__(\"os\"), \"abort\")()"].iter().enumerate()
+    {
+        let new = format!("{PY_TEST}def test_b():\n    {call}\n");
+        exit_drift(&format!("exit-name-py-{i}"), "tests/test_app.py", "python", PY_TEST, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_by_name_javascript_subscript_and_reflect_are_drift() {
+    for (i, call) in ["process[\"exit\"](0)", "Reflect.get(process, \"exit\")(0)", "process[\"reallyExit\"](0)"].iter().enumerate() {
+        let new = format!("{DESCRIBE_JS}it('b', () => {{\n  {call};\n}});\n");
+        exit_drift(&format!("exit-name-js-{i}"), "tests/app.test.js", "javascript", DESCRIBE_JS, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_by_name_ruby_symbol_is_drift() {
+    let new = format!("{SPEC_RB}it('b') do\n  Kernel.send(:exit)\nend\n");
+    exit_drift("exit-name-rb", "tests/app_spec.rb", "ruby", SPEC_RB, &new);
+}
+
+#[test]
+fn syntax_units_exit_by_name_a_string_that_only_names_exit_is_free() {
+    let s = setup_with("exit-name-free", &[("tests/app.test.js", DESCRIBE_JS), ("tests/t.sh", T_SH)]);
+    prime(&s.home, "javascript");
+    assert!(items(&s).is_empty());
+    let new = format!(
+        "{DESCRIBE_JS}it('b', () => {{\n  expect(code(\"exit\")).toBe(1);\n  const key = \"exit\";\n  expect(key).toBe('exit');\n}});\n"
+    );
+    rewrite_at(&s, "tests/app.test.js", &new);
+    assert!(items(&s).is_empty(), "a string that only names exit is free: {:?}", items(&s));
+}
+
 #[test]
 fn syntax_units_exit_variable_named_exit_is_no_drift() {
     let s = setup("exit-variable");
@@ -643,4 +681,28 @@ fn syntax_units_mod_that_reaches_other_code_is_drift() {
         write_new(&s, "tests/it/sub.rs", "#[test]\nfn x() {\n    std::process::exit(0);\n}\n");
         assert_eq!(weaken_for(&s, "tests/it/main.rs"), ["protected file tests/it/main.rs changed".to_string()], "{walk}");
     }
+}
+
+#[test]
+fn syntax_units_exit_by_name_other_lookups_and_backticks_are_drift() {
+    for (i, call) in ["Kernel.public_send(:exit)", "Kernel.__send__(:exit)", "Kernel.method(:exit).call"].iter().enumerate() {
+        let new = format!("{SPEC_RB}it('b') do\n  {call}\nend\n");
+        exit_drift(&format!("exit-name-rb-more-{i}"), "tests/app_spec.rb", "ruby", SPEC_RB, &new);
+    }
+    for (i, call) in ["process[`exit`](0)", "Reflect.get(process, `exit`)(0)"].iter().enumerate() {
+        let new = format!("{DESCRIBE_JS}it('b', () => {{\n  {call};\n}});\n");
+        exit_drift(&format!("exit-name-js-tick-{i}"), "tests/app.test.js", "javascript", DESCRIBE_JS, &new);
+    }
+}
+
+#[test]
+fn syntax_units_exit_by_name_on_other_objects_is_free() {
+    let s = setup_with("exit-name-other", &[("tests/app.test.js", DESCRIBE_JS), ("tests/t.sh", T_SH)]);
+    prime(&s.home, "javascript");
+    assert!(items(&s).is_empty());
+    let new = format!(
+        "{DESCRIBE_JS}it('b', () => {{\n  ws.send('exit');\n  expect(cfg['exit']).toBe(1);\n  expect(settings.get('exit')).toBe(1);\n}});\n"
+    );
+    rewrite_at(&s, "tests/app.test.js", &new);
+    assert!(items(&s).is_empty(), "a key named exit on another object is free: {:?}", items(&s));
 }

@@ -172,6 +172,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow check` and `rvow clarify` reading the worktree of the current checkout for a change named by id: they now read the worktree of that change's branch, so a check from the main checkout reports the same as a check from the worktree of the branch.
+- Fix a protected C or C++ test file falling back to the raw line rules when its text holds a parse error such as a default argument of `= {}`: it is now compared by syntax unit, with each error region part of the unit around it, so a change inside one is drift.
+- Fix a new test reaching a process exit through a string or a symbol going unnoticed: `getattr(sys, "exit")(0)`, `process["exit"](0)`, `Reflect.get(process, "exit")(0)` and `Kernel.send(:exit)` are drift, while a string that only names exit stays free.
+- Fix a runner that prints its summary in color hiding its test count: the color codes are removed before the count is read, so colored vitest output counts like plain output.
+- Fix a verify that chains several runners hiding one that ran no tests: the counts of the runners are added, and a run in which any of them ran 0 tests records 0 and is no proof.
 - Fix `rvow show AMD-x` saying no id matches: it now prints the amendment of an active or archived change with its reason, its items and whether it is pending, accepted or rejected.
 - Fix the confirm dialog of the mods deciding every pending amendment at once: with more than one pending it asks about each amendment in turn, the `rvow_confirm` tool takes an optional `id` for one amendment, and the `rvow_ask` tool takes an optional `change` to ask the open questions of that change.
 - Fix the drift item of an inline Rust test module that only gained items saying lines were lost: it now names the added helpers, such as `adds helpers row_text, row_ids`.

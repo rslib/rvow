@@ -657,6 +657,133 @@ fn syntax_queries_doctest_real_dftracer_file_adds_and_names_cases() {
     assert_eq!(got, ["test tests/test_hex64.cpp changed hex64 - round trips every value".to_string()]);
 }
 
+/// A doctest file whose helper has a default argument of `= {}`, a default
+/// tree-sitter-cpp cannot parse. The units around the error region must still
+/// be compared.
+const CPP_ERROR: &str = r#"#include <doctest/doctest.h>
+
+struct Opts {
+    int n = 0;
+};
+
+void run(Opts o = {}) {
+    add(o.n);
+}
+
+TEST_CASE("adds") {
+    CHECK(add(1, 2) == 3);
+}
+"#;
+
+const CPP_ERROR_FILE: &str = "tests/calc_test.cpp";
+
+/// A real file of dftracer-utils, `tests/dataframe/test_cast_followups.cpp`,
+/// whose template helper takes a default argument of `= {}`.
+const DFTRACER_CAST: &str = r#"#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/dataframe/dataframe.h>
+#include <doctest/doctest.h>
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <random>
+#include <vector>
+
+using dftracer::utils::dataframe::Series;
+using dftracer::utils::dataframe::TypeId;
+
+namespace {
+
+bool bit(const Series& s, std::int64_t i) {
+    return (s.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1;
+}
+
+template <class T>
+void check_to_bool(const std::vector<T>& x, TypeId type,
+                   const std::vector<std::uint8_t>& valid = {}) {
+    const auto n = static_cast<std::int64_t>(x.size());
+    Series s =
+        Series::flat(type, x.data(), n, valid.empty() ? nullptr : valid.data());
+    Series r = s.cast(TypeId::Bool);
+    REQUIRE(r.valid());
+    REQUIRE(r.length() == n);
+    for (std::int64_t i = 0; i < n; ++i) {
+        const T v = x[static_cast<std::size_t>(i)];
+        bool is_null = !valid.empty() && !((valid[i >> 3] >> (i & 7)) & 1);
+        if constexpr (std::is_floating_point_v<T>)
+            is_null = is_null || std::isnan(v);
+        if (is_null) {
+            CHECK(r.is_null(i));
+        } else {
+            CHECK_FALSE(r.is_null(i));
+            CHECK(bit(r, i) == (v != T{}));
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("SIMD and scalar number-to-bool agree on every width and length") {
+    std::mt19937_64 gen(12345);
+    for (std::size_t n : {0, 1, 7, 8, 63, 64, 65, 127, 128, 129, 1000, 4097}) {
+        std::vector<std::int32_t> a(n);
+        check_to_bool(a, TypeId::Int32);
+    }
+}
+
+TEST_CASE("a column without NaN or nulls has no validity after the cast") {
+    std::vector<std::int64_t> x{1, 0, 3};
+    Series r = Series::flat_i64(x.data(), 3).cast(TypeId::Bool);
+    REQUIRE(r.valid());
+    CHECK(r.null_count() == 0);
+}
+"#;
+
+fn cpp_error_drifts(name: &str, old: &str, new: &str) {
+    drifts(name, CPP_ERROR_FILE, "cpp", old, new);
+}
+
+#[test]
+fn syntax_queries_cpp_errors_a_case_added_next_to_a_default_argument_is_no_drift() {
+    let new = format!("{CPP_ERROR}\nTEST_CASE(\"subtracts\") {{ CHECK(sub(2, 1) == 1); }}\n");
+    free("cpp-errors-added", CPP_ERROR_FILE, "cpp", CPP_ERROR, &new);
+}
+
+#[test]
+fn syntax_queries_cpp_errors_a_change_inside_the_error_region_is_drift() {
+    cpp_error_drifts("cpp-errors-default-changed", CPP_ERROR, &CPP_ERROR.replace("Opts o = {}", "Opts o = {1}"));
+}
+
+#[test]
+fn syntax_queries_cpp_errors_an_assert_removed_next_to_the_error_names_the_case() {
+    let old = CPP_ERROR.replace("    CHECK(add(1, 2) == 3);\n", "");
+    let got = change_of("cpp-errors-assert", CPP_ERROR_FILE, "cpp", CPP_ERROR, &old);
+    assert_eq!(got, [format!("test {CPP_ERROR_FILE} changed adds")]);
+}
+
+#[test]
+fn syntax_queries_cpp_errors_a_new_case_that_holds_a_parse_error_is_drift() {
+    let new = format!("{CPP_ERROR}\nTEST_CASE(\"broken\") {{ CHECK(add(1, 2) == 3 }}\n");
+    cpp_error_drifts("cpp-errors-new-broken", CPP_ERROR, &new);
+}
+
+#[test]
+fn syntax_queries_cpp_errors_a_real_dftracer_file_compares_by_unit() {
+    const FILE: &str = "tests/test_cast_followups.cpp";
+    let new = format!(
+        "{DFTRACER_CAST}\nTEST_CASE(\"a null casts to null\") {{\n    CHECK(Series::flat_i64(nullptr, 0).cast(TypeId::Bool).null_count() == 0);\n}}\n"
+    );
+    free("cpp-errors-dftracer-added", FILE, "cpp", DFTRACER_CAST, &new);
+    let got = change_of(
+        "cpp-errors-dftracer-changed",
+        FILE,
+        "cpp",
+        DFTRACER_CAST,
+        &DFTRACER_CAST.replace("null_count() == 0", "null_count() == 1"),
+    );
+    assert_eq!(got, [format!("test {FILE} changed a column without NaN or nulls has no validity after the cast")]);
+}
+
 const UNITY_FILE: &str = "tests/calc_test.c";
 
 const UNITY: &str = "#include <unity.h>\n\nstatic void test_add(void) {\n    TEST_ASSERT_EQUAL_INT(3, add(1, 2));\n}\n\nint main(void) {\n    UNITY_BEGIN();\n    RUN_TEST(test_add);\n    return UNITY_END();\n}\n";
@@ -911,4 +1038,10 @@ fn syntax_queries_unity_main_keeps_its_order() {
     drifts("unity-return-first", UNITY_FILE, "c", UNITY, &moved);
     let added = unity_with("static void test_sub(void) {\n    TEST_ASSERT_EQUAL_INT(1, sub(2, 1));\n}\n", "    RUN_TEST(test_sub);\n");
     free("unity-order-added", UNITY_FILE, "c", UNITY, &added);
+}
+
+#[test]
+fn syntax_queries_cpp_errors_a_directive_in_a_template_header_is_drift() {
+    let new = format!("{DOCTEST}TEST_CASE_TEMPLATE(\"x\", T, int, float\n#define CHECK(x) (void)0\n) {{ CHECK(1); }}\n");
+    doctest_drifts("cpp-errors-header-define", DOCTEST, &new);
 }

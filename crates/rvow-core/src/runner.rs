@@ -1,6 +1,7 @@
 //! Runs a stored verify command: `sh -c` from the repository root, stdin from
 //! `/dev/null`, in its own process group, with a timeout.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -145,8 +146,37 @@ fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+/// One output line without its ANSI escape sequences, so a runner that prints
+/// its summary in color is read the same as one that does not. A sequence is
+/// `ESC`, then `[`, then any bytes, then one final byte in 0x40..=0x7e.
+fn uncolored(line: &str) -> Cow<'_, str> {
+    if !line.contains('\u{1b}') {
+        return Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 impl TestCount {
     fn feed(&mut self, line: &str) {
+        // The color codes go before the parsers read the line; the tail that
+        // is stored for display keeps them.
+        let plain = uncolored(line);
+        let line = plain.as_ref();
         let t = line.trim();
         if t.starts_with("test result:") {
             *self.libtest.get_or_insert(0) += count_before(t, &["passed", "failed"]);
@@ -233,18 +263,31 @@ impl TestCount {
         let go = (self.go_empty > 0 && self.go_real == 0).then_some(0);
         // Mocha always prints `N passing`, so a lone `N failing` line is not its summary.
         let mocha = self.mocha_passing.map(|p| p + self.mocha_failing.unwrap_or(0));
-        self.libtest
-            .or(self.pytest)
-            .or(self.nextest)
-            .or(self.jest)
-            .or(self.node.map(|n| n.saturating_sub(self.node_files)))
-            .or(self.vitest)
-            .or(mocha)
-            .or(go)
-            .or(self.ctest)
-            .or(self.doctest)
-            .or(self.gtest)
-            .or(self.unity)
+        let counters: Vec<u64> = [
+            self.libtest,
+            self.pytest,
+            self.nextest,
+            self.jest,
+            self.node.map(|n| n.saturating_sub(self.node_files)),
+            self.vitest,
+            mocha,
+            go,
+            self.ctest,
+            self.doctest,
+            self.gtest,
+            self.unity,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        match counters.as_slice() {
+            [] => None,
+            // A run of more than one runner in which one of them ran nothing
+            // proves nothing, so the run records zero. One runner keeps its
+            // own count: libtest sums its result lines into one counter.
+            [_, ..] if counters.len() > 1 && counters.contains(&0) => Some(0),
+            _ => Some(counters.iter().sum()),
+        }
     }
 }
 
@@ -692,6 +735,40 @@ mod tests {
         assert_eq!(mixed.tests_run, Some(5), "passing and failing count, pending does not");
         let zero = quiet("echo '  0 passing (1ms)'", t);
         assert_eq!(zero.tests_run, Some(0));
+    }
+
+    #[test]
+    fn counts_mixed_a_colored_summary_is_read() {
+        let t = Duration::from_secs(10);
+        let vitest = quiet("printf '\\033[2m Tests \\033[22m \\033[1m\\033[32m4 passed\\033[39m\\033[22m\\033[90m (4)\\033[39m'", t);
+        assert_eq!(vitest.tests_run, Some(4), "the color codes are removed before the count is read");
+        assert!(vitest.tail[0].contains('\u{1b}'), "the tail keeps the codes: {:?}", vitest.tail);
+        let libtest = quiet("printf '\\033[32mtest result: ok. 5 passed; 0 failed;\\033[0m'", t);
+        assert_eq!(libtest.tests_run, Some(5));
+    }
+
+    #[test]
+    fn counts_mixed_a_runner_that_ran_nothing_is_zero() {
+        let t = Duration::from_secs(10);
+        let empty = quiet("echo 'test result: ok. 5 passed; 0 failed;'; echo '\u{2139} tests 0'", t);
+        assert_eq!(empty.tests_run, Some(0), "node ran nothing, so the run is no proof");
+        let both = quiet("echo 'test result: ok. 5 passed; 0 failed;'; echo '\u{2139} tests 3'", t);
+        assert_eq!(both.tests_run, Some(8), "two runners that ran add up");
+        let c_and_cargo =
+            quiet("echo '[doctest] test cases: 4 | 4 passed | 0 failed | 0 skipped'; echo 'test result: ok. 6 passed; 0 failed;'", t);
+        assert_eq!(c_and_cargo.tests_run, Some(10), "a C suite and cargo add up");
+        let one = quiet("echo 'test result: ok. 0 passed; 0 failed; 5 filtered out'", t);
+        assert_eq!(one.tests_run, Some(0), "one runner that ran nothing is still zero");
+    }
+
+    #[test]
+    fn counts_mixed_libtest_sums_its_own_result_lines() {
+        let t = Duration::from_secs(10);
+        let docs = quiet(
+            "echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0s'; echo 'test result: ok. 5 passed; 0 failed;'",
+            t,
+        );
+        assert_eq!(docs.tests_run, Some(5), "a crate with no doc tests and 5 unit tests is 5, not 0");
     }
 
     #[test]

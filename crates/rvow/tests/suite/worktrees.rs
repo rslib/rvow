@@ -158,6 +158,33 @@ fn worktree_plan_confirm_decides_an_amendment_made_from_the_main_checkout() {
 }
 
 #[test]
+fn worktree_check_reads_the_files_of_the_change_worktree() {
+    let fx = Fx::new("check");
+    fx.ok(&fx.repo, &["init"]);
+    let (id, dir) = fx.plan(&fx.wt);
+    std::fs::write(fx.wt.join("prove.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(dir.join("tasks.md"), TASKS.replace("grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'", "./prove.sh"))
+        .unwrap();
+    let (from_wt, code_wt) = fx.run(&fx.wt, &["check", &id]);
+    let (from_main, code_main) = fx.run(&fx.repo, &["check", &id]);
+    assert!(!from_wt.contains("missing-program"), "{from_wt}");
+    assert!(!from_main.contains("missing-program"), "{from_main}");
+    assert_eq!(from_main, from_wt, "the main checkout must read the worktree of branch B");
+    assert_eq!(code_main, code_wt);
+}
+
+#[test]
+fn worktree_check_clarify_lists_the_questions_of_the_change_worktree() {
+    let fx = Fx::new("check-clarify");
+    fx.ok(&fx.repo, &["init"]);
+    let (id, dir) = fx.plan(&fx.wt);
+    let proposal = std::fs::read_to_string(dir.join("proposal.md")).unwrap();
+    std::fs::write(dir.join("proposal.md"), format!("{proposal}\n[NEEDS CLARIFICATION: Which shell?]\n")).unwrap();
+    let out = fx.ok(&fx.repo, &["clarify", &id]);
+    assert!(out.contains("Which shell?"), "{out}");
+}
+
+#[test]
 fn worktree_plan_clarify_lists_the_questions_of_a_worktree_change() {
     let fx = Fx::new("clarify");
     fx.ok(&fx.repo, &["init"]);

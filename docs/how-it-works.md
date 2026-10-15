@@ -334,8 +334,10 @@ Let each repository gate its own part.
 ## Working in git worktrees
 
 In home mode one store serves every worktree of a repository, so a plan made in one worktree shows in all of them.
-`rvow accept`, `rvow amend`, `rvow archive` and `rvow check` run in the worktree where the branch of the change is checked out, even when you start them from another worktree.
+`rvow accept`, `rvow amend`, `rvow archive`, `rvow check` and `rvow clarify` run in the worktree where the branch of the change is checked out, even when you start them from another worktree.
 The base commit, the files, the baseline and the fingerprints come from that worktree.
+A `rvow check` or `rvow clarify` that names a change reads the worktree of that change's branch, so it reports the same from the main checkout as from the worktree of the branch.
+With no change named, `rvow check` keeps the changes of the branch of the current worktree.
 When no worktree has the branch, accept fails and names `git checkout <branch>` and `git worktree add <path> <branch>`.
 A session in a worktree is judged by the change of that worktree's branch.
 Its hooks, its stop hold and the leases it delegates all use that change, and a change of another branch does not count.

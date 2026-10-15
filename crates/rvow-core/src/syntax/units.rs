@@ -178,35 +178,45 @@ fn macro_body(item: Node) -> Option<Node> {
     (last.is_missing() && last.kind() == ";" && body.kind() == "compound_statement").then_some(body)
 }
 
-/// Whether the parse errors of a tree are only macro headers with no `;`,
-/// their blocks and what is inside them. The header and the block stay in
-/// the unit form, so errors inside them hide nothing.
-fn only_macro_errors(node: Node) -> bool {
-    if !node.has_error() {
-        return true;
-    }
-    if node.is_error() || node.is_missing() {
-        return false;
-    }
-    let mut skip = None;
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i) else { continue };
-        if skip == Some(child.id()) {
-            continue;
+/// Whether every named node of `root` that holds bytes lies in the span of
+/// some unit. Then every byte of the file belongs to the form of some unit,
+/// an ERROR region included, so a change anywhere in a file with parse
+/// errors is a change in some unit form and is drift.
+fn covers_every_node(root: Node, units: &[Unit]) -> bool {
+    let mut spans: Vec<(usize, usize)> = units
+        .iter()
+        .flat_map(|unit| {
+            unit.nodes
+                .iter()
+                .map(|node| (node.start_byte(), node.end_byte()))
+                .chain(unit.tail.map(|tail| (tail.start_byte(), tail.end_byte())))
+        })
+        .collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
         }
-        if let Some(body) = macro_body(child) {
-            skip = Some(body.id());
-        } else if !only_macro_errors(child) {
+    }
+    let covered = |start: usize, end: usize| {
+        let mut lo = 0;
+        let mut hi = merged.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if merged[mid].0 <= start { lo = mid + 1 } else { hi = mid }
+        }
+        lo > 0 && merged[lo - 1].1 >= end
+    };
+    let mut stack: Vec<Node> = (0..root.named_child_count()).filter_map(|i| root.named_child(i as u32)).collect();
+    while let Some(node) = stack.pop() {
+        if node.end_byte() > node.start_byte() && !covered(node.start_byte(), node.end_byte()) {
             return false;
         }
+        stack.extend((0..node.named_child_count()).filter_map(|i| node.named_child(i as u32)));
     }
     true
-}
-
-/// Whether a parse is good enough for the unit compare: no error node, or a
-/// C++ tree whose only errors are doctest and Catch2 macro headers.
-fn usable(tree: &tree_sitter::Tree, lang: &str) -> bool {
-    !tree.root_node().has_error() || (lang == "cpp" && only_macro_errors(tree.root_node()))
 }
 
 /// The units of a parsed file, in source order. A file whose root holds no
@@ -393,6 +403,108 @@ const EXIT_ON_RECEIVER: &[&str] = &["exit", "exit!", "Exit", "abort", "quit", "t
 /// compared without case: `std::process`, `sys`, `System`, `Kernel`.
 const EXIT_RECEIVERS: &[&str] = &["process", "sys", "os", "system", "environment", "kernel", "std", "libc", "pytest", "runtime", "syscall"];
 
+/// Calls that fetch a function by name and hand it back, so an argument that
+/// names an exit ends the process: `getattr(sys, "exit")`, `send(:exit)`.
+const NAME_LOOKUPS: &[&str] = &["getattr", "send", "public_send", "__send__", "method", "getMethod", "getDeclaredMethod"];
+
+/// Receivers whose `get` fetches a member by name, so `Reflect.get(obj,
+/// "exit")` ends the process. Compared without case.
+const NAME_LOOKUP_GETS: &[&str] = &["reflect", "object", "module", "class"];
+
+/// Node kinds that index a container by a key: a Python subscript, a JS
+/// subscript expression, and the Ruby and PHP element access.
+fn is_subscript(kind: &str) -> bool {
+    matches!(kind, "subscript" | "subscript_expression" | "element" | "element_access" | "offset_expression")
+}
+
+/// Node kinds that wrap string or symbol text without adding meaning.
+fn is_text_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "string"
+            | "simple_symbol"
+            | "symbol"
+            | "string_content"
+            | "string_fragment"
+            | "string_array"
+            | "encapsed_string"
+            | "template_string"
+    )
+}
+
+/// Whether the text of a string or symbol leaf names a function that ends the
+/// process, without its quotes or a Ruby `:`.
+fn names_exit(text: &str) -> bool {
+    let text = text.trim_matches(['"', '\'', '`']);
+    let text = text.strip_prefix(':').unwrap_or(text);
+    EXIT_ALWAYS.contains(&text) || EXIT_ON_RECEIVER.contains(&text)
+}
+
+/// Whether a call fetches a function by name: `getattr(...)`, `send(...)` or
+/// `get` on a receiver that looks members up.
+fn looks_up_by_name(call: Node, bytes: &[u8]) -> bool {
+    let function = ["function", "method", "name", "type"]
+        .into_iter()
+        .find_map(|field| call.child_by_field_name(field))
+        .or_else(|| call.named_child(0));
+    let Some(function) = function else { return false };
+    let Ok(text) = function.utf8_text(bytes) else { return false };
+    let text = text.trim();
+    let (owner, name) = match text.rsplit_once('.') {
+        Some((owner, name)) => (owner.to_string(), name),
+        None => (receiver(bytes, function.start_byte()).unwrap_or_default(), text),
+    };
+    let first =
+        call.child_by_field_name("arguments").and_then(|args| args.named_child(0)).and_then(|arg| arg.utf8_text(bytes).ok()).unwrap_or("");
+    if name == "get" {
+        let lower = owner.to_ascii_lowercase();
+        return NAME_LOOKUP_GETS.iter().any(|known| lower.ends_with(known)) && process_like(first);
+    }
+    if !NAME_LOOKUPS.contains(&name) {
+        return false;
+    }
+    // `getattr(obj, "exit")` looks up on its first argument; `send(:exit)` and
+    // `getMethod("exit")` on their receiver, and a bare `send` on self, which
+    // reaches Kernel in Ruby.
+    if name == "getattr" { process_like(first) } else { owner.is_empty() || process_like(&owner) }
+}
+
+/// Whether an object's text looks like the process or a holder of its exit
+/// functions: `sys`, `os`, `process`, `Kernel`, `System.class`, `Runtime`.
+fn process_like(text: &str) -> bool {
+    let text = text.trim().to_ascii_lowercase();
+    let last = text.trim_end_matches(".class").rsplit(['.', ':']).next().unwrap_or("");
+    // A module loaded by name, such as `__import__("os")`, can be any module.
+    EXIT_RECEIVERS.contains(&last) || text.contains("process") || text.contains("runtime") || text.contains("import")
+}
+
+/// Whether a string or symbol leaf reaches an exit function where it stands:
+/// the key of a subscript or element access, as in `process["exit"]` or
+/// `hash[:exit]`, or an argument of a call that looks a function up by name,
+/// as in `getattr(sys, "exit")` or `Kernel.send(:exit)`.
+fn exit_by_name(leaf: Node, bytes: &[u8]) -> bool {
+    if !leaf.utf8_text(bytes).is_ok_and(names_exit) {
+        return false;
+    }
+    let mut node = leaf;
+    while let Some(parent) = node.parent() {
+        if !is_text_node(parent.kind()) {
+            break;
+        }
+        node = parent;
+    }
+    let Some(holder) = node.parent() else { return false };
+    if is_subscript(holder.kind()) {
+        let object = ["value", "object", "receiver"]
+            .into_iter()
+            .find_map(|field| holder.child_by_field_name(field))
+            .or_else(|| holder.named_child(0))
+            .filter(|object| object.id() != node.id());
+        return object.and_then(|object| object.utf8_text(bytes).ok()).is_some_and(process_like);
+    }
+    matches!(holder.kind(), "argument_list" | "arguments") && holder.parent().is_some_and(|call| looks_up_by_name(call, bytes))
+}
+
 /// Whether a leaf is string or comment text, which never calls anything.
 fn is_text_leaf(kind: &str) -> bool {
     ["string", "content", "fragment", "comment", "char", "escape", "heredoc", "regex"].iter().any(|part| kind.contains(part))
@@ -432,8 +544,8 @@ fn bare_call(leaf: Node, bytes: &[u8]) -> bool {
 /// Whether a leaf names a function that ends the process and is called
 /// there. A string, a comment or a variable named exit is no call.
 fn exit_leaf(leaf: Node, bytes: &[u8], lang: &str) -> bool {
-    if is_text_leaf(leaf.kind()) {
-        return false;
+    if is_text_leaf(leaf.kind()) || leaf.kind().contains("symbol") {
+        return exit_by_name(leaf, bytes);
     }
     let Ok(text) = leaf.utf8_text(bytes) else { return false };
     let text = text.strip_prefix('\\').unwrap_or(text);
@@ -510,6 +622,16 @@ fn skips_case(header: Node, bytes: &[u8]) -> bool {
     (0..header.child_count()).filter_map(|i| header.child(i)).any(|child| skips_case(child, bytes))
 }
 
+/// Whether the text of a C or C++ unit holds a line that starts a directive.
+/// A directive inside a parse error is no `preproc_*` node, so the text is
+/// read as well.
+fn holds_directive_text(unit: &Unit, bytes: &[u8]) -> bool {
+    let start = unit.nodes.first().map_or(unit.item.start_byte(), |node| node.start_byte());
+    let end = unit.tail.map_or(unit.item.end_byte(), |tail| tail.end_byte());
+    let text = String::from_utf8_lossy(bytes.get(start..end).unwrap_or_default());
+    text.lines().any(|line| line.trim_start().starts_with('#'))
+}
+
 /// Whether a node holds a preprocessor directive: a `#define` or `#undef`
 /// inside a new test can switch off the asserts of every later test.
 fn has_preprocessor(node: Node) -> bool {
@@ -525,6 +647,23 @@ fn ignores_test(node: Node, bytes: &[u8]) -> bool {
     (0..node.child_count()).filter_map(|i| node.child(i)).any(|child| ignores_test(child, bytes))
 }
 
+/// Whether a node holds an ERROR node anywhere in it. The text of an ERROR
+/// node is not a test, so a unit that holds one is never free.
+fn has_error_node(node: Node) -> bool {
+    node.kind() == "ERROR" || (0..node.named_child_count()).filter_map(|i| node.named_child(i as u32)).any(has_error_node)
+}
+
+/// Whether a unit holds an ERROR node anywhere in it. The text of an ERROR
+/// node is not a test, so a unit that holds one is never free. The header of
+/// a doctest or Catch2 macro is left out: `macro_body` already decides that
+/// pair, and a template argument list parses as an ERROR node there.
+fn holds_error_node(unit: &Unit) -> bool {
+    match unit.tail {
+        Some(tail) => has_error_node(tail),
+        None => unit.nodes.iter().any(|node| has_error_node(*node)),
+    }
+}
+
 /// Whether a new unit is free: a trusted query marks it a test, its name is
 /// one the old text does not use, every node above it is a test prefix, and
 /// its body calls no function that ends the process.
@@ -534,11 +673,13 @@ fn free(unit: &Unit, named: Option<&queries::Queries>, lang: &str, old: &str, by
     if name.is_empty()
         || matches!(name.as_str(), "TestMain" | "init")
         || has_word(old, &name)
+        || holds_error_node(unit)
         || calls_exit(unit.item, bytes, lang)
         || unit.tail.is_some_and(|tail| calls_exit(tail, bytes, lang) || skips_case(unit.item, bytes))
         || focuses_run(unit.item, bytes)
         || has_preprocessor(unit.item)
         || unit.tail.is_some_and(has_preprocessor)
+        || (matches!(lang, "c" | "cpp") && holds_directive_text(unit, bytes))
         || (matches!(lang, "c" | "cpp") && (ignores_test(unit.item, bytes) || unit.tail.is_some_and(|tail| ignores_test(tail, bytes))))
     {
         return false;
@@ -681,6 +822,8 @@ fn kept_units(forms: &[String], old: &BTreeMap<&String, usize>) -> Vec<bool> {
 /// decided, `None` when the caller keeps its own rule. `None` covers a file
 /// with no pinned grammar, a grammar that is not in the cache, a fetch that
 /// failed inside the retry window, and a text that does not parse cleanly.
+/// A C or C++ text parses into units even when it holds other errors, as long
+/// as every node of both trees belongs to a unit.
 /// `repo` resolves the project query files of `test_queries`, keyed by
 /// language; the queries decide which containers split and which new units
 /// are free, so they load before the compare. `session` is the grammar
@@ -707,20 +850,24 @@ pub fn preserved(
     }
     let session = session.as_mut()?;
     let base = std::env::var(grammar::URL_VAR).ok().filter(|v| !v.is_empty());
-    let mut parse = |text: &str| -> Option<_> {
-        let tree = session.parse(home, entry, base.as_deref(), text).ok()?;
-        usable(&tree, entry.name.as_str()).then_some(tree)
-    };
+    let mut parse = |text: &str| session.parse(home, entry, base.as_deref(), text).ok();
     let before_tree = parse(before)?;
     let now_tree = parse(now)?;
     let language = session.language(entry)?;
-    let mut parse = |text: &str| -> Option<_> {
-        let tree = session.parse(home, entry, base.as_deref(), text).ok()?;
-        usable(&tree, entry.name.as_str()).then_some(tree)
-    };
+    let mut parse = |text: &str| session.parse(home, entry, base.as_deref(), text).ok();
     let named = repo.map(|repo| queries::load(entry.name.as_str(), &language, repo.top, test_queries, repo.protected));
     let old = unit_nodes(before_tree.root_node(), named.as_ref(), before.as_bytes());
     let new = unit_nodes(now_tree.root_node(), named.as_ref(), now.as_bytes());
+    if before_tree.root_node().has_error() || now_tree.root_node().has_error() {
+        // A C or C++ file with other errors, such as a default argument of
+        // `= {}`, still compares by unit: an ERROR region is part of the
+        // unit around it and is never free. Any other language, and any
+        // tree a unit does not cover, keeps the caller's own rule.
+        let covers = |tree: &tree_sitter::Tree, units: &[Unit]| covers_every_node(tree.root_node(), units);
+        if !matches!(entry.name.as_str(), "c" | "cpp") || !covers(&before_tree, &old) || !covers(&now_tree, &new) {
+            return None;
+        }
+    }
     let old_forms: Vec<String> = old.iter().map(|unit| unit.form(before.as_bytes())).collect();
     let new_forms: Vec<String> = new.iter().map(|unit| unit.form(now.as_bytes())).collect();
     fn count(forms: &[String]) -> BTreeMap<&String, usize> {

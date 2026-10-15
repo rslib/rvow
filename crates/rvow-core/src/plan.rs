@@ -1,7 +1,7 @@
 //! `rvow check`: a read-only report on a plan before the user accepts it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -340,6 +340,18 @@ fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded,
     Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
 }
 
+/// The top of the worktree that holds the change's branch: the worktree of
+/// `top` when its branch is checked out there, else the worktree of the same
+/// repository that has it, else `top`. The files a check reads, and the
+/// programs it blames, belong to that worktree.
+fn change_top(top: &Path, loaded: &Loaded) -> PathBuf {
+    let branch = loaded.proposal.branch.as_str();
+    if branch.is_empty() {
+        return top.to_path_buf();
+    }
+    git::top_for_branch(top, branch).ok().flatten().filter(|other| other != top).unwrap_or_else(|| top.to_path_buf())
+}
+
 /// Checks `target`, or every open change whose proposal names the current
 /// branch.
 pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<Report>> {
@@ -364,8 +376,9 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
     let mut out = Vec::new();
     for d in dirs {
         let loaded = change::load(&d.path, &living)?;
-        let mut r = report(project, &config, d, loaded, &top);
-        r.findings.extend(crate::lint::test_query_checks(&home, &top, &config));
+        let change_top = if target.is_some() { change_top(&top, &loaded) } else { top.clone() };
+        let mut r = report(project, &config, d, loaded, &change_top);
+        r.findings.extend(crate::lint::test_query_checks(&home, &change_top, &config));
         out.push(r);
     }
     Ok(out)

@@ -124,6 +124,14 @@ A pass with 0 tests run is not a proof, so rvow reads the number of tests from t
 rvow counts only a summary line at the start of a line, like the other runners, so a line that a test prints itself, indented or with a prefix, does not count.
 A doctest or GoogleTest binary has no fixed name, so rvow reads its output wherever it appears; `ctest` is the one C or C++ runner that the `baseline: pass` check knows by name.
 
+rvow removes the color codes from a line before it reads the count, so a runner that prints its summary in color, such as vitest in a terminal, counts the same as one that does not.
+The tail that `rvow show` prints for the run keeps the codes.
+
+When the output holds the summaries of more than one runner, rvow adds their counts.
+A run in which one of the runners ran 0 tests is not a proof, so the run records 0 tests.
+One runner keeps its own count: the lines of one runner, such as the `test result:` lines of libtest or the summary lines of doctest, are added into a single count first, so a crate with 0 doc tests and 5 unit tests is 5.
+`pytest` that exits with 5, no tests ran, is 0 as well.
+
 ## The full-suite warning
 
 `rvow check` warns with `full-suite` about a task whose verify chains three or more commands with `&&` or `;`, repeats a `checks` entry, or took more than one minute on its last recorded run.
@@ -200,8 +208,11 @@ A new unit is free only when a shipped query marks it a test, its name is one th
 A Java, Kotlin, C# or PHP test also needs every annotation or attribute it holds to be a test one (see the shipped queries below).
 A new test that calls a function that ends the process is drift, even when a query marks it: a process exit or abort such as `std::process::exit`, `sys.exit`, `os._exit`, `exit()`, `process.exit`, `os.Exit`, `log.Fatal*`, `System.exit`, `Environment.Exit` or PHP `exit`.
 rvow reads the names in the syntax tree, so a string `"exit"` or a variable named `exit` is not a process exit, but a qualified or indirect call such as `java.lang.System.exit(0)`, `(process.exit)(0)`, `dbg!(std::process::exit(0))` or a bare Ruby `exit if done` is.
+A string or a symbol that names one of those functions is a process exit where it is used to reach one: as the key of a subscript or element access on a process-like object, such as `process["exit"]` or ``process[`exit`]``, or as an argument of a call that looks a function up by name on one, such as `getattr(sys, "exit")`, `Reflect.get(process, "exit")`, `Kernel.send`, `public_send`, `__send__`, `method`, `getMethod` and `getDeclaredMethod`.
+A process-like object is `process`, `sys`, `os`, `System`, `Kernel`, `Runtime` and the like, or a module loaded by name such as `__import__("os")`; a bare Ruby `send(:exit)` counts too, so `ws.send('exit')` or `cfg['exit']` on other objects stays free.
+The same string in any other place is not an exit, so `assert_eq!(code("exit"), 1)` stays free.
 `exit`, `abort` and `terminate` count only when they are called bare or on a process-like object (`process`, `sys`, `os`, `System`, `Environment`, `Kernel`, `Runtime`, `std`, `libc`), so `controller.abort()` stays free.
-A call made through a string, such as `getattr(sys, "exit")()`, is not caught.
+A call made through a string, such as `getattr(sys, "exit")()`, is drift too, as a call that reaches an exit function by name is.
 A new test call that focuses the run on itself, with RSpec `focus: true` or `:focus` or a node test `{ only: true }` option, is drift too, because it makes the runner skip every other test.
 A comment above it is free only after the first old unit of the file.
 A new `mod NAME;` line with no body in a protected Rust test file (the mod line rule) is free too, when all of these hold:
@@ -215,6 +226,8 @@ A new helper, hook, fixture, import or `macro_rules!` is drift: record it with `
 Moving a unit inside its container is not drift.
 Plain Rust `//` comments are left out of unit forms; doc comments and comments in other languages are kept.
 A file whose grammar does not load, or whose text does not parse cleanly, keeps the raw rules: the line rule for most files and the Rust test-module rule for `.rs`.
+A C or C++ file is the one exception: it is compared by unit even when its text holds other parse errors, such as a default argument of `= {}` that tree-sitter cannot parse.
+Each error region is then part of the unit around it, so a change inside one, such as `= {}` to `= {1}`, is drift, and a new unit that holds an ERROR node is never free.
 
 The drift item names the test that changed when a query file marks its unit.
 Each shipped query marks the test units of the common frameworks: `test(...)`, `it(...)` and `describe(...)` calls for JavaScript and TypeScript, pytest and unittest `test_*` functions for Python, `#[test]` functions for Rust, GoogleTest `TEST`, `TEST_F` and `TEST_P` macros for C++, named `Suite.Name`, and `func TestX` for Go.
@@ -232,7 +245,7 @@ The queries for Java, Kotlin, C#, Ruby, PHP, C++ (doctest and Catch2) and C (Uni
 In C and C++ a new test that holds a preprocessor directive (`#define`, `#undef`, `#include`) is drift, since it can switch off the asserts of later tests, and naming `exit`, `abort` or `quick_exit` counts as a process exit even without a call, as does `::exit`, `raise` or `kill`.
 The statements of a Unity `main` keep their order: moving `return UNITY_END();` above a `RUN_TEST` line is drift.
 A doctest or Catch2 macro such as `TEST_CASE("adds") { ... }` has no `;`, so tree-sitter-cpp parses it as a header with a missing `;` followed by a block, and the parse holds an error.
-rvow accepts that error in a C++ file, joins the header and its block into one unit, and keeps every other parse error as a reason for the raw rules, so a file with an unrelated error keeps them.
+rvow accepts that error in a C++ file and joins the header and its block into one unit.
 A `RUN_TEST` rule applies to a `main` that holds at least one `RUN_TEST` line: the header of `main` is one unit and each statement is its own unit, so a new `RUN_TEST(test_name);` line for a new free `test_` function is free and a removed line is drift.
 A `main` of any other C file stays one unit, and a `.h` file frees no new unit unless it includes `unity.h`.
 A new test in these languages that calls a process exit (`System.exit`, `Runtime...halt`, `exitProcess`, `Environment.Exit`, `exit`, `abort`, `Process.exit`, `die`) is drift too.
