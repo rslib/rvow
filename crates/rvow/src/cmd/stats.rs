@@ -32,6 +32,9 @@ pub fn stats(days: u64) -> Result<Reply> {
         r.line(format!("asked the user after repeated denials: {}", c.asks));
     }
     r.line(format!("stops: {} blocked, {} passed", c.stop_blocks, c.stop_passes));
+    for (reason, n) in &c.stop_reasons {
+        r.line(format!("stop blocked for {reason}: {n}"));
+    }
     if let Some(per_100) = c.blocks_per_100() {
         r.line(format!("{per_100} stop blocks per 100 stops"));
         r.set("stop_blocks_per_100", per_100);
@@ -44,5 +47,7 @@ pub fn stats(days: u64) -> Result<Reply> {
     let audits: Vec<Obj> = c.audits.iter().map(|(rule, n)| crate::obj! { "rule" => rule.as_str(), "count" => *n }).collect();
     r.table("audits", audits, "no audits");
     r.set("asks", c.asks);
+    let reasons: Vec<Obj> = c.stop_reasons.iter().map(|(reason, n)| crate::obj! { "reason" => reason.as_str(), "count" => *n }).collect();
+    r.table("stop_reasons", reasons, "no stop blocks");
     Ok(r)
 }

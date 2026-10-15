@@ -73,9 +73,21 @@ impl Fx {
         tasks.lines().find_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).unwrap()
     }
 
+    /// An allowed Write call of session `s1` on `rel`, which puts the file in the session's record.
+    fn edit(&self, rel: &str) {
+        let input = json!({"file_path": self.root.join("repo").join(rel)});
+        let payload = json!({"cwd": self.root.join("repo"), "tool_name": "Write", "tool_input": input, "session_id": "s1"});
+        let mut child =
+            self.cmd(RVOW).args(["hook", "claude", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        assert_eq!(out.trim(), "", "the edit of {rel} was held back");
+    }
+
     fn stop(&self) -> Option<String> {
         let mut child = self.cmd(RVOW).args(["hook", "claude", "stop"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(json!({"cwd": self.root.join("repo")}).to_string().as_bytes()).unwrap();
+        let payload = json!({"cwd": self.root.join("repo"), "session_id": "s1"});
+        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
         let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
         (!out.trim().is_empty()).then(|| serde_json::from_str::<Value>(&out).unwrap()["reason"].as_str().unwrap().to_string())
     }
@@ -89,6 +101,7 @@ fn stop_an_older_change_does_not_hold_the_agent() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     let new = fx.change("New work", &format!("test -f b.txt && {PASS}"));
     std::fs::write(fx.root.join("repo/b.txt"), "x").unwrap();
+    fx.edit("b.txt");
     fx.rvow(&["prove", &new]);
     assert_eq!(fx.stop(), None, "the older change has a failed task, but the newest change is done");
 }
@@ -101,6 +114,7 @@ fn stop_the_newest_change_still_holds_the_agent() {
     fx.rvow(&["prove", &old]);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let new = fx.change("New work", "false");
+    fx.edit("a.txt");
     fx.rvow(&["prove", &new]);
     let reason = fx.stop().expect("the newest change has a failed task");
     assert!(reason.contains(&new) && !reason.contains(&old), "{reason}");

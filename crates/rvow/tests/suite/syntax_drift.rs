@@ -228,7 +228,7 @@ fn syntax_drift_fetch_hook_check_downloads_nothing() {
     }
     let entry = grammar::by_name("toml").unwrap();
     rewrites(&s, &edit_of(&s, "\n\n", "\n"), &_env);
-    let _ = hook::stop_reason(&s.project, &s.home, &s.repo).unwrap();
+    let _ = hook::stop_reason(&s.project, &s.home, &s.repo, None).unwrap();
     assert!(!grammar::cache_file(&s.home, entry).is_file(), "a hook drift check stays offline");
     unsafe {
         std::env::remove_var("RVOW_GRAMMAR_URL");

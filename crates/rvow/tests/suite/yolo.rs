@@ -184,12 +184,17 @@ fn tiers_the_length_has_a_limit_and_a_unit() {
 fn tiers_the_bypass_tier_never_holds_a_stop_and_the_others_keep_the_usual_stop() {
     let fx = Fx::new("stop", true);
     std::fs::write(fx.repo().join("out.txt"), "touched").unwrap();
-    let stop = || fx.event("stop", json!({"cwd": fx.repo()}));
-    assert!(stop().is_some(), "an open task holds the stop");
+    let edit = json!({"file_path": fx.repo().join("out.txt")});
+    for session in ["s1", "s2", "s3"] {
+        let call = json!({"cwd": fx.repo(), "tool_name": "Write", "tool_input": edit, "session_id": session});
+        assert_eq!(fx.event("pre-tool-use", call), None);
+    }
+    let stop = |session: &str| fx.event("stop", json!({"cwd": fx.repo(), "session_id": session}));
+    assert!(stop("s1").is_some(), "an open task holds the stop");
     fx.rvow(&["yolo", "auto"]);
-    assert!(stop().is_some(), "auto keeps the stop");
+    assert!(stop("s2").is_some(), "auto keeps the stop");
     fx.rvow(&["yolo", "bypass"]);
-    assert_eq!(stop(), None);
+    assert_eq!(stop("s3"), None);
 }
 
 #[test]

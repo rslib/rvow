@@ -127,6 +127,15 @@ impl Fx {
         self.hook("Write", json!({"file_path": file}), &[])
     }
 
+    /// An allowed Write call of session `s1`, which puts the file in the session's record.
+    fn write_as_session(&self, file: &Path) {
+        let payload = json!({"cwd": self.repo(), "tool_name": "Write", "tool_input": {"file_path": file}, "session_id": "s1"});
+        let mut child = self.cmd(RVOW).args(["hook", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        assert_eq!(out.trim(), "", "the write of {} was held back", file.display());
+    }
+
     fn bash(&self, command: &str) -> Option<String> {
         self.hook("Bash", json!({"command": command}), &[])
     }
@@ -333,17 +342,16 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     // Stop: an open task, then drift.
     let stop = |fx: &Fx| {
         let mut child = fx.cmd(RVOW).args(["hook", "stop"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(json!({"cwd": fx.repo()}).to_string().as_bytes()).unwrap();
+        child.stdin.take().unwrap().write_all(json!({"cwd": fx.repo(), "session_id": "s1"}).to_string().as_bytes()).unwrap();
         let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
         serde_json::from_str::<Value>(&out).unwrap()["reason"].as_str().unwrap().to_string()
     };
     std::fs::write(fx.repo().join("out.txt"), "touched").unwrap();
+    fx.write_as_session(&fx.repo().join("out.txt"));
     reasons.push(("open task".into(), stop(&fx)));
-    let active = std::fs::read_dir(project_root.join("active")).unwrap().next().unwrap().unwrap().path();
-    // A title change is free drift; a proposal change needs the user's confirm.
-    let proposal = active.join("proposal.md");
-    let text = std::fs::read_to_string(&proposal).unwrap();
-    std::fs::write(&proposal, format!("{text}\nOne more thing.\n")).unwrap();
+    // A change to a protected test file needs the user's confirm.
+    std::fs::write(fx.repo().join("tests/t.sh"), "exit 1").unwrap();
+    fx.write_as_session(&fx.repo().join("tests/t.sh"));
     let drift = stop(&fx);
     assert!(drift.contains("/rvow-confirm"), "{drift}");
     reasons.push(("drift".into(), drift));

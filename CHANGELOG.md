@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Hold a stop only for the work of the session: a session is held only for a task or drift item whose file it changed, a pending amendment of a change releases its stop, and stale proofs no longer hold a stop and are left to the push gate; `rvow stats` lists the stop blocks by reason, `drift`, `no-proof` or `unknown`.
 - Count only the segments that are not a file check (`grep`, `rg`, `test`, `[`, `diff`, `cmp`) toward the `full-suite` chain warning, so a verify of file checks before one test no longer warns.
 - Refuse a blank required proposal section: `rvow check` reports a structure error that names the section and its line, and one word is enough.
 - Count the issues of a backlog plan in the dashboard with the same function as `rvow check`, so a task whose runner fails to fill counts once and the plan is not ready.

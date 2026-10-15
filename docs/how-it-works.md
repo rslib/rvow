@@ -93,10 +93,22 @@ An agent that could approve its own amendment would make drift detection a forma
 The agent can do two things instead.
 It can amend and wait, or it can run `rvow block` when a task cannot pass as written.
 
-A pending amendment also decides the Stop hook.
-The stop is held while an active change has an unproved or failed task, unless a pending amendment of that change names the task.
-An amendment that only changed `design.md` releases nothing, while an amendment whose items name a task releases that task.
-An amendment recorded before rvow wrote task names has no `tasks` key and releases its whole change.
+## The stop holds only the work of the session
+
+The Stop hook holds a session only for work that session started.
+The hooks record each file that a session changed: the files of its Edit and Write calls, and the file names in a shell command that does not only read.
+For a shell command they read its path and file-name words, the files its globs match, the path-like text of heredoc bodies and inline scripts such as `python3 -c "..."`, and the folders that a `cd` of the line moves to.
+A formatter or fixer run such as `cargo fmt` or `ruff check --fix` counts as a change of every file, and `rvow put` counts as a change of the plan.
+Git read commands such as `git diff` and `sed` without `-i` change nothing.
+A session is held only for a task or drift item whose file it changed.
+It is held for a task with no proof when it changed a file that the `files:` of the task match.
+It is held for drift when it changed a file that a drift item names or a protected file.
+A session that changed no file, one that only read, a subagent and a call with no session id are never held.
+Each reason is given once to a session.
+
+A pending amendment releases the stop.
+While a change has any pending amendment, the Stop hook holds nothing for that change, since only the user can decide it.
+Stale proofs never hold a stop: they are left to the push gate, and `rvow gate --strict` still fails on them.
 
 ## The proof and what stale means
 
@@ -264,8 +276,10 @@ A branch with no active change and no backlog plan gets one line naming `rvow ne
 The hooks should help and stay quiet, so rvow counts what they do.
 Each denial and each stop is one line in `hook-stats.jsonl` in the project folder.
 A line holds the time, the hook, the outcome (deny, audit, ask, block or pass), the session id and, for a denial, an audit or an ask, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
+A stop block also holds a `reason`, `drift` or `no-proof`.
 It never holds a command or a path.
-`rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops.
+`rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops and a `stop_reasons` list that counts the blocks of each reason.
+A block line written before reasons existed counts as `unknown`.
 Use it to find the rule that fires most before you change any rule.
 Agents cannot read or write the stats file.
 

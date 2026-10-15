@@ -668,6 +668,103 @@ pub(super) fn path_words(cmd: &str) -> Vec<String> {
         .collect()
 }
 
+/// The words of `cmd` that may name a file it changes: the path words, and the
+/// bare file names such as `out.txt` or `Cargo.toml`, which hold a dot but no `/`.
+pub(super) fn changed_words(cmd: &str) -> Vec<String> {
+    let mut out = path_words(cmd);
+    let sh = parse(cmd, 0, &HashMap::new());
+    let bare = |w: &&String| !w.starts_with('-') && !w.contains('/') && !has_glob(w) && w.trim_matches('.').contains('.');
+    out.extend(sh.words.iter().filter(bare).cloned());
+    out
+}
+
+/// Git subcommands that only read the repository, so their path words name
+/// no file the command changes.
+const GIT_READS: &[&str] = &[
+    "diff",
+    "log",
+    "show",
+    "status",
+    "blame",
+    "grep",
+    "ls-files",
+    "ls-tree",
+    "rev-parse",
+    "cat-file",
+    "describe",
+    "shortlog",
+    "whatchanged",
+];
+
+/// Words that make a formatter or fixer rewrite files it does not name:
+/// `cargo fmt`, `ruff check --fix`, `prettier --write .`.
+const REWRITES: &[&str] = &["fmt", "format", "--fix", "--write"];
+
+/// What a Bash command that does not only read may change, as rvow records it
+/// for the stop hook.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Changes {
+    /// Words that may name a changed file, each with the directories a `cd`
+    /// of the line moved to, so the caller resolves it from each.
+    pub paths: Vec<String>,
+    pub dirs: Vec<String>,
+    /// A formatter or fixer ran, so any file may have changed.
+    pub any: bool,
+    /// `rvow put` ran, so the plan of the change may have changed.
+    pub plan: bool,
+}
+
+/// The files a Bash command may change: its path and file-name words, the
+/// expansions of its glob words, and the path-like text of heredoc bodies and
+/// inline scripts such as `python3 -c "open('src/a.rs', 'w')"`. A line of git
+/// read commands changes nothing.
+pub(super) fn bash_changes(cmd: &str, cwd: &Path) -> Changes {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
+    let git_read = |inv: &&[String]| {
+        matches!(base_name(&inv[0]), "git" | "rgit") && git_subcommand(&inv[1..]).is_some_and(|(sub, _)| GIT_READS.contains(&sub))
+    };
+    // `sed` without `-i` prints, and `cd` moves; neither changes a file unless
+    // the line redirects into one.
+    let quiet = |inv: &&[String]| {
+        let name = base_name(&inv[0]);
+        git_read(inv)
+            || READERS.contains(&name)
+            || name == "cd"
+            || (name == "sed" && !inv.iter().any(|w| w.starts_with("-i") || w.starts_with("--in-place")))
+    };
+    if !invs.is_empty() && !writes_files(&invs, cmd) && invs.iter().all(quiet) {
+        return Changes::default();
+    }
+    let mut out = Changes::default();
+    for inv in &invs {
+        let name = base_name(&inv[0]);
+        if name == "cd" {
+            out.dirs.extend(inv.get(1).cloned());
+        }
+        if name == "rvow" && inv.get(1).is_some_and(|w| w == "put") {
+            out.plan = true;
+        }
+        if !inv.iter().any(|w| w == "--check") && inv[1..].iter().any(|w| REWRITES.contains(&w.as_str())) {
+            out.any = true;
+        }
+    }
+    out.paths = changed_words(cmd);
+    out.paths.extend(glob_paths(cmd, cwd).into_iter().filter_map(|p| p.to_str().map(String::from)));
+    // Heredoc bodies and quoted scripts are not shell words, so read the raw
+    // text for anything shaped like a path.
+    let is_path_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '/' | '-');
+    for piece in cmd.split(|c: char| !is_path_char(c)) {
+        let piece = piece.strip_prefix("./").unwrap_or(piece).trim_end_matches(['.', '-']);
+        let named = piece.contains('/')
+            || piece.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().all(char::is_alphanumeric));
+        if named && !piece.is_empty() {
+            out.paths.push(piece.to_string());
+        }
+    }
+    out
+}
+
 /// The filesystem paths that the glob words of `cmd` expand to from `cwd`.
 /// A word without `*`, `?` or `[` is not expanded, and a path that does not
 /// exist is dropped, so a pattern that matches nothing yields nothing.
