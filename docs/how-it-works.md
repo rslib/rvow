@@ -103,8 +103,10 @@ It can amend and wait, or it can run `rvow block` when a task cannot pass as wri
 
 The Stop hook holds a session only for work that session started.
 The hooks record each file that a session changed: the files of its Edit and Write calls, and the file names in a shell command that does not only read.
-For a shell command they read its path and file-name words, the files its globs match, the path-like text of heredoc bodies and inline scripts such as `python3 -c "..."`, and the folders that a `cd` of the line moves to.
-A formatter or fixer run such as `cargo fmt` or `ruff check --fix` counts as a change of every file, and `rvow put` counts as a change of the plan.
+For a shell command they read its path and file-name words, the files its globs match, and the path-like text of heredoc bodies and inline scripts such as `python3 -c "..."`. A `cd` of the line only moves the folder those words resolve from, and folders themselves are never recorded.
+A formatter run such as `cargo fmt` records nothing beyond the files it names, and `rvow put` counts as a change of the plan.
+Script text counts only where it names an existing file, or a path with a `/` whose folder exists: `src/a.rs` counts, while code words such as `stack.pop` do not.
+A subagent's edits count for that subagent, not for the main session that spawned it.
 Git read commands such as `git diff` and `sed` without `-i` change nothing.
 A session is held only for a task or drift item whose file it changed.
 It is held for a task with no proof when it changed a file that the `files:` of the task match.

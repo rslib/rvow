@@ -739,20 +739,18 @@ const GIT_READS: &[&str] = &[
     "whatchanged",
 ];
 
-/// Words that make a formatter or fixer rewrite files it does not name:
-/// `cargo fmt`, `ruff check --fix`, `prettier --write .`.
-const REWRITES: &[&str] = &["fmt", "format", "--fix", "--write"];
-
 /// What a Bash command that does not only read may change, as rvow records it
 /// for the stop hook.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Changes {
-    /// Words that may name a changed file, each with the directories a `cd`
-    /// of the line moved to, so the caller resolves it from each.
+    /// Shell words that may name a changed file, each with the directories a `cd`
+    /// of the line moved to, so the caller resolves it from each. A word here may
+    /// name a new file in an existing folder.
     pub paths: Vec<String>,
+    /// Path-like text of heredoc bodies and inline scripts. It counts only where it
+    /// names an existing file, or a path with a `/` whose folder exists.
+    pub script_paths: Vec<String>,
     pub dirs: Vec<String>,
-    /// A formatter or fixer ran, so any file may have changed.
-    pub any: bool,
     /// `rvow put` ran, so the plan of the change may have changed.
     pub plan: bool,
 }
@@ -788,21 +786,19 @@ pub(super) fn bash_changes(cmd: &str, cwd: &Path) -> Changes {
         if name == "rvow" && inv.get(1).is_some_and(|w| w == "put") {
             out.plan = true;
         }
-        if !inv.iter().any(|w| w == "--check") && inv[1..].iter().any(|w| REWRITES.contains(&w.as_str())) {
-            out.any = true;
-        }
     }
     out.paths = changed_words(cmd);
     out.paths.extend(glob_paths(cmd, cwd).into_iter().filter_map(|p| p.to_str().map(String::from)));
     // Heredoc bodies and quoted scripts are not shell words, so read the raw
-    // text for anything shaped like a path.
+    // text for anything shaped like a path. The caller keeps only the ones that
+    // name an existing file, or a path with a `/` whose folder exists.
     let is_path_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '/' | '-');
     for piece in cmd.split(|c: char| !is_path_char(c)) {
         let piece = piece.strip_prefix("./").unwrap_or(piece).trim_end_matches(['.', '-']);
         let named = piece.contains('/')
             || piece.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().all(char::is_alphanumeric));
         if named && !piece.is_empty() {
-            out.paths.push(piece.to_string());
+            out.script_paths.push(piece.to_string());
         }
     }
     out

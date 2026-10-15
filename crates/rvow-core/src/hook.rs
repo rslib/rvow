@@ -664,8 +664,9 @@ fn repo_rel(file: &str, cwd: &Path, top: &Path) -> Option<String> {
     target.strip_prefix(&top).ok().and_then(Path::to_str).filter(|r| !r.is_empty()).map(String::from)
 }
 
-/// Adds the files an allowed tool call may change to the record of `session`: the paths of a
-/// writing tool, and the path words of a Bash command that does not only read.
+/// Adds the files an allowed tool call may change to the record of its owner: the
+/// subagent record when the input carries an agent id, else the main session record.
+/// The main session stop reads only the main record.
 fn record_changes(project: &Project, session: &str, input: &Value) {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
@@ -675,22 +676,44 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
         let Some(c) = args.get("command").and_then(Value::as_str).filter(|c| !reads_only(c)) else { return };
         let changes = bash_changes(c, &cwd);
         let bases: Vec<PathBuf> = std::iter::once(cwd.clone()).chain(changes.dirs.iter().map(|d| cwd.join(d))).collect();
-        let mut rels: Vec<String> = changes
-            .paths
-            .iter()
-            .flat_map(|f| bases.iter().map(move |base| (f, base)))
-            .filter(|(f, base)| {
-                // A word is a file the command may change only where that file or its folder is.
-                let at = base.join(f);
-                at.exists() || at.parent().is_some_and(Path::is_dir)
-            })
-            .filter_map(|(f, base)| repo_rel(f, base, &top))
-            .collect();
-        if changes.any {
-            rels.push(session_files::ANY.to_string());
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rels: Vec<String> = Vec::new();
+        let mut push = |rel: String| {
+            if seen.insert(rel.clone()) {
+                rels.push(rel);
+            }
+        };
+        for (f, base) in changes.paths.iter().flat_map(|f| bases.iter().map(move |base| (f, base))) {
+            let at = base.join(f);
+            if at.is_dir() {
+                continue;
+            }
+            let writable = at.exists() || at.parent().is_some_and(Path::is_dir);
+            if !writable {
+                continue;
+            }
+            if at.exists() && std::fs::metadata(&at).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            if let Some(rel) = repo_rel(f, base, &top) {
+                push(rel);
+            }
+        }
+        for (f, base) in changes.script_paths.iter().flat_map(|f| bases.iter().map(move |base| (f, base))) {
+            let at = base.join(f);
+            if at.is_dir() {
+                continue;
+            }
+            let keep = at.is_file() || (f.contains('/') && at.parent().is_some_and(Path::is_dir));
+            if !keep {
+                continue;
+            }
+            if let Some(rel) = repo_rel(f, base, &top) {
+                push(rel);
+            }
         }
         if changes.plan {
-            rels.push(session_files::PLAN.to_string());
+            push(session_files::PLAN.to_string());
         }
         rels
     } else if writes_files(tool) {
@@ -698,7 +721,11 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
     } else {
         return;
     };
-    session_files::record(project, session, &rels);
+    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
+        session_files::record_agent(project, session, agent, &rels);
+    } else {
+        session_files::record(project, session, &rels);
+    }
 }
 
 /// Whether drift item text names `path` as a whole word, so a short name
@@ -1441,9 +1468,76 @@ mod tests {
         claude_pre_tool_use(p, &call).unwrap()
     }
 
+    fn pre_agent(p: &Project, repo: &Path, session: &str, agent: &str, tool: &str, input: Value) -> Option<Value> {
+        let call = json!({"session_id": session, "agent_id": agent, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
+        claude_pre_tool_use(p, &call).unwrap()
+    }
+
     fn stop_of(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {
         let input = json!({"cwd": repo.to_str().unwrap(), "session_id": session});
         claude_stop(p, home, &input).unwrap().map(|v| v["reason"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn stop_agent_subagent_edits_do_not_hold_the_main_session() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "ok"});
+        assert_eq!(pre_agent(&p, &repo, "s1", "a1", "Write", edit), None);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+    }
+
+    #[test]
+    fn stop_agent_main_session_edits_hold_the_main_session() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "no"});
+        assert_eq!(pre(&p, &repo, "s1", "Write", edit), None);
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap();
+        assert!(reason.contains(&task), "{reason}");
+    }
+
+    #[test]
+    fn record_only_formatter_run_holds_nothing() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "cargo fmt --all"})), None);
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "a formatter run alone holds nothing");
+    }
+
+    #[test]
+    fn record_only_script_text_names_files_not_code_words() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn main() {}").unwrap();
+        let cmd = "python3 - <<'EOF'\nstack.pop()\nopen(\"src/a.rs\", \"w\")\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(touched.contains("src/a.rs"), "{touched:?}");
+        assert!(!touched.iter().any(|f| f.contains("stack.pop")), "{touched:?}");
+    }
+
+    #[test]
+    fn record_only_cd_touch_records_the_file_not_the_folder() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::create_dir_all(repo.join("crates/core")).unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "cd crates/core && touch new.rs"})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(touched.contains("crates/core/new.rs"), "{touched:?}");
+        assert!(!touched.contains("crates/core"), "{touched:?}");
+    }
+
+    #[test]
+    fn record_only_each_path_once() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "echo x > out.txt && echo y > out.txt"})), None);
+        let file = p.root.join("hook-state").join("files-s1");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        assert_eq!(text.lines().filter(|l| *l == "out.txt").count(), 1, "{text:?}");
     }
 
     #[test]
@@ -1485,7 +1579,6 @@ mod tests {
             "python3 -c \"open('out.txt', 'w').write('b')\"",
             "sed -i s/a/b/ *.txt",
             "mkdir -p sub && cd sub && sed -i s/a/b/ ../out.txt",
-            "cargo fmt",
             "tool --out=out.txt",
         ];
         for (i, command) in commands.iter().enumerate() {
