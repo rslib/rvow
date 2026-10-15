@@ -32,6 +32,7 @@ pub const MARKETPLACE_DIR: &str = "claude-plugin";
 const MARK: &str = "rvow-managed sha256:";
 const PRE_PUSH_MARK: &str = "# rvow pre-push gate";
 pub(crate) const PRE_PUSH_RECORD: &str = "rvow-pre-push-installed";
+const PRE_PUSH_PREV_SUFFIX: &str = ".rvow-prev";
 const TOOLS: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,11 @@ pub enum Outcome {
     Unchanged(PathBuf),
     /// The user edited the file, so rvow leaves it alone.
     KeptEdit(PathBuf),
+    /// rvow moved the user's hook to `prev` and wrote `path`, which runs it first.
+    Chained {
+        path: PathBuf,
+        prev: PathBuf,
+    },
     /// Another hook manager owns the hook; the user adds this line.
     AddLine {
         path: PathBuf,
@@ -469,15 +475,23 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
     Ok(Outcome::Written(path.to_path_buf()))
 }
 
-/// The pre-push hook script. It refuses to run an rvow binary that changed
-/// since install, so a binary the agent rebuilt cannot pass the gate.
+/// The pre-push hook script. It first runs the hook that `rvow install` moved
+/// to `pre-push.rvow-prev`, with the same arguments and pushed refs, and stops
+/// when that hook fails. It refuses to run an rvow binary that changed since
+/// install, so a binary the agent rebuilt cannot pass the gate.
 pub fn pre_push_script(rvow: &Path) -> Result<String> {
     let bytes = std::fs::read(rvow).map_err(|e| Error::io(rvow, e))?;
     let bin = shell_quote(&rvow.display().to_string());
     Ok(format!(
-        "#!/bin/sh\n{PRE_PUSH_MARK}, written by rvow install\nrvow={bin}\nwant={}\nhave=$(shasum -a 256 \"$rvow\" | cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then\n  echo \"rvow: $rvow changed since rvow install; run rvow install again\" >&2\n  exit 1\nfi\nexec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \"$rvow\" gate --strict --rerun\n",
+        "#!/bin/sh\n{PRE_PUSH_MARK}, written by rvow install\n# One group: the shell reads the whole hook before the old hook can change it.\n{{\nrvow={bin}\nwant={}\nprev=\"$0{PRE_PUSH_PREV_SUFFIX}\"\nif [ -x \"$prev\" ]; then\n  refs=$(mktemp) || exit 1\n  trap 'rm -f \"$refs\"' EXIT\n  cat > \"$refs\" || exit 1\n  \"$prev\" \"$@\" < \"$refs\" || exit $?\n  rm -f \"$refs\"\n  trap - EXIT\nfi\nhave=$(shasum -a 256 \"$rvow\" | cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then\n  echo \"rvow: $rvow changed since rvow install; run rvow install again\" >&2\n  exit 1\nfi\nexec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \"$rvow\" gate --strict --rerun\nexit 1\n}}\n",
         sha256_hex(&bytes)
     ))
+}
+
+/// The line a user adds as the first command of a pre-push hook that another
+/// hook manager owns. A failed gate exits before the rest of the hook runs.
+pub fn pre_push_line(rvow: &Path) -> String {
+    format!("{} gate --strict --rerun || exit 1", shell_quote(&rvow.display().to_string()))
 }
 
 /// Writes `.git/hooks/pre-push` when no other hook manager owns it.
@@ -494,27 +508,32 @@ pub fn pre_push(top: &Path, rvow: &Path) -> Result<Outcome> {
     if let Ok(dir) = git::run(top, &["config", "--get", "core.hooksPath"])
         && !dir.is_empty()
     {
-        return Ok(Outcome::AddLine {
-            path: top.join(&dir).join("pre-push"),
-            line: format!("{} gate --strict --rerun", shell_quote(&rvow.display().to_string())),
-        });
+        return Ok(Outcome::AddLine { path: top.join(&dir).join("pre-push"), line: pre_push_line(rvow) });
     }
     let path = hooks.join("pre-push");
-    match std::fs::read_to_string(&path) {
-        Ok(old) if old == script => return Ok(Outcome::Unchanged(path)),
-        Ok(old) if !old.contains(PRE_PUSH_MARK) => {
-            return Ok(Outcome::AddLine { path, line: format!("{} gate --strict --rerun", shell_quote(&rvow.display().to_string())) });
+    let mut chained = None;
+    if std::fs::symlink_metadata(&path).is_ok() {
+        // A hook that is not text, or a dangling link, is still the user's hook.
+        let old = std::fs::read(&path).unwrap_or_default();
+        if old == script.as_bytes() {
+            return Ok(Outcome::Unchanged(path));
         }
-        _ => {}
+        if !String::from_utf8_lossy(&old).contains(PRE_PUSH_MARK) {
+            let prev = hooks.join(format!("pre-push{PRE_PUSH_PREV_SUFFIX}"));
+            std::fs::rename(&path, &prev).map_err(|e| Error::io(&path, e))?;
+            chained = Some(prev);
+        }
     }
-    std::fs::create_dir_all(&hooks).map_err(|e| Error::io(&hooks, e))?;
     std::fs::write(&path, script).map_err(|e| Error::io(&path, e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| Error::io(&path, e))?;
     }
-    Ok(Outcome::Written(path))
+    Ok(match chained {
+        Some(prev) => Outcome::Chained { path, prev },
+        None => Outcome::Written(path),
+    })
 }
 
 #[cfg(test)]
@@ -670,7 +689,7 @@ mod tests {
         assert!(script.contains(&sha256_hex(b"binary")));
 
         std::fs::write(repo.join(".git/hooks/pre-push"), "#!/bin/sh\necho mine\n").unwrap();
-        assert!(matches!(pre_push(&repo, &bin).unwrap(), Outcome::AddLine { .. }));
+        assert!(matches!(pre_push(&repo, &bin).unwrap(), Outcome::Chained { .. }));
         git(&repo, &["config", "core.hooksPath", ".husky"]);
         assert!(matches!(pre_push(&repo, &bin).unwrap(), Outcome::AddLine { .. }));
     }

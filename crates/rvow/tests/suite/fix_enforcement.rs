@@ -569,6 +569,161 @@ fn the_manager_hook_must_run_the_recorded_binary_by_an_absolute_path() {
     assert!(!hook_failures(&fx, &project).is_empty(), "a binary that is not the recorded one passed");
 }
 
+/// A fake rvow that records its arguments in `$MARKER`, and a bare remote.
+fn chain_setup(fx: &Fx) -> (PathBuf, PathBuf, PathBuf) {
+    let bin = fx.root.join("bin/rvow");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "#!/bin/sh\necho \"$@\" >> \"$MARKER\"\n").unwrap();
+    executable(&bin);
+    let remote = fx.root.join("remote.git");
+    fx.git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+    fx.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    (bin, remote, fx.root.join("marker"))
+}
+
+fn set_pre_push(fx: &Fx, text: &str) -> PathBuf {
+    let hook = fx.repo().join(".git/hooks/pre-push");
+    std::fs::write(&hook, text).unwrap();
+    executable(&hook);
+    hook
+}
+
+fn push(fx: &Fx, marker: &Path, prev_out: &Path) -> bool {
+    fx.cmd("git").args(["push", "-q", "origin", "main"]).env("MARKER", marker).env("PREV_OUT", prev_out).status().unwrap().success()
+}
+
+const BASH_HOOK: &str = "#!/usr/bin/env bash\nset -euo pipefail\n# managed hook\n{ echo \"args: $*\"; cat; } > \"$PREV_OUT\"\n";
+
+#[test]
+fn install_chains_an_existing_pre_push_hook_and_the_gate_passes() {
+    let fx = Fx::new("chain");
+    let project = fx.init();
+    let (bin, remote, marker) = chain_setup(&fx);
+    let hook = set_pre_push(&fx, BASH_HOOK);
+    assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Chained { .. }));
+    let prev = fx.repo().join(".git/hooks/pre-push.rvow-prev");
+    assert_eq!(std::fs::read_to_string(&prev).unwrap(), BASH_HOOK);
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), install::pre_push_script(&bin).unwrap());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(std::fs::metadata(&prev).unwrap().permissions().mode() & 0o111, 0, "the old hook keeps its mode");
+    }
+    assert!(hook_failures(&fx, &project).is_empty(), "{:?}", hook_failures(&fx, &project));
+
+    let prev_out = fx.root.join("prev-out");
+    assert!(push(&fx, &marker, &prev_out));
+    let seen = std::fs::read_to_string(&prev_out).unwrap();
+    assert!(seen.starts_with(&format!("args: origin {}\n", remote.display())), "{seen}");
+    assert!(
+        seen.lines().nth(1).is_some_and(|l| l.starts_with("refs/heads/main ") && l.contains(" refs/heads/main ")),
+        "the previous hook gets the pushed refs: {seen}"
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "gate --strict --rerun\n");
+}
+
+#[test]
+fn a_failing_previous_hook_stops_the_push_before_the_gate() {
+    let fx = Fx::new("chain-fail");
+    fx.init();
+    let (bin, _, marker) = chain_setup(&fx);
+    set_pre_push(&fx, "#!/usr/bin/env bash\ncat > /dev/null\nexit 1\n");
+    assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Chained { .. }));
+    assert!(!push(&fx, &marker, &fx.root.join("prev-out")), "the push passed");
+    assert!(!marker.exists(), "the gate ran after the previous hook failed");
+}
+
+#[test]
+fn a_previous_hook_that_rewrites_the_rvow_hook_cannot_skip_the_gate() {
+    let fx = Fx::new("chain-rewrite-tail");
+    fx.init();
+    let (bin, _, marker) = chain_setup(&fx);
+    set_pre_push(
+        &fx,
+        "#!/bin/sh\ncat > /dev/null\nhook=\"${0%.rvow-prev}\"\nat=$(grep -b 'have=' \"$hook\" | cut -d: -f1)\nprintf 'exit 0\\n' | dd of=\"$hook\" bs=1 seek=\"$at\" conv=notrunc 2>/dev/null\n",
+    );
+    assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Chained { .. }));
+    push(&fx, &marker, &fx.root.join("prev-out"));
+    assert!(std::fs::read_to_string(fx.repo().join(".git/hooks/pre-push")).unwrap().contains("exit 0\n"), "the hook was not rewritten");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap_or_default(), "gate --strict --rerun\n", "the gate did not run");
+}
+
+#[test]
+fn install_keeps_a_previous_hook_that_is_not_text() {
+    let fx = Fx::new("chain-binary");
+    fx.init();
+    let (bin, _, _) = chain_setup(&fx);
+    let hook = fx.repo().join(".git/hooks/pre-push");
+    std::fs::write(&hook, b"\x7fELF\xff\xfe").unwrap();
+    executable(&hook);
+    assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Chained { .. }));
+    assert_eq!(std::fs::read(fx.repo().join(".git/hooks/pre-push.rvow-prev")).unwrap(), b"\x7fELF\xff\xfe");
+}
+
+#[test]
+fn install_twice_chains_once() {
+    let fx = Fx::new("chain-twice");
+    fx.init();
+    let (bin, _, _) = chain_setup(&fx);
+    let hook = set_pre_push(&fx, BASH_HOOK);
+    install::pre_push(&fx.repo(), &bin).unwrap();
+    let first = std::fs::read_to_string(&hook).unwrap();
+    assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Unchanged(_)));
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), first);
+    let hooks = fx.repo().join(".git/hooks");
+    assert_eq!(std::fs::read_to_string(hooks.join("pre-push.rvow-prev")).unwrap(), BASH_HOOK);
+    assert!(!hooks.join("pre-push.rvow-prev.rvow-prev").exists());
+}
+
+#[test]
+fn a_pre_push_hook_rewritten_after_install_fails_the_gate_with_the_reinstall_step() {
+    let fx = Fx::new("chain-rewrite");
+    let project = fx.init();
+    let (bin, _, _) = chain_setup(&fx);
+    set_pre_push(&fx, BASH_HOOK);
+    install::pre_push(&fx.repo(), &bin).unwrap();
+    let hook = set_pre_push(&fx, &format!("{BASH_HOOK}'{}' gate --strict --rerun\n", bin.display()));
+    assert_eq!(
+        hook_failures(&fx, &project),
+        [format!("installed pre-push hook {} is missing or was changed; run rvow install again", hook.display())]
+    );
+    assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Chained { .. }));
+    assert!(hook_failures(&fx, &project).is_empty());
+}
+
+#[test]
+fn a_hooks_path_hook_passes_with_the_printed_line_first_and_fails_with_a_skip_before_it() {
+    let fx = Fx::new("first-line");
+    let project = fx.init();
+    let (bin, _, _) = chain_setup(&fx);
+    fx.git(&["config", "core.hooksPath", ".manager"]);
+    let line = match install::pre_push(&fx.repo(), &bin).unwrap() {
+        install::Outcome::AddLine { line, .. } => line,
+        other => panic!("{other:?}"),
+    };
+    std::fs::create_dir_all(fx.repo().join(".manager")).unwrap();
+    let manager = fx.repo().join(".manager/pre-push");
+    let set = |text: String| {
+        std::fs::write(&manager, text).unwrap();
+        executable(&manager);
+    };
+    let tail = "repo_root=\"$(git rev-parse --show-toplevel)\"\n\"$repo_root/scripts/git-hooks.sh\" run-pre-push\n";
+    set(format!("#!/usr/bin/env bash\n# managed\n{line}\n{tail}"));
+    assert!(hook_failures(&fx, &project).is_empty(), "{line}");
+    for before in ["exit 0", "if false; then", "set -euo pipefail"] {
+        set(format!("#!/usr/bin/env bash\n{before}\n{line}\n{tail}"));
+        assert!(!hook_failures(&fx, &project).is_empty(), "{before} before the gate passed");
+    }
+    set(format!("#!/usr/bin/true\n{line}\n"));
+    assert!(!hook_failures(&fx, &project).is_empty(), "an interpreter that skips the script passed");
+    set(format!("#!/bin/sh\n{} gate --strict --rerun\n{tail}", bin.display()));
+    assert!(!hook_failures(&fx, &project).is_empty(), "a first gate line without an exit on failure passed");
+    let glued = format!("'{}'gate --strict --rerun || exit 1", bin.display());
+    set(format!("#!/bin/sh\n{glued}\n{tail}"));
+    assert!(!hook_failures(&fx, &project).is_empty(), "a quoted binary glued to its first argument passed");
+    set(format!("#!/bin/sh\n{line}\n{tail}"));
+    assert!(hook_failures(&fx, &project).is_empty(), "{line}");
+}
+
 // 8. Quoting in the installed scripts and settings.
 
 fn quoted_binary(fx: &Fx) -> (PathBuf, PathBuf) {

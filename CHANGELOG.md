@@ -172,6 +172,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow install` and the gate disagreeing about a pre-push hook that another tool wrote: install now moves that hook to `pre-push.rvow-prev` and writes its own hook, which runs the old hook first with the same arguments and pushed refs and stops the push when it fails.
+  When a tool rewrites the hook later, the gate says to run `rvow install` again.
+  Under `core.hooksPath` install prints `'<rvow>' gate --strict --rerun || exit 1` to add as the first command of the hook, and the gate accepts that hook only when it runs as a shell script.
 - Hold no session for the files it only named in plan or note text: heredoc and quoted text count for changed files only when an interpreter or a shell runs it, and an `rvow` command records no file.
 - Fix the session record counting formatter runs, folders and code words as changes: a formatter run records nothing beyond the files it names, folders are never recorded, and script text counts only for an existing file or a path with a `/` in an existing folder.
 

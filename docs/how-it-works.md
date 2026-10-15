@@ -317,6 +317,24 @@ The hook sits at the last point where the agent cannot argue.
 A push that carries stale or unproved work stops there.
 The hook refuses to run an rvow binary that changed after install.
 
+When `.git/hooks/pre-push` already holds a hook of another tool, `rvow install` moves it to `.git/hooks/pre-push.rvow-prev` and writes its own hook.
+The rvow hook runs the old hook first, with the same arguments and the same pushed refs on stdin.
+When the old hook fails, the push stops and the gate does not run.
+The old hook cannot skip the gate: the rvow hook is one shell group, so the shell reads all of it before the old hook runs, and the old hook can only fail the push.
+`rvow install` again finds its own hook and changes nothing.
+
+When a tool rewrites `.git/hooks/pre-push` later, `rvow gate` and `rvow archive` fail with `installed pre-push hook <path> is missing or was changed; run rvow install again`.
+`rvow install` then moves the new hook to `pre-push.rvow-prev` in place of the old copy.
+
+Under `core.hooksPath` another hook manager owns the folder, so `rvow install` prints a line to add as the first command of its pre-push hook:
+
+```sh
+'/path/to/rvow' gate --strict --rerun || exit 1
+```
+
+The gate accepts that hook only when the line is its first command and the hook runs as a shell script, so nothing before it can skip the gate.
+It also accepts a hook whose last command runs the gate and whose earlier lines are plain `npx`, `npm`, `pnpm` or `yarn` commands.
+
 ## One store per remote
 
 rvow keeps its tree in a home store, keyed by the origin remote of the repository.
