@@ -492,3 +492,36 @@ fn bind_next_lease_is_refused_while_the_old_lease_is_live() {
     assert_eq!(fx.hook("Edit", serde_json::json!({"file_path": src}), Some("a1")), None, "still on the first task");
     assert!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")).is_some(), "the second task is not held");
 }
+
+#[test]
+fn bind_closed_task_without_end_task_does_not_hold_the_session() {
+    let (fx, code, docs) = Fx::two("bind-closed");
+    let first = fx.rvow(&["delegate", &code]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    assert_eq!(out["bound"], true, "{out}");
+    std::fs::write(fx.repo().join("code.txt"), "x").unwrap();
+    fx.rvow(&["prove", &code]);
+    let path = fx.project().root.join(LEASE_FILE);
+    let kept: String =
+        std::fs::read_to_string(&path).unwrap().lines().filter(|l| !l.contains("end_task")).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, kept).unwrap();
+    let held = lease::leases(&fx.project()).unwrap();
+    assert!(held.iter().all(|l| !l.ended), "the proof left the lease open");
+
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!((out["bound"].clone(), out["task"].clone()), (true.into(), docs.as_str().into()), "{out}");
+    assert!(out.get("reason").is_none(), "{out}");
+}
+
+#[test]
+fn bind_closed_open_task_still_holds_the_session() {
+    let (fx, code, docs) = Fx::two("bind-closed-open");
+    let first = fx.rvow(&["delegate", &code]);
+    fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!(out["bound"], false, "{out}");
+    let want = format!("this session still holds the lease of {code}; prove or block {code}, or start a new session for {docs}");
+    assert_eq!(out["reason"], want.as_str(), "{out}");
+}

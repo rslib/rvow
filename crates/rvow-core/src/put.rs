@@ -76,25 +76,48 @@ fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<C
     Ok(dir)
 }
 
+enum Block {
+    Task,
+    Requirement,
+}
+
 /// One task or requirement block of an open change, found by id or placeholder.
 fn put_block(project: &Project, target: &str, text: &str) -> Result<ChangeDir> {
     let want = parse_ref(project, target)?;
     let (living, _) = change::load_living(project)?;
     let open = change::list(project)?.0.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active));
-    let mut written = None;
+    let mut holders = Vec::new();
     for dir in open {
         let loaded = change::load(&dir.path, &living)?;
         if loaded.tasks.iter().any(|t| t.id == want) {
-            replace_task_block(&dir.path.join(change::TASKS), want, text)?;
-            written = Some(dir);
-            break;
-        }
-        if let Some(cap) = loaded.deltas.iter().find_map(|(cap, f)| f.deltas.iter().find(|d| d.req.id == want).map(|_| cap.clone())) {
-            replace_req_block(&dir.path.join(change::DELTAS).join(format!("{cap}.md")), want, text)?;
-            written = Some(dir);
-            break;
+            let path = dir.path.join(change::TASKS);
+            holders.push((dir, path, Block::Task));
+        } else if let Some(cap) = loaded.deltas.iter().find_map(|(cap, f)| f.deltas.iter().find(|d| d.req.id == want).map(|_| cap.clone()))
+        {
+            let path = dir.path.join(change::DELTAS).join(format!("{cap}.md"));
+            holders.push((dir, path, Block::Requirement));
         }
     }
+    if holders.len() > 1 {
+        let ids: Vec<String> = holders.iter().map(|(dir, _, _)| dir.id.to_string()).collect();
+        let first = &holders[0].0.id;
+        return Err(Error::new(
+            "ambiguous",
+            format!("{target} is held by {} open changes: {}", ids.len(), ids.join(", ")),
+            format!("put the whole part: rvow put {first} tasks, or rvow put {first} spec:<name>"),
+        ));
+    }
+    let written = match holders.pop() {
+        Some((dir, path, Block::Task)) => {
+            replace_task_block(&path, want, text)?;
+            Some(dir)
+        }
+        Some((dir, path, Block::Requirement)) => {
+            replace_req_block(&path, want, text)?;
+            Some(dir)
+        }
+        None => None,
+    };
     written.ok_or_else(|| {
         Error::new(
             "put",

@@ -161,6 +161,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow put` writing the first plan when an id sits in two open plans.
+  It now refuses and names both changes.
+  Put the whole part instead.
+- Fix a subagent bind being refused because of an old lease whose task is already proved or blocked.
+  A bind is now refused only while the task of the old lease is still open.
+- Remove old session records under `hook-state` after 7 days.
 - Report a new protected infra file as drift: a `conftest.py` or `.cargo/config.toml` added after accept is `protected file <path> added`, while a new test file stays free.
 - A new test that calls a process exit or abort, such as `std::process::exit`, `sys.exit`, `process.exit`, `os.Exit` or `exit()`, or that focuses the run with `focus: true` or `{ only: true }`, is drift in a protected test file, and rvow removes saved syntax compare results older than 30 days.
 - A `node --test`, vitest or mocha verify that ran 0 tests no longer proves a task.

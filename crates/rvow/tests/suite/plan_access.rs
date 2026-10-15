@@ -227,6 +227,51 @@ fn plan_access_put_replaces_a_requirement_block() {
     assert!(spec.contains("- THEN the whole outline is kept"), "{spec}");
 }
 
+/// A second backlog change in the same project, with the same tasks and spec as `change`.
+fn second_change(r: &Repo) -> (String, PathBuf) {
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(dir.join("proposal.md"), PROPOSAL).unwrap();
+    std::fs::write(dir.join("tasks.md"), TASKS).unwrap();
+    std::fs::write(dir.join("specs/out.md"), SPEC).unwrap();
+    (id, dir)
+}
+
+#[test]
+fn plan_access_put_refuses_a_shared_task_id() {
+    let (r, _root, id, dir) = change("put-shared-task");
+    let (id2, dir2) = second_change(&r);
+    let before = (std::fs::read(dir.join("tasks.md")).unwrap(), std::fs::read(dir2.join("tasks.md")).unwrap());
+    let block = "- TSK-new1 Do one differently\n  covers: REQ-new1\n  verify: cargo test --locked plan_access::plan_access_show_\n  files: one.txt\n";
+    let (out, code) = r.pipe(&["--human", "put", "TSK-new1"], block);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains(&id) && out.contains(&id2), "the output names both changes: {out}");
+    assert!(out.contains("ambiguous"), "{out}");
+    assert_eq!(
+        (std::fs::read(dir.join("tasks.md")).unwrap(), std::fs::read(dir2.join("tasks.md")).unwrap()),
+        before,
+        "nothing was written"
+    );
+}
+
+#[test]
+fn plan_access_put_refuses_a_shared_requirement_id() {
+    let (r, _root, id, dir) = change("put-shared-req");
+    let (id2, dir2) = second_change(&r);
+    let before = (std::fs::read(dir.join("specs/out.md")).unwrap(), std::fs::read(dir2.join("specs/out.md")).unwrap());
+    let block = "## ADD REQ-new1 Out in full\n\nrvow SHALL keep the whole outline.\n\n### Scenario: whole\n- WHEN it runs\n- THEN the whole outline is kept\n";
+    let (out, code) = r.pipe(&["--human", "put", "REQ-new1"], block);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains(&id) && out.contains(&id2), "the output names both changes: {out}");
+    assert!(out.contains("ambiguous"), "{out}");
+    assert_eq!(
+        (std::fs::read(dir.join("specs/out.md")).unwrap(), std::fs::read(dir2.join("specs/out.md")).unwrap()),
+        before,
+        "nothing was written"
+    );
+}
+
 fn hook_denial(r: &Repo, project: &rvow_core::store::Project, tool: &str, input: serde_json::Value) -> Option<rvow_core::hook::Denial> {
     let payload = serde_json::json!({"cwd": r.repo(), "tool_name": tool, "tool_input": input});
     rvow_core::hook::pre_tool_use_denial(project, &payload).unwrap()

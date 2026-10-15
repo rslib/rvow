@@ -159,13 +159,14 @@ pub enum Bound {
 }
 
 /// Binds a subagent id to the newest unbound lease of `task`, unless the agent
-/// still holds the live lease of another task.
-pub fn bind_checked(project: &Project, task: &str, agent_id: &str) -> Result<Bound> {
+/// still holds the live lease of another task that `is_open` says is open.
+pub fn bind_checked(project: &Project, task: &str, agent_id: &str, is_open: impl Fn(&str) -> Result<bool>) -> Result<Bound> {
     let _lock = project.lock()?;
     let all = leases(project)?;
     if let Some(held) = bound_last(&all, agent_id)
         && held.task != task
         && held.live(now_ms())
+        && is_open(&held.task)?
     {
         return Ok(Bound::Holds(held.task.clone()));
     }
@@ -178,7 +179,7 @@ pub fn bind_checked(project: &Project, task: &str, agent_id: &str) -> Result<Bou
 
 /// Binds a subagent id to the newest unbound lease of `task`. Returns whether a lease took it.
 pub fn bind(project: &Project, task: &str, agent_id: &str) -> Result<bool> {
-    Ok(bind_checked(project, task, agent_id)? == Bound::Yes)
+    Ok(bind_checked(project, task, agent_id, |_| Ok(true))? == Bound::Yes)
 }
 
 /// Ends the lease that `agent_id` holds, when the subagent stops.
@@ -211,16 +212,18 @@ pub fn holder(project: &Project, home: &Path, cwd: &Path, agent_id: &str, now: u
     if !lease.live(now) {
         return Ok(None);
     }
+    Ok(task_open(project, home, cwd, &lease.task)?.then_some(lease))
+}
+
+/// Whether `task` is in an active change and is neither proved nor blocked.
+pub fn task_open(project: &Project, home: &Path, cwd: &Path, task: &str) -> Result<bool> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
-    let Ok((c, task)) = proof::find_task(&changes, &lease.task) else {
-        return Ok(None);
+    let Ok((c, task)) = proof::find_task(&changes, task) else {
+        return Ok(false);
     };
     let config = config::load(project, home)?;
     let state_now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
-    Ok(match proof::state(c, task, &state_now)? {
-        State::Proved | State::Blocked => None,
-        _ => Some(lease),
-    })
+    Ok(!matches!(proof::state(c, task, &state_now)?, State::Proved | State::Blocked))
 }

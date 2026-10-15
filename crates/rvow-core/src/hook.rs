@@ -718,7 +718,9 @@ pub fn claude_lease_bind(project: &Project, input: &Value) -> Result<Option<Valu
     let (Some(agent), Some(task)) = (text("agent_id"), text("prompt").and_then(lease::marker)) else {
         return Ok(None);
     };
-    Ok(Some(match lease::bind_checked(project, &task, agent)? {
+    let home = crate::store::home_dir()?;
+    let cwd = PathBuf::from(text("cwd").unwrap_or("."));
+    Ok(Some(match lease::bind_checked(project, &task, agent, |held| lease::task_open(project, &home, &cwd, held))? {
         lease::Bound::Holds(held) => json!({
             "bound": false,
             "task": task,
@@ -991,6 +993,57 @@ mod tests {
         ] {
             denial_has_a_next_step(reason);
         }
+    }
+
+    fn aged(path: &Path, days: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    fn hook_state(p: &Project) -> PathBuf {
+        let dir = p.root.join("hook-state");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn prune_session_removes_a_record_older_than_7_days() {
+        let (_tmp, p, _repo, _task) = accepted();
+        let dir = hook_state(&p);
+        for name in ["files-old", "stop-old"] {
+            std::fs::write(dir.join(name), "a.txt\n").unwrap();
+            aged(&dir.join(name), 8);
+        }
+        session_files::record(&p, "fresh", &["b.txt".to_string()]);
+        assert!(!dir.join("files-old").exists());
+        assert!(!dir.join("stop-old").exists());
+        assert!(dir.join("files-fresh").exists());
+    }
+
+    #[test]
+    fn prune_session_keeps_a_record_6_days_old() {
+        let (_tmp, p, _repo, _task) = accepted();
+        let dir = hook_state(&p);
+        for name in ["files-recent", "stop-recent"] {
+            std::fs::write(dir.join(name), "a.txt\n").unwrap();
+            aged(&dir.join(name), 6);
+        }
+        session_files::record(&p, "fresh", &["b.txt".to_string()]);
+        assert!(dir.join("files-recent").exists());
+        assert!(dir.join("stop-recent").exists());
+    }
+
+    #[test]
+    fn prune_session_keeps_a_file_that_is_not_a_session_record() {
+        let (_tmp, p, _repo, _task) = accepted();
+        let dir = hook_state(&p);
+        for name in ["denied-old", "notes.txt"] {
+            std::fs::write(dir.join(name), "x\n").unwrap();
+            aged(&dir.join(name), 30);
+        }
+        session_files::record(&p, "fresh", &["b.txt".to_string()]);
+        assert!(dir.join("denied-old").exists());
+        assert!(dir.join("notes.txt").exists());
     }
 
     #[test]
