@@ -528,3 +528,94 @@ fn syntax_units_exit_other_spellings_are_drift() {
         exit_drift(&format!("exit-js-more-{i}"), "tests/app.test.js", "javascript", DESCRIBE_JS, &new);
     }
 }
+
+const MOD_TEST_RS: &str = "#[test]\nfn w() {\n    assert_eq!(1, 1);\n}\n";
+
+const MOD_MAIN_RS: &str = "mod status;\n";
+
+fn mod_setup(name: &str, main: &str, extra: &[(&str, &str)]) -> Setup {
+    let mut files = vec![(main, "mod status;\n"), ("tests/it/status.rs", MOD_TEST_RS), ("tests/t.sh", T_SH)];
+    files.extend_from_slice(extra);
+    let s = setup_with(name, &files);
+    prime_rust(&s.home);
+    assert!(items(&s).is_empty());
+    s
+}
+
+fn write_new(s: &Setup, rel: &str, text: &str) {
+    if let Some(dir) = Path::new(rel).parent() {
+        std::fs::create_dir_all(s.repo.join(dir)).unwrap();
+    }
+    rewrite_at(s, rel, text);
+}
+
+#[test]
+fn syntax_units_mod_new_module_is_no_drift() {
+    let s = mod_setup("mod-new", "tests/it/main.rs", &[]);
+    write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}mod walk;\n"));
+    write_new(&s, "tests/it/walk.rs", MOD_TEST_RS);
+    assert!(items(&s).is_empty(), "a new module with a test is free: {:?}", items(&s));
+}
+
+#[test]
+fn syntax_units_mod_nested_dir_module_is_no_drift() {
+    let s = mod_setup("mod-dir", "tests/it/main.rs", &[]);
+    write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}#[cfg(test)]\nmod walk;\n"));
+    write_new(&s, "tests/it/walk/mod.rs", MOD_TEST_RS);
+    assert!(items(&s).is_empty(), "a new walk/mod.rs is free: {:?}", items(&s));
+}
+
+#[test]
+fn syntax_units_mod_path_attribute_is_no_drift() {
+    let s = mod_setup("mod-path", "tests/main.rs", &[("tests/suite/a.rs", MOD_TEST_RS)]);
+    write_new(&s, "tests/main.rs", "mod status;\n#[path = \"suite/b.rs\"]\nmod b;\n");
+    write_new(&s, "tests/suite/b.rs", MOD_TEST_RS);
+    assert_eq!(weaken_for(&s, "tests/main.rs"), Vec::<String>::new(), "a path module is free: {:?}", items(&s));
+}
+
+#[test]
+fn syntax_units_mod_that_exits_is_drift() {
+    let s = mod_setup("mod-exit", "tests/it/main.rs", &[]);
+    write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}mod walk;\n"));
+    write_new(&s, "tests/it/walk.rs", "#[test]\nfn w() {\n    std::process::exit(0);\n}\n");
+    assert_eq!(weaken_for(&s, "tests/it/main.rs"), ["protected file tests/it/main.rs changed".to_string()]);
+}
+
+#[test]
+fn syntax_units_mod_existing_file_is_drift() {
+    let s = mod_setup("mod-old", "tests/it/main.rs", &[("tests/it/old.rs", MOD_TEST_RS)]);
+    write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}mod old;\n"));
+    assert_eq!(weaken_for(&s, "tests/it/main.rs"), ["protected file tests/it/main.rs changed".to_string()]);
+}
+
+#[test]
+fn syntax_units_mod_other_attribute_is_drift() {
+    let s = mod_setup("mod-attr", "tests/it/main.rs", &[]);
+    write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}#[macro_use]\nmod walk;\n"));
+    write_new(&s, "tests/it/walk.rs", MOD_TEST_RS);
+    assert_eq!(weaken_for(&s, "tests/it/main.rs"), ["protected file tests/it/main.rs changed".to_string()]);
+}
+
+#[test]
+fn syntax_units_mod_missing_file_is_drift() {
+    let s = mod_setup("mod-missing", "tests/it/main.rs", &[]);
+    write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}mod walk;\n"));
+    assert_eq!(weaken_for(&s, "tests/it/main.rs"), ["protected file tests/it/main.rs changed".to_string()]);
+}
+
+#[test]
+fn syntax_units_mod_that_reaches_other_code_is_drift() {
+    let walks = [
+        "mod sub;\n\n#[test]\nfn w() {\n    assert_eq!(1, 1);\n}\n",
+        "include!(\"sub.rs\");\n\n#[test]\nfn w() {\n    assert_eq!(1, 1);\n}\n",
+        "#[ctor::ctor]\nfn start() {}\n\n#[test]\nfn w() {\n    assert_eq!(1, 1);\n}\n",
+    ];
+    for (i, walk) in walks.iter().enumerate() {
+        let s = mod_setup(&format!("mod-reach-{i}"), "tests/it/main.rs", &[]);
+        write_new(&s, "tests/it/main.rs", &format!("{MOD_MAIN_RS}mod walk;\n"));
+        write_new(&s, "tests/it/walk.rs", walk);
+        write_new(&s, "tests/it/walk/sub.rs", "#[test]\nfn x() {\n    std::process::exit(0);\n}\n");
+        write_new(&s, "tests/it/sub.rs", "#[test]\nfn x() {\n    std::process::exit(0);\n}\n");
+        assert_eq!(weaken_for(&s, "tests/it/main.rs"), ["protected file tests/it/main.rs changed".to_string()], "{walk}");
+    }
+}

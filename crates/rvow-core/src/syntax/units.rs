@@ -13,10 +13,11 @@
 //! old text does not use, every attribute above it is a test attribute, its
 //! body calls no function that ends the process, and it holds no argument
 //! that focuses the run on it. A helper, a hook or an import is drift, and a
-//! project query only names tests in drift items.
+//! project query only names tests in drift items. A new `mod NAME;` line of a
+//! Rust file is free too when `free_mod` accepts it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use tree_sitter::Node;
 
@@ -24,6 +25,15 @@ use crate::ledger;
 use crate::syntax::canonical;
 use crate::syntax::grammar::{self, Session};
 use crate::syntax::queries;
+
+/// The repository a unit compare reads. `top` resolves query files and the
+/// module files of new `mod` lines. `protected` holds the files protected at
+/// accept; without it no `mod` line is free.
+#[derive(Clone, Copy)]
+pub struct Repo<'a> {
+    pub top: &'a Path,
+    pub protected: Option<&'a BTreeMap<String, String>>,
+}
 
 /// What the unit compare decided about a protected test file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,6 +426,112 @@ fn free(unit: &Unit, named: Option<&queries::Queries>, lang: &str, old: &str, by
         && held_annotations(unit.item).into_iter().all(|node| test_prefix(node, bytes, before_first_old))
 }
 
+/// The path of a file that a Rust `mod NAME;` line names, relative to the
+/// repository top, in the order rustc tries: `#[path]` against the folder of
+/// the declaring file, else `NAME.rs` then `NAME/mod.rs` under the folder
+/// that holds the module's files. `None` when a path leaves the top.
+fn module_files(rel: &str, name: &str, path: Option<&str>) -> Option<Vec<String>> {
+    let declaring = Path::new(rel);
+    let dir = declaring.parent().unwrap_or(Path::new(""));
+    let stem = declaring.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let joined: Vec<PathBuf> = match path {
+        Some(path) => vec![dir.join(path)],
+        None => {
+            let base = if matches!(stem, "main" | "lib" | "mod") { dir.to_path_buf() } else { dir.join(stem) };
+            vec![base.join(format!("{name}.rs")), base.join(name).join("mod.rs")]
+        }
+    };
+    joined.iter().map(|p| normalized(p)).collect()
+}
+
+fn normalized(path: &Path) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_str()?),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// The value of a `#[path = "..."]` attribute, or `None` for any other text.
+fn path_attribute(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix("#[")?.strip_suffix(']')?.trim();
+    let value = inner.strip_prefix("path")?.trim_start().strip_prefix('=')?.trim();
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    (!value.contains(['"', '\\'])).then_some(value)
+}
+
+/// Whether a new body-less Rust `mod NAME;` line is free: its only
+/// attributes are `#[path = "..."]` and `#[cfg(test)]`, the module file is
+/// new since accept and exists now, and it calls no function that ends the
+/// process and holds no focusing argument. The module file is parsed whole.
+fn free_mod(
+    unit: &Unit,
+    rel: &str,
+    bytes: &[u8],
+    before_first_old: bool,
+    repo: Repo,
+    parse: &mut impl FnMut(&str) -> Option<tree_sitter::Tree>,
+) -> bool {
+    let Some(protected) = repo.protected else { return false };
+    let item = unit.item;
+    if item.kind() != "mod_item" || item.child_by_field_name("body").is_some() || !unit.ctx.is_empty() {
+        return false;
+    }
+    let Some(name) = item.child_by_field_name("name").and_then(|n| n.utf8_text(bytes).ok()) else { return false };
+    let mut path = None;
+    let Some((_, prefix)) = unit.nodes.split_last() else { return false };
+    for node in prefix {
+        let Ok(text) = node.utf8_text(bytes) else { return false };
+        let compact: String = text.split_whitespace().collect();
+        match node.kind() {
+            "attribute_item" if compact == "#[cfg(test)]" => {}
+            "attribute_item" if path.is_none() && path_attribute(text).is_some() => path = path_attribute(text),
+            kind if kind.ends_with("comment") && !before_first_old => {}
+            _ => return false,
+        }
+    }
+    let Some(files) = module_files(rel, name, path) else { return false };
+    let present: Vec<&String> = files.iter().filter(|file| repo.top.join(file).is_file()).collect();
+    if present.is_empty() || present.iter().any(|file| protected.contains_key(file.as_str())) {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(repo.top.join(present[0])) else { return false };
+    let Some(tree) = parse(&text) else { return false };
+    let root = tree.root_node();
+    let source = text.as_bytes();
+    !calls_exit(root, source, "rust")
+        && !(0..root.named_child_count()).filter_map(|i| root.named_child(i as u32)).any(|child| focuses_run(child, source))
+        && !reaches_other_code(root, source)
+}
+
+/// Attributes that run code before any test or out of its sight: `#[ctor]`
+/// start-up functions and statics placed in a link section.
+const STARTUP_ATTRIBUTES: &[&str] = &["ctor", "dtor", "link_section", "used", "no_mangle", "export_name"];
+
+/// Whether a new module file brings in code that the compare never reads: a
+/// `mod` line of its own, an `include!`, or a start-up attribute.
+fn reaches_other_code(node: Node, bytes: &[u8]) -> bool {
+    let hit = match node.kind() {
+        "mod_item" => node.child_by_field_name("body").is_none(),
+        "macro_invocation" => node
+            .child_by_field_name("macro")
+            .and_then(|m| m.utf8_text(bytes).ok())
+            .is_some_and(|m| m.trim_start_matches("::").trim_start_matches("std::").trim_start_matches("core::") == "include"),
+        "attribute_item" | "inner_attribute_item" => {
+            node.utf8_text(bytes).is_ok_and(|text| STARTUP_ATTRIBUTES.iter().any(|name| has_word(text, name)))
+        }
+        _ => false,
+    };
+    hit || (0..node.named_child_count()).filter_map(|i| node.named_child(i as u32)).any(|child| reaches_other_code(child, bytes))
+}
+
 /// The decorators a Python decorated_definition holds as children. They
 /// are not prefix siblings, so `free` checks them here: a
 /// `@pytest.fixture(autouse=True)` named `test_*` is not a free test.
@@ -442,7 +558,7 @@ fn kept_units(forms: &[String], old: &BTreeMap<&String, usize>) -> Vec<bool> {
 /// decided, `None` when the caller keeps its own rule. `None` covers a file
 /// with no pinned grammar, a grammar that is not in the cache, a fetch that
 /// failed inside the retry window, and a text that does not parse cleanly.
-/// `top` resolves the project query files of `test_queries`, keyed by
+/// `repo` resolves the project query files of `test_queries`, keyed by
 /// language; the queries decide which containers split and which new units
 /// are free, so they load before the compare. `session` is the grammar
 /// session of the whole drift call, shared by every file. The compare stays
@@ -453,7 +569,7 @@ pub fn preserved(
     before: &str,
     now: &str,
     home: Option<&Path>,
-    top: Option<&Path>,
+    repo: Option<Repo>,
     test_queries: &BTreeMap<String, String>,
     session: &mut Option<Session>,
 ) -> Option<Units> {
@@ -475,7 +591,11 @@ pub fn preserved(
     let before_tree = parse(before)?;
     let now_tree = parse(now)?;
     let language = session.language(entry)?;
-    let named = top.map(|top| queries::load(entry.name.as_str(), &language, top, test_queries));
+    let mut parse = |text: &str| -> Option<_> {
+        let tree = session.parse(home, entry, base.as_deref(), text).ok()?;
+        (!tree.root_node().has_error()).then_some(tree)
+    };
+    let named = repo.map(|repo| queries::load(entry.name.as_str(), &language, repo.top, test_queries));
     let old = unit_nodes(before_tree.root_node(), named.as_ref(), before.as_bytes());
     let new = unit_nodes(now_tree.root_node(), named.as_ref(), now.as_bytes());
     let old_forms: Vec<String> = old.iter().map(|unit| unit.form(before.as_bytes())).collect();
@@ -506,10 +626,12 @@ pub fn preserved(
     }
     let kept = kept_units(&new_forms, &old_counts);
     let first_old = new.iter().zip(&kept).find(|(_, kept)| **kept).map_or(usize::MAX, |(unit, _)| unit.start());
-    let added = new
-        .iter()
-        .zip(&kept)
-        .any(|(unit, kept)| !kept && !free(unit, named.as_ref(), entry.name.as_str(), before, now.as_bytes(), unit.start() < first_old));
+    let added = new.iter().zip(&kept).any(|(unit, kept)| {
+        let early = unit.start() < first_old;
+        !kept
+            && !free(unit, named.as_ref(), entry.name.as_str(), before, now.as_bytes(), early)
+            && !repo.is_some_and(|repo| free_mod(unit, rel, now.as_bytes(), early, repo, &mut parse))
+    });
     if !missing && !added {
         return Some(Units::Preserved);
     }

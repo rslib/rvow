@@ -468,6 +468,7 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
     let protected_then = baseline_protected(project, change)?;
     let protected_now = protected_files(top, config)?;
     let tests = globset(&config.test_globs)?;
+    let repo = crate::syntax::units::Repo { top, protected: Some(&protected_then) };
     let mut session = None;
     for (rel, hash) in &protected_then {
         match protected_now.get(rel) {
@@ -484,7 +485,7 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
                     if let (Some(o), Some(n)) = (old.as_deref(), new.as_deref())
                         && tests.is_match(rel)
                     {
-                        let named = match crate::guard::preserved(rel, o, n, home, Some(top), &config.test_queries, &mut session) {
+                        let named = match crate::guard::preserved(rel, o, n, home, Some(repo), &config.test_queries, &mut session) {
                             crate::guard::Kept::Yes => continue,
                             crate::guard::Kept::No(names) => names,
                         };
@@ -515,6 +516,13 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
                     });
                 }
             }
+        }
+    }
+    let infra =
+        globset(&config.protect_infra.iter().cloned().chain(crate::config::ENFORCEMENT.iter().map(|s| s.to_string())).collect::<Vec<_>>())?;
+    for rel in protected_now.keys() {
+        if !protected_then.contains_key(rel) && infra.is_match(rel) {
+            out.push(item(Class::Weaken, format!("protected file {rel} added")));
         }
     }
     out.extend(crate::guard::drift(project, top, change));
@@ -650,5 +658,35 @@ mod tests {
         );
         std::fs::remove_file(repo.join("tests/t.sh")).unwrap();
         assert_eq!(drift_of(&p, &cache_home, &repo), [(Class::Weaken, "protected file tests/t.sh removed".to_string())]);
+    }
+
+    #[test]
+    fn new_infra_added_after_accept() {
+        let cases = [
+            (false, "tests/conftest.py", "protected file tests/conftest.py added"),
+            (false, ".cargo/config.toml", "protected file .cargo/config.toml added"),
+            (false, "tests/new_test.py", ""),
+            (true, "tests/unrelated_test.py", ""),
+        ];
+        for (conftest, added, want) in cases {
+            let tmp = crate::git::testrepo::TempDir::new();
+            let home = tmp.0.join("home");
+            let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+            std::fs::create_dir_all(repo.join("tests")).unwrap();
+            std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+            if conftest {
+                std::fs::write(repo.join("tests/conftest.py"), "import pytest\n").unwrap();
+            }
+            let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+            let c = change::new(&p, "T", "main", true).unwrap();
+            std::fs::write(c.path.join(TASKS), "- TSK-new1 T\n  verify: false\n  files: src/**\n").unwrap();
+            let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+            vow::commit(&p, prepared).unwrap();
+            assert_eq!(drift_of(&p, home_of(&p), &repo), [], "{added}: no drift right after accept");
+            std::fs::create_dir_all(repo.join(added).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(added), "x = 1\n").unwrap();
+            let want: Vec<(Class, String)> = if want.is_empty() { vec![] } else { vec![(Class::Weaken, want.to_string())] };
+            assert_eq!(drift_of(&p, home_of(&p), &repo), want, "{added}");
+        }
     }
 }

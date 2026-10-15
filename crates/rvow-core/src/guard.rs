@@ -139,7 +139,7 @@ pub(crate) fn preserved(
     before: &str,
     now: &str,
     home: Option<&Path>,
-    top: Option<&Path>,
+    repo: Option<units::Repo>,
     test_queries: &BTreeMap<String, String>,
     session: &mut Option<grammar::Session>,
 ) -> Kept {
@@ -147,7 +147,7 @@ pub(crate) fn preserved(
         return Kept::Yes;
     }
     if !rel.ends_with(RUST_TESTS)
-        && let Some(kept) = units::preserved(rel, before, now, home, top, test_queries, session)
+        && let Some(kept) = units::preserved(rel, before, now, home, repo, test_queries, session)
     {
         return match kept {
             units::Units::Preserved => Kept::Yes,
@@ -204,7 +204,9 @@ pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
         if before == now {
             continue;
         }
-        if let Kept::No(names) = preserved(&key, &before, &now, Some(home.as_path()), Some(top), &test_queries, &mut session) {
+        if let Kept::No(names) =
+            preserved(&key, &before, &now, Some(home.as_path()), Some(units::Repo { top, protected: None }), &test_queries, &mut session)
+        {
             let what = if names.is_empty() {
                 what("lost or changed lines")
             } else {

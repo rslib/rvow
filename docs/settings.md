@@ -180,6 +180,13 @@ rvow reads the names in the syntax tree, so a string `"exit"` or a variable name
 A call made through a string, such as `getattr(sys, "exit")()`, is not caught.
 A new test call that focuses the run on itself, with RSpec `focus: true` or `:focus` or a node test `{ only: true }` option, is drift too, because it makes the runner skip every other test.
 A comment above it is free only after the first old unit of the file.
+A new `mod NAME;` line with no body in a protected Rust test file (the mod line rule) is free too, when all of these hold:
+its only attributes are `#[path = "..."]` and `#[cfg(test)]`, so `#[macro_use]` or any other `#[cfg(...)]` is drift;
+the module file is new since accept, so a `mod` line that names a file that was protected at accept is drift;
+the file exists now, found as rustc finds it (the `#[path]` value against the folder of the declaring file, else `NAME.rs` or `NAME/mod.rs` under the folder of `main.rs`, `lib.rs` or `mod.rs`, or under `<stem>/` for any other file);
+and the file calls no process exit, focuses no run, and brings in no code the compare does not read: no `mod` line of its own, no `include!` and no start-up attribute such as `#[ctor]` or `#[link_section]`.
+A `mod` line inside an inline module is drift.
+A new file that matches `protect_infra` or the enforcement files after accept, such as `tests/conftest.py` or `.cargo/config.toml`, is a new protected infra file and is drift (`protected file <path> added`); a new file that only matches `test_globs` stays free.
 A new helper, hook, fixture, import or `macro_rules!` is drift: record it with `rvow amend`.
 Moving a unit inside its container is not drift.
 Plain Rust `//` comments are left out of unit forms; doc comments and comments in other languages are kept.

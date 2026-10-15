@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Free a new `mod NAME;` line in a protected Rust test file when its module file is new since accept, its only attributes are `#[path = "..."]` and `#[cfg(test)]`, and the module file calls no process exit and focuses no run.
 - Hold a stop only for the work of the session: a session is held only for a task or drift item whose file it changed, a pending amendment of a change releases its stop, and stale proofs no longer hold a stop and are left to the push gate; `rvow stats` lists the stop blocks by reason, `drift`, `no-proof` or `unknown`.
 - Count only the segments that are not a file check (`grep`, `rg`, `test`, `[`, `diff`, `cmp`) toward the `full-suite` chain warning, so a verify of file checks before one test no longer warns.
 - Refuse a blank required proposal section: `rvow check` reports a structure error that names the section and its line, and one word is enough.
@@ -160,6 +161,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Report a new protected infra file as drift: a `conftest.py` or `.cargo/config.toml` added after accept is `protected file <path> added`, while a new test file stays free.
 - A new test that calls a process exit or abort, such as `std::process::exit`, `sys.exit`, `process.exit`, `os.Exit` or `exit()`, or that focuses the run with `focus: true` or `{ only: true }`, is drift in a protected test file, and rvow removes saved syntax compare results older than 30 days.
 - A `node --test`, vitest or mocha verify that ran 0 tests no longer proves a task.
 - End every lease of a task when the task is proved or blocked, bound or not, so a lease no longer comes back when the task goes stale.
