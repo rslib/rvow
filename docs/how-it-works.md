@@ -110,6 +110,8 @@ A subagent's edits count for that subagent, not for the main session that spawne
 Git read commands such as `git diff` and `sed` without `-i` change nothing.
 A session is held only for a task or drift item whose file it changed.
 It is held for a task with no proof when it changed a file that the `files:` of the task match.
+It is not held for that task while the task has a live lease that another worker holds, or that no worker took yet: the session handed the task off with `rvow delegate`.
+When the lease ends, the hold comes back, and the session that holds the lease is held as before.
 It is held for drift when it changed a file that a drift item names or a protected file.
 A session that changed no file, one that only read, a subagent and a call with no session id are never held.
 Each reason is given once to a session.

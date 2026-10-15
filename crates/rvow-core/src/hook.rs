@@ -877,6 +877,9 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
                 continue;
             }
             let id = t.id.to_string();
+            if lease::leased_away(project, &id, session, crate::ledger::now_ms())? {
+                continue;
+            }
             let text = format!("{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written");
             return Ok(Some(StopHold { kind: StopReason::NoProof, text }));
         }
@@ -1476,6 +1479,52 @@ mod tests {
     fn stop_of(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {
         let input = json!({"cwd": repo.to_str().unwrap(), "session_id": session});
         claude_stop(p, home, &input).unwrap().map(|v| v["reason"].as_str().unwrap().to_string())
+    }
+
+    /// The no-proof hold of `session`, without the once-per-session filter of the hook.
+    fn hold(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {
+        stop_reason(p, home, repo, Some(session)).unwrap().map(|h| h.text)
+    }
+
+    #[test]
+    fn stop_lease_a_task_leased_to_another_worker_does_not_hold() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        edits_out(&p, &repo, "s1");
+        assert!(hold(&p, &home, &repo, "s1").is_some_and(|r| r.contains(&task)));
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert_eq!(hold(&p, &home, &repo, "s1"), None, "an unbound live lease");
+        assert!(lease::bind(&p, &task, "worker").unwrap());
+        assert_eq!(hold(&p, &home, &repo, "s1"), None, "a lease bound to another worker");
+    }
+
+    #[test]
+    fn stop_lease_an_ended_or_old_lease_holds_again() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        edits_out(&p, &repo, "s1");
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert!(lease::bind(&p, &task, "worker").unwrap());
+        lease::end(&p, "worker").unwrap();
+        assert!(hold(&p, &home, &repo, "s1").is_some_and(|r| r.contains(&task)), "an ended lease");
+
+        let old = json!({"event": "issue", "task": task, "change": "CHG-x", "files": ["out.txt"], "time": 1});
+        std::fs::write(p.root.join(LEASE_FILE), format!("{old}\n")).unwrap();
+        assert!(hold(&p, &home, &repo, "s2").is_none(), "s2 changed nothing");
+        assert!(hold(&p, &home, &repo, "s1").is_some_and(|r| r.contains(&task)), "a lease older than 4 hours");
+    }
+
+    #[test]
+    fn stop_lease_the_session_that_holds_the_lease_is_held() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert!(lease::bind(&p, &task, "w1").unwrap());
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        edits_out(&p, &repo, "w1");
+        assert!(hold(&p, &home, &repo, "w1").is_some_and(|r| r.contains(&task)));
     }
 
     #[test]

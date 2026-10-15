@@ -197,6 +197,12 @@ pub fn end_task(project: &Project, task: &str) -> Result<()> {
     write(project, &Event::EndTask { task: task.into(), time: now_ms() })
 }
 
+/// Whether `task` has a live lease at `now` that `session` does not hold:
+/// another worker builds it.
+pub fn leased_away(project: &Project, task: &str, session: Option<&str>, now: u64) -> Result<bool> {
+    Ok(leases(project)?.iter().any(|l| l.task == task && l.live(now) && (session.is_none() || l.agent_id.as_deref() != session)))
+}
+
 /// The lease that `agent_id` bound last, live or not.
 fn bound_last<'a>(all: &'a [Lease], agent_id: &str) -> Option<&'a Lease> {
     all.iter().filter(|l| l.agent_id.as_deref() == Some(agent_id)).max_by_key(|l| l.bound)
