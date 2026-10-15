@@ -183,8 +183,13 @@ fn added_lines_safe(before: &str, now: &str) -> bool {
 /// The rvow home, the config and the grammar session load once for the whole
 /// call, not once per file.
 pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
+    drift_in(project, top, change, &crate::store::home_dir().unwrap_or_default())
+}
+
+/// `drift` with the rvow home given, whose config and grammar cache it reads.
+fn drift_in(project: &Project, top: &Path, change: &Active, home: &Path) -> Vec<Item> {
     let mut out = Vec::new();
-    let home = crate::store::home_dir().unwrap_or_default();
+    let home = home.to_path_buf();
     let test_queries = crate::config::load(project, &home).map(|c| c.test_queries).unwrap_or_default();
     let mut session = None;
     for (key, hash) in guarded(change) {
@@ -255,7 +260,10 @@ mod tests {
     fn weaken(p: &Project, repo: &Path) -> Vec<String> {
         let (living, _) = crate::change::load_living(p).unwrap();
         let changes = crate::proof::active(p, &living).unwrap();
-        drift(p, repo, &changes[0]).into_iter().map(|i| i.what).collect()
+        // An empty home of the test's own, so the grammars a user has cached
+        // cannot change which rule a file meets.
+        let home = p.root.join("guard-test-home");
+        drift_in(p, repo, &changes[0], &home).into_iter().map(|i| i.what).collect()
     }
 
     #[test]
