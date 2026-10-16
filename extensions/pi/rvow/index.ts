@@ -953,7 +953,7 @@ export default function (pi: ExtensionAPI) {
   // the next lease once the old one ended; while the old one is live the hook refuses with a reason.
   let leaseAgent: string | undefined;
   pi.on("before_agent_start", async (event, ctx) => {
-    if (!/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
+    if (event.messageType === "custom" || !/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
     const id = ctx.sessionManager?.getSessionId?.();
     if (!id) return;
     const out = await hook(
