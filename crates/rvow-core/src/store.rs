@@ -153,9 +153,15 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
     match mode {
         Mode::Repo => {
             add_union_merge(&top)?;
-            add_lines(&top.join(".gitignore"), &[&format!("{REPO_DIR}/.lock")])?;
+            let lines: Vec<String> = local_files().iter().map(|f| format!("{REPO_DIR}/{f}")).collect();
+            add_lines(&top.join(".gitignore"), &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
-        Mode::Home => add_lines(&home.join(".gitignore"), &[".lock", "claude-plugin/"])?,
+        Mode::Home => {
+            let key = format!("{}/{}", crate::seal::KEY_FOLDER, crate::seal::KEY_FILE);
+            let mut lines = local_files().to_vec();
+            lines.extend([format!("{}/", crate::install::MARKETPLACE_DIR), key]);
+            add_lines(&home.join(".gitignore"), &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
+        }
     }
     Ok(Project { root, meta })
 }
@@ -285,6 +291,19 @@ fn add_union_merge(top: &Path) -> Result<()> {
     add_lines(&top.join(".gitattributes"), &[&format!("{REPO_DIR}/**/*.jsonl merge=union")])
 }
 
+/// The project files that belong to one machine, so git never tracks them.
+fn local_files() -> [String; 7] {
+    [
+        LOCK_FILE.to_string(),
+        "hook-state/".to_string(),
+        "provenance/".to_string(),
+        crate::stats::STATS_FILE.to_string(),
+        crate::lease::LEASE_FILE.to_string(),
+        crate::yolo::YOLO_FILE.to_string(),
+        crate::gate::cache::CACHE_FILE.to_string(),
+    ]
+}
+
 /// Appends each of `lines` to the file at `path` unless it is already there.
 fn add_lines(path: &Path, lines: &[&str]) -> Result<()> {
     let mut text = std::fs::read_to_string(path).unwrap_or_default();
@@ -378,6 +397,53 @@ mod tests {
     use super::*;
     use crate::git::testrepo::*;
 
+    fn ignored(repo: &Path, rel: &str) -> bool {
+        std::process::Command::new(git::bin())
+            .args(["-C", repo.to_str().unwrap(), "check-ignore", "-q", "--no-index", rel])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn init_ignores_local_state() {
+        let tmp = TempDir::new();
+        let local = [
+            "hook-state/files-s1",
+            "provenance/k/records.jsonl",
+            "hook-stats.jsonl",
+            "leases.jsonl",
+            "yolo.json",
+            "rerun-cache.jsonl",
+            ".lock",
+        ];
+        let shared = ["ids.jsonl", "config.toml", "project.toml", "spec-record.json", "backlog/x/proposal.md"];
+
+        let home = tmp.0.join("home");
+        git(&tmp.0, &["init", "-q", home.to_str().unwrap()]);
+        let p = init(&repo_with_commit(&tmp.0, "r"), &home, Mode::Home).unwrap();
+        let rel = p.root.strip_prefix(&home).unwrap().to_str().unwrap().to_string();
+        for f in local {
+            assert!(ignored(&home, &format!("{rel}/{f}")), "home mode must ignore {f}");
+        }
+        for f in shared {
+            assert!(!ignored(&home, &format!("{rel}/{f}")), "home mode must track {f}");
+        }
+        let key = crate::seal::key_path(&home);
+        assert!(ignored(&home, key.strip_prefix(&home).unwrap().to_str().unwrap()), "the seal key is a secret");
+
+        let repo = repo_with_commit(&tmp.0, "o");
+        init(&repo, &tmp.0.join("home2"), Mode::Repo).unwrap();
+        for f in local {
+            assert!(ignored(&repo, &format!("{REPO_DIR}/{f}")), "repo mode must ignore {f}");
+        }
+        for f in shared {
+            assert!(!ignored(&repo, &format!("{REPO_DIR}/{f}")), "repo mode must track {f}");
+        }
+    }
+
     #[test]
     fn init_writes_the_ignore_lines() {
         let tmp = TempDir::new();
@@ -385,16 +451,26 @@ mod tests {
         let home = tmp.0.join("home");
         init(&repo, &home, Mode::Home).unwrap();
         let text = std::fs::read_to_string(home.join(".gitignore")).unwrap();
-        assert_eq!(text, ".lock\nclaude-plugin/\n");
+        let key = format!("{}/{}", crate::seal::KEY_FOLDER, crate::seal::KEY_FILE);
+        assert_eq!(
+            text,
+            format!(
+                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\n"
+            )
+        );
 
         let other = repo_with_commit(&tmp.0, "o");
         std::fs::write(other.join(".gitignore"), "target/").unwrap();
         init(&other, &tmp.0.join("home2"), Mode::Repo).unwrap();
         let text = std::fs::read_to_string(other.join(".gitignore")).unwrap();
-        assert_eq!(text, "target/\nrvow/.lock\n");
+        assert_eq!(
+            text,
+            "target/\nrvow/.lock\nrvow/hook-state/\nrvow/provenance/\nrvow/hook-stats.jsonl\nrvow/leases.jsonl\nrvow/yolo.json\nrvow/rerun-cache.jsonl\n"
+        );
         add_lines(&other.join(".gitignore"), &["rvow/.lock", "x"]).unwrap();
         let text = std::fs::read_to_string(other.join(".gitignore")).unwrap();
-        assert_eq!(text, "target/\nrvow/.lock\nx\n");
+        assert!(text.ends_with("rvow/rerun-cache.jsonl\nx\n"), "{text}");
+        assert_eq!(text.matches("rvow/.lock").count(), 1, "a line already there is not added again");
     }
 
     #[test]

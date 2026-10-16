@@ -4,6 +4,9 @@ rvow reads settings from a global file and a project file.
 The global file lives inside the rvow home (the directory named in `RVOW_HOME`).
 The project file is `config.toml` in the rvow tree root of the project.
 That root is the project folder of the home store in home mode, and the `rvow/` folder of the repository in repository mode.
+`rvow init` adds the files of one machine in that root to `.gitignore`: `.lock`, `hook-state/`, `provenance/`, `hook-stats.jsonl`, `leases.jsonl`, `yolo.json` and `rerun-cache.jsonl`.
+In home mode it also ignores `claude-plugin/` and the seal key of the rvow home.
+A store made before this change needs these lines added by hand.
 The project value wins when both set a key, and a project list replaces the global list instead of extending it.
 
 In repository mode the shared settings come from the project file only, so one contributor's settings cannot change a check that the project owns.

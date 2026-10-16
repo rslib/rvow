@@ -174,6 +174,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow init` leaving files of one machine for git to track: a new store now ignores the hook state, the provenance store, the hook stats, the leases, the yolo state, the rerun cache and, in home mode, the seal key.
 - Fix the Stop hook holding a session for a task it handed off with `rvow delegate`: a task with a live lease that another worker holds, or that no worker took yet, no longer holds the session, and the hold comes back when the lease ends.
 - Fix `rvow install` and the gate disagreeing about a pre-push hook that another tool wrote: install now moves that hook to `pre-push.rvow-prev` and writes its own hook, which runs the old hook first with the same arguments and pushed refs and stops the push when it fails.
   When a tool rewrites the hook later, the gate says to run `rvow install` again.
