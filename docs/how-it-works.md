@@ -39,6 +39,7 @@ A model that writes both the code and the claim that the code works grades its o
 The claim is cheap to make and hard to audit.
 So the checks run as ordinary processes, and the result goes into a ledger that the model cannot write to.
 Hooks deny edits to rvow's own files, and they deny `rvow accept` and `rvow confirm` for agents.
+They also deny a search that covers the plan files of the store: a search program is denied when a path among its own arguments covers the store, or when it runs with no path after a `cd` into a covering folder, and another program on the same line does not count.
 This does not make cheating impossible.
 It makes cheating leave a record that a person can read.
 
@@ -83,7 +84,12 @@ Each run's task id, exit code and test count go into the amendment, and `rvow co
 The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
 In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.
-It then decides everything with the digest of the listing that was read, so an edit that arrived later waits for the next round.
+With one amendment pending the dialog is a yes or no question that shows its id, reason and items.
+With more than one pending, the dialog lists each amendment with its id, reason and items and asks about each in turn: accept, reject or later.
+Each answer runs `rvow confirm <AMD-id> --accept` or `--reject`, and a later leaves that amendment pending, so an edit that arrived later waits for the next round.
+The `rvow_confirm` tool takes an optional `id` and then asks only about that amendment.
+`rvow show AMD-x` prints an amendment of an active or archived change with its change, its reason, its items and its decision: pending, accepted or rejected.
+An unknown AMD- id fails with `no id matches`.
 `/rvow-confirm accept <id>` and `/rvow-confirm reject <id>` decide those ids with no dialog.
 A confirm that names an amendment that already has a decision fails with the code `decided` and names the amendment and its decision, such as `AMD-x is already accepted`.
 An unknown id keeps the code `amendment`.
@@ -93,10 +99,33 @@ An agent that could approve its own amendment would make drift detection a forma
 The agent can do two things instead.
 It can amend and wait, or it can run `rvow block` when a task cannot pass as written.
 
-A pending amendment also decides the Stop hook.
-The stop is held while an active change has an unproved or failed task, unless a pending amendment of that change names the task.
-An amendment that only changed `design.md` releases nothing, while an amendment whose items name a task releases that task.
-An amendment recorded before rvow wrote task names has no `tasks` key and releases its whole change.
+## The stop holds only the work of the session
+
+The Stop hook holds a session only for work that session started.
+The hooks record each file that a session changed: the files of its Edit and Write calls, and the file names in a shell command that does not only read.
+For a shell command they read its path and file-name words, the files its globs match, and the value of an option such as `--out=report.txt`, and the path-like text of heredoc bodies and inline scripts such as `python3 -c "..."` when an interpreter or a shell runs that text. The text given to any other program, such as `rvow put`, `rvow note`, `cat` or `git commit -m`, is data and names no changed file, and an `rvow` command records no file. A `cd` of the line only moves the folder those words resolve from, and folders themselves are never recorded.
+A formatter run such as `cargo fmt` records nothing beyond the files it names, and `rvow put` counts as a change of the plan.
+Script text counts only where it names an existing file, or a path with a `/` whose folder exists: `src/a.rs` counts, while code words such as `stack.pop` do not.
+A subagent's edits count for that subagent, not for the main session that spawned it.
+Git read commands such as `git diff` and `sed` without `-i` change nothing.
+A session is held only for a task or drift item whose file it changed.
+It is held for a task with no proof when it changed a file that the `files:` of the task match.
+It is not held for that task while the task has a live lease that another worker holds, or that no worker took yet: the session handed the task off with `rvow delegate`.
+When the lease ends, the hold comes back, and the session that holds the lease is held as before.
+Around each checked call that may write, the hooks snapshot the work tree with a private git index and object store, and record each changed path with its new git blob id, or deleted, for the session or the subagent of the call.
+The private store lists the repository's own objects as an alternate and lives under the project folder, so nothing is written into the user's `.git`.
+The private objects are transient: the records keep only blob ids, and when the private store passes 64 MiB and no call is in flight, it is deleted and rebuilt from the repository's own objects.
+Records are dropped after 7 days, and a call that never reports back (cancelled or killed) stops counting as in flight after 6 hours.
+A read takes no snapshot.
+A session owns a file only when the file's current blob is the blob its latest call on that file produced, or the file is still gone after the session deleted it, and no call of another session or of a subagent that overlapped that call in time recorded the same path and blob; overlapping same-blob calls leave no owner.
+A session whose hooks send no after-call record, such as an older mod that sent only pre-tool-use, falls back to today's text record.
+It is held for drift when it changed a file that a drift item names or a protected file.
+A session that changed no file, one that only read, a subagent and a call with no session id are never held.
+Each reason is given once to a session.
+
+A pending amendment releases the stop.
+While a change has any pending amendment, the Stop hook holds nothing for that change, since only the user can decide it.
+Stale proofs never hold a stop: they are left to the push gate, and `rvow gate --strict` still fails on them.
 
 ## The proof and what stale means
 
@@ -188,10 +217,13 @@ A subagent meets the same rules as the main agent, but it does not know which ta
 `rvow delegate <task>` records a lease for one task and prints a short brief.
 The first line of the brief is `lease: <task id>`, so put the brief at the start of the subagent's prompt.
 The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
-In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from the first prompt of that session and binds the session id.
+In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from a prompt of that session and binds the session id.
 From then on the hook denies that subagent's edits of files outside the task's `files:`, and the reason names the task.
 It also denies an `rvow prove` of any other task or `rvow prove --stale`, so one subagent cannot prove another's work.
 A lease ends when its task is proved or blocked, when the subagent stops or after 4 hours.
+A prove or block ends the lease for good, bound or not, so the task going stale later does not bring it back.
+A pi session takes the next lease from a later `lease:` line when its old lease ended: the hook binds the session to the new task and judges its edits by that task.
+When the old lease is still live, the hook refuses the bind, the session stays on the old task and the user sees "this session still holds the lease of <task>; prove or block <task>, or start a new session".
 The lease file is closed to agents, like the gate cache.
 
 Two limits stay.
@@ -261,8 +293,10 @@ A branch with no active change and no backlog plan gets one line naming `rvow ne
 The hooks should help and stay quiet, so rvow counts what they do.
 Each denial and each stop is one line in `hook-stats.jsonl` in the project folder.
 A line holds the time, the hook, the outcome (deny, audit, ask, block or pass), the session id and, for a denial, an audit or an ask, one rule name such as `owner-command`, `outside-scope` or `protected-test`.
+A stop block also holds a `reason`, `drift` or `no-proof`.
 It never holds a command or a path.
-`rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops.
+`rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops and a `stop_reasons` list that counts the blocks of each reason.
+A block line written before reasons existed counts as `unknown`.
 Use it to find the rule that fires most before you change any rule.
 Agents cannot read or write the stats file.
 
@@ -292,6 +326,24 @@ The hook sits at the last point where the agent cannot argue.
 A push that carries stale or unproved work stops there.
 The hook refuses to run an rvow binary that changed after install.
 
+When `.git/hooks/pre-push` already holds a hook of another tool, `rvow install` moves it to `.git/hooks/pre-push.rvow-prev` and writes its own hook.
+The rvow hook runs the old hook first, with the same arguments and the same pushed refs on stdin.
+When the old hook fails, the push stops and the gate does not run.
+The old hook cannot skip the gate: the rvow hook is one shell group, so the shell reads all of it before the old hook runs, and the old hook can only fail the push.
+`rvow install` again finds its own hook and changes nothing.
+
+When a tool rewrites `.git/hooks/pre-push` later, `rvow gate` and `rvow archive` fail with `installed pre-push hook <path> is missing or was changed; run rvow install again`.
+`rvow install` then moves the new hook to `pre-push.rvow-prev` in place of the old copy.
+
+Under `core.hooksPath` another hook manager owns the folder, so `rvow install` prints a line to add as the first command of its pre-push hook:
+
+```sh
+'/path/to/rvow' gate --strict --rerun || exit 1
+```
+
+The gate accepts that hook only when the line is its first command and the hook runs as a shell script, so nothing before it can skip the gate.
+It also accepts a hook whose last command runs the gate and whose earlier lines are plain `npx`, `npm`, `pnpm` or `yarn` commands.
+
 ## One store per remote
 
 rvow keeps its tree in a home store, keyed by the origin remote of the repository.
@@ -307,6 +359,19 @@ When work spans repositories, make one change in each.
 Write the shared intent in each proposal and link the other change by id in the text.
 Let each repository gate its own part.
 `rvow bundle --out` and `rvow gate --bundle` carry one repository's checks into CI without the home store.
+
+## Working in git worktrees
+
+In home mode one store serves every worktree of a repository, so a plan made in one worktree shows in all of them.
+`rvow accept`, `rvow amend`, `rvow archive`, `rvow check` and `rvow clarify` run in the worktree where the branch of the change is checked out, even when you start them from another worktree.
+The base commit, the files, the baseline and the fingerprints come from that worktree.
+A `rvow check` or `rvow clarify` that names a change reads the worktree of that change's branch, so it reports the same from the main checkout as from the worktree of the branch.
+With no change named, `rvow check` keeps the changes of the branch of the current worktree.
+When no worktree has the branch, accept fails and names `git checkout <branch>` and `git worktree add <path> <branch>`.
+A session in a worktree is judged by the change of that worktree's branch.
+Its hooks, its stop hold and the leases it delegates all use that change, and a change of another branch does not count.
+`rvow confirm` reads no folder, so it works from any worktree.
+`rvow init --in-repo` keeps one `rvow/` folder per checkout, so those checkouts do not share a store.
 
 ## Why one format and no custom schemas
 
@@ -345,6 +410,9 @@ Each one is caught later by the gate, or needs a person.
   `require_signature` is the real boundary, and it is off by default.
 - **Hardware signing keys are untested.**
   The tests sign with a software key. A hardware key (`ed25519-sk`) has not been used yet.
+- **The provenance snapshots see only the work tree, not background writes.**
+  A write after a call ends, such as a background command, is not in the before or after snapshot of any call and does not count toward ownership.
+  Submodule content is not seen either.
 - **A timeout stops rvow and not its child.**
   The pi tool `rvow_prove` ends the rvow process after its timeout, and the verify command that rvow started can keep running.
 - **`config.toml` has no edit deny.**

@@ -9,6 +9,21 @@ rust-version = "1.98"
 license = "MIT"
 publish = false
 
+# Releases are GitHub-only: the tag push triggers .github/workflows/release.yml,
+# which builds and publishes the binaries. No crates.io publishing.
+[workspace.metadata.release]
+publish = false
+push = true
+# One consolidated tag for the whole workspace; release.yml triggers on v*.
+tag-name = "v{{version}}"
+
+# The hooks start rvow on every tool call, so the release binary is built for
+# size and speed: fat LTO makes it 5% smaller than thin, for a longer build.
+[profile.release]
+strip = "symbols"
+lto = "fat"
+codegen-units = 1
+
 # Optimize the wasm engine in debug builds: the syntax tests run it.
 [profile.dev.package.cranelift-assembler-x64]
 opt-level = 2

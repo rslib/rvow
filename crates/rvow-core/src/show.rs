@@ -50,6 +50,9 @@ pub fn review(project: &Project, input: &str) -> Result<String> {
 }
 
 fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks: bool) -> Result<String> {
+    if input.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("AMD-")) {
+        return show_amendment(project, input);
+    }
     let id = change::find(project, input)?.id;
     let (living, _) = change::load_living(project)?;
     let (dirs, _) = change::list(project)?;
@@ -64,6 +67,46 @@ fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks
     }
     let runners = crate::config::runners(project).unwrap_or_default();
     if id.kind() == Kind::Req { show_requirement(project, &id, &living, &open) } else { show_task(&id, &living, &open, &runners) }
+}
+
+/// One amendment of an active or archived change: its reason, its items and
+/// whether it is pending, accepted or rejected.
+fn show_amendment(project: &Project, input: &str) -> Result<String> {
+    let (dirs, _) = change::list(project)?;
+    let mut found = Vec::new();
+    for dir in &dirs {
+        let (events, _) = ledger::read(&dir.path.join(change::LEDGER))?;
+        for e in events.iter().filter(|e| e.kind == ledger::Kind::Amend) {
+            if let Some(id) = e.data.get("amendment").and_then(|v| v.as_str()).and_then(|a| a.parse::<Id>().ok()) {
+                found.push((id, dir.id.clone(), e.clone(), events.clone()));
+            }
+        }
+    }
+    let id = crate::id::resolve(input, found.iter().map(|f| &f.0)).map_err(|e| {
+        Error::new("path", format!("{input}: {e}"), "give more characters of the id, or run rvow status to see the pending amendments")
+    })?;
+    let (_, change_id, event, events) = found.into_iter().find(|f| f.0 == id).ok_or_else(|| not_listed(&id))?;
+    let decision = events
+        .iter()
+        .rfind(|e| e.kind == ledger::Kind::Confirm && e.data.get("amendment").and_then(|v| v.as_str()) == Some(id.to_string().as_str()))
+        .map(|e| match e.data.get("decision").and_then(|v| v.as_str()) {
+            Some("accept") => "accepted",
+            Some("reject") => "rejected",
+            _ => "decided",
+        })
+        .unwrap_or("pending");
+    let mut out = format!(
+        "{id} for {change_id}\ndecision: {decision}\nreason: {}\n",
+        event.data.get("reason").and_then(|v| v.as_str()).unwrap_or("")
+    );
+    let items = event.data.get("items").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or_default();
+    let _ = writeln!(out, "items: {}", items.len());
+    for i in items {
+        let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
+        let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
+        let _ = writeln!(out, "  {class}: {what}");
+    }
+    Ok(out)
 }
 
 fn not_listed(id: &Id) -> Error {

@@ -92,6 +92,8 @@ mod literal_paths;
 mod plan_access;
 #[path = "suite/protected_growth.rs"]
 mod protected_growth;
+#[path = "suite/provenance.rs"]
+mod provenance;
 #[path = "suite/quiet_hooks.rs"]
 mod quiet_hooks;
 #[path = "suite/reach.rs"]
@@ -116,9 +118,28 @@ mod syntax_cli;
 mod syntax_drift;
 #[path = "suite/syntax_grammar.rs"]
 mod syntax_grammar;
+#[path = "suite/syntax_queries.rs"]
+mod syntax_queries;
+#[path = "suite/syntax_units.rs"]
+mod syntax_units;
 #[path = "suite/tamper_holes.rs"]
 mod tamper_holes;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
+#[path = "suite/worktrees.rs"]
+mod worktrees;
 #[path = "suite/yolo.rs"]
 mod yolo;
+
+/// Tests in this binary share the process env, so every one that sets an
+/// env var holds this lock: syntax_units sets RVOW_GRAMMAR_OFFLINE and
+/// syntax_drift sets RVOW_GRAMMAR_URL.
+pub(crate) mod env_lock {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static ENV: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub fn lock() -> MutexGuard<'static, ()> {
+        ENV.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+}

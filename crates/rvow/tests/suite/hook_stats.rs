@@ -240,6 +240,8 @@ fn stats_record_a_denial_with_its_rule_and_session() {
 fn stats_record_a_stop_block_and_the_pass_that_follows() {
     let fx = Fx::new("rec-stop", true);
     std::fs::write(fx.repo().join("src/b.txt"), "touched").unwrap();
+    let edit = json!({"file_path": fx.repo().join("src/b.txt")});
+    assert!(fx.event("pre-tool-use", json!({"tool_name": "Write", "tool_input": edit, "session_id": "s1"})).is_none());
     let session = json!({"session_id": "s1"});
     assert!(fx.event("stop", session.clone()).is_some(), "the first stop is held back");
     assert!(fx.event("stop", session).is_none(), "the same reason passes the second time");

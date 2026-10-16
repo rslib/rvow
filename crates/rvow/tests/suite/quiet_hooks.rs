@@ -127,12 +127,24 @@ impl Fx {
     fn touch(&self, text: &str) {
         std::fs::write(self.repo().join("out.txt"), text).unwrap();
     }
+
+    /// An allowed Write call of `session` on `rel`, which puts the file in the session's record.
+    fn edit(&self, session: &str, rel: &str) {
+        let payload =
+            json!({"cwd": self.repo(), "tool_name": "Write", "tool_input": {"file_path": self.repo().join(rel)}, "session_id": session});
+        let mut child =
+            self.cmd(RVOW).args(["hook", "claude", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        assert_eq!(out.trim(), "", "the edit of {rel} was held back");
+    }
 }
 
 #[test]
 fn stop_second_stop_in_a_session_passes() {
     let fx = Fx::new("twice");
     fx.touch("ok");
+    fx.edit("s1", "out.txt");
     let s = json!({"session_id": "s1"});
     assert!(fx.stop(s.clone()).unwrap().contains(&fx.task));
     assert_eq!(fx.stop(s), None);
@@ -142,50 +154,55 @@ fn stop_second_stop_in_a_session_passes() {
 fn stop_a_new_reason_blocks_once() {
     let fx = Fx::new("new-reason");
     fx.touch("ok");
+    fx.edit("s1", "out.txt");
     let s = json!({"session_id": "s1"});
     assert!(fx.stop(s.clone()).unwrap().contains("has no proof"));
     fx.rvow(&["prove", &fx.task.clone()]);
     assert_eq!(fx.stop(s.clone()), None);
     fx.touch("ok changed");
-    assert!(fx.stop(s.clone()).unwrap().contains("stale"));
-    assert_eq!(fx.stop(s), None);
+    assert_eq!(fx.stop(s), None, "stale proofs are left to the push gate");
 }
 
 #[test]
 fn stop_another_session_is_told_again() {
     let fx = Fx::new("sessions");
     fx.touch("ok");
+    fx.edit("s1", "out.txt");
+    fx.edit("s2", "out.txt");
     assert!(fx.stop(json!({"session_id": "s1"})).is_some());
     assert_eq!(fx.stop(json!({"session_id": "s1"})), None);
     assert!(fx.stop(json!({"session_id": "s2"})).is_some());
 }
 
 #[test]
-fn stop_without_a_session_id_keeps_blocking() {
+fn stop_without_a_session_id_holds_nothing() {
     let fx = Fx::new("anon");
     fx.touch("ok");
-    assert!(fx.stop(json!({})).is_some());
-    assert!(fx.stop(json!({})).is_some());
+    fx.edit("s1", "out.txt");
+    assert_eq!(fx.stop(json!({})), None);
+    assert_eq!(fx.stop(json!({})), None);
 }
 
 #[test]
 fn stop_a_subagent_or_a_continued_stop_passes() {
     let fx = Fx::new("sub");
     fx.touch("ok");
-    assert_eq!(fx.stop(json!({"agent_id": "a1", "agent_type": "general-purpose"})), None);
-    assert_eq!(fx.stop(json!({"stop_hook_active": true})), None);
-    assert!(fx.stop(json!({"stop_hook_active": false})).is_some());
+    fx.edit("s1", "out.txt");
+    assert_eq!(fx.stop(json!({"agent_id": "a1", "agent_type": "general-purpose", "session_id": "s1"})), None);
+    assert_eq!(fx.stop(json!({"stop_hook_active": true, "session_id": "s1"})), None);
+    assert!(fx.stop(json!({"stop_hook_active": false, "session_id": "s1"})).is_some());
 }
 
 #[test]
 fn stop_during_a_git_operation_passes() {
     let fx = Fx::new("rebase");
     fx.touch("ok");
+    fx.edit("s1", "out.txt");
     let marker = fx.repo().join(".git/rebase-merge");
     std::fs::create_dir(&marker).unwrap();
-    assert_eq!(fx.stop(json!({})), None);
+    assert_eq!(fx.stop(json!({"session_id": "s1"})), None);
     std::fs::remove_dir(&marker).unwrap();
-    assert!(fx.stop(json!({})).unwrap().contains(&fx.task));
+    assert!(fx.stop(json!({"session_id": "s1"})).unwrap().contains(&fx.task));
 }
 
 #[test]
@@ -199,11 +216,12 @@ fn stop_plan_changed_message_lists_three_items_and_a_count() {
     let id = &fx.task;
     std::fs::write(
         &tasks,
-        format!("- {id} Write it\n  covers: REQ-new1\n  verify: true\n  files: out.txt, tests/**\n\n- TSK-new9 Another\n  covers: REQ-new1\n  verify: true\n  files: **\n"),
+        format!("- {id} Write it\n  covers: REQ-new1\n  verify: true\n  files: out.txt, tests/**\n\n- TSK-new9 Another\n  covers: REQ-new1\n  verify: true\n  files: docs/new.md\n"),
     )
     .unwrap();
     std::fs::write(&proposal, format!("{proposal_text}\nmore\n")).unwrap();
-    let reason = fx.stop(json!({})).unwrap();
+    fx.edit("s1", "docs/new.md");
+    let reason = fx.stop(json!({"session_id": "s1"})).unwrap();
     assert!(reason.contains("the plan changed"), "{reason}");
     assert!(reason.contains("; and ") && reason.contains(" more)"), "{reason}");
     assert!(reason.contains("covers changed; and 1 more)"), "{reason}");
@@ -211,7 +229,7 @@ fn stop_plan_changed_message_lists_three_items_and_a_count() {
     std::fs::write(&proposal, proposal_text).unwrap();
     std::fs::write(&tasks, original.replace("Write ok", "Write it")).unwrap();
     // A title change is free drift, so it is not a reason to hold the stop.
-    let one = fx.stop(json!({})).unwrap_or_default();
+    let one = fx.stop(json!({"session_id": "s1"})).unwrap_or_default();
     assert!(!one.contains("the plan changed"), "{one}");
 }
 

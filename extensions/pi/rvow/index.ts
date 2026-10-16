@@ -148,8 +148,8 @@ function asked(a: Ask): string {
   return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${a.question}`, ...opts].join("\n");
 }
 
-async function ask(ctx: ExtensionContext): Promise<string> {
-  const r = await run(["clarify", "--json"], ctx.cwd, "", SLOW_MS);
+async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
+  const r = await run(["clarify", ...(change ? [change] : []), "--json"], ctx.cwd, "", SLOW_MS);
   if (r?.code !== 0) return `cannot read the open questions from '${BIN}'`;
   let round: { questions?: Ask[]; remaining?: number };
   try {
@@ -947,12 +947,13 @@ export default function (pi: ExtensionAPI) {
     return { handled: true };
   }
 
-  // A subagent runs in a session of its own that loads this extension, so it can bind itself: when its
-  // first prompt starts with the `lease:` line of `rvow delegate`, the hook then judges its edits and
-  // its `rvow prove` by the leased task, as it does for a bound Claude subagent.
+  // A subagent runs in a session of its own that loads this extension, so it can bind itself: when a
+  // prompt starts with the `lease:` line of `rvow delegate`, the hook then judges its edits and its
+  // `rvow prove` by the leased task, as it does for a bound Claude subagent. A later `lease:` line binds
+  // the next lease once the old one ended; while the old one is live the hook refuses with a reason.
   let leaseAgent: string | undefined;
   pi.on("before_agent_start", async (event, ctx) => {
-    if (leaseAgent || !/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
+    if (event.messageType === "custom" || !/^\s*lease:\s*TSK-/m.test(event.prompt)) return;
     const id = ctx.sessionManager?.getSessionId?.();
     if (!id) return;
     const out = await hook(
@@ -965,6 +966,7 @@ export default function (pi: ExtensionAPI) {
       enforcementOff(ctx),
     );
     if (out?.bound === true) leaseAgent = id;
+    else if (typeof out?.reason === "string" && ctx.hasUI) ctx.ui.notify(out.reason, "warning");
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -981,6 +983,7 @@ export default function (pi: ExtensionAPI) {
           tool_input: input,
           session_id: ctx.sessionManager?.getSessionId?.(),
           agent_id: leaseAgent,
+          tool_use_id: event.toolCallId,
         },
         FAST_MS,
         false,
@@ -1072,7 +1075,22 @@ export default function (pi: ExtensionAPI) {
     later(() => refresh(ctx));
   });
 
-  pi.on("tool_result", (event, ctx) => {
+  pi.on("tool_result", async (event, ctx) => {
+    // After the call returns, report its outcome so rvow records the blobs the
+    // call changed, with the same call id that pre-tool-use carried.
+    await hook(
+      "post-tool-use",
+      ctx.cwd,
+      {
+        session_id: ctx.sessionManager?.getSessionId?.(),
+        agent_id: leaseAgent,
+        tool_use_id: event.toolCallId,
+      },
+      FAST_MS,
+      false,
+      undefined,
+      enforcementOff(ctx),
+    );
     const cmd = (event.input as Record<string, unknown>).command;
     if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd))
       later(() => refresh(ctx));
@@ -1383,10 +1401,16 @@ export default function (pi: ExtensionAPI) {
     name: "rvow_ask",
     label: "rvow ask",
     description:
-      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Ask in chat only when it is missing.",
-    parameters: { type: "object", properties: {} } as ToolDefinition["parameters"],
-    async execute(_id, _params, _signal, _update, ctx) {
-      return { content: [{ type: "text", text: await ask(ctx) }], details: {} };
+      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.",
+    parameters: {
+      type: "object",
+      properties: { change: { type: "string", pattern: "^CHG-[a-z0-9]+$" } },
+    } as ToolDefinition["parameters"],
+    async execute(_id, params, _signal, _update, ctx) {
+      const change = (params as { change?: unknown } | undefined)?.change;
+      if (change !== undefined && (typeof change !== "string" || !/^CHG-[a-z0-9]+$/.test(change)))
+        throw new Error("rvow: change must be a CHG id");
+      return { content: [{ type: "text", text: await ask(ctx, change) }], details: {} };
     },
   });
 }

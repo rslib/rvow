@@ -91,6 +91,8 @@ impl Repo {
         let out = self.ok(&["new", "--spec", "Out"]);
         let id = out.lines().find_map(|l| l.strip_prefix("created: ")).unwrap().to_string();
         let dir = PathBuf::from(out.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().to_string());
+        std::fs::write(dir.join("proposal.md"), "branch: main\n\n# Out\n\n## Why\nw\n\n## What changes\nw\n\n## Out of scope\nNone.\n")
+            .unwrap();
         std::fs::write(dir.join("tasks.md"), format!("- TSK-new1 {name}\n  covers: REQ-new1\n  verify: {verify}\n  files: a.txt\n"))
             .unwrap();
         std::fs::write(
@@ -220,4 +222,35 @@ fn accept_speed_check_leaves_a_targeted_verify_alone() {
     let out = r.ok(&["check", &id]);
     assert!(!out.contains("full-suite"), "{out}");
     assert!(out.contains("Ask the user to run /rvow-accept"), "{out}");
+}
+
+/// REQ-mreyxw, scenario: chained commands.
+#[test]
+fn full_suite_warns_when_a_verify_chains_three_programs() {
+    let r = Repo::new("fs-chain");
+    let id = r.plan("Suite", "cargo fmt --check && cargo clippy && cargo test");
+    let out = r.ok(&["check", &id]);
+    assert!(out.contains("full-suite"), "{out}");
+    assert!(out.contains("chains 3 commands"), "{out}");
+}
+
+/// REQ-mreyxw, scenario: file checks before one test.
+#[test]
+fn full_suite_ignores_file_checks_before_one_test() {
+    let r = Repo::new("fs-file-checks");
+    let id = r.plan("Docs", "grep -q x a.md && grep -q y b.md && cargo test --test main docs::");
+    let out = r.ok(&["check", &id]);
+    assert!(!out.contains("full-suite"), "{out}");
+}
+
+/// REQ-mreyxw: a leading `!` and env assignments do not hide the program.
+#[test]
+fn full_suite_counts_only_programs_after_a_bang_or_env_assignment() {
+    let r = Repo::new("fs-prefix");
+    let id = r.plan("Prefix", "! grep -q x a.md && X=1 test -f a.txt && FOO=bar cargo test --test main one");
+    let out = r.ok(&["check", &id]);
+    assert!(!out.contains("full-suite"), "{out}");
+    let id = r.plan("Count", "X=1 cargo fmt && ! cargo clippy && grep -q x a.md && cargo test");
+    let out = r.ok(&["check", &id]);
+    assert!(out.contains("chains 3 commands"), "{out}");
 }

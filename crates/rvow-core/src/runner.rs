@@ -1,6 +1,7 @@
 //! Runs a stored verify command: `sh -c` from the repository root, stdin from
 //! `/dev/null`, in its own process group, with a timeout.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -40,14 +41,46 @@ impl Outcome {
 /// package lines (`[no tests to run]` and `[no test files]` count as zero).
 /// Nextest, jest and go lines count only where the tool prints them: a line
 /// that a test prints itself is indented, or too far indented, and is ignored.
+/// Node `--test` summaries (`\u{2139} tests N` or TAP `# tests N`, the last one
+/// wins), vitest `Tests  ... (T)` totals and mocha `N passing` plus `N failing`
+/// lines count the same way. Node reports a file whose tests a filter left out
+/// as one passing test named by the file, so those results do not count.
+/// A top-level node `--test` result named by a test file, which node prints
+/// for a file in which no test ran: `\u{2139}`-style `\u{2714} a.test.ts (5ms)` or
+/// TAP `ok 2 - a.test.ts`.
+fn node_file_result(line: &str) -> bool {
+    let name = if let Some(rest) = line.strip_prefix("\u{2714} ") {
+        rest.rsplit_once(" (").map_or(rest, |(name, _)| name)
+    } else if let Some(rest) = line.strip_prefix("ok ") {
+        let Some((num, name)) = rest.split_once(" - ") else { return false };
+        if !num.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        name
+    } else {
+        return false;
+    };
+    let ext = name.rsplit_once('.').map(|(_, e)| e);
+    !name.contains(char::is_whitespace) && matches!(ext, Some("js" | "mjs" | "cjs" | "ts" | "mts" | "cts"))
+}
+
 #[derive(Debug, Default)]
 struct TestCount {
     libtest: Option<u64>,
     pytest: Option<u64>,
     nextest: Option<u64>,
     jest: Option<u64>,
+    node: Option<u64>,
+    node_files: u64,
+    vitest: Option<u64>,
+    mocha_passing: Option<u64>,
+    mocha_failing: Option<u64>,
     go_empty: u64,
     go_real: u64,
+    ctest: Option<u64>,
+    doctest: Option<u64>,
+    gtest: Option<u64>,
+    unity: Option<u64>,
 }
 
 fn count_before(line: &str, words: &[&str]) -> u64 {
@@ -55,12 +88,95 @@ fn count_before(line: &str, words: &[&str]) -> u64 {
     tokens.windows(2).filter(|w| words.contains(&w[1])).filter_map(|w| w[0].parse::<u64>().ok()).sum()
 }
 
+/// The first whole number in `text`, after spaces: doctest pads its counts.
+fn leading_number(text: &str) -> Option<u64> {
+    let text = text.trim_start();
+    let end = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    text[..end].parse().ok()
+}
+
+/// The test count of a C or C++ summary line that starts at column 0, or
+/// `None` for any other line: ctest `N% tests passed, F tests failed out of
+/// M` and `No tests were found!!!`, the doctest `[doctest] test cases:` line,
+/// the GoogleTest `[==========] N tests from M test suites ran.` line and the
+/// Unity `N Tests F Failures I Ignored` line. A line a test prints itself is
+/// indented or has a prefix, so it never matches.
+fn cxx_summary(line: &str) -> Option<(CxxRunner, u64)> {
+    if line.starts_with("No tests were found!!!") {
+        return Some((CxxRunner::Ctest, 0));
+    }
+    if let Some(rest) = line.strip_prefix("[doctest] test cases:") {
+        let fields: Vec<&str> = rest.split('|').collect();
+        let shaped = fields.iter().skip(1).any(|f| f.contains("passed")) && fields.iter().skip(1).any(|f| f.contains("failed"));
+        return shaped.then(|| leading_number(fields[0])).flatten().map(|n| (CxxRunner::Doctest, n));
+    }
+    if let Some(rest) = line.strip_prefix("[==========] ") {
+        let mut tokens = rest.split_whitespace();
+        let n = tokens.next()?.parse::<u64>().ok()?;
+        let shaped = matches!(tokens.next(), Some("test" | "tests")) && tokens.next() == Some("from") && rest.contains(" ran.");
+        return shaped.then_some((CxxRunner::Gtest, n));
+    }
+    if let Some((percent, rest)) = line.split_once("% tests passed, ")
+        && !percent.is_empty()
+        && percent.bytes().all(|b| b.is_ascii_digit())
+    {
+        let total = rest.split_once(" tests failed out of ")?.1.trim();
+        return total.parse::<u64>().ok().map(|n| (CxxRunner::Ctest, n));
+    }
+    let tokens: Vec<&str> = line.split(' ').collect();
+    if let [n, "Tests", failures, "Failures", ignored, "Ignored"] = tokens[..]
+        && failures.parse::<u64>().is_ok()
+        && let Ok(ignored) = ignored.parse::<u64>()
+    {
+        // An ignored test did not run.
+        return n.parse::<u64>().ok().map(|n| (CxxRunner::Unity, n.saturating_sub(ignored)));
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CxxRunner {
+    Ctest,
+    Doctest,
+    Gtest,
+    Unity,
+}
+
 fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+/// One output line without its ANSI escape sequences, so a runner that prints
+/// its summary in color is read the same as one that does not. A sequence is
+/// `ESC`, then `[`, then any bytes, then one final byte in 0x40..=0x7e.
+fn uncolored(line: &str) -> Cow<'_, str> {
+    if !line.contains('\u{1b}') {
+        return Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 impl TestCount {
     fn feed(&mut self, line: &str) {
+        // The color codes go before the parsers read the line; the tail that
+        // is stored for display keeps them.
+        let plain = uncolored(line);
+        let line = plain.as_ref();
         let t = line.trim();
         if t.starts_with("test result:") {
             *self.libtest.get_or_insert(0) += count_before(t, &["passed", "failed"]);
@@ -87,6 +203,47 @@ impl TestCount {
             *self.jest.get_or_insert(0) += count_before(t, &["total"]);
             return;
         }
+        if let Some((runner, n)) = cxx_summary(line) {
+            let slot = match runner {
+                CxxRunner::Ctest => &mut self.ctest,
+                CxxRunner::Doctest => &mut self.doctest,
+                CxxRunner::Gtest => &mut self.gtest,
+                CxxRunner::Unity => &mut self.unity,
+            };
+            *slot.get_or_insert(0) += n;
+            return;
+        }
+        if node_file_result(line) {
+            self.node_files += 1;
+            return;
+        }
+        if let Some(n) =
+            line.strip_prefix("\u{2139} tests ").or_else(|| line.strip_prefix("# tests ")).and_then(|r| r.trim().parse::<u64>().ok())
+        {
+            self.node = Some(n);
+            return;
+        }
+        if t.starts_with("Tests  ") && t.ends_with(')') {
+            // vitest: "Tests  1 failed | 3 passed (4)".
+            if let Some(n) = t.rfind('(').and_then(|i| t[i + 1..t.len() - 1].trim().parse::<u64>().ok()) {
+                self.vitest = Some(n);
+                return;
+            }
+        }
+        if indent(line) <= 2 {
+            // mocha: "  2 passing (5ms)" and "  1 failing".
+            let mut tokens = t.splitn(3, ' ');
+            let (n, word, rest) = (tokens.next().and_then(|n| n.parse::<u64>().ok()), tokens.next(), tokens.next());
+            let tail_ok = rest.is_none_or(|r| r.starts_with('(') && r.ends_with(')'));
+            if let (Some(n), Some(word), true) = (n, word, tail_ok) {
+                match word {
+                    "passing" => self.mocha_passing = Some(n),
+                    "failing" => self.mocha_failing = Some(n),
+                    _ => {}
+                }
+                return;
+            }
+        }
         if line.starts_with("ok  \t") {
             // go test: "ok  \tpkg\t0.1s", with a marker when nothing ran.
             if t.contains("[no tests to run]") {
@@ -104,7 +261,33 @@ impl TestCount {
             return Some(0);
         }
         let go = (self.go_empty > 0 && self.go_real == 0).then_some(0);
-        self.libtest.or(self.pytest).or(self.nextest).or(self.jest).or(go)
+        // Mocha always prints `N passing`, so a lone `N failing` line is not its summary.
+        let mocha = self.mocha_passing.map(|p| p + self.mocha_failing.unwrap_or(0));
+        let counters: Vec<u64> = [
+            self.libtest,
+            self.pytest,
+            self.nextest,
+            self.jest,
+            self.node.map(|n| n.saturating_sub(self.node_files)),
+            self.vitest,
+            mocha,
+            go,
+            self.ctest,
+            self.doctest,
+            self.gtest,
+            self.unity,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        match counters.as_slice() {
+            [] => None,
+            // A run of more than one runner in which one of them ran nothing
+            // proves nothing, so the run records zero. One runner keeps its
+            // own count: libtest sums its result lines into one counter.
+            [_, ..] if counters.len() > 1 && counters.contains(&0) => Some(0),
+            _ => Some(counters.iter().sum()),
+        }
     }
 }
 
@@ -406,6 +589,186 @@ mod tests {
         assert_eq!(jest.tests_run, Some(13), "jest counts its total");
         let go = quiet("echo 'ok  \texample \t0.006s [no tests to run]'", Duration::from_secs(10));
         assert_eq!(go.tests_run, Some(0), "go with no tests to run is zero");
+    }
+
+    #[test]
+    fn counts_node_spec_and_tap_summaries() {
+        let t = Duration::from_secs(10);
+        let spec = quiet("echo '\u{2139} tests 3'; echo '\u{2139} pass 3'", t);
+        assert_eq!(spec.tests_run, Some(3), "node spec summary");
+        let tap = quiet("echo '# tests 5'; echo '# pass 5'", t);
+        assert_eq!(tap.tests_run, Some(5), "node tap summary");
+        let zero = quiet("echo '\u{2139} tests 0'", t);
+        assert_eq!(zero.tests_run, Some(0), "node spec zero");
+        let last = quiet("echo '# tests 2'; echo '\u{2139} tests 7'", t);
+        assert_eq!(last.tests_run, Some(7), "the last summary wins");
+        let nested = quiet("echo '    \u{2139} tests 9'", t);
+        assert_eq!(nested.tests_run, None, "an indented line is test output");
+    }
+
+    #[test]
+    fn counts_node_filter_that_left_a_file_empty() {
+        let t = Duration::from_secs(10);
+        let spec = quiet("echo '\u{2714} extensions/pi/lease.test.ts (125.1ms)'; echo '\u{2139} tests 1'", t);
+        assert_eq!(spec.tests_run, Some(0), "node names an empty file as a test");
+        let tap = quiet("echo 'ok 1 - a.test.mjs'; echo '# tests 1'", t);
+        assert_eq!(tap.tests_run, Some(0), "the same in TAP");
+        let mixed = quiet("echo '\u{2714} one (0.3ms)'; echo '\u{2714} b.test.mjs (44ms)'; echo '\u{2139} tests 2'", t);
+        assert_eq!(mixed.tests_run, Some(1), "only the real test counts");
+        let named = quiet("echo '\u{2714} reads the config (1ms)'; echo '\u{2139} tests 1'", t);
+        assert_eq!(named.tests_run, Some(1), "a test with a plain name counts");
+    }
+
+    #[test]
+    fn counts_node_mocha_needs_the_summary_shape() {
+        let t = Duration::from_secs(10);
+        assert_eq!(quiet("echo '0 failing cases were found'", t).tests_run, None, "not a mocha summary");
+        assert_eq!(quiet("echo '0 failing'", t).tests_run, None, "mocha always prints a passing line");
+        assert_eq!(quiet("echo '  3 failing cases'; echo '  4 passing (2ms)'", t).tests_run, Some(4), "a suite title is not a count");
+    }
+
+    #[test]
+    fn counts_node_vitest_total() {
+        let t = Duration::from_secs(10);
+        let ok = quiet("echo '      Tests  4 passed (4)'", t);
+        assert_eq!(ok.tests_run, Some(4));
+        let mixed = quiet("echo ' Tests  1 failed | 3 passed (4)'", t);
+        assert_eq!(mixed.tests_run, Some(4), "vitest counts the total");
+    }
+
+    #[test]
+    fn counts_cxx_ctest_summary() {
+        let t = Duration::from_secs(10);
+        let ok = quiet("echo '100% tests passed, 0 tests failed out of 12'", t);
+        assert_eq!(ok.tests_run, Some(12));
+        let mixed = quiet("echo '83% tests passed, 2 tests failed out of 12'", t);
+        assert_eq!(mixed.tests_run, Some(12), "failed tests count too");
+        let real = quiet(
+            "echo '1/2 Test #1: dftracer_utils_core_hex64 ......   Passed    0.01 sec'; echo; echo '100% tests passed, 0 tests failed out of 2'; echo; echo 'Total Test time (real) =   0.03 sec'",
+            t,
+        );
+        assert_eq!(real.tests_run, Some(2));
+    }
+
+    #[test]
+    fn counts_cxx_ctest_no_tests_found() {
+        let t = Duration::from_secs(10);
+        let none = quiet("echo 'Test project /build'; echo 'No tests were found!!!'", t);
+        assert_eq!(none.tests_run, Some(0), "ctest -R none prints this and exits 0");
+        assert!(none.passed());
+        let printed = quiet("echo '    No tests were found!!!'", t);
+        assert_eq!(printed.tests_run, None, "an indented line is test output");
+    }
+
+    #[test]
+    fn counts_cxx_doctest_test_cases_line() {
+        let t = Duration::from_secs(10);
+        let ok = quiet(
+            "echo '[doctest] test cases:  5 |  5 passed | 0 failed | 0 skipped'; echo '[doctest] assertions: 21 | 21 passed | 0 failed |'; echo '[doctest] Status: SUCCESS!'",
+            t,
+        );
+        assert_eq!(ok.tests_run, Some(5), "the test cases line counts, not the assertions line");
+        let plain = quiet("echo '[doctest] test cases: 5 | 5 passed | 0 failed | 0 skipped'", t);
+        assert_eq!(plain.tests_run, Some(5));
+        let none = quiet("echo '[doctest] test cases: 0 | 0 passed | 0 failed | 0 skipped'", t);
+        assert_eq!(none.tests_run, Some(0));
+        let two = quiet(
+            "echo '[doctest] test cases: 2 | 2 passed | 0 failed | 0 skipped'; echo '[doctest] test cases: 3 | 3 passed | 0 failed | 0 skipped'",
+            t,
+        );
+        assert_eq!(two.tests_run, Some(5), "two binaries add up");
+    }
+
+    #[test]
+    fn counts_cxx_gtest_ran_line() {
+        let t = Duration::from_secs(10);
+        let ok = quiet(
+            "echo '[==========] Running 7 tests from 2 test suites.'; echo '[==========] 7 tests from 2 test suites ran. (3 ms total)'",
+            t,
+        );
+        assert_eq!(ok.tests_run, Some(7), "the ran line counts, the running line does not");
+        let one = quiet("echo '[==========] 1 test from 1 test suite ran. (0 ms total)'", t);
+        assert_eq!(one.tests_run, Some(1));
+        let none = quiet("echo '[==========] 0 tests from 0 test suites ran. (0 ms total)'", t);
+        assert_eq!(none.tests_run, Some(0));
+    }
+
+    #[test]
+    fn counts_cxx_unity_ignored_tests_did_not_run() {
+        let t = Duration::from_secs(10);
+        assert_eq!(quiet("echo '3 Tests 0 Failures 3 Ignored'", t).tests_run, Some(0));
+        assert_eq!(quiet("echo '5 Tests 0 Failures 2 Ignored'", t).tests_run, Some(3));
+    }
+
+    #[test]
+    fn counts_cxx_unity_summary() {
+        let t = Duration::from_secs(10);
+        let ok = quiet("echo '-----------------------'; echo '4 Tests 0 Failures 0 Ignored'; echo 'OK'", t);
+        assert_eq!(ok.tests_run, Some(4));
+        let failed = quiet("echo '13 Tests 2 Failures 1 Ignored'; echo 'FAIL'", t);
+        assert_eq!(failed.tests_run, Some(12), "the ignored test did not run");
+        let none = quiet("echo '0 Tests 0 Failures 0 Ignored'", t);
+        assert_eq!(none.tests_run, Some(0));
+    }
+
+    #[test]
+    fn counts_cxx_ignores_lines_that_tests_print_themselves() {
+        let t = Duration::from_secs(10);
+        let nested = quiet(
+            "echo '    100% tests passed, 0 tests failed out of 9'; echo '  [doctest] test cases: 9 | 9 passed | 0 failed | 0 skipped'; echo '  [==========] 9 tests from 1 test suite ran.'; echo '  9 Tests 0 Failures 0 Ignored'; echo '1: 9 Tests 0 Failures 0 Ignored'",
+            t,
+        );
+        assert_eq!(nested.tests_run, None, "indented or prefixed lines are test output");
+        let shapes = quiet(
+            "echo '9 Tests'; echo '9 Tests 0 Failures'; echo '[doctest] test cases: lots'; echo '[==========] 9 tests from 1 test suite'; echo '100% tests passed'",
+            t,
+        );
+        assert_eq!(shapes.tests_run, None, "a line that is not the whole summary shape is no summary");
+    }
+
+    #[test]
+    fn counts_node_mocha_passing() {
+        let t = Duration::from_secs(10);
+        let ok = quiet("echo '  2 passing (5ms)'", t);
+        assert_eq!(ok.tests_run, Some(2));
+        let mixed = quiet("echo '  2 passing (5ms)'; echo '  1 pending'; echo '  3 failing'", t);
+        assert_eq!(mixed.tests_run, Some(5), "passing and failing count, pending does not");
+        let zero = quiet("echo '  0 passing (1ms)'", t);
+        assert_eq!(zero.tests_run, Some(0));
+    }
+
+    #[test]
+    fn counts_mixed_a_colored_summary_is_read() {
+        let t = Duration::from_secs(10);
+        let vitest = quiet("printf '\\033[2m Tests \\033[22m \\033[1m\\033[32m4 passed\\033[39m\\033[22m\\033[90m (4)\\033[39m'", t);
+        assert_eq!(vitest.tests_run, Some(4), "the color codes are removed before the count is read");
+        assert!(vitest.tail[0].contains('\u{1b}'), "the tail keeps the codes: {:?}", vitest.tail);
+        let libtest = quiet("printf '\\033[32mtest result: ok. 5 passed; 0 failed;\\033[0m'", t);
+        assert_eq!(libtest.tests_run, Some(5));
+    }
+
+    #[test]
+    fn counts_mixed_a_runner_that_ran_nothing_is_zero() {
+        let t = Duration::from_secs(10);
+        let empty = quiet("echo 'test result: ok. 5 passed; 0 failed;'; echo '\u{2139} tests 0'", t);
+        assert_eq!(empty.tests_run, Some(0), "node ran nothing, so the run is no proof");
+        let both = quiet("echo 'test result: ok. 5 passed; 0 failed;'; echo '\u{2139} tests 3'", t);
+        assert_eq!(both.tests_run, Some(8), "two runners that ran add up");
+        let c_and_cargo =
+            quiet("echo '[doctest] test cases: 4 | 4 passed | 0 failed | 0 skipped'; echo 'test result: ok. 6 passed; 0 failed;'", t);
+        assert_eq!(c_and_cargo.tests_run, Some(10), "a C suite and cargo add up");
+        let one = quiet("echo 'test result: ok. 0 passed; 0 failed; 5 filtered out'", t);
+        assert_eq!(one.tests_run, Some(0), "one runner that ran nothing is still zero");
+    }
+
+    #[test]
+    fn counts_mixed_libtest_sums_its_own_result_lines() {
+        let t = Duration::from_secs(10);
+        let docs = quiet(
+            "echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0s'; echo 'test result: ok. 5 passed; 0 failed;'",
+            t,
+        );
+        assert_eq!(docs.tests_run, Some(5), "a crate with no doc tests and 5 unit tests is 5, not 0");
     }
 
     #[test]

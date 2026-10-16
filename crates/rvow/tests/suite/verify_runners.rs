@@ -74,6 +74,8 @@ fn backlog(f: &Fx, verify: &str, fields: &str) -> change::ChangeDir {
     )
     .unwrap();
     std::fs::write(c.path.join("specs/out.md"), SPEC).unwrap();
+    std::fs::write(c.path.join("proposal.md"), "branch: main\n\n# Run\n\n## Why\nw\n\n## What changes\nw\n\n## Out of scope\nNone.\n")
+        .unwrap();
     c
 }
 

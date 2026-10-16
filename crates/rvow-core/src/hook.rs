@@ -18,11 +18,12 @@ use crate::git;
 use crate::lease::{self, LEASE_FILE};
 use crate::ledger::Kind;
 use crate::proof::{self, Now, State};
-use crate::stats::{self, Hook, Outcome, STATS_FILE};
+use crate::stats::{self, Hook, Outcome, STATS_FILE, StopReason};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 use crate::yolo::{self, Tier, YOLO_FILE};
 
 mod rule;
+mod session_files;
 mod shell;
 mod stop_state;
 mod store_guard;
@@ -30,8 +31,8 @@ mod streak;
 pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
+use shell::{bash_changes, bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
 pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
-use shell::{bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
 use store_guard::{bash_store_denial, store_denial};
 
 use rule::denial;
@@ -625,6 +626,8 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
     let Some(d) = found.filter(|d| mode(d) == Mode::Enforce) else {
         if let Some(s) = session {
             streak::reset(project, s);
+            record_changes(project, s, input);
+            record_before_snapshot(project, s, input);
         }
         return Ok(None);
     };
@@ -655,6 +658,136 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
     }})))
 }
 
+/// The path of `file` relative to the repository top in its real case, or `None` outside it.
+fn repo_rel(file: &str, cwd: &Path, top: &Path) -> Option<String> {
+    let target = real_path(Path::new(file), cwd);
+    let top = real_path(top, cwd);
+    target.strip_prefix(&top).ok().and_then(Path::to_str).filter(|r| !r.is_empty()).map(String::from)
+}
+
+/// Adds the files an allowed tool call may change to the record of its owner: the
+/// subagent record when the input carries an agent id, else the main session record.
+/// The main session stop reads only the main record.
+fn record_changes(project: &Project, session: &str, input: &Value) {
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    let Ok(top) = git::toplevel(&cwd) else { return };
+    let rels: Vec<String> = if tool == "Bash" {
+        let Some(c) = args.get("command").and_then(Value::as_str).filter(|c| !reads_only(c)) else { return };
+        let changes = bash_changes(c, &cwd);
+        let bases: Vec<PathBuf> = std::iter::once(cwd.clone()).chain(changes.dirs.iter().map(|d| cwd.join(d))).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rels: Vec<String> = Vec::new();
+        let mut push = |rel: String| {
+            if seen.insert(rel.clone()) {
+                rels.push(rel);
+            }
+        };
+        for (f, base) in changes.paths.iter().flat_map(|f| bases.iter().map(move |base| (f, base))) {
+            let at = base.join(f);
+            if at.is_dir() {
+                continue;
+            }
+            let writable = at.exists() || at.parent().is_some_and(Path::is_dir);
+            if !writable {
+                continue;
+            }
+            if at.exists() && std::fs::metadata(&at).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            if let Some(rel) = repo_rel(f, base, &top) {
+                push(rel);
+            }
+        }
+        for (f, base) in changes.script_paths.iter().flat_map(|f| bases.iter().map(move |base| (f, base))) {
+            let at = base.join(f);
+            if at.is_dir() {
+                continue;
+            }
+            let keep = at.is_file() || (f.contains('/') && at.parent().is_some_and(Path::is_dir));
+            if !keep {
+                continue;
+            }
+            if let Some(rel) = repo_rel(f, base, &top) {
+                push(rel);
+            }
+        }
+        if changes.plan {
+            push(session_files::PLAN.to_string());
+        }
+        rels
+    } else if writes_files(tool) {
+        file_args(&args).iter().filter_map(|f| repo_rel(f, &cwd, &top)).collect()
+    } else {
+        return;
+    };
+    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
+        session_files::record_agent(project, session, agent, &rels);
+    } else {
+        session_files::record(project, session, &rels);
+    }
+}
+
+/// Whether a tool call may write the work tree, so a before snapshot is taken
+/// around it. Read, Grep, Glob and a read-only Bash command are skipped.
+fn may_write(tool: &str, args: &Value) -> bool {
+    if writes_files(tool) {
+        return true;
+    }
+    if tool == "Bash" {
+        return args.get("command").and_then(Value::as_str).is_some_and(|c| !reads_only(c));
+    }
+    false
+}
+
+/// The pre-tool-use provenance: snapshots the work tree before an allowed
+/// write call and stores the before tree per (session, agent, tool_use_id).
+fn record_before_snapshot(project: &Project, session: &str, input: &Value) {
+    let Some(id) = input.get("tool_use_id").and_then(Value::as_str) else {
+        return;
+    };
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    if !may_write(tool, &args) {
+        return;
+    }
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else { return };
+    let agent = input.get("agent_id").and_then(Value::as_str);
+    crate::provenance::before_call(project, &top, session, agent, id);
+}
+
+/// Claude Code `PostToolUse`: snapshots the tree after a checked call, diffs it
+/// against the before snapshot of the same call, and records each changed path
+/// with its new blob id for the session (or its subagent). A call with no
+/// before record (a read) takes no snapshot and records nothing.
+pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
+    let Some(session) = input.get("session_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(id) = input.get("tool_use_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else {
+        return Ok(None);
+    };
+    let agent = input.get("agent_id").and_then(Value::as_str);
+    crate::provenance::after_call(project, &top, session, agent, id);
+    Ok(None)
+}
+
+/// Whether drift item text names `path` as a whole word, so a short name
+/// such as `a` does not match every item.
+fn names_path(what: &str, path: &str) -> bool {
+    what.match_indices(path).any(|(i, _)| {
+        let before = what[..i].chars().next_back();
+        let after = what[i + path.len()..].chars().next();
+        before.is_none_or(|c| matches!(c, ' ' | '(' | ',')) && after.is_none_or(|c| matches!(c, ' ' | ')' | ',' | ';' | '#' | ':'))
+    })
+}
+
 /// The Claude mod's `agent.spawn`: binds the new subagent to the lease that its
 /// prompt names. Prints nothing for a prompt without a marker.
 pub fn claude_lease_bind(project: &Project, input: &Value) -> Result<Option<Value>> {
@@ -662,7 +795,16 @@ pub fn claude_lease_bind(project: &Project, input: &Value) -> Result<Option<Valu
     let (Some(agent), Some(task)) = (text("agent_id"), text("prompt").and_then(lease::marker)) else {
         return Ok(None);
     };
-    Ok(Some(json!({"bound": lease::bind(project, &task, agent)?, "task": task})))
+    let home = crate::store::home_dir()?;
+    let cwd = PathBuf::from(text("cwd").unwrap_or("."));
+    Ok(Some(match lease::bind_checked(project, &task, agent, |held| lease::task_open(project, &home, &cwd, held))? {
+        lease::Bound::Holds(held) => json!({
+            "bound": false,
+            "task": task,
+            "reason": format!("this session still holds the lease of {held}; prove or block {held}, or start a new session for {task}"),
+        }),
+        bound => json!({"bound": bound == lease::Bound::Yes, "task": task}),
+    }))
 }
 
 /// The Claude mod's `SubagentStop`: ends the lease that the stopping subagent holds.
@@ -701,9 +843,16 @@ fn git_operation_running(top: &Path) -> bool {
     ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"].iter().any(|n| dir.join(n).exists())
 }
 
-/// Why the agent must keep working, or `None` when it may stop. Pending
-/// amendments let it stop, since only the user can decide them.
-pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
+/// Why a stop is held back, and the kind of reason that the stats count.
+pub struct StopHold {
+    pub kind: StopReason,
+    pub text: String,
+}
+
+/// Why the agent must keep working, or `None` when it may stop. Only the session that changed a
+/// file of a task, or a file that drift names, is held. A change with a pending amendment holds
+/// nothing, since only the user can decide it.
+pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&str>) -> Result<Option<StopHold>> {
     let top = git::toplevel(cwd)?;
     let Some(branch) = git::branch(&top)? else {
         return Ok(None);
@@ -719,8 +868,23 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
     }
     let pending = amend::pending(&changes);
     let config = config::load(project, home)?;
+    // The files the session owns: its latest blob record matches the current
+    // blob. A session without after-call records (an older mod) decides from
+    // today's text record.
+    let touched = match session {
+        Some(s) => match crate::provenance::owned(project, &top, s)? {
+            Some(mut set) => {
+                if session_files::load(project, s).contains(session_files::PLAN) {
+                    set.insert(session_files::PLAN.to_string());
+                }
+                set
+            }
+            None => session_files::load(project, s),
+        },
+        None => BTreeSet::new(),
+    };
+    let mut protected_files = None;
     for c in &queue {
-        // A recorded amendment already tells the user about this change's drift.
         if pending.iter().any(|p| p.change == c.dir.id) {
             continue;
         }
@@ -729,77 +893,62 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path) -> Result<Option<
             .filter(|i| i.class.blocks())
             .map(|i| i.what)
             .collect();
-        if !blocking.is_empty() {
-            let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
-            let mut shown = blocking[..blocking.len() - more].join("; ");
-            if more > 0 {
-                shown.push_str(&format!("; and {more} more"));
-            }
-            return Ok(Some(format!(
-                "the plan changed without an amendment ({shown}); run rvow amend --reason \"...\" and ask the user to run /rvow-confirm (or ! rvow confirm)"
-            )));
+        if blocking.is_empty() {
+            continue;
         }
+        let guarded = match &protected_files {
+            Some(set) => set,
+            None => protected_files.insert(protected(project, &top)?),
+        };
+        let own = touched.iter().any(|f| {
+            f == session_files::ANY
+                || f == session_files::PLAN
+                || guarded.contains(&key(Path::new(f)))
+                || blocking.iter().any(|what| names_path(what, f))
+        });
+        if !own {
+            continue;
+        }
+        let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
+        let mut shown = blocking[..blocking.len() - more].join("; ");
+        if more > 0 {
+            shown.push_str(&format!("; and {more} more"));
+        }
+        let text = format!(
+            "the plan changed without an amendment ({shown}); run rvow amend --reason \"...\" and ask the user to run /rvow-confirm (or ! rvow confirm)"
+        );
+        return Ok(Some(StopHold { kind: StopReason::Drift, text }));
     }
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
-    let mut stale = false;
     // Only the newest accepted change is the agent's current plan; older changes on the branch are
     // enforced by the pre-push gate, and nagging about them each time hides the plan that matters.
     let newest = queue.iter().max_by_key(|c| c.vow().map_or(0, |e| e.time));
     for c in queue.iter().filter(|c| newest.is_some_and(|n| std::ptr::eq(*c, n))) {
-        let released = released_tasks(&c.dir.id, &pending);
-        let changed = changed_since_vow(&top, c);
+        if pending.iter().any(|p| p.change == c.dir.id) {
+            continue;
+        }
         for t in &c.loaded.tasks {
             let s = proof::state(c, t, &now)?;
             if !s.open() {
                 continue;
             }
-            // A pending amendment releases the tasks its items name, and an
-            // older one without task names releases the whole change.
-            if released.as_ref().is_none_or(|set| set.contains(&t.id.to_string())) {
-                continue;
-            }
-            // A task nobody started is no reason to hold the agent back from a plain answer.
-            if s == State::Missing
-                && let Some(files) = &changed
-                && !t
-                    .files
-                    .iter()
-                    .any(|g| fingerprint::globset(std::slice::from_ref(g)).is_ok_and(|set| files.iter().any(|f| set.is_match(f))))
-            {
-                continue;
-            }
+            // Stale proofs are left to the push gate.
             if matches!(s, State::Stale(_) | State::Flaky) {
-                stale = true;
+                continue;
+            }
+            let scope = fingerprint::globset(&t.files)?;
+            if !touched.iter().any(|f| f == session_files::ANY || scope.is_match(f)) {
                 continue;
             }
             let id = t.id.to_string();
-            return Ok(Some(format!(
-                "{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written"
-            )));
+            if lease::leased_away(project, &id, session, crate::ledger::now_ms())? {
+                continue;
+            }
+            let text = format!("{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written");
+            return Ok(Some(StopHold { kind: StopReason::NoProof, text }));
         }
     }
-    // One fixed text for every stale task, so it is given once and not once for each task.
-    Ok(stale.then(|| "some tasks have stale proofs; run rvow prove --stale before you push".to_string()))
-}
-
-/// The tasks a pending amendment of `change` releases, or `None` for the whole
-/// change when an amendment has no `tasks` key (it predates that key).
-fn released_tasks(change: &crate::id::Id, pending: &[amend::Pending]) -> Option<BTreeSet<String>> {
-    let mut set = BTreeSet::new();
-    for p in pending.iter().filter(|p| &p.change == change) {
-        let tasks = p.tasks.as_ref()?;
-        set.extend(tasks.iter().cloned());
-    }
-    Some(set)
-}
-
-/// The files that differ from the vow's base commit, committed or not, or
-/// `None` when the base is unknown.
-fn changed_since_vow(top: &Path, c: &proof::Active) -> Option<Vec<String>> {
-    let base = c.vow()?.data.get("base_commit")?.as_str()?;
-    let tracked = git::run(top, &["diff", "--name-only", base]).ok()?;
-    let new = git::run(top, &["ls-files", "-o", "--exclude-standard"]).ok()?;
-    Some(tracked.lines().chain(new.lines()).map(String::from).collect())
+    Ok(None)
 }
 
 /// One line for a status bar: proved tasks, drift and pending amendments of
@@ -864,11 +1013,12 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
 pub fn claude_stop(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
     let out = stop_decision(project, home, input)?;
     let outcome = if out.is_some() { Outcome::Block } else { Outcome::Pass };
-    stats::record(project, Hook::Stop, outcome, None, input.get("session_id").and_then(Value::as_str));
-    Ok(out)
+    let kind = out.as_ref().map(|(_, kind)| *kind);
+    stats::record_stop(project, outcome, kind, input.get("session_id").and_then(Value::as_str));
+    Ok(out.map(|(block, _)| block))
 }
 
-fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
+fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option<(Value, StopReason)>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let flag = |k: &str| input.get(k).and_then(Value::as_bool).unwrap_or(false);
     if input.get("agent_id").is_some() || flag("stop_hook_active") {
@@ -878,16 +1028,16 @@ fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option
         return Ok(None);
     }
     let session = input.get("session_id").and_then(Value::as_str);
-    let Some(reason) = stop_reason(project, home, &cwd)? else {
+    let Some(hold) = stop_reason(project, home, &cwd, session)? else {
         if let Some(s) = session {
             stop_state::clear(project, s);
         }
         return Ok(None);
     };
-    if session.is_some_and(|s| stop_state::already_given(project, s, &reason)) {
+    if session.is_some_and(|s| stop_state::already_given(project, s, &hold.text)) {
         return Ok(None);
     }
-    Ok(Some(json!({"decision": "block", "reason": format!("rvow: {reason}")})))
+    Ok(Some((json!({"decision": "block", "reason": format!("rvow: {}", hold.text)}), hold.kind)))
 }
 
 #[cfg(test)]
@@ -937,6 +1087,57 @@ mod tests {
         ] {
             denial_has_a_next_step(reason);
         }
+    }
+
+    fn aged(path: &Path, days: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    fn hook_state(p: &Project) -> PathBuf {
+        let dir = p.root.join("hook-state");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn prune_session_removes_a_record_older_than_7_days() {
+        let (_tmp, p, _repo, _task) = accepted();
+        let dir = hook_state(&p);
+        for name in ["files-old", "stop-old"] {
+            std::fs::write(dir.join(name), "a.txt\n").unwrap();
+            aged(&dir.join(name), 8);
+        }
+        session_files::record(&p, "fresh", &["b.txt".to_string()]);
+        assert!(!dir.join("files-old").exists());
+        assert!(!dir.join("stop-old").exists());
+        assert!(dir.join("files-fresh").exists());
+    }
+
+    #[test]
+    fn prune_session_keeps_a_record_6_days_old() {
+        let (_tmp, p, _repo, _task) = accepted();
+        let dir = hook_state(&p);
+        for name in ["files-recent", "stop-recent"] {
+            std::fs::write(dir.join(name), "a.txt\n").unwrap();
+            aged(&dir.join(name), 6);
+        }
+        session_files::record(&p, "fresh", &["b.txt".to_string()]);
+        assert!(dir.join("files-recent").exists());
+        assert!(dir.join("stop-recent").exists());
+    }
+
+    #[test]
+    fn prune_session_keeps_a_file_that_is_not_a_session_record() {
+        let (_tmp, p, _repo, _task) = accepted();
+        let dir = hook_state(&p);
+        for name in ["denied-old", "notes.txt"] {
+            std::fs::write(dir.join(name), "x\n").unwrap();
+            aged(&dir.join(name), 30);
+        }
+        session_files::record(&p, "fresh", &["b.txt".to_string()]);
+        assert!(dir.join("denied-old").exists());
+        assert!(dir.join("notes.txt").exists());
     }
 
     #[test]
@@ -1049,6 +1250,42 @@ mod tests {
             std::os::unix::fs::symlink(tmp.0.join("a/b"), tmp.0.join("link")).unwrap();
             assert_eq!(real_path(Path::new("link/x.rs"), &tmp.0), tmp.0.join("a/b/x.rs"));
         }
+    }
+
+    fn store_search(cmd: &str) -> Option<String> {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        store_guard::bash_store_denial(&p, &repo, cmd).map(|d| d.reason)
+    }
+
+    #[test]
+    fn store_search_own_path_is_the_searchers_argument() {
+        assert_eq!(store_search("tmux send-keys / && tmux capture-pane -p | grep x"), None);
+        assert_eq!(store_search("tmux send-keys / Enter; grep -E 'a|b' notes.txt"), None);
+        assert!(store_search("grep -r secret /").is_some_and(|r| r.contains("covers the rvow store")));
+        assert!(store_search("find / -name x").is_some_and(|r| r.contains("covers the rvow store")));
+        assert!(store_search("echo go && find / -name x").is_some());
+        assert!(store_search("xargs grep -r x /").is_some());
+    }
+
+    #[test]
+    fn store_search_own_cwd_after_cd_is_searched() {
+        assert!(store_search("cd / && ls").is_some_and(|r| r.contains("covers the rvow store")));
+        assert!(store_search("cd / && grep -r secret").is_some());
+        assert_eq!(store_search("ls"), None);
+        assert_eq!(store_search("cd / && echo hi"), None);
+    }
+
+    #[test]
+    fn store_search_own_plan_tree_word_is_denied_for_any_program() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let cmd = format!("cat {}/active/CHG-abcdef-x/proposal.md", p.root.display());
+        assert!(store_guard::bash_store_denial(&p, &repo, &cmd).is_some());
     }
 
     /// What the rules find for an edit, whatever the rule's mode does with it.
@@ -1223,40 +1460,47 @@ mod tests {
         assert!(edit(&p, &repo, "tests/t.sh").is_some(), "a proof locks it again");
     }
 
+    /// The session edits `out.txt`, the file of the task that `accepted` makes.
+    fn edits_out(p: &Project, repo: &Path, session: &str) {
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "ok"});
+        assert_eq!(pre(p, repo, session, "Write", edit), None);
+    }
+
     #[test]
     fn stop_ignores_untouched_tasks() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
-        let input = json!({"cwd": repo.to_str().unwrap()});
+        let input = json!({"cwd": repo.to_str().unwrap(), "session_id": "s1"});
         assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
 
         std::fs::write(repo.join("other.txt"), "x").unwrap();
         assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
 
         std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        edits_out(&p, &repo, "s1");
         let out = claude_stop(&p, &home, &input).unwrap().unwrap();
         assert!(out["reason"].as_str().unwrap().contains(&task), "{out}");
     }
 
     #[test]
-    fn stop_gives_one_fixed_reason_for_stale_tasks() {
+    fn stop_lets_a_stale_task_through() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
-        let input = json!({"cwd": repo.to_str().unwrap()});
+        let input = json!({"cwd": repo.to_str().unwrap(), "session_id": "s1"});
         std::fs::write(repo.join("out.txt"), "ok").unwrap();
         proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
         std::fs::write(repo.join("out.txt"), "ok changed").unwrap();
-        let reason = claude_stop(&p, &home, &input).unwrap().unwrap()["reason"].as_str().unwrap().to_string();
-        assert!(reason.contains("stale") && reason.contains("rvow prove --stale"), "{reason}");
-        assert!(!reason.contains(&task), "a stale task must not put its id in the reason, or each task is a new reason: {reason}");
+        edits_out(&p, &repo, "s1");
+        assert_eq!(claude_stop(&p, &home, &input).unwrap(), None, "stale proofs are left to the push gate");
     }
 
     #[test]
     fn stop_blocks_on_open_tasks_and_drift_but_not_on_pending() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
-        let input = json!({"cwd": repo.to_str().unwrap()});
+        let input = json!({"cwd": repo.to_str().unwrap(), "session_id": "s1"});
         std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        edits_out(&p, &repo, "s1");
         let out = claude_stop(&p, &home, &input).unwrap().unwrap();
         assert!(out["reason"].as_str().unwrap().contains(&task), "{out}");
 
@@ -1268,15 +1512,12 @@ mod tests {
         let text = std::fs::read_to_string(&tasks).unwrap();
         // A title change is free drift: it asks for a new proof and not for the user's confirm.
         std::fs::write(&tasks, text.replace("Write ok", "Write it")).unwrap();
-        let out = claude_stop(&p, &home, &input).unwrap().unwrap();
-        let reason = out["reason"].as_str().unwrap();
-        assert!(reason.contains("stale proofs") && !reason.contains("amend"), "{out}");
+        assert_eq!(claude_stop(&p, &home, &input).unwrap(), None, "stale proofs are left to the push gate");
         std::fs::write(&tasks, &text).unwrap();
         let proposal = dir.join("proposal.md");
         let text = std::fs::read_to_string(&proposal).unwrap();
         std::fs::write(&proposal, format!("{text}\nOne more thing.\n")).unwrap();
-        let out = claude_stop(&p, &home, &input).unwrap().unwrap();
-        assert!(out["reason"].as_str().unwrap().contains("amend"), "{out}");
+        assert_eq!(claude_stop(&p, &home, &input).unwrap(), None, "a plan edit names no file of the session");
 
         amend::amend(&p, &home, &repo, None, "rename", None).unwrap();
         assert_eq!(claude_stop(&p, &home, &input).unwrap(), None);
@@ -1287,5 +1528,339 @@ mod tests {
         );
         let start = claude_session_start(&p, &home, &input).unwrap().unwrap();
         assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("tasks:"));
+    }
+
+    fn pre(p: &Project, repo: &Path, session: &str, tool: &str, input: Value) -> Option<Value> {
+        let call = json!({"session_id": session, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
+        claude_pre_tool_use(p, &call).unwrap()
+    }
+
+    fn pre_agent(p: &Project, repo: &Path, session: &str, agent: &str, tool: &str, input: Value) -> Option<Value> {
+        let call = json!({"session_id": session, "agent_id": agent, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
+        claude_pre_tool_use(p, &call).unwrap()
+    }
+
+    fn stop_of(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {
+        let input = json!({"cwd": repo.to_str().unwrap(), "session_id": session});
+        claude_stop(p, home, &input).unwrap().map(|v| v["reason"].as_str().unwrap().to_string())
+    }
+
+    /// The no-proof hold of `session`, without the once-per-session filter of the hook.
+    fn hold(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {
+        stop_reason(p, home, repo, Some(session)).unwrap().map(|h| h.text)
+    }
+
+    #[test]
+    fn stop_lease_a_task_leased_to_another_worker_does_not_hold() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        edits_out(&p, &repo, "s1");
+        assert!(hold(&p, &home, &repo, "s1").is_some_and(|r| r.contains(&task)));
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert_eq!(hold(&p, &home, &repo, "s1"), None, "an unbound live lease");
+        assert!(lease::bind(&p, &task, "worker").unwrap());
+        assert_eq!(hold(&p, &home, &repo, "s1"), None, "a lease bound to another worker");
+    }
+
+    #[test]
+    fn stop_lease_an_ended_or_old_lease_holds_again() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        edits_out(&p, &repo, "s1");
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert!(lease::bind(&p, &task, "worker").unwrap());
+        lease::end(&p, "worker").unwrap();
+        assert!(hold(&p, &home, &repo, "s1").is_some_and(|r| r.contains(&task)), "an ended lease");
+
+        let old = json!({"event": "issue", "task": task, "change": "CHG-x", "files": ["out.txt"], "time": 1});
+        std::fs::write(p.root.join(LEASE_FILE), format!("{old}\n")).unwrap();
+        assert!(hold(&p, &home, &repo, "s2").is_none(), "s2 changed nothing");
+        assert!(hold(&p, &home, &repo, "s1").is_some_and(|r| r.contains(&task)), "a lease older than 4 hours");
+    }
+
+    #[test]
+    fn stop_lease_the_session_that_holds_the_lease_is_held() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert!(lease::bind(&p, &task, "w1").unwrap());
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        edits_out(&p, &repo, "w1");
+        assert!(hold(&p, &home, &repo, "w1").is_some_and(|r| r.contains(&task)));
+    }
+
+    #[test]
+    fn stop_agent_subagent_edits_do_not_hold_the_main_session() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "ok"});
+        assert_eq!(pre_agent(&p, &repo, "s1", "a1", "Write", edit), None);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+    }
+
+    #[test]
+    fn stop_agent_main_session_edits_hold_the_main_session() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "no"});
+        assert_eq!(pre(&p, &repo, "s1", "Write", edit), None);
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap();
+        assert!(reason.contains(&task), "{reason}");
+    }
+
+    #[test]
+    fn record_only_formatter_run_holds_nothing() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "cargo fmt --all"})), None);
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "a formatter run alone holds nothing");
+    }
+
+    #[test]
+    fn record_only_script_text_names_files_not_code_words() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn main() {}").unwrap();
+        let cmd = "python3 - <<'EOF'\nstack.pop()\nopen(\"src/a.rs\", \"w\")\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(touched.contains("src/a.rs"), "{touched:?}");
+        assert!(!touched.iter().any(|f| f.contains("stack.pop")), "{touched:?}");
+    }
+
+    #[test]
+    fn record_only_cd_touch_records_the_file_not_the_folder() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::create_dir_all(repo.join("crates/core")).unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "cd crates/core && touch new.rs"})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(touched.contains("crates/core/new.rs"), "{touched:?}");
+        assert!(!touched.contains("crates/core"), "{touched:?}");
+    }
+
+    #[test]
+    fn record_text_of_rvow_put_is_data() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        let cmd = "rvow put CHG-abc123 tasks <<'EOF'\n- TSK-new1 x\n  files: out.txt\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(!touched.contains("out.txt"), "{touched:?}");
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "naming a task file in plan text is no edit");
+    }
+
+    #[test]
+    fn record_text_of_a_note_is_data() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "rvow note \"pi edits out.txt next\""})), None);
+        assert!(session_files::load(&p, "s1").iter().all(|f| f.starts_with(':')), "{:?}", session_files::load(&p, "s1"));
+    }
+
+    #[test]
+    fn record_text_of_a_python_script_counts() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        let cmd = "python3 - <<'EOF'\nopen('out.txt', 'w').write('b')\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        assert!(session_files::load(&p, "s1").contains("out.txt"));
+    }
+
+    #[test]
+    fn record_text_of_cat_into_a_file_counts_only_the_target() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        std::fs::write(repo.join("other.txt"), "a").unwrap();
+        let cmd = "cat > other.txt <<'EOF'\nsee out.txt\nEOF";
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": cmd})), None);
+        let touched = session_files::load(&p, "s1");
+        assert!(touched.contains("other.txt") && !touched.contains("out.txt"), "{touched:?}");
+    }
+
+    #[test]
+    fn record_only_each_path_once() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "echo x > out.txt && echo y > out.txt"})), None);
+        let file = p.root.join("hook-state").join("files-s1");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        assert_eq!(text.lines().filter(|l| *l == "out.txt").count(), 1, "{text:?}");
+    }
+
+    #[test]
+    fn stop_owner_another_session_built_the_task() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "old_string": "a", "new_string": "b"});
+        assert_eq!(pre(&p, &repo, "builder", "Edit", edit), None);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert_eq!(stop_of(&p, &home, &repo, "bystander"), None);
+        assert_eq!(stop_of(&p, &home, &repo, ""), None);
+    }
+
+    #[test]
+    fn stop_owner_the_session_edited_the_file_of_the_task() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "no"});
+        assert_eq!(pre(&p, &repo, "s1", "Write", edit), None);
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap();
+        assert!(reason.contains(&task), "{reason}");
+    }
+
+    #[test]
+    fn stop_owner_a_shell_command_changed_the_file() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "sed -i s/a/b/ out.txt"})), None);
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap();
+        assert!(reason.contains(&task), "{reason}");
+    }
+
+    #[test]
+    fn stop_owner_scripts_globs_cd_and_formatters_are_recorded() {
+        let commands = [
+            "python3 - <<'EOF'\nopen('out.txt', 'w').write('b')\nEOF",
+            "python3 -c \"open('out.txt', 'w').write('b')\"",
+            "sed -i s/a/b/ *.txt",
+            "mkdir -p sub && cd sub && sed -i s/a/b/ ../out.txt",
+            "tool --out=out.txt",
+        ];
+        for (i, command) in commands.iter().enumerate() {
+            let (tmp, p, repo, task) = accepted();
+            let home = tmp.0.join("home");
+            std::fs::write(repo.join("out.txt"), "a").unwrap();
+            std::fs::create_dir_all(repo.join("sub")).unwrap();
+            let session = format!("s{i}");
+            assert_eq!(pre(&p, &repo, &session, "Bash", json!({"command": command})), None, "{command}");
+            let reason = stop_of(&p, &home, &repo, &session).unwrap_or_else(|| panic!("{command} is not recorded"));
+            assert!(reason.contains(&task), "{command}: {reason}");
+        }
+    }
+
+    #[test]
+    fn stop_owner_reading_commands_hold_nothing() {
+        for (i, command) in ["git diff -- out.txt", "git log -p out.txt", "sed -n 1,5p out.txt", "cargo fmt --check"].iter().enumerate() {
+            let (tmp, p, repo, _task) = accepted();
+            let home = tmp.0.join("home");
+            std::fs::write(repo.join("out.txt"), "a").unwrap();
+            let session = format!("r{i}");
+            assert_eq!(pre(&p, &repo, &session, "Bash", json!({"command": command})), None, "{command}");
+            assert_eq!(stop_of(&p, &home, &repo, &session), None, "{command} only reads");
+        }
+    }
+
+    #[test]
+    fn stop_owner_drift_names_a_path_as_a_whole_word() {
+        assert!(names_path("protected file tests/t.sh changed", "tests/t.sh"));
+        assert!(names_path("test crates/a.rs#cfg(test) changed", "crates/a.rs"));
+        assert!(!names_path("TSK-x covers changed", "a"));
+        assert!(!names_path("protected file tests/t.sh changed", "t.sh"));
+    }
+
+    #[test]
+    fn stop_owner_rvow_put_owns_the_plan() {
+        let cwd = std::env::temp_dir();
+        assert!(bash_changes("rvow put CHG-abc123 tasks <<'EOF'\n- TSK-new1 x\nEOF", &cwd).plan);
+        assert!(!bash_changes("rvow show CHG-abc123", &cwd).plan);
+    }
+
+    #[test]
+    fn stop_owner_a_read_only_command_holds_nothing() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "a").unwrap();
+        assert_eq!(pre(&p, &repo, "s1", "Bash", json!({"command": "grep a out.txt"})), None);
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+    }
+
+    #[test]
+    fn stop_owner_a_pending_amendment_releases_the_change() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let edit = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "no"});
+        assert_eq!(pre(&p, &repo, "s1", "Write", edit.clone()), None);
+        assert_eq!(pre(&p, &repo, "s2", "Write", edit), None);
+        std::fs::write(repo.join("out.txt"), "no").unwrap();
+        assert!(stop_of(&p, &home, &repo, "s1").is_some());
+
+        let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(dir.join("design.md"), "A new design note.\n").unwrap();
+        amend::amend(&p, &home, &repo, None, "design", None).unwrap();
+        assert_eq!(stop_of(&p, &home, &repo, "s2"), None);
+    }
+
+    fn protected_fixture() -> (crate::git::testrepo::TempDir, Project, PathBuf) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.sh"), "exit 1").unwrap();
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 T\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/**\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(&p, prepared).unwrap();
+        (tmp, p, repo)
+    }
+
+    #[test]
+    fn stop_owner_drift_is_held_for_the_session_that_made_it() {
+        let (tmp, p, repo) = protected_fixture();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+        assert_eq!(pre(&p, &repo, "maker", "Bash", json!({"command": "echo 'exit 0' > tests/t.sh"})), None);
+        let reason = stop_of(&p, &home, &repo, "maker").unwrap();
+        assert!(reason.contains("amend"), "{reason}");
+    }
+
+    #[test]
+    fn stop_owner_drift_made_by_another_session_passes() {
+        let (tmp, p, repo) = protected_fixture();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+        assert_eq!(pre(&p, &repo, "maker", "Bash", json!({"command": "echo 'exit 0' > tests/t.sh"})), None);
+        assert_eq!(stop_of(&p, &home, &repo, "bystander"), None);
+    }
+
+    /// A proved task whose file changed since, edited by session `s1`, so the proof is stale.
+    fn stale_after_edit() -> (crate::git::testrepo::TempDir, Project, PathBuf, String) {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        std::fs::write(repo.join("out.txt"), "ok changed").unwrap();
+        edits_out(&p, &repo, "s1");
+        (tmp, p, repo, task)
+    }
+
+    #[test]
+    fn stop_stale_a_session_that_edited_a_proved_task_may_stop() {
+        let (tmp, p, repo, _task) = stale_after_edit();
+        let home = tmp.0.join("home");
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+    }
+
+    #[test]
+    fn stop_stale_the_gate_still_refuses_the_stale_proof() {
+        let (tmp, p, repo, task) = stale_after_edit();
+        let home = tmp.0.join("home");
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+        let opts = crate::gate::Options { strict: true, ..Default::default() };
+        let report = crate::gate::gate_uncached(&p, &home, &repo, opts, &mut std::io::sink()).unwrap();
+        assert!(!report.passed(), "{report:?}");
+        assert!(report.failures.iter().any(|f| f.contains(&task) && f.contains("stale")), "{report:?}");
     }
 }

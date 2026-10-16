@@ -178,6 +178,12 @@ fn str_of<'a>(e: &'a Event, k: &str) -> &'a str {
     e.data.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
+/// When the run began: runs overlap, so the ledger order of two runs is not their start order.
+/// An event with no `started` (a block) sorts by the time it was written.
+fn started(e: &Event) -> u64 {
+    e.data.get("started").and_then(Value::as_u64).unwrap_or(e.time)
+}
+
 fn is_proved(e: &Event) -> bool {
     e.data.get("proved").and_then(Value::as_bool) == Some(true)
 }
@@ -204,7 +210,7 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     let id = task.id.to_string();
     let mine: Vec<&Event> =
         change.events.iter().filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id).collect();
-    let Some(last) = mine.last() else {
+    let Some(last) = mine.iter().enumerate().max_by_key(|(i, e)| (started(e), *i)).map(|(_, e)| *e) else {
         return Ok(State::Missing);
     };
     if last.kind == Kind::Block {
@@ -212,7 +218,12 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
         return Ok(if str_of(last, "task_hash") == task_hash(task) { State::Blocked } else { State::Missing });
     }
     if !is_proved(last) {
-        return Ok(State::Failed);
+        let recorded = str_of(last, "inputs");
+        return Ok(if !recorded.is_empty() && recorded != now.inputs(task)?.hash {
+            State::Stale(vec!["inputs-changed"])
+        } else {
+            State::Failed
+        });
     }
     let key = str_of(last, "key");
     let last_tree = last.data.get("worktree").and_then(Value::as_str).unwrap_or("");
@@ -642,6 +653,9 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         let key = crate::seal::key(home)?;
         ledger::append_sealed(&ledger_path, &lock, Kind::Prove, data, Some(&key))?
     };
+    if proved {
+        crate::lease::end_task(project, &task.id.to_string())?;
+    }
 
     let (events, _) = ledger::read(&ledger_path)?;
     let id = task.id.to_string();
@@ -881,6 +895,102 @@ pub(crate) mod tests {
         assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "flaky");
         let _ = std::fs::remove_file(&flag);
+    }
+
+    /// The state of the only task when its change holds `events` instead of the ledger.
+    fn state_with_events(p: &Project, home: &Path, repo: &Path, events: impl FnOnce(&[Event]) -> Vec<Event>) -> State {
+        let top = git::toplevel(repo).unwrap();
+        let (living, _) = change::load_living(p).unwrap();
+        let mut changes = active(p, &living).unwrap();
+        changes[0].events = events(&changes[0].events);
+        let config = config::load(p, home).unwrap();
+        let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config).unwrap(), living: &living };
+        state_for(p, home, &changes[0], &changes[0].loaded.tasks[0], &now).unwrap()
+    }
+
+    #[test]
+    fn run_order_newest_started_run_wins() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        let state = state_with_events(&p, &home, &repo, |events| {
+            let pass = events.iter().rfind(|e| e.kind == Kind::Prove).unwrap();
+            let mut fail = pass.clone();
+            fail.data.insert("proved".into(), false.into());
+            fail.data.insert("worktree".into(), "an-older-tree".into());
+            fail.data.insert("started".into(), (pass.data["started"].as_u64().unwrap() - 60_000).into());
+            let mut out = events.to_vec();
+            out.push(fail);
+            out
+        });
+        assert_eq!(state, State::Proved);
+        let state = state_with_events(&p, &home, &repo, |events| {
+            let pass = events.iter().rfind(|e| e.kind == Kind::Prove).unwrap();
+            let mut fail = pass.clone();
+            fail.data.insert("proved".into(), false.into());
+            fail.data.insert("worktree".into(), "a-newer-tree".into());
+            fail.data.insert("started".into(), (pass.data["started"].as_u64().unwrap() + 60_000).into());
+            let mut out = events.to_vec();
+            out.insert(out.len() - 1, fail);
+            out
+        });
+        assert_eq!(state, State::Failed, "a fail that started last wins even when it was appended first");
+    }
+
+    #[test]
+    fn run_order_fail_with_changed_inputs_is_stale() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert_eq!(state_of(&p, &home, &repo), "stale");
+        assert_eq!(stale_tasks(&p, &home, &repo).unwrap(), [task]);
+        let s = status(&p, &home, &repo, false).unwrap();
+        assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed"]));
+    }
+
+    #[test]
+    fn run_order_fail_with_same_inputs_stays_failed() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert_eq!(state_of(&p, &home, &repo), "failed");
+        assert!(stale_tasks(&p, &home, &repo).unwrap().is_empty());
+    }
+
+    fn prove_with_summary(summary: &str) -> Proved {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let active_dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+        let tasks = active_dir.join("tasks.md");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
+        std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: echo '{summary}'"))).unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap()
+    }
+
+    #[test]
+    fn node_zero_spec_summary_is_not_a_proof() {
+        let r = prove_with_summary("\u{2139} tests 0");
+        assert!(r.outcome.passed());
+        assert_eq!(r.outcome.tests_run, Some(0), "the result says 0 tests ran");
+        assert!(!r.proved, "a node --test run of 0 tests is not a proof");
+    }
+
+    #[test]
+    fn node_zero_tap_summary_is_not_a_proof() {
+        let r = prove_with_summary("# tests 0");
+        assert!(r.outcome.passed());
+        assert_eq!(r.outcome.tests_run, Some(0), "the result says 0 tests ran");
+        assert!(!r.proved, "a node --test run of 0 tests is not a proof");
+    }
+
+    #[test]
+    fn node_zero_three_tests_still_prove() {
+        let r = prove_with_summary("# tests 3");
+        assert_eq!(r.outcome.tests_run, Some(3));
+        assert!(r.proved, "{:?}", r.outcome);
     }
 
     #[test]

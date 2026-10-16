@@ -1,7 +1,7 @@
 //! `rvow check`: a read-only report on a plan before the user accepts it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -95,9 +95,17 @@ pub const CHAINED_COMMANDS: usize = 3;
 /// A verify whose last recorded run took longer than this is a full suite.
 pub const SLOW_PROOF_SECS: u64 = 60;
 
-/// The commands a verify chains with `&&` or `;`.
+/// Programs that only look at files, so chaining them does not make a suite.
+const FILE_CHECKS: [&str; 6] = ["grep", "rg", "test", "[", "diff", "cmp"];
+
+/// The program of a segment, after any leading `!` words.
+fn segment_program(segment: &str) -> Option<&str> {
+    program(segment.trim_start().trim_start_matches(['!', ' ']))
+}
+
+/// The commands a verify chains with `&&` or `;`, not counting file checks.
 pub fn chained_commands(cmd: &str) -> usize {
-    cmd.replace("&&", ";").split(';').filter(|s| !s.trim().is_empty()).count()
+    cmd.replace("&&", ";").split(';').filter_map(segment_program).filter(|p| !FILE_CHECKS.contains(p)).count()
 }
 
 /// The duration of the newest recorded proof of `cmd` in this project, in ms.
@@ -221,7 +229,15 @@ fn trivial_verify(cmd: &str) -> bool {
 fn counted_runner(cmd: &str) -> bool {
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let pair = |a: &str, b: &str| words.windows(2).any(|w| w == [a, b]);
-    pair("cargo", "test") || pair("cargo", "nextest") || pair("go", "test") || words.contains(&"pytest") || words.contains(&"jest")
+    pair("cargo", "test")
+        || pair("cargo", "nextest")
+        || pair("go", "test")
+        || words.contains(&"pytest")
+        || words.contains(&"jest")
+        || words.contains(&"vitest")
+        || words.contains(&"mocha")
+        || words.contains(&"ctest")
+        || (words.contains(&"node") && words.contains(&"--test"))
 }
 
 /// A warning for each task whose check proves nothing: a stub command, or a
@@ -244,7 +260,7 @@ fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding
             )
         } else {
             format!(
-                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest or go test",
+                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest, vitest, mocha, node --test, go test or ctest",
                 t.id
             )
         };
@@ -260,20 +276,80 @@ fn fill_ok(runners: &BTreeMap<String, crate::template::Runner>, task: &Task) -> 
     crate::template::reference(task.verify.as_deref().unwrap_or("")).is_none() || crate::template::plan(runners, task).is_ok()
 }
 
+/// The missing programs that `check` blames on a task: those of tasks whose
+/// runner fills, since a failed fill already gets the runner error.
+pub fn blamed_programs(
+    top: &Path,
+    tasks: &[Task],
+    runners: &BTreeMap<String, crate::template::Runner>,
+    filled: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    missing_programs_filled(top, tasks, filled)
+        .into_iter()
+        .filter(|(task, _)| tasks.iter().find(|t| t.id.to_string() == *task).is_none_or(|t| fill_ok(runners, t)))
+        .collect()
+}
+
+const REQUIRED_SECTIONS: [&str; 3] = ["Why", "What changes", "Out of scope"];
+
+/// A structure error for each required proposal section that holds no words.
+/// Only `rvow check` runs it: the `rvow new` scaffold is blank by design.
+fn blank_sections(src: &str) -> Vec<crate::diag::Diagnostic> {
+    let mut sections: Vec<(&str, usize, usize)> = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        if let Some(name) = line.strip_prefix("## ") {
+            sections.push((name.trim(), i + 1, 0));
+        } else if !line.starts_with('#')
+            && let Some(last) = sections.last_mut()
+        {
+            last.2 += line.split_whitespace().count();
+        }
+    }
+    sections
+        .into_iter()
+        .filter(|(name, _, n)| *n == 0 && REQUIRED_SECTIONS.contains(name))
+        .map(|(name, line, _)| {
+            crate::diag::Diagnostic::new(crate::diag::Rule::Structure, line, format!("proposal section `## {name}` is empty"))
+        })
+        .collect()
+}
+
+/// The blank-section errors of a loaded change's proposal, keyed by the
+/// proposal file. `rvow check` and the dashboard both count them.
+pub fn proposal_blanks(loaded: &Loaded) -> Vec<(String, crate::diag::Diagnostic)> {
+    loaded
+        .texts
+        .iter()
+        .find(|(path, _)| path == change::PROPOSAL)
+        .map(|(_, text)| blank_sections(text).into_iter().map(|d| (change::PROPOSAL.to_string(), d)).collect())
+        .unwrap_or_default()
+}
+
 fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
     let runners = config::runners(project).unwrap_or_default();
     let filled = filled_commands(&runners, &loaded.tasks);
     let slow = full_suite(project, config, &loaded.tasks, &filled);
+    let blanks = proposal_blanks(&loaded);
     let mut findings = loaded.findings;
+    findings.extend(blanks);
     findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
-    let missing: Vec<(String, String)> = missing_programs_filled(top, &loaded.tasks, &filled)
-        .into_iter()
-        .filter(|(task, _)| loaded.tasks.iter().find(|t| t.id.to_string() == *task).is_none_or(|t| fill_ok(&runners, t)))
-        .collect();
+    let missing = blamed_programs(top, &loaded.tasks, &runners, &filled);
     Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
+}
+
+/// The top of the worktree that holds the change's branch: the worktree of
+/// `top` when its branch is checked out there, else the worktree of the same
+/// repository that has it, else `top`. The files a check reads, and the
+/// programs it blames, belong to that worktree.
+fn change_top(top: &Path, loaded: &Loaded) -> PathBuf {
+    let branch = loaded.proposal.branch.as_str();
+    if branch.is_empty() {
+        return top.to_path_buf();
+    }
+    git::top_for_branch(top, branch).ok().flatten().filter(|other| other != top).unwrap_or_else(|| top.to_path_buf())
 }
 
 /// Checks `target`, or every open change whose proposal names the current
@@ -300,7 +376,10 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
     let mut out = Vec::new();
     for d in dirs {
         let loaded = change::load(&d.path, &living)?;
-        out.push(report(project, &config, d, loaded, &top));
+        let change_top = if target.is_some() { change_top(&top, &loaded) } else { top.clone() };
+        let mut r = report(project, &config, d, loaded, &change_top);
+        r.findings.extend(crate::lint::test_query_checks(&home, &change_top, &config));
+        out.push(r);
     }
     Ok(out)
 }
@@ -355,6 +434,13 @@ mod tests {
         let text = std::fs::read_to_string(c.path.join(change::PROPOSAL)).unwrap();
         assert!(text.starts_with("branch: main\n"), "{text}");
         assert_eq!(check(&p, &repo, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ctest_is_a_counted_runner_and_a_gtest_binary_is_not() {
+        assert!(counted_runner("ctest --test-dir build -R hex64"));
+        assert!(counted_runner("cmake --build build && ctest --output-on-failure"));
+        assert!(!counted_runner("./build/tests/test_hex64"), "a doctest or gtest binary has no fixed name");
     }
 
     #[test]
@@ -417,5 +503,20 @@ mod tests {
         assert_eq!(wide.len(), 1, "{:?}", r.findings);
         assert!(wide[0].1.message.contains("src/**") && wide[0].1.message.contains("goes stale"), "{}", wide[0].1.message);
         assert_eq!(wide[0].1.rule.severity(), crate::diag::Severity::Warning);
+    }
+
+    #[test]
+    fn blank_why_is_an_error_that_names_why() {
+        let diags = blank_sections("branch: b\n## Why\n## What changes\nx\n## Out of scope\nNone.\n");
+        let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(msgs, ["proposal section `## Why` is empty"]);
+        assert_eq!(diags[0].line, 2);
+        assert_eq!(diags[0].rule, crate::diag::Rule::Structure);
+    }
+
+    #[test]
+    fn blank_out_of_scope_with_one_word_is_no_error() {
+        let diags = blank_sections("branch: b\n## Why\nx\n## What changes\nx\n## Out of scope\nNone.\n");
+        assert!(diags.is_empty(), "{diags:?}");
     }
 }

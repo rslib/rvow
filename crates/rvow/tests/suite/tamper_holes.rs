@@ -149,6 +149,13 @@ impl Fx {
     fn touch(&self, rel: &str) {
         std::fs::write(self.repo().join(rel), "changed").unwrap();
     }
+
+    /// An allowed Write call of `session` on `rel`, which puts the file in the session's record.
+    fn edit(&self, session: &str, rel: &str) {
+        let input = json!({"file_path": self.repo().join(rel)});
+        let out = self.event("pre-tool-use", json!({"tool_name": "Write", "tool_input": input, "session_id": session}));
+        assert_eq!(out, None);
+    }
 }
 
 #[test]
@@ -262,18 +269,20 @@ fn glob_a_tilde_glob_on_the_cache_key_is_denied() {
 fn stop_hold_a_design_amendment_does_not_release_a_task() {
     let fx = Fx::new("hold-design");
     fx.touch("src/a.txt");
+    fx.edit("s1", "src/a.txt");
+    fx.edit("s2", "src/a.txt");
     let first = fx.stop("s1").expect("the unproved task holds the stop");
     assert!(first.contains(&fx.task), "{first}");
     std::fs::write(fx.change.join("design.md"), "# Design\n\nSomething.\n").unwrap();
     fx.rvow(&["amend", "--reason", "design"]);
-    let held = fx.stop("s2").expect("a design amendment does not release the task");
-    assert!(held.contains(&fx.task), "{held}");
+    assert_eq!(fx.stop("s2"), None, "any pending amendment of the change releases the stop");
 }
 
 #[test]
 fn stop_hold_an_amendment_that_names_a_task_releases_it() {
     let fx = Fx::new("hold-named");
     fx.touch("src/a.txt");
+    fx.edit("s2", "src/a.txt");
     let tasks = std::fs::read_to_string(fx.change.join("tasks.md")).unwrap();
     std::fs::write(fx.change.join("tasks.md"), tasks.replace("grep -q ok", "grep -q changed")).unwrap();
     fx.rvow(&["amend", "--reason", "verify"]);
@@ -285,6 +294,7 @@ fn stop_hold_an_old_amendment_without_task_names_releases() {
     let fx = Fx::new("hold-old");
     fx.touch("src/a.txt");
     let lock = fx.project().lock().unwrap();
+    fx.edit("s2", "src/a.txt");
     let mut data = serde_json::Map::new();
     data.insert("amendment".into(), "AMD-old111".into());
     data.insert("reason".into(), "old".into());
@@ -299,6 +309,7 @@ fn stop_hold_an_amendment_on_another_branch_releases_nothing() {
     let mut fx = Fx::new("hold-branch");
     let x_task = fx.task.clone();
     fx.touch("src/a.txt");
+    fx.edit("s2", "src/a.txt");
     fx.git(&["checkout", "-q", "-b", "feat/y"]);
     fx.accepted_change("Other");
     let tasks = std::fs::read_to_string(fx.change.join("tasks.md")).unwrap();

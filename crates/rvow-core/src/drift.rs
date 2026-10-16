@@ -87,14 +87,24 @@ enum Syntax {
 /// Compares the syntax trees of a changed protected file. A file without a
 /// pinned grammar, or one that does not parse cleanly, keeps the raw rule.
 /// Never lets a missing grammar weaken drift: a load failure names the fix
-/// instead of reporting same.
-fn same_syntax(rel: &str, home: Option<&Path>, before: Option<&str>, after: Option<&str>) -> Syntax {
+/// instead of reporting same. `session` is the grammar session of the whole
+/// drift call, shared by every file.
+fn same_syntax(
+    rel: &str,
+    home: Option<&Path>,
+    before: Option<&str>,
+    after: Option<&str>,
+    session: &mut Option<crate::syntax::grammar::Session>,
+) -> Syntax {
     let Some(entry) = crate::syntax::grammar::for_file(rel) else {
         return Syntax::Raw;
     };
     let (Some(before), Some(after)) = (before, after) else {
         return Syntax::Raw;
     };
+    if before == after {
+        return Syntax::Same;
+    }
     let Some(home) = home else {
         return Syntax::Missing(&entry.name, "rvow has no home; set RVOW_HOME to the rvow store".to_string());
     };
@@ -111,11 +121,16 @@ fn same_syntax(rel: &str, home: Option<&Path>, before: Option<&str>, after: Opti
         );
     }
     let base = std::env::var(crate::syntax::grammar::URL_VAR).ok().filter(|v| !v.is_empty());
-    let mut session = match crate::syntax::grammar::Session::new() {
-        Ok(s) => s,
-        Err(e) => return Syntax::Missing(&entry.name, e.fix),
+    if session.is_none() {
+        *session = match crate::syntax::grammar::Session::new() {
+            Ok(s) => Some(s),
+            Err(e) => return Syntax::Missing(&entry.name, e.fix),
+        };
+    }
+    let Some(session) = session.as_mut() else {
+        return Syntax::Missing(&entry.name, "the grammar session could not start".to_string());
     };
-    match crate::syntax::canonical::compare(&mut session, home, entry, base.as_deref(), before, after) {
+    match crate::syntax::canonical::compare(session, home, entry, base.as_deref(), before, after) {
         Ok(crate::syntax::canonical::Compare::Same) => Syntax::Same,
         Ok(_) => Syntax::Raw,
         Err(e) => Syntax::Missing(&entry.name, e.fix),
@@ -453,6 +468,8 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
     let protected_then = baseline_protected(project, change)?;
     let protected_now = protected_files(top, config)?;
     let tests = globset(&config.test_globs)?;
+    let repo = crate::syntax::units::Repo { top, protected: Some(&protected_then) };
+    let mut session = None;
     for (rel, hash) in &protected_then {
         match protected_now.get(rel) {
             None => out.push(item(Class::Weaken, format!("protected file {rel} removed"))),
@@ -467,13 +484,25 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
                     // hash rule exactly as before.
                     if let (Some(o), Some(n)) = (old.as_deref(), new.as_deref())
                         && tests.is_match(rel)
-                        && crate::guard::preserved(rel, o, n)
                     {
-                        continue;
+                        let named = match crate::guard::preserved(rel, o, n, home, Some(repo), &config.test_queries, &mut session) {
+                            crate::guard::Kept::Yes => continue,
+                            crate::guard::Kept::No(names) => names,
+                        };
+                        if !named.is_empty() {
+                            let what = format!("test {rel} changed {}", named.join(", "));
+                            out.push(match (old, new) {
+                                (Some(o), Some(n)) if o.len() + n.len() <= SHOW_LIMIT => changed(Class::Weaken, what, &o, &n),
+                                _ => item(Class::Weaken, what),
+                            });
+                            continue;
+                        }
+                        // No query named the changed unit: the item below keeps
+                        // today's text and its grammar hint.
                     }
                     // A protected file whose two texts parse to the same
                     // syntax tree only lost trivia, not code. It is not drift.
-                    match same_syntax(rel, home, old.as_deref(), new.as_deref()) {
+                    match same_syntax(rel, home, old.as_deref(), new.as_deref(), &mut session) {
                         Syntax::Same => continue,
                         Syntax::Missing(lang, hint) => {
                             out.push(item(Class::Weaken, format!("{what} (the {lang} grammar could not load: {hint})")));
@@ -487,6 +516,13 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
                     });
                 }
             }
+        }
+    }
+    let infra =
+        globset(&config.protect_infra.iter().cloned().chain(crate::config::ENFORCEMENT.iter().map(|s| s.to_string())).collect::<Vec<_>>())?;
+    for rel in protected_now.keys() {
+        if !protected_then.contains_key(rel) && infra.is_match(rel) {
+            out.push(item(Class::Weaken, format!("protected file {rel} added")));
         }
     }
     out.extend(crate::guard::drift(project, top, change));
@@ -622,5 +658,35 @@ mod tests {
         );
         std::fs::remove_file(repo.join("tests/t.sh")).unwrap();
         assert_eq!(drift_of(&p, &cache_home, &repo), [(Class::Weaken, "protected file tests/t.sh removed".to_string())]);
+    }
+
+    #[test]
+    fn new_infra_added_after_accept() {
+        let cases = [
+            (false, "tests/conftest.py", "protected file tests/conftest.py added"),
+            (false, ".cargo/config.toml", "protected file .cargo/config.toml added"),
+            (false, "tests/new_test.py", ""),
+            (true, "tests/unrelated_test.py", ""),
+        ];
+        for (conftest, added, want) in cases {
+            let tmp = crate::git::testrepo::TempDir::new();
+            let home = tmp.0.join("home");
+            let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+            std::fs::create_dir_all(repo.join("tests")).unwrap();
+            std::fs::write(repo.join("tests/t.sh"), "exit 0").unwrap();
+            if conftest {
+                std::fs::write(repo.join("tests/conftest.py"), "import pytest\n").unwrap();
+            }
+            let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+            let c = change::new(&p, "T", "main", true).unwrap();
+            std::fs::write(c.path.join(TASKS), "- TSK-new1 T\n  verify: false\n  files: src/**\n").unwrap();
+            let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+            vow::commit(&p, prepared).unwrap();
+            assert_eq!(drift_of(&p, home_of(&p), &repo), [], "{added}: no drift right after accept");
+            std::fs::create_dir_all(repo.join(added).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(added), "x = 1\n").unwrap();
+            let want: Vec<(Class, String)> = if want.is_empty() { vec![] } else { vec![(Class::Weaken, want.to_string())] };
+            assert_eq!(drift_of(&p, home_of(&p), &repo), want, "{added}");
+        }
     }
 }

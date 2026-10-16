@@ -39,6 +39,9 @@ pub(crate) fn today() -> String {
     let secs = ledger::now_ms() / 1000;
     #[cfg(unix)]
     {
+        // musl marks `time_t` deprecated only to announce its 64-bit switch;
+        // the cast is right for either width.
+        #[allow(deprecated)]
         let t = secs as libc::time_t;
         // SAFETY: localtime_r only writes the tm it is given, and an all-zero
         // tm is a valid value to overwrite.
@@ -169,6 +172,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         ));
     }
 
+    let cwd = &c.branch().and_then(|b| git::top_for_branch(cwd, b).ok().flatten()).unwrap_or_else(|| cwd.to_path_buf());
     let r = gate::change_gate_echo(project, home, cwd, c, &mut std::io::stderr())?;
     if !r.passed() {
         return Err(Error::new(

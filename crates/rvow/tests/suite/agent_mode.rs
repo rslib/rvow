@@ -335,6 +335,48 @@ fn scope_the_lease_file_is_closed_to_writes_and_open_to_reads() {
     }
 }
 
+#[test]
+fn lease_stale_after_prove_does_not_bring_a_bound_lease_back() {
+    let (fx, code, _docs) = Fx::two("stale-bound");
+    fx.rvow(&["delegate", &code]);
+    assert!(lease::bind(&fx.project(), &code, "a1").unwrap());
+    std::fs::write(fx.repo().join("code.txt"), "x").unwrap();
+    fx.rvow(&["prove", &code]);
+    std::fs::write(fx.repo().join("src/a.txt"), "changed").unwrap();
+    let status = fx.rvow(&["status"]);
+    assert!(status.contains("stale"), "{status}");
+
+    let (p, home, repo) = (fx.project(), fx.home(), fx.repo());
+    assert!(lease::holder(&p, &home, &repo, "a1", fx.now()).unwrap().is_none(), "the lease ended at prove");
+    assert!(lease::leases(&p).unwrap().iter().all(|l| l.ended));
+    let doc = repo.join("docs/a.md");
+    assert_eq!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")), None, "the usual rules apply");
+}
+
+#[test]
+fn lease_stale_after_prove_ends_an_unbound_lease_too() {
+    let (fx, code, _docs) = Fx::two("stale-unbound");
+    fx.rvow(&["delegate", &code]);
+    std::fs::write(fx.repo().join("code.txt"), "x").unwrap();
+    fx.rvow(&["prove", &code]);
+    std::fs::write(fx.repo().join("src/a.txt"), "changed").unwrap();
+    assert!(!lease::bind(&fx.project(), &code, "a1").unwrap(), "an ended lease cannot be bound");
+    assert!(lease::leases(&fx.project()).unwrap().iter().all(|l| l.ended));
+}
+
+#[test]
+fn lease_stale_after_block_ends_bound_and_unbound_leases() {
+    let (fx, code, _docs) = Fx::two("stale-blocked");
+    fx.rvow(&["delegate", &code]);
+    assert!(lease::bind(&fx.project(), &code, "a1").unwrap());
+    fx.rvow(&["delegate", &code]);
+    fx.rvow(&["block", &code, "--reason", "cannot pass"]);
+    let (p, home, repo) = (fx.project(), fx.home(), fx.repo());
+    assert!(lease::leases(&p).unwrap().iter().all(|l| l.ended));
+    assert!(!lease::bind(&p, &code, "a2").unwrap(), "an ended lease cannot be bound");
+    assert!(lease::holder(&p, &home, &repo, "a1", fx.now()).unwrap().is_none());
+}
+
 // The mod binds a new subagent to the lease its prompt names.
 
 impl Fx {
@@ -394,4 +436,92 @@ fn bind_a_stopping_subagent_ends_its_lease() {
     assert!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")).is_some());
     assert_eq!(fx.event("lease-end", serde_json::json!({"agent_id": "a1"})), None);
     assert_eq!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")), None, "the lease ended with the subagent");
+}
+
+#[test]
+fn bind_next_lease_after_the_old_task_is_proved() {
+    let (fx, code, docs) = Fx::two("bind-next");
+    let first = fx.rvow(&["delegate", &code]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    assert_eq!(out["bound"], true, "{out}");
+    std::fs::write(fx.repo().join("code.txt"), "x").unwrap();
+    fx.rvow(&["prove", &code]);
+
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!((out["bound"].clone(), out["task"].clone()), (true.into(), docs.as_str().into()), "{out}");
+    assert!(out.get("reason").is_none(), "{out}");
+    let (src, doc) = (fx.repo().join("src/a.txt"), fx.repo().join("docs/a.md"));
+    assert_eq!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")), None, "inside the new lease");
+    let reason = fx.hook("Edit", serde_json::json!({"file_path": src}), Some("a1")).expect("outside the new lease");
+    assert!(reason.contains(&docs) && reason.contains("src/a.txt"), "{reason}");
+}
+
+#[test]
+fn bind_next_lease_issued_earlier_is_the_one_held() {
+    let (fx, code, docs) = Fx::two("bind-next-older");
+    let first = fx.rvow(&["delegate", &code]);
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!(out["bound"], true, "{out}");
+    std::fs::write(fx.repo().join("docs.txt"), "x").unwrap();
+    fx.rvow(&["prove", &docs]);
+
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    assert_eq!(out["bound"], true, "{out}");
+    let (p, home, repo) = (fx.project(), fx.home(), fx.repo());
+    let held = lease::holder(&p, &home, &repo, "a1", fx.now()).unwrap().expect("the lease bound last is held");
+    assert_eq!(held.task, code);
+    let doc = repo.join("docs/a.md");
+    assert!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")).is_some(), "outside the held lease");
+}
+
+#[test]
+fn bind_next_lease_is_refused_while_the_old_lease_is_live() {
+    let (fx, code, docs) = Fx::two("bind-next-live");
+    let first = fx.rvow(&["delegate", &code]);
+    fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!(out["bound"], false, "{out}");
+    let want = format!("this session still holds the lease of {code}; prove or block {code}, or start a new session for {docs}");
+    assert_eq!(out["reason"], want.as_str(), "{out}");
+    assert!(!lease::bind(&fx.project(), &docs, "a1").unwrap());
+
+    let (src, doc) = (fx.repo().join("src/a.txt"), fx.repo().join("docs/a.md"));
+    assert_eq!(fx.hook("Edit", serde_json::json!({"file_path": src}), Some("a1")), None, "still on the first task");
+    assert!(fx.hook("Edit", serde_json::json!({"file_path": doc}), Some("a1")).is_some(), "the second task is not held");
+}
+
+#[test]
+fn bind_closed_task_without_end_task_does_not_hold_the_session() {
+    let (fx, code, docs) = Fx::two("bind-closed");
+    let first = fx.rvow(&["delegate", &code]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    assert_eq!(out["bound"], true, "{out}");
+    std::fs::write(fx.repo().join("code.txt"), "x").unwrap();
+    fx.rvow(&["prove", &code]);
+    let path = fx.project().root.join(LEASE_FILE);
+    let kept: String =
+        std::fs::read_to_string(&path).unwrap().lines().filter(|l| !l.contains("end_task")).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, kept).unwrap();
+    let held = lease::leases(&fx.project()).unwrap();
+    assert!(held.iter().all(|l| !l.ended), "the proof left the lease open");
+
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!((out["bound"].clone(), out["task"].clone()), (true.into(), docs.as_str().into()), "{out}");
+    assert!(out.get("reason").is_none(), "{out}");
+}
+
+#[test]
+fn bind_closed_open_task_still_holds_the_session() {
+    let (fx, code, docs) = Fx::two("bind-closed-open");
+    let first = fx.rvow(&["delegate", &code]);
+    fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": first})).unwrap();
+    let second = fx.rvow(&["delegate", &docs]);
+    let out = fx.event("lease-bind", serde_json::json!({"agent_id": "a1", "prompt": second})).unwrap();
+    assert_eq!(out["bound"], false, "{out}");
+    let want = format!("this session still holds the lease of {code}; prove or block {code}, or start a new session for {docs}");
+    assert_eq!(out["reason"], want.as_str(), "{out}");
 }

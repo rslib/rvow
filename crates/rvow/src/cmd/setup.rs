@@ -76,6 +76,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         };
         match (harness, event) {
             (Harness::Claude, HookEvent::PreToolUse) => hooks::claude_pre_tool_use(&p, &input),
+            (Harness::Claude, HookEvent::PostToolUse) => hooks::claude_post_tool_use(&p, &input),
             (Harness::Claude, HookEvent::SessionStart) => hooks::claude_session_start(&p, &home, &input),
             (Harness::Claude, HookEvent::Stop) => hooks::claude_stop(&p, &home, &input),
             (Harness::Claude, HookEvent::LeaseBind) => hooks::claude_lease_bind(&p, &input),
@@ -117,8 +118,11 @@ fn report(r: &mut Reply, what: &str, o: install::Outcome) {
         install::Outcome::Written(p) => format!("{what}: wrote {}", p.display()),
         install::Outcome::Unchanged(p) => format!("{what}: up to date at {}", p.display()),
         install::Outcome::KeptEdit(p) => format!("{what}: kept your edits in {}; delete it to get the new version", p.display()),
+        install::Outcome::Chained { path, prev } => {
+            format!("{what}: moved your hook to {} and wrote {}, which runs it before the gate", prev.display(), path.display())
+        }
         install::Outcome::AddLine { path, line } => {
-            format!("{what}: another hook manager owns {}; add this line to it:\n  {line}", path.display())
+            format!("{what}: another hook manager owns {}; add this line as its first command:\n  {line}", path.display())
         }
     });
 }

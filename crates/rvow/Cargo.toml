@@ -7,6 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Only this package rewrites the changelog, so a workspace release dates the
+# Unreleased section once. The link list holds either the first-release seed
+# (`commits/trunk`) or a compare link; the replacement that fits it runs.
+[package.metadata.release]
+pre-release-replacements = [
+  { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+  { file = "../../CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/rslib/rvow/compare/v\\S+\\.\\.\\.HEAD", replace = "[Unreleased]: https://github.com/rslib/rvow/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/rslib/rvow/compare/v{{prev_version}}...v{{version}}", min = 0, max = 1 },
+  { file = "../../CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/rslib/rvow/commits/trunk", replace = "[Unreleased]: https://github.com/rslib/rvow/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/rslib/rvow/releases/tag/v{{version}}", min = 0, max = 1 },
+]
+
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 rvow-core = { path = "../rvow-core" }

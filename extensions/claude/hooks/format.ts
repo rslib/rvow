@@ -319,7 +319,7 @@ export function archiveBlockers(
 export const ACCEPT_DESCRIPTION =
   'Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.'
 export const CONFIRM_DESCRIPTION =
-  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. The result tells you what happened, and when it failed it says why.'
+  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. When several are pending the user answers for each one. Pass id to ask only about that amendment. The result tells you what happened, and when it failed it says why.'
 export const ACCEPT_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -328,8 +328,34 @@ export const ACCEPT_SCHEMA = {
 }
 export const CONFIRM_SCHEMA = {
   type: 'object',
-  properties: { decision: { type: 'string', enum: ['accept', 'reject'] } },
+  properties: {
+    decision: { type: 'string', enum: ['accept', 'reject'] },
+    id: { type: 'string', pattern: '^AMD-[a-z0-9]+$' },
+  },
   additionalProperties: false,
+}
+export const ASK_SCHEMA = {
+  type: 'object',
+  properties: { change: { type: 'string', pattern: '^CHG-[a-z0-9]+$' } },
+  additionalProperties: false,
+}
+
+/** One pending amendment of a `rvow confirm` listing: its id and its own lines. */
+export type Listed = { id: string; text: string }
+
+/** Splits a `rvow confirm` listing into one block per amendment, without the digest lines. */
+export function splitListing(listing: string): Listed[] {
+  const out: Listed[] = []
+  for (const line of listing.split('\n')) {
+    const head = /^(AMD-[\w-]+) for /.exec(line)
+    if (head?.[1]) out.push({ id: head[1], text: line })
+    else if (/^digest \S+$/.test(line) || /^decide with:/.test(line)) break
+    else if (line.trim()) {
+      const last = out.at(-1)
+      if (last) last.text += `\n${line}`
+    }
+  }
+  return out
 }
 
 /** What a failed command tells the agent inside a tool result: the command and its own words. */

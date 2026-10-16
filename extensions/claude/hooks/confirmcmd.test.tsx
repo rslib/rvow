@@ -63,17 +63,20 @@ test('no argument opens the dialog and Accept all decides with the digest', asyn
   expect(out).toContain('AMD-a1: accepted')
 })
 
-test('all opens the same dialog and Reject all rejects both', async ($, on) => {
-  const { ran, asked } = fake(on, 'Reject all', (line) =>
+test('all with two pending asks about each and Reject rejects both', async ($, on) => {
+  const { ran, asked } = fake(on, 'Reject', (line) =>
     line === 'confirm'
       ? [0, TWO]
-      : line === 'confirm --reject --all def456'
-        ? [0, 'AMD-a1: rejected\nAMD-b2: rejected\nnext: undo the rejected plan edit\n']
+      : line.startsWith('confirm AMD-')
+        ? [0, `${line.split(' ')[1]}: rejected\nnext: undo the rejected plan edit\n`]
         : [0, ''],
   )
   const out = await run($, 'all')
-  expect(asked).toHaveLength(1)
-  expect(decided(ran)).toEqual(['confirm --reject --all def456'])
+  expect(asked).toHaveLength(2)
+  expect(ran.filter((l) => l.startsWith('confirm AMD-'))).toEqual([
+    'confirm AMD-a1 --reject',
+    'confirm AMD-b2 --reject',
+  ])
   expect(out).toContain('AMD-b2: rejected')
 })
 

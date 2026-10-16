@@ -653,6 +653,7 @@ enum YoloTier {
 enum HookTarget {
     Claude,
     PreToolUse,
+    PostToolUse,
     SessionStart,
     Stop,
     Status,
@@ -666,6 +667,7 @@ impl HookTarget {
         match self {
             Self::Claude => None,
             Self::PreToolUse => Some(HookEvent::PreToolUse),
+            Self::PostToolUse => Some(HookEvent::PostToolUse),
             Self::SessionStart => Some(HookEvent::SessionStart),
             Self::Stop => Some(HookEvent::Stop),
             Self::Status => Some(HookEvent::Status),
@@ -679,6 +681,7 @@ impl HookTarget {
 #[derive(Clone, Copy, ValueEnum)]
 enum HookEvent {
     PreToolUse,
+    PostToolUse,
     SessionStart,
     Stop,
     Status,

@@ -67,8 +67,47 @@ fn managed(text: &str) -> bool {
     rest.is_empty() && path.is_absolute() && executable(&path) && install::pre_push_script(&path).is_ok_and(|expected| expected == text)
 }
 
+/// Whether the hook runs as a shell script; another interpreter can skip it.
+fn shell_script(text: &str) -> bool {
+    let Some(shebang) = text.lines().next().and_then(|l| l.strip_prefix("#!")) else {
+        return true;
+    };
+    let mut words = shebang.split_whitespace();
+    let program = match words.next() {
+        Some("/usr/bin/env") => words.next(),
+        first => first
+            .and_then(|p| p.rsplit_once('/'))
+            .and_then(|(dir, name)| matches!(dir, "/bin" | "/usr/bin" | "/usr/local/bin" | "/opt/homebrew/bin").then_some(name)),
+    };
+    words.next().is_none() && program.is_some_and(|p| matches!(p, "sh" | "bash" | "dash" | "zsh" | "ksh"))
+}
+
+/// Whether `command` runs the trusted rvow binary with exactly `want` as its arguments.
+fn gate_command(top: &Path, command: &str, want: &str) -> bool {
+    let (word, args) = if let Some((word, args)) = install::shell_unquote_prefix(command) {
+        // Text glued to the closing quote is part of the program name.
+        if !args.starts_with([' ', '\t']) {
+            return false;
+        }
+        (word, args.trim())
+    } else {
+        let Some((word, args)) = command.split_once(' ') else {
+            return false;
+        };
+        (word.to_string(), args.trim())
+    };
+    args == want && binary(&word).is_some_and(|bin| trusted(top, &bin))
+}
+
 fn manager(top: &Path, text: &str) -> bool {
+    if !shell_script(text) {
+        return false;
+    }
     let lines: Vec<_> = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+    // The line `rvow install` prints, as the first command: nothing runs before it.
+    if lines.first().is_some_and(|first| gate_command(top, first, "gate --strict --rerun || exit 1")) {
+        return true;
+    }
     let Some((last, prior)) = lines.split_last() else {
         return false;
     };
@@ -79,16 +118,7 @@ fn manager(top: &Path, text: &str) -> bool {
     }) {
         return false;
     }
-    let command = last.strip_prefix("exec ").unwrap_or(last);
-    let (word, args) = if let Some((word, args)) = install::shell_unquote_prefix(command) {
-        (word, args.trim())
-    } else {
-        let Some((word, args)) = command.split_once(' ') else {
-            return false;
-        };
-        (word.to_string(), args.trim())
-    };
-    args == "gate --strict --rerun" && binary(&word).is_some_and(|bin| trusted(top, &bin))
+    gate_command(top, last.strip_prefix("exec ").unwrap_or(last), "gate --strict --rerun")
 }
 
 pub(super) fn failure(top: &Path) -> Option<String> {
@@ -105,9 +135,11 @@ pub(super) fn failure(top: &Path) -> Option<String> {
     if executable(&hook) && text.as_ref().is_some_and(|t| managed(t) || manager(top, t)) {
         return None;
     }
-    let origin = configured.map_or_else(|| "installed".to_string(), |dir| format!("core.hooksPath {dir}"));
-    Some(format!(
-        "{origin} pre-push hook {} is missing, non-executable or does not run an intact rvow gate; run rvow install or add the line it prints",
-        hook.display()
-    ))
+    Some(match configured {
+        Some(dir) => format!(
+            "core.hooksPath {dir} pre-push hook {} is missing, non-executable or does not run an intact rvow gate; run rvow install and add the line it prints",
+            hook.display()
+        ),
+        None => format!("installed pre-push hook {} is missing or was changed; run rvow install again", hook.display()),
+    })
 }

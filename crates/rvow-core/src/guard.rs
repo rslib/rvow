@@ -20,6 +20,8 @@ use crate::fingerprint::{candidate_files, globset};
 use crate::ledger::Kind;
 use crate::proof::Active;
 use crate::store::Project;
+use crate::syntax::grammar;
+use crate::syntax::units;
 use crate::tasks::Task;
 use crate::vow::put_object;
 
@@ -109,16 +111,55 @@ fn current(top: &Path, key: &str) -> Option<String> {
     }
 }
 
+/// What the guard decided about one saved text: it is preserved, or it is
+/// drift and the names of the tests a query marks among the changed units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Kept {
+    Yes,
+    No(Vec<String>),
+}
+
 /// Whether `now` keeps every line of `before` and only adds free lines: new
 /// Rust test items for `.rs` files, standalone added checks elsewhere. This
 /// is the same check `drift` below uses; callers that compare other saved
 /// text, such as protected files, use it too.
-pub(crate) fn preserved(rel: &str, before: &str, now: &str) -> bool {
+///
+/// `home` is the rvow home; `Some` turns on the syntax-unit rule for files
+/// with a pinned grammar that is in the cache. When the rule does not apply
+/// (no grammar, no cached grammar, a fetch failed inside the retry window,
+/// or a text that does not parse cleanly) the rule of the file kind stays in
+/// force: `guard_rust` for `.rs`, the line rule for the rest. A failed parse
+/// never weakens the check. The `#[cfg(test)]` module keys of Rust sources
+/// always keep `guard_rust`: a new inline test item is free there, which the
+/// unit compare cannot see. `top` resolves the project query files of
+/// `test_queries`, and `session` is the grammar session of the whole drift
+/// call, shared by every file.
+pub(crate) fn preserved(
+    rel: &str,
+    before: &str,
+    now: &str,
+    home: Option<&Path>,
+    repo: Option<units::Repo>,
+    test_queries: &BTreeMap<String, String>,
+    session: &mut Option<grammar::Session>,
+) -> Kept {
+    if before == now {
+        return Kept::Yes;
+    }
+    if !rel.ends_with(RUST_TESTS)
+        && let Some(kept) = units::preserved(rel, before, now, home, repo, test_queries, session)
+    {
+        return match kept {
+            units::Units::Preserved => Kept::Yes,
+            units::Units::Changed(names) => Kept::No(names),
+        };
+    }
     if rel.strip_suffix(RUST_TESTS).unwrap_or(rel).ends_with(".rs") {
-        rust::preserved(before, now)
+        if rust::preserved(before, now) { Kept::Yes } else { Kept::No(Vec::new()) }
     } else {
         let mut remaining = now.lines();
-        before.lines().all(|line| remaining.by_ref().any(|candidate| candidate == line)) && added_lines_safe(before, now)
+        let kept = before.lines().all(|line| remaining.by_ref().any(|candidate| candidate == line)) && added_lines_safe(before, now);
+        if kept { Kept::Yes } else { Kept::No(Vec::new()) }
     }
 }
 
@@ -139,8 +180,18 @@ fn added_lines_safe(before: &str, now: &str) -> bool {
 }
 
 /// Weaken drift for saved content whose order, multiplicity or lexical context changed.
+/// The rvow home, the config and the grammar session load once for the whole
+/// call, not once per file.
 pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
+    drift_in(project, top, change, &crate::store::home_dir().unwrap_or_default())
+}
+
+/// `drift` with the rvow home given, whose config and grammar cache it reads.
+fn drift_in(project: &Project, top: &Path, change: &Active, home: &Path) -> Vec<Item> {
     let mut out = Vec::new();
+    let home = home.to_path_buf();
+    let test_queries = crate::config::load(project, &home).map(|c| c.test_queries).unwrap_or_default();
+    let mut session = None;
     for (key, hash) in guarded(change) {
         let what = |how: &str| format!("test {key} {how} after its first passing proof");
         let before = std::fs::read_to_string(project.root.join("objects").join(&hash));
@@ -155,8 +206,21 @@ pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
             out.push(Item { class: Class::Weaken, what: what("was removed"), before: None, after: None });
             continue;
         };
-        if !preserved(&key, &before, &now) {
-            out.push(Item { class: Class::Weaken, what: what("lost or changed lines"), before: Some(before), after: None });
+        if before == now {
+            continue;
+        }
+        if let Kept::No(names) =
+            preserved(&key, &before, &now, Some(home.as_path()), Some(units::Repo { top, protected: None }), &test_queries, &mut session)
+        {
+            let helpers = if names.is_empty() && key.ends_with(RUST_TESTS) { rust::added_helpers(&before, &now) } else { None };
+            let what = if let Some(helpers) = helpers.filter(|h| !h.is_empty()) {
+                format!("test {key} adds helpers {}", helpers.join(", "))
+            } else if names.is_empty() {
+                what("lost or changed lines")
+            } else {
+                format!("test {key} changed {} after its first passing proof", names.join(", "))
+            };
+            out.push(Item { class: Class::Weaken, what, before: Some(before), after: None });
         }
     }
     out
@@ -196,7 +260,10 @@ mod tests {
     fn weaken(p: &Project, repo: &Path) -> Vec<String> {
         let (living, _) = crate::change::load_living(p).unwrap();
         let changes = crate::proof::active(p, &living).unwrap();
-        drift(p, repo, &changes[0]).into_iter().map(|i| i.what).collect()
+        // An empty home of the test's own, so the grammars a user has cached
+        // cannot change which rule a file meets.
+        let home = p.root.join("guard-test-home");
+        drift_in(p, repo, &changes[0], &home).into_iter().map(|i| i.what).collect()
     }
 
     #[test]
@@ -214,6 +281,33 @@ mod tests {
         let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
         std::fs::write(repo.join("src/lib.rs"), lib.replace("pub fn f() {}", "pub fn f() { let _ = 1; }")).unwrap();
         assert_eq!(weaken(&p, &repo).len(), 2, "code outside test modules is free");
+    }
+
+    fn lib_weaken(p: &Project, repo: &Path, body: &str) -> Vec<String> {
+        let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), lib.replace("    fn t() { assert_eq!(1, 1); }\n", body)).unwrap();
+        weaken(p, repo).into_iter().filter(|w| w.contains("src/lib.rs#cfg(test)")).collect()
+    }
+
+    #[test]
+    fn cfg_test_names_added_helper_plus_test() {
+        let (_tmp, p, repo, _) = setup();
+        let body = "    fn t() { assert_eq!(1, 1); }\n    fn row_text() -> u8 { 1 }\n    fn row_ids() -> u8 { 2 }\n    #[test]\n    fn u() { assert_eq!(row_ids(), 2); }\n";
+        assert_eq!(lib_weaken(&p, &repo, body), ["test src/lib.rs#cfg(test) adds helpers row_text, row_ids"]);
+    }
+
+    #[test]
+    fn cfg_test_names_removed_assert() {
+        let (_tmp, p, repo, _) = setup();
+        let body = "    fn t() {}\n    fn row_ids() -> u8 { 2 }\n";
+        assert_eq!(lib_weaken(&p, &repo, body), ["test src/lib.rs#cfg(test) lost or changed lines after its first passing proof"]);
+    }
+
+    #[test]
+    fn cfg_test_names_added_tests_only() {
+        let (_tmp, p, repo, _) = setup();
+        let body = "    fn t() { assert_eq!(1, 1); }\n    #[test]\n    fn u() { assert_eq!(2, 2); }\n";
+        assert_eq!(lib_weaken(&p, &repo, body), Vec::<String>::new());
     }
 
     #[test]

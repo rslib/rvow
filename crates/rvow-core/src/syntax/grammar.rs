@@ -77,6 +77,12 @@ impl Session {
         self.parses
     }
 
+    /// The loaded language of `entry`, for callers that run queries over a
+    /// tree this session parsed. `None` before a parse of `entry` loaded it.
+    pub fn language(&self, entry: &Entry) -> Option<Language> {
+        self.langs.get(&entry.name).cloned()
+    }
+
     /// Parses `text` with the grammar of `entry`, downloading it into the
     /// cache when it is not there yet. Returns the syntax tree; a parse with
     /// error nodes still returns a tree and the caller reads `has_error`.

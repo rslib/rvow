@@ -35,6 +35,7 @@ pub enum Rule {
     WeakVerify,
     Runner,
     ConfigureInVerify,
+    TestQuery,
 }
 
 impl Rule {
@@ -52,7 +53,8 @@ impl Rule {
             | Rule::ClarifyForm
             | Rule::WideScope
             | Rule::WeakVerify
-            | Rule::ConfigureInVerify => Severity::Warning,
+            | Rule::ConfigureInVerify
+            | Rule::TestQuery => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -85,6 +87,7 @@ impl Rule {
             Rule::WeakVerify => "weak-verify",
             Rule::Runner => "runner",
             Rule::ConfigureInVerify => "configure-in-verify",
+            Rule::TestQuery => "test-query",
         }
     }
 
@@ -122,6 +125,7 @@ impl Rule {
             Rule::ConfigureInVerify => {
                 "build with `cmake --build --preset ...` and keep the configure step in a `setup` entry or a configured build dir"
             }
+            Rule::TestQuery => "fix the query, or remove test_queries for this language",
         }
     }
 }

@@ -31,6 +31,9 @@ pub fn accept(target: &str) -> Result<bool> {
             println!("warning: {} baseline ended by a signal or timeout", b.task);
         }
     }
+    if let Some(hint) = &prepared.hint {
+        println!("hint: {hint}");
+    }
     let tasks = prepared.loaded.tasks.len();
     let base = prepared.base_commit[..12.min(prepared.base_commit.len())].to_string();
     let vowed = vow::commit(&p, prepared)?;

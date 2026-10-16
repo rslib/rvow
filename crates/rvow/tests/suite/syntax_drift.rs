@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 
 use rvow_core::store::{self, Project};
 use rvow_core::syntax::canonical::{self, Compare};
@@ -16,12 +16,10 @@ fn fixtures() -> String {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grammars").display().to_string()
 }
 
-/// wxo tests in this binary share the process env, so every one that sets
-/// RVOW_GRAMMAR_URL holds this lock.
-static ENV: OnceLock<Mutex<()>> = OnceLock::new();
-
+/// Tests in this binary share the process env, so every one that sets
+/// RVOW_GRAMMAR_URL holds the shared lock of the test binary.
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV.get_or_init(|| Mutex::new(())).lock().unwrap()
+    crate::env_lock::lock()
 }
 
 struct Setup {
@@ -230,7 +228,7 @@ fn syntax_drift_fetch_hook_check_downloads_nothing() {
     }
     let entry = grammar::by_name("toml").unwrap();
     rewrites(&s, &edit_of(&s, "\n\n", "\n"), &_env);
-    let _ = hook::stop_reason(&s.project, &s.home, &s.repo).unwrap();
+    let _ = hook::stop_reason(&s.project, &s.home, &s.repo, None).unwrap();
     assert!(!grammar::cache_file(&s.home, entry).is_file(), "a hook drift check stays offline");
     unsafe {
         std::env::remove_var("RVOW_GRAMMAR_URL");

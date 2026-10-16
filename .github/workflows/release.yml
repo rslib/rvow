@@ -39,49 +39,54 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # build-musl.sh builds Linux in a cross image with a full musl C
+          # toolchain for ring and the tree-sitter grammars.
           - name: linux-x86_64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            binroot: $RUNNER_TEMP/musl/target
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            binroot: $RUNNER_TEMP/musl/target
           - name: macos-aarch64
             runner: macos-latest
             target: aarch64-apple-darwin
+            binroot: target
     runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: runner.os == 'macOS'
         with:
           target: ${{ matrix.target }}
           rustflags: ""
-      - name: Install musl tools
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
+        if: runner.os == 'Linux'
+        run: .github/scripts/build-musl.sh ${{ matrix.target }} "$RUNNER_TEMP/musl"
+      - name: Build
+        if: runner.os == 'macOS'
         run: cargo build --release --locked --target ${{ matrix.target }} -p rvow
-      - name: The Linux binary is static
+      - name: The Linux binary links no shared library
         if: runner.os == 'Linux'
         run: |
-          bin=target/${{ matrix.target }}/release/rvow
-          file "$bin"
-          file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          bin="${{ matrix.binroot }}/${{ matrix.target }}/release/rvow"
           if ldd "$bin" 2>&1 | grep -q '=>'; then
             echo "$bin links shared libraries"
             exit 1
           fi
       - name: The binary runs and reports the version
         run: |
-          out=$(target/${{ matrix.target }}/release/rvow --version)
+          out=$("${{ matrix.binroot }}/${{ matrix.target }}/release/rvow" --version)
           echo "$out"
           echo "$out" | grep -q "$VERSION"
       - name: Pack
         run: |
           archive="rvow-${{ matrix.name }}-v$VERSION.tar.gz"
           mkdir -p pkg
-          cp "target/${{ matrix.target }}/release/rvow" pkg/rvow
+          cp "${{ matrix.binroot }}/${{ matrix.target }}/release/rvow" pkg/rvow
           tar -czf "$archive" -C pkg rvow
           shasum -a 256 "$archive" > "$archive.sha256"
           cat "$archive.sha256"
@@ -109,7 +114,7 @@ jobs:
           test "$(find . -name '*.tar.gz' | wc -l)" -eq 3
           sha256sum -c -- ./*.sha256
       - name: Release notes
-        run: .github/scripts/changelog.sh "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" | tee notes.md
+        run: .github/scripts/release-notes.sh "$GITHUB_REF_NAME" | tee notes.md
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
