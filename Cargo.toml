@@ -9,6 +9,14 @@ rust-version = "1.98"
 license = "MIT"
 publish = false
 
+# Releases are GitHub-only: the tag push triggers .github/workflows/release.yml,
+# which builds and publishes the binaries. No crates.io publishing.
+[workspace.metadata.release]
+publish = false
+push = true
+# One consolidated tag for the whole workspace; release.yml triggers on v*.
+tag-name = "v{{version}}"
+
 [profile.release]
 strip = "symbols"
 lto = "thin"

@@ -5,33 +5,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
-### Added
-
-- A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
-  A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.
-- Compare a protected test file by syntax unit when its grammar is in the cache: a unit is an item with the attributes, decorators and comments right before it, and a module, class, namespace or `@group` call splits into a header unit plus one unit per body item.
-  Each old unit must keep its canonical form as many times as before, and a unit keeps its container.
-  A new unit is free only when a shipped query marks it a test with a name the old text does not use, and its attributes are test attributes: a moved test and a new test are not drift, while a new helper, hook, fixture, import or shadowing macro, a removed `#[test]`, a changed assert and a deleted duplicate are. Record such drift with `rvow amend`.
-  A file whose grammar does not load or whose text does not parse cleanly keeps the raw rules.
-- Query files name the changed test: shipped queries mark the test units of JavaScript and TypeScript, Python, Rust, C++ and Go, and `test_queries = { <lang> = "<path>" }` in the project config adds a query file per language.
-  A gtest `TEST(Suite, Name)` is named `Suite.Name`, and a `@group` capture marks a call as a container that splits into a header plus its body items.
-  The drift item prints the test's title or function name, a unit no query marks keeps today's item text, and `rvow check` warns with `test-query` about a query file that is missing or does not compile.
-- A runner that fills `{junit}` writes a JUnit report that accept and prove read: accept records the failed test names and refuses when the report names none, and a proof passes only when each recorded name passes and no test case failed.
-  A missing `needs` path refuses the run and names the path, `rvow check` warns `configure-in-verify` about a CMake configure step in a verify, and a `Re-running CMake` output adds a note to the prove result.
-
-- `rvow show <change>` prints an outline of the change (each proposal section with its word count, each requirement with its title, each task with its state, and the parts), and `rvow show <change> <part>` prints the full text of one part: `proposal`, `tasks` or `spec:<name>`.
-- `rvow put` replaces one part of an open change, or one task or requirement block, with the text on stdin, writes it atomically and prints `ok` or the check findings of the change.
-- The hooks deny a direct read, write or search of the plan files in the rvow store of a home-mode project, and the reason names the `rvow show` or `rvow put` command for the need; a search from the root names `rvow ls` and `rvow show`.
-- `rvow check` warns with `full-suite` about a task whose verify runs the whole suite instead of one target, the mods show how many baseline checks accept will run and size the accept timeout to the plan's task timeouts, and `rvow archive` prints each gate check on stderr while it runs.
-- Compare a protected file by its syntax tree when both texts parse with the grammar of its language, so a file that only lost a blank line or a comment is not drift.
-  `rvow grammar fetch [<lang>...]` fills the grammar cache with pinned checksummed `.wasm` grammars and `rvow grammar list` shows each pinned language and whether the cache holds it.
-- Count comment text in the syntax compare, fetch missing grammars in prove and gate with a short timeout, and save each compare result under `grammars/` for reuse.
-- Name tests in Java, Kotlin, C#, Ruby and PHP: shipped queries mark JUnit, xUnit/NUnit/MSTest, RSpec/Minitest and PHPUnit tests, so a new test is free and a changed test is named in the drift item, while setup and teardown hooks and a test with an extra annotation such as `@Disabled` stay drift.
-- Name doctest, Catch2 and Unity tests: the shipped C++ query marks `TEST_CASE`, `TEST_CASE_FIXTURE`, `TEST_CASE_METHOD`, `TEST_CASE_TEMPLATE`, `TEMPLATE_TEST_CASE` and `SCENARIO` blocks by their string and `TEST_SUITE` as a container, and a new C query marks the `test_` functions and `RUN_TEST` lines of a Unity file.
-  A new case or `RUN_TEST` line is free and a changed case is named in the drift item, while a `SUBCASE` or `SECTION` change names its case, and a new case that exits, skips or hides itself with `doctest::skip()` or a Catch2 `[.]` tag stays drift.
-  A doctest macro parses with a missing `;`, and rvow accepts that one error in a C++ file instead of falling back to the raw rules.
-- Count the tests of `ctest`, doctest, GoogleTest and Unity runs from their summary lines, so a `ctest` run that finds no tests (`No tests were found!!!`) is 0 tests and no proof, and `ctest` is a counted runner for `baseline: pass`.
-
 ### Changed
 
 - Run `rvow accept`, `rvow amend`, `rvow archive` and `rvow check` in the worktree where the branch of the change is checked out, so a plan made in a second worktree works from the main checkout.
@@ -100,6 +73,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
+  A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.
+- Compare a protected test file by syntax unit when its grammar is in the cache: a unit is an item with the attributes, decorators and comments right before it, and a module, class, namespace or `@group` call splits into a header unit plus one unit per body item.
+  Each old unit must keep its canonical form as many times as before, and a unit keeps its container.
+  A new unit is free only when a shipped query marks it a test with a name the old text does not use, and its attributes are test attributes: a moved test and a new test are not drift, while a new helper, hook, fixture, import or shadowing macro, a removed `#[test]`, a changed assert and a deleted duplicate are. Record such drift with `rvow amend`.
+  A file whose grammar does not load or whose text does not parse cleanly keeps the raw rules.
+- Query files name the changed test: shipped queries mark the test units of JavaScript and TypeScript, Python, Rust, C++ and Go, and `test_queries = { <lang> = "<path>" }` in the project config adds a query file per language.
+  A gtest `TEST(Suite, Name)` is named `Suite.Name`, and a `@group` capture marks a call as a container that splits into a header plus its body items.
+  The drift item prints the test's title or function name, a unit no query marks keeps today's item text, and `rvow check` warns with `test-query` about a query file that is missing or does not compile.
+- A runner that fills `{junit}` writes a JUnit report that accept and prove read: accept records the failed test names and refuses when the report names none, and a proof passes only when each recorded name passes and no test case failed.
+  A missing `needs` path refuses the run and names the path, `rvow check` warns `configure-in-verify` about a CMake configure step in a verify, and a `Re-running CMake` output adds a note to the prove result.
+
+- `rvow show <change>` prints an outline of the change (each proposal section with its word count, each requirement with its title, each task with its state, and the parts), and `rvow show <change> <part>` prints the full text of one part: `proposal`, `tasks` or `spec:<name>`.
+- `rvow put` replaces one part of an open change, or one task or requirement block, with the text on stdin, writes it atomically and prints `ok` or the check findings of the change.
+- The hooks deny a direct read, write or search of the plan files in the rvow store of a home-mode project, and the reason names the `rvow show` or `rvow put` command for the need; a search from the root names `rvow ls` and `rvow show`.
+- `rvow check` warns with `full-suite` about a task whose verify runs the whole suite instead of one target, the mods show how many baseline checks accept will run and size the accept timeout to the plan's task timeouts, and `rvow archive` prints each gate check on stderr while it runs.
+- Compare a protected file by its syntax tree when both texts parse with the grammar of its language, so a file that only lost a blank line or a comment is not drift.
+  `rvow grammar fetch [<lang>...]` fills the grammar cache with pinned checksummed `.wasm` grammars and `rvow grammar list` shows each pinned language and whether the cache holds it.
+- Count comment text in the syntax compare, fetch missing grammars in prove and gate with a short timeout, and save each compare result under `grammars/` for reuse.
+- Name tests in Java, Kotlin, C#, Ruby and PHP: shipped queries mark JUnit, xUnit/NUnit/MSTest, RSpec/Minitest and PHPUnit tests, so a new test is free and a changed test is named in the drift item, while setup and teardown hooks and a test with an extra annotation such as `@Disabled` stay drift.
+- Name doctest, Catch2 and Unity tests: the shipped C++ query marks `TEST_CASE`, `TEST_CASE_FIXTURE`, `TEST_CASE_METHOD`, `TEST_CASE_TEMPLATE`, `TEMPLATE_TEST_CASE` and `SCENARIO` blocks by their string and `TEST_SUITE` as a container, and a new C query marks the `test_` functions and `RUN_TEST` lines of a Unity file.
+  A new case or `RUN_TEST` line is free and a changed case is named in the drift item, while a `SUBCASE` or `SECTION` change names its case, and a new case that exits, skips or hides itself with `doctest::skip()` or a Catch2 `[.]` tag stays drift.
+  A doctest macro parses with a missing `;`, and rvow accepts that one error in a C++ file instead of falling back to the raw rules.
+- Count the tests of `ctest`, doctest, GoogleTest and Unity runs from their summary lines, so a `ctest` run that finds no tests (`No tests were found!!!`) is 0 tests and no proof, and `ctest` is a counted runner for `baseline: pass`.
 - Protect nested test folders by default: `tests/`, `__tests__/`, `spec/` and `src/test/` at any depth, with `*_spec.rb` and `*Test.java` names, and the `tox.ini` setup file.
   Setting `test_globs` or `protect_infra` still replaces the defaults.
 - Add an optional spec-conformance judge: `rvow guide judge` prints the shared judge prompt, and `rvow review --record <file> --judge --harness <harness> --model <model>` records its findings against the current packet (`--record -` reads stdin).
@@ -222,3 +219,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Fix the hook reading a data file as a script when an interpreter takes the script from stdin or runs inline code.
 - Fix drift flagging a protected test file that only grew.
   Added tests and standalone added checks stay free, and a lost or changed line still counts.
+
+[Unreleased]: https://github.com/rslib/rvow/commits/trunk

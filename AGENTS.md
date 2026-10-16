@@ -31,6 +31,8 @@ npm --prefix extensions run test:claude  # the whole suite, there is no filter
 
 The claude steps skip with exit 0 when the `claude` CLI is missing, so a skip proves nothing.
 `.github/scripts/quickstart.sh` runs the README quickstart and `.github/scripts/install.sh` runs `rvow install`, each against the `rvow` on `PATH`, in a throwaway repository and home.
+`.github/scripts/build-musl.sh <target> <out-dir>` builds the static Linux binary in docker, as CI and the release do; set `RUSTFLAGS="-D warnings"` to match CI.
+A release is `cargo release <level> --execute`, run by the owner only: it dates `## [Unreleased]` in `CHANGELOG.md` and pushes the `v*` tag, and `.github/workflows/release.yml` publishes the binaries with that version block as the notes.
 `prek run` runs the same checks as the git hook, on staged files only.
 CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 
