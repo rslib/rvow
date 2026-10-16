@@ -39,6 +39,9 @@ pub(crate) fn today() -> String {
     let secs = ledger::now_ms() / 1000;
     #[cfg(unix)]
     {
+        // musl marks `time_t` deprecated only to announce its 64-bit switch;
+        // the cast is right for either width.
+        #[allow(deprecated)]
         let t = secs as libc::time_t;
         // SAFETY: localtime_r only writes the tm it is given, and an all-zero
         // tm is a valid value to overwrite.
