@@ -89,6 +89,33 @@ jobs:
         run: npm --prefix extensions ci
       - run: cargo test --all-targets --locked -- --include-ignored
 
+  musl:
+    name: Static build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build as the release does, with warnings as errors
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          bin=$(.github/scripts/build-musl.sh ${{ matrix.target }} "$RUNNER_TEMP/musl" | tail -n1)
+          echo "bin=$bin" >> "$GITHUB_ENV"
+      - name: The binary links no shared library and runs
+        run: |
+          if ldd "$bin" 2>&1 | grep -q '=>'; then
+            echo "$bin links shared libraries"
+            exit 1
+          fi
+          "$bin" --version
+
   quickstart:
     name: Quickstart (${{ matrix.os }})
     strategy:
