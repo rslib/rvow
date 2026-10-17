@@ -40,6 +40,11 @@ fn git_cmd(repo: &Path, args: &[&str]) {
 /// An accepted change of `tasks` on a fresh repository. Each task entry is
 /// `(placeholder, title, verify, extra fields)`.
 fn setup(name: &str, tasks: &[(&str, &str, &str, &str)]) -> Setup {
+    setup_with(name, tasks, |_| {})
+}
+
+/// The same, with `before` run on the repository before the accept.
+fn setup_with(name: &str, tasks: &[(&str, &str, &str, &str)], before: impl Fn(&Path)) -> Setup {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("rvow-baseline-{}-{n}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -53,6 +58,7 @@ fn setup(name: &str, tasks: &[(&str, &str, &str, &str)]) -> Setup {
     git_cmd(&repo, &["add", "a.txt"]);
     git_cmd(&repo, &["commit", "-q", "-m", "init"]);
 
+    before(&repo);
     let project = store::init(&repo, &home, store::Mode::Home).unwrap();
     let c = change::new(&project, "Out", "main", false).unwrap();
     let mut text = String::new();
@@ -379,4 +385,23 @@ fn amend_rejected_change_keeps_the_baseline() {
     amend::confirm(&s.project, &[pend[0].id.to_string()], amend::Decision::Reject, None).unwrap();
     std::fs::write(dir.join("tasks.md"), text).unwrap();
     assert!(!baseline_pending(&s, "Cargo case"));
+}
+
+/// REQ-ahdyae: an unlock recorded while a scope change is pending does not
+/// bring the old scope back as drift once both are accepted.
+#[test]
+fn an_unlock_keeps_the_confirmed_scope() {
+    let s = setup_with("unlock-scope", &[failing()], |repo| {
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/check.rs"), "// a test\n").unwrap();
+        git_cmd(repo, &["add", "tests/check.rs"]);
+        git_cmd(repo, &["commit", "-q", "-m", "test"]);
+    });
+    widen(&s, "out.txt, more.txt", "widen the scope");
+    amend::amend(&s.project, &s.home, &s.repo, None, "the test is wrong", Some("tests/check.rs")).unwrap();
+    let ids: Vec<String> = pending_of(&s).iter().map(|p| p.id.to_string()).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    amend::confirm(&s.project, &ids, amend::Decision::Accept, None).unwrap();
+    let items = drift_items(&s);
+    assert!(items.iter().all(|(_, what)| !what.contains("scope")), "the confirmed scope shows as drift again: {items:?}");
 }

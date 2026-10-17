@@ -89,10 +89,12 @@ impl Active {
 
     /// The snapshot that drift is measured against: the snapshot of the
     /// accepted amendment recorded last, else the vow. The order of the confirm
-    /// events does not count, since one confirm can accept several at once.
+    /// events does not count, since one confirm can accept several at once. An
+    /// unlock is skipped: its snapshot is a copy from when it was recorded and
+    /// would undo a plan edit accepted in the same round.
     pub fn baseline(&self) -> Option<&Map<String, Value>> {
         let mut base = self.vow().map(|e| &e.data);
-        for a in self.events.iter().filter(|e| e.kind == Kind::Amend) {
+        for a in self.events.iter().filter(|e| e.kind == Kind::Amend && !e.data.contains_key("unlock")) {
             let id = a.data.get("amendment");
             let accepted = self.events.iter().any(|e| {
                 e.kind == Kind::Confirm && e.data.get("amendment") == id && e.data.get("decision").and_then(Value::as_str) == Some("accept")
