@@ -52,6 +52,8 @@ mod audit_upgrade;
 mod audit_view;
 #[path = "suite/base_ref.rs"]
 mod base_ref;
+#[path = "suite/baseline_at_prove.rs"]
+mod baseline_at_prove;
 #[path = "suite/cli.rs"]
 mod cli;
 #[path = "suite/committed_tests.rs"]

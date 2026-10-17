@@ -31,14 +31,17 @@ pub struct Pending {
     pub reason: String,
     pub items: Vec<Value>,
     pub snapshot: String,
-    /// One record per baseline run of the amendment, in run order.
+    /// One record per baseline run of the amendment, in run order. An
+    /// amendment from before baselines moved to prove holds them.
     pub baseline: Vec<BaselineRun>,
+    /// The added or changed tasks whose baseline runs at their next prove.
+    pub baseline_pending: Vec<String>,
     /// The task ids the amendment's items name, or `None` for an amendment
     /// recorded before this key existed. `None` releases the whole change.
     pub tasks: Option<Vec<String>>,
 }
 
-/// One verify command run on the vow's base commit at amend time.
+/// One verify command run on the vow's base commit by an older amend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineRun {
     pub task: String,
@@ -117,6 +120,9 @@ impl Pending {
         for b in &self.baseline {
             lines.push(format!("  baseline: {}", b.line()));
         }
+        for task in &self.baseline_pending {
+            lines.push(format!("  baseline: {task} baseline pending, it runs at the task's next prove"));
+        }
         lines.push(format!("  reason (from the agent): {}", self.reason));
         lines
     }
@@ -165,6 +171,12 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(BaselineRun::of).collect())
                     .unwrap_or_default(),
+                baseline_pending: e
+                    .data
+                    .get("baseline_pending")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default(),
                 tasks: e
                     .data
                     .get("tasks")
@@ -184,9 +196,8 @@ pub fn digest(pending: &[Pending]) -> String {
     short_hash(lines.join("\n").as_bytes())[..8].to_string()
 }
 
-/// The tasks whose verify command the baseline must run: each added task
-/// and each task whose verify command changed. A title-only edit runs
-/// nothing.
+/// The tasks whose baseline the amendment makes pending: each added task and
+/// each task whose verify command changed. A title-only edit keeps it.
 fn baseline_candidates<'a>(before: &[Task], after: &'a [Task]) -> Vec<&'a Task> {
     after
         .iter()
@@ -225,19 +236,19 @@ fn tests_word(tests_run: Option<u64>) -> String {
 
 /// The amend baseline: one run record per candidate task, with the failed
 /// JUnit names each `{junit}` runner recorded.
-struct BaselineOut {
-    runs: Vec<Value>,
-    junit: BTreeMap<String, Vec<String>>,
+pub(crate) struct BaselineOut {
+    pub(crate) runs: Vec<Value>,
+    pub(crate) junit: BTreeMap<String, Vec<String>>,
 }
 
 /// Runs each candidate verify command on the vow's base commit, in a clean
 /// worktree set up the same way as the gate rerun (setup, rerun_links,
 /// rerun_env), and refuses a check that would pass before any work starts.
 /// A `@runner` verify runs filled from the project config, with the runner
-/// env, timeout and needs check, as `vow::prepare` runs it. Returns one
-/// record per run for the amendment event, with the failed JUnit names each
-/// `{junit}` runner recorded, by the same rule as accept.
-fn baseline(
+/// env, timeout and needs check. Returns one record per run, with the failed
+/// JUnit names each `{junit}` runner recorded. Prove calls it when the work
+/// of a baseline-pending task came first.
+pub(crate) fn baseline(
     project: &Project,
     home: &Path,
     top: &Path,
@@ -416,21 +427,19 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                     continue;
                 }
                 let before = drift::baseline_tasks(project, c)?;
-                let candidates = baseline_candidates(&before, &c.loaded.tasks);
-                let out = baseline(project, home, &top, &config, c, &candidates)?;
-                let (runs, junit_new) = (out.runs, out.junit);
+                let pending: Vec<String> = baseline_candidates(&before, &c.loaded.tasks).iter().map(|t| t.id.to_string()).collect();
                 let mut snapshot = drift::snapshot_now(project, &top, &config, c)?;
-                // The recorded JUnit names hold after the amendment: the
-                // old baseline's names carry forward, with the amended
-                // tasks' fresh names on top.
+                // The recorded JUnit names of the other tasks hold after the
+                // amendment; a pending task records new ones at its baseline.
                 let mut junit: Map<String, Value> =
                     c.baseline().and_then(|b| b.get("junit")).and_then(Value::as_object).cloned().unwrap_or_default();
-                for (task, names) in junit_new {
-                    junit.insert(task, Value::Array(names.into_iter().map(Value::String).collect()));
+                for task in &pending {
+                    junit.remove(task);
                 }
                 snapshot.insert("junit".into(), Value::Object(junit));
                 data.insert("snapshot".into(), Value::Object(snapshot));
-                data.insert("baseline".into(), Value::Array(runs));
+                data.insert("baseline".into(), Value::Array(Vec::new()));
+                data.insert("baseline_pending".into(), json!(pending));
                 items
             }
         };

@@ -184,19 +184,19 @@ fn drift_longer_timeout_is_free() {
 
 #[test]
 fn amend_baseline_passing_check_is_refused() {
+    // The amendment records the new task as baseline pending; its first
+    // prove, before any work, refuses the check that passes at once.
     let s = setup("refuse-pass", &[failing()]);
     let dir = active_dir(&s.project);
     let mut text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     text.push_str("- TSK-new2 Extra check\n  verify: echo 'test result: ok. 2 passed; 0 failed;'\n  files: out.txt\n");
     std::fs::write(dir.join("tasks.md"), text).unwrap();
-    let err = amend::amend(&s.project, &s.home, &s.repo, None, "add a task", None).unwrap_err();
-    assert_eq!(err.code, "baseline", "{err:?}");
-    assert!(err.message.contains("passes on the base commit"), "{err:?}");
-    assert!(!err.message.contains("TSK-new2"), "amend mints before the baseline: {err:?}");
+    amend::amend(&s.project, &s.home, &s.repo, None, "add a task", None).unwrap();
     let minted = task_id_with_title(&dir, "Extra check");
     assert_ne!(minted, "TSK-new2", "the new task keeps no placeholder: {minted}");
-    assert!(err.message.contains(&minted), "the message names the minted id {minted}: {err:?}");
-    assert!(pending_of(&s).is_empty(), "a refused amendment records nothing");
+    let err = proof::prove(&s.project, &s.home, &s.repo, &minted, &mut std::io::sink()).err().expect("the baseline must refuse");
+    assert_eq!(err.code, "baseline", "{err:?}");
+    assert!(err.message.contains("passes before the work") && err.message.contains(&minted), "{err:?}");
 }
 
 #[test]
@@ -216,12 +216,8 @@ fn amend_baseline_failing_check_is_recorded() {
     amend::amend(&s.project, &s.home, &s.repo, None, "name the real test", None).unwrap();
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1, "{pend:?}");
-    assert_eq!(
-        pend[0].baseline,
-        [amend::BaselineRun { task: a.clone(), exit: Some(101), tests_run: Some(2), timed_out: false }],
-        "{:?}",
-        pend[0].baseline
-    );
+    assert!(pend[0].baseline.is_empty(), "amend runs nothing: {:?}", pend[0].baseline);
+    assert_eq!(pend[0].baseline_pending, [a], "{pend:?}");
 }
 
 #[test]
@@ -231,13 +227,12 @@ fn amend_baseline_guard_must_pass() {
     let mut text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     text.push_str("- TSK-new2 Guard\n  verify: false\n  files: out.txt\n  baseline: pass\n");
     std::fs::write(dir.join("tasks.md"), text).unwrap();
-    let err = amend::amend(&s.project, &s.home, &s.repo, None, "add a guard", None).unwrap_err();
-    assert_eq!(err.code, "baseline", "{err:?}");
-    assert!(!err.message.contains("TSK-new2"), "amend mints before the baseline: {err:?}");
+    amend::amend(&s.project, &s.home, &s.repo, None, "add a guard", None).unwrap();
     let minted = task_id_with_title(&dir, "Guard");
     assert_ne!(minted, "TSK-new2", "the new task keeps no placeholder: {minted}");
+    let err = proof::prove(&s.project, &s.home, &s.repo, &minted, &mut std::io::sink()).err().expect("the baseline must refuse");
+    assert_eq!(err.code, "baseline", "{err:?}");
     assert!(err.message.contains(&minted), "the message names the minted id {minted}: {err:?}");
-    assert!(pending_of(&s).is_empty(), "a refused amendment records nothing");
 }
 
 #[test]
@@ -280,9 +275,9 @@ fn confirm_list_shows_the_baseline_result() {
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1, "{pend:?}");
     let lines = amend::listing(&pend);
-    assert!(lines.iter().any(|l| l.contains("fails before the work") && l.contains("exit 1") && l.contains("3 tests")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("baseline pending")), "{lines:?}");
     assert!(lines.iter().all(|l| !l.contains("TSK-new2")), "amend mints before the snapshot: {lines:?}");
-    let minted = &pend[0].baseline[0].task;
+    let minted = &pend[0].baseline_pending[0];
     assert_ne!(minted, "TSK-new2", "the baseline names no placeholder: {lines:?}");
     assert!(minted.starts_with("TSK-"), "the baseline names the minted id: {lines:?}");
     assert!(lines.iter().any(|l| l.contains(minted)), "the listing names the minted id {minted}: {lines:?}");
@@ -320,4 +315,68 @@ fn amend_baseline_newest_rejected_keeps_the_older_snapshot() {
     let a = real_id(&s, "TSK-new1");
     let got = drift_items(&s);
     assert_eq!(got.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>(), [format!("{a} scope made wider")], "{got:?}");
+}
+
+/// Whether `rvow status` lists the task with this title as baseline pending.
+fn baseline_pending(s: &Setup, title: &str) -> bool {
+    let rows = proof::status(&s.project, &s.home, &s.repo, false).unwrap();
+    rows[0].tasks.iter().find(|t| t.title.contains(title)).unwrap().baseline_pending
+}
+
+/// REQ-q9zb20: amend runs no verify command; an added task or a changed
+/// check is baseline pending, and a title edit keeps the recorded baseline.
+#[test]
+fn amend_marks_a_changed_check_pending() {
+    let s = setup("pending", &[failing()]);
+    let a = real_id(&s, "TSK-new1");
+    let dir = active_dir(&s.project);
+    // The red baseline of the first task, before the work.
+    assert!(proof::prove(&s.project, &s.home, &s.repo, &a, &mut std::io::sink()).unwrap().baseline_recorded);
+    assert!(!baseline_pending(&s, "Write ok"));
+
+    let mut text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    text.push_str("- TSK-new2 Marker\n  verify: touch marker && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n");
+    std::fs::write(dir.join("tasks.md"), text).unwrap();
+    amend::amend(&s.project, &s.home, &s.repo, None, "add a task", None).unwrap();
+    assert!(!s.repo.join("marker").exists(), "amend ran the new verify command");
+    let pend = pending_of(&s);
+    assert!(pend[0].baseline.is_empty(), "{:?}", pend[0].baseline);
+    let marker = task_id_with_title(&dir, "Marker");
+    assert_eq!(pend[0].baseline_pending, std::slice::from_ref(&marker), "{pend:?}");
+    assert!(amend::listing(&pend).iter().any(|l| l.contains(&marker) && l.contains("baseline pending")), "{:?}", amend::listing(&pend));
+    amend::confirm(&s.project, &[pend[0].id.to_string()], amend::Decision::Accept, None).unwrap();
+    assert!(baseline_pending(&s, "Marker"));
+
+    // A title edit keeps the recorded baseline.
+    let text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    std::fs::write(dir.join("tasks.md"), text.replace("Write ok", "Write ok clearly")).unwrap();
+    amend::amend(&s.project, &s.home, &s.repo, None, "clearer title", None).unwrap();
+    let pend = pending_of(&s);
+    assert!(pend[0].baseline_pending.is_empty(), "{pend:?}");
+    amend::confirm(&s.project, &[pend[0].id.to_string()], amend::Decision::Accept, None).unwrap();
+    assert!(!baseline_pending(&s, "Write ok clearly"));
+
+    // A changed check of that task is pending again.
+    let text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    std::fs::write(dir.join("tasks.md"), text.replace("grep -q ok out.txt", "grep -q done out.txt")).unwrap();
+    amend::amend(&s.project, &s.home, &s.repo, None, "name the real test", None).unwrap();
+    let pend = pending_of(&s);
+    amend::confirm(&s.project, &[pend[0].id.to_string()], amend::Decision::Accept, None).unwrap();
+    assert!(baseline_pending(&s, "Write ok clearly"));
+}
+
+/// A rejected amendment leaves the baseline the task had: here one known from
+/// the source at accept, which no prove run backs.
+#[test]
+fn amend_rejected_change_keeps_the_baseline() {
+    let s = setup("rejected", &[("TSK-new1", "Cargo case", "cargo test --locked brand_new_case", "")]);
+    let dir = active_dir(&s.project);
+    assert!(!baseline_pending(&s, "Cargo case"), "a known red from the source");
+    let text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    std::fs::write(dir.join("tasks.md"), text.replace("brand_new_case", "other_new_case")).unwrap();
+    amend::amend(&s.project, &s.home, &s.repo, None, "rename the test", None).unwrap();
+    let pend = pending_of(&s);
+    amend::confirm(&s.project, &[pend[0].id.to_string()], amend::Decision::Reject, None).unwrap();
+    std::fs::write(dir.join("tasks.md"), text).unwrap();
+    assert!(!baseline_pending(&s, "Cargo case"));
 }

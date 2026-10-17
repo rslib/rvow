@@ -17,7 +17,7 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 
 ## The verify command
 
-- It must fail before the work and pass after. Run it before you write the code and see it fail for the reason the task fixes. The one exception is `baseline: pass`, a guard that stays green.
+- It must fail before the work and pass after. Write the test, then run `rvow prove <task>` before the code to record the failure. The one exception is `baseline: pass`, a guard that stays green.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists. Write the test first if it does not.
 - Do not use `true`, `echo` or a build alone. `rvow check` warns with `weak-verify` about a stub command, and about `baseline: pass` with no counted test runner.
 - `verify: @<runner> key=value` runs a project runner with the keys filled; see `docs/settings.md`.

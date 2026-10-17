@@ -1446,6 +1446,7 @@ mod tests {
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         let vowed = crate::vow::commit(&p, prepared).unwrap();
         let task = vowed.minted[0].1.to_string();
+        assert!(proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
 
         assert!(edit(&p, &repo, "tests/t.sh").is_some());
         let err = amend::amend(&p, &home, &repo, None, "fix", Some("src/x.rs")).unwrap_err();

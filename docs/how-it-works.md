@@ -74,13 +74,11 @@ It can tell that a test file or a verify command changed, and that is where it a
 The plan must be able to change, because plans are wrong.
 The agent replaces the changed part with `rvow put` and runs `rvow amend` with a reason.
 That records the edit as an amendment.
-Before it records, `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up the same way as the gate rerun.
-The base commit always comes from the vow, also after a confirmed amendment, so a second amend and the mutants diff keep working.
-When the vow has no base commit, the amend error names a step for an active change such as `rvow block`.
+`rvow amend` runs no verify command.
+It marks each added task and each changed verify command as baseline pending, so the task's next prove records a new baseline, as the section on the baseline says.
+A title edit keeps the recorded baseline.
 `rvow amend` mints placeholder ids before it takes the snapshot, as accept does, so a new task keeps its real id after confirm and a later `rvow ids` mints nothing.
-A check that passes there with tests run is refused with the code `baseline`, unless the task says `baseline: pass`, and a `baseline: pass` check that fails there is refused too.
-Nothing is recorded when the baseline refuses.
-Each run's task id, exit code and test count go into the amendment, and `rvow confirm` lists weaken items first with each baseline result, so the user sees which checks failed before the work.
+`rvow confirm` lists weaken items first and names each baseline-pending task.
 The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
 In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.
@@ -126,6 +124,31 @@ Each reason is given once to a session.
 A pending amendment releases the stop.
 While a change has any pending amendment, the Stop hook holds nothing for that change, since only the user can decide it.
 Stale proofs never hold a stop: they are left to the push gate, and `rvow gate --strict` still fails on them.
+
+## The baseline: the check fails before the work
+
+A check proves something only when it fails before the work, as the FAIL_TO_PASS tests of SWE-bench do.
+`rvow accept` runs no verify command, so a slow build never stands between the accept and the first task.
+Accept prints each task's filled command and says whether its baseline is pending.
+`rvow status` shows `(baseline pending)` after each task whose baseline is not known yet, and lists those tasks under `baseline_pending` in TOON.
+rvow learns each baseline in one of three ways, cheapest first.
+
+- From the source, at accept.
+  When the whole verify is one `cargo test` or `cargo nextest run` with one test filter and only known flags, and no tracked Rust file at the base commit holds the last part of that filter, the test does not exist yet, so the check must fail.
+  A name in a comment, a chained command, an unknown flag or anything after `--` keeps the task pending.
+- From the first prove, before the work.
+  While no file in the task's scope differs from the base commit, other than test files (the `test_globs`) and files of the change's proved tasks, `rvow prove` records its run as the baseline.
+  A failure is the red the task needs: prove records it, with the failed JUnit names when the runner writes `{junit}`, and says `baseline: recorded`.
+  A pass with tests run is refused with the code `baseline` and records nothing, unless the task says `baseline: pass`, whose first pass is both its baseline and its proof.
+  The agent pays nothing extra, since it runs the test first anyway.
+- From the base commit, when the work came first.
+  Then prove runs the verify command once in a clean worktree at the vow's base commit, set up the same way as the gate rerun, and applies the same rules before the proof.
+  The base commit always comes from the vow, also after a confirmed amendment.
+  When the vow has no base commit, the error names a step for an active change such as `rvow block`.
+  This run builds from a clean tree, so it is the slow path.
+  Prove prints a hint when it takes more than 60 seconds and neither `rerun_env` nor `rerun_links` is set.
+
+A baseline belongs to the task's `verify:` text, so a title edit keeps it and a new check needs a new one.
 
 ## The proof and what stale means
 

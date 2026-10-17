@@ -231,7 +231,7 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
             let all = format!("{out}{full}");
             out = if fits(&all) { all } else { out + &compact(t, c, &living) };
             out.push_str(&format!(
-                "loop: after the work run `rvow prove {}`; to change the plan run `rvow amend` and call the `rvow_confirm` tool; to read the plan run `rvow show {}`\n",
+                "loop: run `rvow prove {}` before the work to record that the check fails, and after the work to prove it; to change the plan run `rvow amend` and call the `rvow_confirm` tool; to read the plan run `rvow show {}`\n",
                 t.id, c.dir.id
             ));
         }
@@ -313,6 +313,15 @@ mod tests {
         assert!(
             b.ends_with("rules: rvow accept and confirm belong to the user; stay inside files:; use rvow block if a task cannot pass.\n")
         );
+    }
+
+    #[test]
+    fn loop_line_names_prove_before_the_work() {
+        let (tmp, p, repo, task) = accepted();
+        let b = brief(&p, &tmp.0.join("home"), &repo).unwrap();
+        let line = b.lines().find(|l| l.starts_with("loop:")).unwrap();
+        assert!(line.contains(&format!("`rvow prove {task}`")) && line.contains("before the work"), "{line}");
+        assert!(fits(&b), "{b}");
     }
 
     #[test]

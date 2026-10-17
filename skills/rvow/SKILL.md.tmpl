@@ -11,7 +11,7 @@ The brief at session start names the next task. {{cmd:brief}} prints it again.
 
 ## Work
 
-- Do the next task, then run {{cmd:prove <task>}}; rvow runs the stored verify command, and a pass with 0 tests run is not a proof, so make the test exist and run. Never run the check yourself and claim it passed.
+- Write the test, run {{cmd:prove <task>}} once to record that the check fails, then do the work and prove again; rvow runs the stored verify command, and a pass with 0 tests run is not a proof. Never run the check yourself and claim it passed.
 - {{cmd:status}} shows each task and any drift. {{cmd:prove --stale}} re-proves stale tasks.
 - Stay inside each task's `files:` scope. The gate fails on files outside it.
 - The store is read and written only through rvow: the hooks deny a direct path into it. {{cmd:show <change>}} prints the outline; {{cmd:show <change> proposal}} prints one part in full (`proposal`, `tasks`, `design` or `spec:<name>`); pipe a part to {{cmd:put <change> proposal}}, or one task or requirement block to {{cmd:put <task or requirement id>}}, and rvow prints `ok` or the check findings.

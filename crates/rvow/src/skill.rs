@@ -126,6 +126,28 @@ mod tests {
     }
 
     #[test]
+    fn mods_show_no_baseline_count() {
+        // Accept runs no verify command, so neither mod counts baseline checks
+        // nor sizes the accept wait from the task timeouts.
+        for (name, text) in [
+            ("claude", include_str!("../../../extensions/claude/hooks/register.tsx")),
+            ("claude accept", include_str!("../../../extensions/claude/hooks/accept.tsx")),
+            ("pi", include_str!("../../../extensions/pi/rvow/index.ts")),
+            ("pi tools", include_str!("../../../extensions/pi/rvow/tools.ts")),
+            ("pi typed tools", include_str!("../../../extensions/pi/rvow/typed-tools.ts")),
+        ] {
+            assert!(!text.contains("baseline checks"), "{name} still counts baseline checks");
+            assert!(!text.contains("acceptTimeoutMs"), "{name} still sums the task timeouts");
+        }
+    }
+
+    #[test]
+    fn the_skill_says_to_prove_before_the_work() {
+        let text = render().unwrap();
+        assert!(text.contains("run `rvow prove <task>` once to record that the check fails"), "{text}");
+    }
+
+    #[test]
     fn the_skill_names_the_plan_parts_and_design() {
         let text = render().unwrap();
         assert!(text.contains("a `spec:<name>` per capability and an optional `design`"), "{text}");

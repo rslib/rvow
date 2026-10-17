@@ -27,12 +27,9 @@ pub fn accept(target: &str) -> Result<bool> {
     let c = change::resolve(&p, target)?;
     let prepared = vow::prepare(&p, &home, c, &cwd()?, &mut std::io::stderr())?;
     for b in &prepared.baseline {
-        if b.outcome.exit.is_none() {
+        if b.from == vow::BaselineFrom::Run && b.outcome.exit.is_none() {
             println!("warning: {} baseline ended by a signal or timeout", b.task);
         }
-    }
-    if let Some(hint) = &prepared.hint {
-        println!("hint: {hint}");
     }
     let tasks = prepared.loaded.tasks.len();
     let base = prepared.base_commit[..12.min(prepared.base_commit.len())].to_string();

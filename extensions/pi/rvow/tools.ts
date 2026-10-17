@@ -60,40 +60,8 @@ export function run(
   });
 }
 
-/** The accept budget of one plan, read from the hook view rvow prints. */
-export type PlanBudget = {
-  /** The number of baseline checks accept will run. */
-  tasks: number;
-  /** Each task's timeout in seconds; 0 means the configured default. */
-  timeouts: number[];
-  /** The configured default timeout in seconds. */
-  defaultSecs: number;
-};
-
-type ViewPlan = {
-  id?: unknown;
-  tasks?: unknown;
-  task_timeouts_secs?: unknown;
-  default_timeout_secs?: unknown;
-};
-
-/** Finds one plan's baseline count and timeout budget in the hook view JSON. */
-export function planBudget(view: unknown, change: string): PlanBudget | null {
-  if (!view || typeof view !== "object") return null;
-  const backlog =
-    (view as { backlog?: unknown; plans?: unknown }).backlog ?? (view as { plans?: unknown }).plans;
-  const entries = Array.isArray(backlog) ? backlog : [];
-  const plan = entries.find(
-    (p): p is ViewPlan => !!p && typeof p === "object" && (p as ViewPlan).id === change,
-  );
-  if (!plan) return null;
-  const timeouts = Array.isArray(plan.task_timeouts_secs)
-    ? plan.task_timeouts_secs.filter((n): n is number => typeof n === "number" && n >= 0)
-    : [];
-  const defaultSecs = typeof plan.default_timeout_secs === "number" ? plan.default_timeout_secs : 0;
-  const tasks = typeof plan.tasks === "number" ? plan.tasks : timeouts.length;
-  return { tasks, timeouts, defaultSecs };
-}
+/** The wait for `rvow accept`, which runs no verify command. */
+export const ACCEPT_MS = 600_000;
 
 /** The most checklist lines the accept dialog shows before it cuts the rest. */
 export const ACCEPT_DIALOG_LINES = 10;
@@ -145,20 +113,3 @@ export function createAcceptMemory() {
 }
 
 export type AcceptMemoryStore = ReturnType<typeof createAcceptMemory>;
-
-/** The notice shown before accept starts, so the user knows what will run. */
-export function baselineNotice(count: number): string {
-  return `rvow accept: ${count} baseline checks; this can take a while`;
-}
-
-/** The accept timeout: the sum of the plan's task timeouts, each task without
- *  one counting the configured default, and never below the fixed wait. */
-export function acceptTimeoutMs(budget: PlanBudget | null, floorMs = 600_000): number {
-  if (!budget || budget.tasks <= 0) return floorMs;
-  let total = 0;
-  for (let i = 0; i < budget.tasks; i++) {
-    const secs = budget.timeouts[i] ?? 0;
-    total += secs > 0 ? secs : budget.defaultSecs;
-  }
-  return Math.max(floorMs, total * 1000);
-}

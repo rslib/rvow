@@ -359,7 +359,7 @@ fn programs_recorded_in_the_proof() {
 
 #[test]
 fn programs_a_tool_shim_on_path_is_caught() {
-    let fx = Fx::build("shim", "cargo && echo 'test result: ok. 2 passed; 0 failed;'", "ok", "out.txt, src/**");
+    let fx = Fx::build("shim", "grep -q ok out.txt && cargo && echo 'test result: ok. 2 passed; 0 failed;'", "ok", "out.txt, src/**");
     let shim = fx.root.join("shim");
     fx.shim(&shim, "cargo", "#!/bin/sh\nexit 0\n");
     let out = fx.rvow_path(&["prove", &fx.task], &shim);

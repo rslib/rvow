@@ -46,15 +46,12 @@ import { judgeArgs, judgeRun } from "./judge.ts";
 import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
 import {
+  ACCEPT_MS,
   type AcceptMemoryStore,
-  acceptTimeoutMs,
   BIN,
-  baselineNotice,
   createAcceptMemory,
   FAST_MS,
   GATE_MS,
-  type PlanBudget,
-  planBudget,
   run,
   SLOW_MS,
   shortReview,
@@ -1301,20 +1298,7 @@ export default function (pi: ExtensionAPI) {
     const repeat = acceptMemory.remembered(id, r.out) !== null;
     if (!(await ctx.ui.confirm(`rvow ${id}`, `${shortReview(r.out, id).trim()}\n\nAccept ${id}?`)))
       return;
-    // The notice names the baseline count from the view, and the wait covers the
-    // plan's own budget: the sum of its task timeouts.
-    await refresh(ctx);
-    let budget: PlanBudget | null = null;
-    try {
-      budget = planBudget(S.view, id);
-    } catch {}
-    ctx.ui.notify(
-      budget
-        ? baselineNotice(budget.tasks)
-        : "rvow accept: baseline checks will run; this can take a while",
-      "info",
-    );
-    return decide(ctx, ["accept", id], budget ? acceptTimeoutMs(budget) : SLOW_MS, !repeat);
+    return decide(ctx, ["accept", id], ACCEPT_MS, !repeat);
   }
 
   userCommand(

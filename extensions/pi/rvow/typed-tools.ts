@@ -1,10 +1,9 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
-  acceptTimeoutMs,
+  ACCEPT_MS,
   createAcceptMemory,
   declinedAcceptReason,
   GATE_MS,
-  planBudget,
   repeatAcceptResult,
   run,
   SLOW_MS,
@@ -366,14 +365,9 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         acceptMemory.remember(change, reviewText, reason, true);
         return declined(repeatAcceptResult(reason, change));
       }
-      // The wait covers every baseline check of the plan, not a fixed ten minutes.
-      // A view that cannot be read keeps the fixed wait.
-      const seen = await queue(() =>
-        result(["hook", "view"], ctx.cwd, signal, SLOW_MS).catch(() => null),
+      const done = await queue(() =>
+        result(["accept", change, "--yes"], ctx.cwd, signal, ACCEPT_MS),
       );
-      const view = seen?.details.kind === "view" ? seen.details.data : null;
-      const wait = acceptTimeoutMs(planBudget(view, change));
-      const done = await queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, wait));
       if (done.details.kind === "decision") {
         acceptMemory.forget(change);
         return done;

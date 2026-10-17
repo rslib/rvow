@@ -78,7 +78,7 @@ The same holds for `rerun_proven`. By default a push trusts a task whose proof i
 
 ## A fast baseline for a Rust project
 
-The reruns of `rvow amend` and `rvow gate --rerun` build in a clean temporary worktree.
+The base commit baseline of `rvow prove` and the reruns of `rvow gate --rerun` build in a clean temporary worktree.
 A Rust project then compiles from nothing each time.
 Point the build at a shared directory and link `target` in, so the reruns reuse the build:
 
@@ -88,9 +88,9 @@ rerun_links = ["target"]
 ```
 
 Use a directory of your own for `CARGO_TARGET_DIR`.
-The `rvow accept` baseline runs in your own checkout, not in a temporary worktree, so these keys do not speed it up.
-A new git worktree starts with an empty `target/`; export `CARGO_TARGET_DIR` in your shell to share one build folder between worktrees, and the accept baseline uses it.
-`rvow accept` prints one hint that says this when a baseline run takes more than 60 seconds and neither key is set.
+`rvow accept` runs no verify command, and the first prove before the work runs in your own checkout, so these keys do not touch either.
+A new git worktree starts with an empty `target/`; export `CARGO_TARGET_DIR` in your shell to share one build folder between worktrees.
+`rvow prove` prints one hint that says this when a base commit baseline takes more than 60 seconds and neither key is set.
 `rerun_links` turns the rerun cache off, as the section on linked build output says.
 
 ## Scoping setup and checks to files
@@ -310,11 +310,12 @@ Each value lands inside a shell command, so it may hold only `A-Z a-z 0-9 _ . : 
 A `default` value follows the same char rule and the same `params` list.
 A task's own `timeout:` wins over the runner's `timeout`.
 
-When `run` holds `{junit}`, accept reads the JUnit report after the baseline run, records the failed test names in the vow and refuses when the report names no failed test.
+When `run` holds `{junit}`, the baseline run reads the JUnit report, records the failed test names and refuses when the report names no failed test.
 A case is failed when it holds a `<failure>` or an `<error>` child, and its name is the `name` attribute, or `classname.name` when both are there.
 At prove and at the gate rerun the proof passes only when the command exits 0, the report exists, each recorded name is there and passed, and no test case failed.
-An amendment that adds or changes such a task records its failed names at the amend baseline, and the recorded names hold after the amendment.
-A `baseline: pass` task on such a runner records no names: its report must hold at least one passed case and no failed case, at accept and at each prove.
+An amendment that adds or changes such a task makes it baseline pending, and its next baseline run records the new names.
+The names of the other tasks hold after the amendment.
+A `baseline: pass` task on such a runner records no names: its report must hold at least one passed case and no failed case, at its baseline and at each prove.
 
 Each path of `needs` is filled with the same params and must exist before anything runs: accept, prove and the gate rerun run no command and name the missing path, so configure that build dir first.
 
