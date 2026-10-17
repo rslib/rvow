@@ -343,12 +343,15 @@ fn section_words(text: &str) -> Vec<(String, usize)> {
 /// The parts of a change that `rvow show <change> <part>` prints in full.
 pub fn parts_of(loaded: &Loaded) -> Vec<String> {
     let mut out = vec!["proposal".to_string(), "tasks".to_string()];
+    if loaded.texts.iter().any(|(k, _)| k == change::DESIGN) {
+        out.push("design".to_string());
+    }
     out.extend(loaded.deltas.iter().map(|(cap, _)| format!("spec:{cap}")));
     out
 }
 
-/// The full text of one part of a change, where a part is `proposal`, `tasks`
-/// or `spec:<name>`.
+/// The full text of one part of a change, where a part is `proposal`, `tasks`,
+/// `design` or `spec:<name>`.
 pub fn change_part(project: &Project, change: &ChangeDir, part: &str) -> Result<String> {
     let (living, _) = change::load_living(project)?;
     let loaded = change::load(&change.path, &living)?;
@@ -362,10 +365,20 @@ pub fn change_part(project: &Project, change: &ChangeDir, part: &str) -> Result<
     let want = match part {
         "proposal" => Some(change::PROPOSAL.to_string()),
         "tasks" => Some(change::TASKS.to_string()),
+        "design" => Some(change::DESIGN.to_string()),
         other => other.strip_prefix("spec:").map(|cap| format!("{}/{}.md", change::DELTAS, cap)),
     };
     let Some(want) = want else { return Err(wrong(&loaded)) };
-    let Some((_, text)) = loaded.texts.iter().find(|(k, _)| k == &want) else { return Err(wrong(&loaded)) };
+    let Some((_, text)) = loaded.texts.iter().find(|(k, _)| k == &want) else {
+        if part == "design" {
+            return Err(Error::new(
+                "part",
+                format!("{} has no {} yet", change.id, change::DESIGN),
+                format!("write one first: rvow put {} design", change.id),
+            ));
+        }
+        return Err(wrong(&loaded));
+    };
     Ok(text.clone())
 }
 

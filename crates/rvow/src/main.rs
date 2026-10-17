@@ -100,7 +100,7 @@ enum Cmd {
     Show {
         /// A REQ, TSK or CHG id or a unique prefix of it.
         id: String,
-        /// One part of a change: `proposal`, `tasks` or `spec:<name>`.
+        /// One part of a change: `proposal`, `tasks`, `design` or `spec:<name>`.
         part: Option<String>,
         /// Print long text in full in TOON.
         #[arg(long)]
@@ -110,7 +110,7 @@ enum Cmd {
     Put {
         /// A CHG id with `part`, or a TSK or REQ id whose block the stdin replaces.
         target: String,
-        /// One part of a change: `proposal`, `tasks` or `spec:<name>`.
+        /// One part of a change: `proposal`, `tasks`, `design` or `spec:<name>`.
         part: Option<String>,
     },
     /// Read the living specs.

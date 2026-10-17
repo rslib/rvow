@@ -42,3 +42,7 @@ At most 100 lines. A design that grows past that mixes in a description of the c
 ## Constraints
 - The ledger reads a line whole, so keep the tail under 4 KB.
 <!-- /example -->
+
+## Write it with rvow
+
+Pipe the file to `rvow put <change> design`; the hook denies a direct write.

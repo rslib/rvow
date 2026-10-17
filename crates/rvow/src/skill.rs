@@ -126,6 +126,15 @@ mod tests {
     }
 
     #[test]
+    fn the_skill_names_the_plan_parts_and_design() {
+        let text = render().unwrap();
+        assert!(text.contains("a `spec:<name>` per capability and an optional `design`"), "{text}");
+        assert!(text.contains("rvow guide design"), "{text}");
+        assert!(text.contains("rvow new"), "{text}");
+        assert!(text.contains("rvow new --spec"), "{text}");
+    }
+
+    #[test]
     fn the_asking_sentence_is_shared_by_skill_and_tools() {
         let sentence = "Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing";
         let skill = render().unwrap();
