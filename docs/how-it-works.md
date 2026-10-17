@@ -142,13 +142,20 @@ rvow learns each baseline in one of three ways, cheapest first.
   A pass with tests run is refused with the code `baseline` and records nothing, unless the task says `baseline: pass`, whose first pass is both its baseline and its proof.
   The agent pays nothing extra, since it runs the test first anyway.
 - From the base commit, when the work came first.
-  Then prove runs the verify command once in a clean worktree at the vow's base commit, set up the same way as the gate rerun, and applies the same rules before the proof.
+  Then prove runs the verify command once in the project's warm worktree at the vow's base commit, set up the same way as the gate rerun, and applies the same rules before the proof.
+  The warm worktree keeps its git-ignored build output between runs, so only the changed files build again, and a busy one falls back to a clean temporary worktree.
   The base commit always comes from the vow, also after a confirmed amendment.
   When the vow has no base commit, the error names a step for an active change such as `rvow block`.
-  This run builds from a clean tree, so it is the slow path.
+  It is still the slow path: only the changed files build again, but a first run in a project builds everything.
   Prove prints a hint when it takes more than 60 seconds and neither `rerun_env` nor `rerun_links` is set.
 
 A baseline belongs to the task's `verify:` text, so a title edit keeps it and a new check needs a new one.
+
+The cheap path needs the first prove before the work, so rvow says so at the right moment.
+The first time a session edits a source file of a baseline-pending task, rvow allows the edit and gives the agent one line that names `rvow prove <task>`.
+A source file is a file in the task's `files:` that no `test_globs` entry matches, and a Bash command that writes one counts as an edit.
+Each task is named once per session, the line never denies, and a test file, a file outside the task or a task with a recorded baseline gets no line.
+The line rides the post-tool-use answer of the same call: `additionalContext` for the Claude Code settings hooks, the call's `context` in the Claude mod and an added text block of the tool result in pi.
 
 ## The proof and what stale means
 

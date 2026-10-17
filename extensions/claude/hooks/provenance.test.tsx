@@ -4,14 +4,14 @@ import { procResult, test } from './testkit'
 
 type Call = { event: string; input: Record<string, unknown> }
 
-function fakeRvow(on: On) {
+function fakeRvow(on: On, post = '') {
   const calls: Call[] = []
   on('session.cwd', async () => ({ value: '/tmp' }))
   on('ui.status', async () => ({ value: undefined }))
   on('process.run', async (_$, e) => {
     const event = e.argv[3] ?? ''
     calls.push({ event, input: e.init?.stdin ? JSON.parse(e.init.stdin) : {} })
-    return { value: procResult(0, '') }
+    return { value: procResult(0, event === 'post-tool-use' ? post : '') }
   })
   return calls
 }
@@ -59,4 +59,38 @@ test('a subagent call carries the agent id to post-tool-use too', async ($, on) 
   } as never)
   const post = calls.find((c) => c.event === 'post-tool-use')
   expect(post?.input).toMatchObject({ agent_id: 'a1', tool_use_id: 't3use' })
+})
+
+const NOTICE = 'rvow: TSK-x is baseline pending. Run `rvow prove TSK-x` now.'
+const allow = JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: 'PostToolUse',
+    additionalContext: NOTICE,
+  },
+})
+
+test('the notice of an allowed call reaches the model after the tool result', async ($, on) => {
+  fakeRvow(on, allow)
+  on('tool.call', { tool: 'Edit' }, async () => ({ result: 'ok', context: ['earlier'] }))
+  const out = await $.tool.call({
+    tool: 'Edit',
+    file_path: '/tmp/a.txt',
+    old_string: 'a',
+    new_string: 'b',
+    tool_use_id: 't4use',
+  } as never)
+  expect(out).toMatchObject({ result: 'ok', context: ['earlier', NOTICE] })
+})
+
+test('a call without a notice carries no context', async ($, on) => {
+  fakeRvow(on, '')
+  on('tool.call', { tool: 'Edit' }, async () => ({ result: 'ok' }))
+  const out = await $.tool.call({
+    tool: 'Edit',
+    file_path: '/tmp/a.txt',
+    old_string: 'a',
+    new_string: 'b',
+    tool_use_id: 't5use',
+  } as never)
+  expect(out).not.toHaveProperty('context')
 })

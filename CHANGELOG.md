@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Reuse one warm worktree per project for the base commit baseline, so its build output stays warm and only changed files build again.
+  A busy or broken one falls back to a temporary worktree.
 - Make each hook find its project from a local index in the rvow home instead of walking the home, which cuts about 70 ms from every hook call.
   rvow trusts an entry only for a project folder inside the home whose root commit the repository still holds, and walks again for any other entry.
 - Run `rvow accept`, `rvow amend`, `rvow archive` and `rvow check` in the worktree where the branch of the change is checked out, so a plan made in a second worktree works from the main checkout.
@@ -81,6 +83,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Give the agent one notice that names `rvow prove <task>` at the first source edit of a baseline pending task in a session, with the edit allowed.
+  A file in the `test_globs` gets no notice, and a Bash command that writes a source file counts as an edit.
 - Record the duration of each hook call in `hook-stats.jsonl` and print the median and the 95th percentile of each hook in `rvow stats`.
 - A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
   A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.

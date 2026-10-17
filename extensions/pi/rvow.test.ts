@@ -29,6 +29,7 @@ case "$1 $2 $3" in
   "hook claude view") [ -f "$RVOW_FAKE/fail-view" ] && exit 1; [ -f "$RVOW_FAKE/slow-view" ] && sleep 0.5; cat "$RVOW_FAKE/view.json" 2>/dev/null; true ;;
   "hook claude status") cat "$RVOW_FAKE/status.json" 2>/dev/null ;;
   "hook claude pre-tool-use") cat > "$RVOW_FAKE/pre.in"; cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
+  "hook claude post-tool-use") cat "$RVOW_FAKE/post.json" 2>/dev/null ;;
   "hook claude stop") cat > "$RVOW_FAKE/stop.in"; cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
   "hook claude lease-bind") cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" 2>/dev/null ;;
   "hook claude lease-end") cat > "$RVOW_FAKE/end.in" ;;
@@ -124,6 +125,7 @@ type Files = Partial<
     | "view.json"
     | "status.json"
     | "pre.json"
+    | "post.json"
     | "stop.json"
     | "review.txt"
     | "slow"
@@ -1037,6 +1039,22 @@ test("tool_call blocks when the hook denies and passes otherwise", async () => {
   const ok = setup({ "pre.json": json({ hookSpecificOutput: { permissionDecision: "allow" } }) });
   assert.equal(await ok.fire("tool_call", event), undefined);
   assert.equal(await setup({}).fire("tool_call", event), undefined);
+});
+
+test("the notice from post-tool-use is added to that call's result", async () => {
+  const notice = "rvow: TSK-x is baseline pending. Run `rvow prove TSK-x` now.";
+  const t = setup({
+    "post.json": json({
+      hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: notice },
+    }),
+  });
+  const call = { toolName: "edit", toolCallId: "c1", input: { path: "src/a.rs" } };
+  const content = [{ type: "text", text: "edited" }];
+  assert.deepEqual(await t.fire("tool_result", { ...call, content }), {
+    content: [...content, { type: "text", text: notice }],
+  });
+  const plain = setup({});
+  assert.equal(await plain.fire("tool_result", { ...call, content }), undefined);
 });
 
 test("tool_call asks the user when the hook asks, and a no keeps the call blocked", async () => {

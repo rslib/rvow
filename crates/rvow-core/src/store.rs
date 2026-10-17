@@ -15,6 +15,8 @@ pub const IDS_FILE: &str = "ids.jsonl";
 pub const LOCK_FILE: &str = ".lock";
 /// The local index in the rvow home from a repository to its project.
 pub const INDEX_FILE: &str = "project-index.json";
+/// The folder in the rvow home that holds one warm worktree per project.
+pub const WORKTREES_DIR: &str = "worktrees";
 pub const REPO_DIR: &str = "rvow";
 const DIRS: [&str; 7] = ["specs", "backlog", "active", "archive/done", "archive/dropped", "archive/superseded", "objects"];
 const MAX_DEPTH: usize = 6;
@@ -161,7 +163,7 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         Mode::Home => {
             let key = format!("{}/{}", crate::seal::KEY_FOLDER, crate::seal::KEY_FILE);
             let mut lines = local_files().to_vec();
-            lines.extend([format!("{}/", crate::install::MARKETPLACE_DIR), key, INDEX_FILE.to_string()]);
+            lines.extend([format!("{}/", crate::install::MARKETPLACE_DIR), key, INDEX_FILE.to_string(), format!("{WORKTREES_DIR}/")]);
             add_lines(&home.join(".gitignore"), &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
     }
@@ -375,6 +377,18 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
     }
 }
 
+/// The warm worktree of `project`: one folder per project under the rvow
+/// home, kept between runs so build output stays. It is local to one machine,
+/// so an older home gets its ignore line here.
+pub fn warm_tree(home: &Path, project: &Project) -> PathBuf {
+    let ignore = home.join(".gitignore");
+    if ignore.is_file() {
+        let _ = add_lines(&ignore, &[&format!("{WORKTREES_DIR}/")]);
+    }
+    let key = crate::vow::sha256_hex(project.root.to_string_lossy().as_bytes());
+    home.join(WORKTREES_DIR).join(&key[..16])
+}
+
 /// What the index remembers about one repository: its project folder and the
 /// root commits that project named when the entry was written.
 #[derive(Debug, Serialize, Deserialize)]
@@ -520,7 +534,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\nproject-index.json\n"
+                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\nproject-index.json\nworktrees/\n"
             )
         );
 

@@ -119,7 +119,10 @@ impl Fx {
     /// A post-tool-use call of `session` for call `id`.
     fn post(&self, session: &str, id: &str) {
         let payload = json!({"cwd": self.root.join("repo"), "session_id": session, "tool_use_id": id});
-        assert!(self.hook("post-tool-use", &payload).is_none());
+        // The only answer is the first-edit notice of a baseline-pending task.
+        let out = self.hook("post-tool-use", &payload);
+        let notice = out.as_ref().and_then(|o| o["hookSpecificOutput"]["additionalContext"].as_str());
+        assert!(out.is_none() || notice.is_some_and(|n| n.contains("baseline pending")), "{out:?}");
     }
 
     /// A Write call of `session` that sets `rel` to `content`, with call `id`.

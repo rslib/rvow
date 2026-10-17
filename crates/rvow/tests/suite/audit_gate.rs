@@ -120,7 +120,10 @@ fn audit_gate_trusts_an_archived_change_and_leaves_no_worktree() {
         assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
     }
     let trees = git_command(&fixture.repo).args(["worktree", "list", "--porcelain"]).output().unwrap();
-    assert_eq!(String::from_utf8(trees.stdout).unwrap().matches("worktree ").count(), 1);
+    // The fixture's prove leaves the project's warm baseline tree; the gate leaves no tree.
+    let left = String::from_utf8(trees.stdout).unwrap();
+    let temporary = left.lines().filter_map(|l| l.strip_prefix("worktree ")).skip(1).filter(|t| !t.contains("/worktrees/")).count();
+    assert_eq!(temporary, 0, "{left}");
 }
 
 #[test]

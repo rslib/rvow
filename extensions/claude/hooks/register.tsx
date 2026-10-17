@@ -865,16 +865,22 @@ export const register: Register = (on) => {
     }
     // After the call runs or fails, report its outcome so rvow records the
     // blobs the call changed. A denied call never ran, so it is not reported.
+    let result: Awaited<ReturnType<typeof next>>
+    let post: HookOutput | undefined
     try {
-      return await next(e)
+      result = await next(e)
     } finally {
-      await hook($, 'post-tool-use', {
+      post = await hook($, 'post-tool-use', {
         session_id: sessionId,
         agent_id: typeof agentId === 'string' ? agentId : undefined,
         tool_use_id,
       })
       if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
     }
+    // A notice that rvow kept for this call goes to the model after the tool's result.
+    const notice = post?.hookSpecificOutput?.additionalContext
+    if (typeof notice !== 'string' || !notice || result.deny !== undefined) return result
+    return { ...result, context: [...(result.context ?? []), notice] }
   })
 
   // A subagent whose prompt starts with the `lease:` line of `rvow delegate` is bound to that lease, so

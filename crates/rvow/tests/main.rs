@@ -66,6 +66,8 @@ mod diff_mutants;
 mod done_scope;
 #[path = "suite/drift_fixes.rs"]
 mod drift_fixes;
+#[path = "suite/first_edit_notice.rs"]
+mod first_edit_notice;
 #[path = "suite/fix_enforcement.rs"]
 mod fix_enforcement;
 #[path = "suite/fix_export.rs"]
@@ -130,6 +132,8 @@ mod syntax_units;
 mod tamper_holes;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
+#[path = "suite/warm_worktree.rs"]
+mod warm_worktree;
 #[path = "suite/worktrees.rs"]
 mod worktrees;
 #[path = "suite/yolo.rs"]

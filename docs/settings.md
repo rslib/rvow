@@ -5,7 +5,7 @@ The global file lives inside the rvow home (the directory named in `RVOW_HOME`).
 The project file is `config.toml` in the rvow tree root of the project.
 That root is the project folder of the home store in home mode, and the `rvow/` folder of the repository in repository mode.
 `rvow init` adds the files of one machine in that root to `.gitignore`: `.lock`, `hook-state/`, `provenance/`, `hook-stats.jsonl`, `leases.jsonl`, `yolo.json` and `rerun-cache.jsonl`.
-In home mode it also ignores `claude-plugin/`, the seal key and `project-index.json` of the rvow home.
+In home mode it also ignores `claude-plugin/`, the seal key, `project-index.json` and `worktrees/` of the rvow home.
 `project-index.json` is a local cache from a repository to its project folder, so rvow walks the rvow home only for a repository it has no valid entry for.
 rvow trusts an entry only for a project folder inside the rvow home whose root commit the repository still holds, and the hooks deny agent writes to the file.
 Delete it at any time.
@@ -79,11 +79,16 @@ A verify command can write through a link into the real directory, so list only 
 `rerun_links` is not part of the vow, so changing it is not drift.
 The same holds for `rerun_proven`. By default a push trusts a task whose proof is current and whose files are all committed, because it was proved on that very content. A task of an archived change is never rerun, since archiving needs every task proved. Set `rerun_proven = true` when you want a clean-checkout run of proven tasks too.
 
-## A fast baseline for a Rust project
+## A fast baseline
 
-The base commit baseline of `rvow prove` and the reruns of `rvow gate --rerun` build in a clean temporary worktree.
-A Rust project then compiles from nothing each time.
-Point the build at a shared directory and link `target` in, so the reruns reuse the build:
+The base commit baseline of `rvow prove` builds in one warm worktree per project, at `worktrees/<project key>/` in the rvow home.
+rvow moves it to the base commit and keeps its git-ignored build output, such as a CMake `build/` folder, so a second run builds only what changed.
+When another run holds it, or a git step on it fails, the run uses a clean temporary worktree instead.
+A fixed path under the home folder also lets ccache, with `base_dir` set to the home folder, reuse compile results from other checkouts.
+rvow never removes a warm worktree; delete the folder at any time, and the next run makes it again.
+
+`rvow gate --rerun` keeps its promise of a clean checkout of HEAD: it builds in a new temporary worktree each time, never in the warm one.
+For a Rust project, point that build at a shared directory and link `target` in, so the reruns reuse the build of your own checkout:
 
 ```toml
 rerun_env = { CARGO_TARGET_DIR = "/Users/me/.cache/rvow-target" }

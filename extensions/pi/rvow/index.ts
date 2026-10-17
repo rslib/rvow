@@ -1075,7 +1075,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     // After the call returns, report its outcome so rvow records the blobs the
     // call changed, with the same call id that pre-tool-use carried.
-    await hook(
+    const out = await hook(
       "post-tool-use",
       ctx.cwd,
       {
@@ -1091,6 +1091,10 @@ export default function (pi: ExtensionAPI) {
     const cmd = (event.input as Record<string, unknown>).command;
     if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd))
       later(() => refresh(ctx));
+    // A notice that rvow kept for this call goes to the model with the call's result.
+    const notice = out?.hookSpecificOutput?.additionalContext;
+    if (typeof notice !== "string" || !notice) return;
+    return { content: [...event.content, { type: "text" as const, text: notice }] };
   });
 
   pi.on("session_compact", () => {

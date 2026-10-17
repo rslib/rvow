@@ -275,7 +275,7 @@ pub(crate) fn baseline(
             setup.push(step.run().to_string());
         }
     }
-    let tree = rerun::Worktree::add_at(top, base_commit, &links)?;
+    let tree = rerun::Worktree::warm(top, base_commit, &links, &crate::store::warm_tree(home, project))?;
     let mut sink = std::io::sink();
     for cmd in &setup {
         if !runner::run(cmd, &tree.path, &env, config.timeout(), &mut sink)?.passed() {

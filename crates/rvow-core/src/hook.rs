@@ -22,6 +22,7 @@ use crate::stats::{self, Hook, Outcome, STATS_FILE, StopReason};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 use crate::yolo::{self, Tier, YOLO_FILE};
 
+mod notice_state;
 mod rule;
 mod session_files;
 mod shell;
@@ -640,6 +641,12 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
             streak::reset(project, s);
             record_changes(project, s, input);
             record_before_snapshot(project, s, input);
+            // The notice rides the post-tool-use answer of the same call, so an allowed call stays silent here.
+            if let Some(id) = input.get("tool_use_id").and_then(Value::as_str)
+                && let Some((task, text)) = first_edit_notice(project, s, input)
+            {
+                notice_state::stash(project, s, id, &task, &text);
+            }
         }
         return Ok(None);
     };
@@ -682,11 +689,23 @@ fn repo_rel(file: &str, cwd: &Path, top: &Path) -> Option<String> {
 /// The main session stop reads only the main record.
 fn record_changes(project: &Project, session: &str, input: &Value) {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else { return };
+    let rels = changed_rels(input, &cwd, &top);
+    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
+        session_files::record_agent(project, session, agent, &rels);
+    } else {
+        session_files::record(project, session, &rels);
+    }
+}
+
+/// The repo-relative files a tool call may change: the file arguments of a writing tool, and the
+/// files that a Bash command writes. Empty for a call that only reads.
+fn changed_rels(input: &Value, cwd: &Path, top: &Path) -> Vec<String> {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
-    let Ok(top) = git::toplevel(&cwd) else { return };
-    let rels: Vec<String> = if tool == "Bash" {
-        let Some(c) = args.get("command").and_then(Value::as_str).filter(|c| !reads_only(c)) else { return };
+    let cwd = cwd.to_path_buf();
+    if tool == "Bash" {
+        let Some(c) = args.get("command").and_then(Value::as_str).filter(|c| !reads_only(c)) else { return Vec::new() };
         let changes = bash_changes(c, &cwd);
         let bases: Vec<PathBuf> = std::iter::once(cwd.clone()).chain(changes.dirs.iter().map(|d| cwd.join(d))).collect();
         let mut seen = std::collections::BTreeSet::new();
@@ -708,7 +727,7 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
             if at.exists() && std::fs::metadata(&at).is_ok_and(|m| m.is_dir()) {
                 continue;
             }
-            if let Some(rel) = repo_rel(f, base, &top) {
+            if let Some(rel) = repo_rel(f, base, top) {
                 push(rel);
             }
         }
@@ -721,7 +740,7 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
             if !keep {
                 continue;
             }
-            if let Some(rel) = repo_rel(f, base, &top) {
+            if let Some(rel) = repo_rel(f, base, top) {
                 push(rel);
             }
         }
@@ -730,15 +749,51 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
         }
         rels
     } else if writes_files(tool) {
-        file_args(&args).iter().filter_map(|f| repo_rel(f, &cwd, &top)).collect()
+        file_args(&args).iter().filter_map(|f| repo_rel(f, &cwd, top)).collect()
     } else {
-        return;
-    };
-    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
-        session_files::record_agent(project, session, agent, &rels);
-    } else {
-        session_files::record(project, session, &rels);
+        Vec::new()
     }
+}
+
+/// The task id and the one-line notice for the first source edit of a baseline-pending task in
+/// `session`, or `None`. A source file is a file in the `files:` scope of the task that no `test_globs` entry
+/// matches. Each task is named once per session. Any failure gives no notice.
+fn first_edit_notice(project: &Project, session: &str, input: &Value) -> Option<(String, String)> {
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let top = git::toplevel(&cwd).ok()?;
+    let rels: Vec<String> = changed_rels(input, &cwd, &top).into_iter().filter(|r| !r.starts_with(':')).collect();
+    if rels.is_empty() {
+        return None;
+    }
+    let home = crate::store::home_dir().ok()?;
+    let tests = fingerprint::globset(&config::load(project, &home).ok()?.test_globs).ok()?;
+    let sources: Vec<&String> = rels.iter().filter(|r| !tests.is_match(r.as_str())).collect();
+    if sources.is_empty() {
+        return None;
+    }
+    let (living, _) = change::load_living(project).ok()?;
+    let branch = git::branch(&top).ok()?.unwrap_or_default();
+    let active = proof::active(project, &living).ok()?;
+    for change in proof::on_branch(&active, &branch) {
+        for task in &change.loaded.tasks {
+            let id = task.id.to_string();
+            let Some(verify) = task.verify.as_deref() else { continue };
+            if change.baseline_known(&id, verify) {
+                continue;
+            }
+            let Ok(scope) = fingerprint::globset(&task.files) else { continue };
+            if !sources.iter().any(|r| scope.is_match(r.as_str())) {
+                continue;
+            }
+            if !notice_state::told(project, session, &id) {
+                let text = format!(
+                    "rvow: {id} is baseline pending. Run `rvow prove {id}` now, before more source edits. It records that the check fails, which is cheap now and a base commit build later."
+                );
+                return Some((id, text));
+            }
+        }
+    }
+    None
 }
 
 /// Whether a tool call may write the work tree, so a before snapshot is taken
@@ -773,7 +828,8 @@ fn record_before_snapshot(project: &Project, session: &str, input: &Value) {
 /// Claude Code `PostToolUse`: snapshots the tree after a checked call, diffs it
 /// against the before snapshot of the same call, and records each changed path
 /// with its new blob id for the session (or its subagent). A call with no
-/// before record (a read) takes no snapshot and records nothing.
+/// before record (a read) takes no snapshot and records nothing. The answer carries the first
+/// edit notice that the pre-tool-use of the same call kept, as additional context.
 pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let Some(session) = input.get("session_id").and_then(Value::as_str) else {
         return Ok(None);
@@ -787,7 +843,14 @@ pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<V
     };
     let agent = input.get("agent_id").and_then(Value::as_str);
     crate::provenance::after_call(project, &top, session, agent, id);
-    Ok(None)
+    // The same handler answers PostToolUseFailure, and the event name must match the call's.
+    let event = input.get("hook_event_name").and_then(Value::as_str).unwrap_or("PostToolUse");
+    Ok(notice_state::take(project, session, id).map(|text| {
+        json!({"hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": text,
+        }})
+    }))
 }
 
 /// Whether drift item text names `path` as a whole word, so a short name
