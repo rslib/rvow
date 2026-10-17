@@ -320,6 +320,12 @@ A stop block also holds a `reason`, `drift` or `no-proof`.
 It never holds a command or a path.
 `rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops and a `stop_reasons` list that counts the blocks of each reason.
 A block line written before reasons existed counts as `unknown`.
+Each hook call that has a project also adds one duration line with the time, the hook, the session id and `duration_ms`, and nothing else.
+`rvow stats` lists the median and the 95th percentile duration of each hook in a `hooks` list.
+The percentile is the nearest rank of the sorted durations, so 20 calls of 10 ms and one of 200 ms give a median and a 95th percentile of 10 ms.
+Duration lines are not events.
+When the file is larger than 1 MiB, the next duration append moves it whole to `hook-state/hook-stats.old.jsonl`, replacing the copy before, and `rvow stats` reads both files.
+A move never rewrites a line, so a line that another hook writes at the same time still counts.
 Use it to find the rule that fires most before you change any rule.
 Agents cannot read or write the stats file.
 

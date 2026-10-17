@@ -459,7 +459,13 @@ fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) 
         if name == CACHE_FILE {
             return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
         }
-        if name == STATS_FILE {
+        if name == crate::store::INDEX_FILE {
+            return denial(
+                Rule::CacheFile,
+                format!("{} is written and read only by rvow; delete it to make rvow look the project up again", crate::store::INDEX_FILE),
+            );
+        }
+        if name == STATS_FILE || Some(name) == Path::new(stats::ROTATED_FILE).file_name().and_then(|n| n.to_str()) {
             return denial(
                 Rule::StatsFile,
                 format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
@@ -484,6 +490,12 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
     let is = |name: &str| target == key(&real_path(&project.root.join(name), cwd));
     if is(CACHE_FILE) {
         return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
+    }
+    if Path::new(file).file_name().and_then(|n| n.to_str()) == Some(crate::store::INDEX_FILE) {
+        return denial(
+            Rule::CacheFile,
+            format!("{} is written and read only by rvow; delete it to make rvow look the project up again", crate::store::INDEX_FILE),
+        );
     }
     if is(STATS_FILE) {
         return denial(

@@ -5,6 +5,7 @@ use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::hook as hooks;
 use rvow_core::install;
+use rvow_core::stats;
 use rvow_core::store::{self, Mode, Rebind};
 use rvow_core::view;
 
@@ -62,11 +63,17 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     }
     let input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
     let run = || -> Result<Option<serde_json::Value>> {
+        // Timed from here, so a hook's duration includes finding the project.
+        let start = std::time::Instant::now();
         let home = store::home_dir()?;
         let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
         if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
             let out = match store::find(&cwd, &home) {
-                Ok(Some(p)) => hooks::claude_session_start(&p, &home, &input)?,
+                Ok(Some(p)) => {
+                    let out = hooks::claude_session_start(&p, &home, &input);
+                    count_duration(&p, stats::Hook::SessionStart, &input, start);
+                    out?
+                }
                 _ => None,
             };
             return session_start_skill_warning(out, &home);
@@ -74,16 +81,22 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         let Ok(Some(p)) = store::find(&cwd, &home) else {
             return Ok(None);
         };
-        match (harness, event) {
-            (Harness::Claude, HookEvent::PreToolUse) => hooks::claude_pre_tool_use(&p, &input),
-            (Harness::Claude, HookEvent::PostToolUse) => hooks::claude_post_tool_use(&p, &input),
-            (Harness::Claude, HookEvent::SessionStart) => hooks::claude_session_start(&p, &home, &input),
-            (Harness::Claude, HookEvent::Stop) => hooks::claude_stop(&p, &home, &input),
-            (Harness::Claude, HookEvent::LeaseBind) => hooks::claude_lease_bind(&p, &input),
-            (Harness::Claude, HookEvent::LeaseEnd) => hooks::claude_lease_end(&p, &input),
-            (Harness::Claude, HookEvent::View) => view::view(&p, &home, &cwd),
-            (Harness::Claude, HookEvent::Status) => Ok(hooks::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s }))),
+        let (counted, out) = match (harness, event) {
+            (Harness::Claude, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
+            (Harness::Claude, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
+            (Harness::Claude, HookEvent::SessionStart) => (None, hooks::claude_session_start(&p, &home, &input)),
+            (Harness::Claude, HookEvent::Stop) => (Some(stats::Hook::Stop), hooks::claude_stop(&p, &home, &input)),
+            (Harness::Claude, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
+            (Harness::Claude, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
+            (Harness::Claude, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
+            (Harness::Claude, HookEvent::Status) => {
+                (None, hooks::status_line(&p, &home, &cwd).map(|s| s.map(|s| serde_json::json!({ "status": s }))))
+            }
+        };
+        if let Some(hook) = counted {
+            count_duration(&p, hook, &input, start);
         }
+        out
     };
     match run() {
         Ok(Some(out)) => println!("{out}"),
@@ -91,6 +104,12 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
     }
     ExitCode::SUCCESS
+}
+
+/// Counts one hook call with its duration, the session id and nothing else.
+fn count_duration(p: &store::Project, hook: stats::Hook, input: &serde_json::Value, start: std::time::Instant) {
+    let ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    stats::record_duration(p, hook, input.get("session_id").and_then(|v| v.as_str()), ms);
 }
 
 fn session_start_skill_warning(mut out: Option<serde_json::Value>, rvow_home: &Path) -> Result<Option<serde_json::Value>> {

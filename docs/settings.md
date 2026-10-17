@@ -5,7 +5,10 @@ The global file lives inside the rvow home (the directory named in `RVOW_HOME`).
 The project file is `config.toml` in the rvow tree root of the project.
 That root is the project folder of the home store in home mode, and the `rvow/` folder of the repository in repository mode.
 `rvow init` adds the files of one machine in that root to `.gitignore`: `.lock`, `hook-state/`, `provenance/`, `hook-stats.jsonl`, `leases.jsonl`, `yolo.json` and `rerun-cache.jsonl`.
-In home mode it also ignores `claude-plugin/` and the seal key of the rvow home.
+In home mode it also ignores `claude-plugin/`, the seal key and `project-index.json` of the rvow home.
+`project-index.json` is a local cache from a repository to its project folder, so rvow walks the rvow home only for a repository it has no valid entry for.
+rvow trusts an entry only for a project folder inside the rvow home whose root commit the repository still holds, and the hooks deny agent writes to the file.
+Delete it at any time.
 A store made before this change needs these lines added by hand.
 The project value wins when both set a key, and a project list replaces the global list instead of extending it.
 

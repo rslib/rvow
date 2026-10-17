@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make each hook find its project from a local index in the rvow home instead of walking the home, which cuts about 70 ms from every hook call.
+  rvow trusts an entry only for a project folder inside the home whose root commit the repository still holds, and walks again for any other entry.
 - Run `rvow accept`, `rvow amend`, `rvow archive` and `rvow check` in the worktree where the branch of the change is checked out, so a plan made in a second worktree works from the main checkout.
   When no worktree has the branch, accept names `git checkout <branch>` and `git worktree add <path> <branch>`.
 - Make `rvow accept` run no verify command, so a slow build no longer stands between accept and the first task.
@@ -79,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Record the duration of each hook call in `hook-stats.jsonl` and print the median and the 95th percentile of each hook in `rvow stats`.
 - A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
   A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.
 - Compare a protected test file by syntax unit when its grammar is in the cache: a unit is an item with the attributes, decorators and comments right before it, and a module, class, namespace or `@group` call splits into a header unit plus one unit per body item.

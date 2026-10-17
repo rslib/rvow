@@ -133,10 +133,10 @@ impl Fx {
         out["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("")
     }
 
-    /// The parsed lines of the stats file.
+    /// The parsed outcome lines of the stats file, with no duration line.
     fn stats(&self) -> Vec<Value> {
         std::fs::read_to_string(self.project().root.join(rvow_core::stats::STATS_FILE))
-            .map(|t| t.lines().map(|l| serde_json::from_str(l).unwrap()).collect())
+            .map(|t| t.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).filter(|l| l.get("duration_ms").is_none()).collect())
             .unwrap_or_default()
     }
 

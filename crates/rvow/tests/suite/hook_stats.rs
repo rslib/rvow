@@ -212,11 +212,21 @@ impl Fx {
         self.event("pre-tool-use", json!({"tool_name": "Bash", "tool_input": {"command": command}, "session_id": session}))
     }
 
-    /// The parsed lines of the stats file.
-    fn stats(&self) -> Vec<serde_json::Value> {
+    /// Every parsed line of the stats file, the duration lines too.
+    fn all_lines(&self) -> Vec<serde_json::Value> {
         std::fs::read_to_string(self.project().root.join(rvow_core::stats::STATS_FILE))
             .map(|t| t.lines().map(|l| serde_json::from_str(l).unwrap()).collect())
             .unwrap_or_default()
+    }
+
+    /// The outcome lines of the stats file, with no duration line.
+    fn stats(&self) -> Vec<serde_json::Value> {
+        self.all_lines().into_iter().filter(|l| l.get("duration_ms").is_none()).collect()
+    }
+
+    /// The duration lines of the stats file.
+    fn durations(&self) -> Vec<serde_json::Value> {
+        self.all_lines().into_iter().filter(|l| l.get("duration_ms").is_some()).collect()
     }
 }
 
@@ -341,6 +351,102 @@ fn stats_show_skips_a_line_that_does_not_parse() {
     text.push_str("not json\n");
     std::fs::write(file, text).unwrap();
     assert!(fx.rvow(&["stats"]).contains("events: 1"));
+}
+
+// Every hook call has a duration.
+
+impl Fx {
+    /// Writes duration lines as the hooks would, `n` of them with `ms` each.
+    fn put_ms(&self, hook: &str, ms: u64, n: usize) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let file = self.project().root.join(rvow_core::stats::STATS_FILE);
+        let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+        for _ in 0..n {
+            text.push_str(&format!("{}\n", json!({"time": now, "hook": hook, "session": "s1", "duration_ms": ms})));
+        }
+        std::fs::write(file, text).unwrap();
+    }
+}
+
+#[test]
+fn hook_stats_duration_an_allowed_read_adds_one_line() {
+    let fx = Fx::new("dur-read", true);
+    let read = json!({"file_path": fx.repo().join("docs/a.md")});
+    assert!(fx.event("pre-tool-use", json!({"tool_name": "Read", "tool_input": read, "session_id": "s1"})).is_none());
+    let lines = fx.all_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["hook"], "pre-tool-use");
+    assert_eq!(lines[0]["session"], "s1");
+    assert!(lines[0]["duration_ms"].is_u64(), "{lines:?}");
+    assert!(lines[0]["time"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn hook_stats_duration_a_line_holds_no_command_text_and_no_path() {
+    let fx = Fx::new("dur-text", true);
+    let command = "cat /Users/someone/private/zq7secret.txt";
+    assert!(fx.bash_event(command, "s1").is_none());
+    let lines = fx.durations();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let mut keys: Vec<&str> = lines[0].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["duration_ms", "hook", "session", "time"], "{lines:?}");
+    let text = std::fs::read_to_string(fx.project().root.join(rvow_core::stats::STATS_FILE)).unwrap();
+    assert!(!text.contains("zq7secret") && !text.contains("/Users/someone") && !text.contains("cat"), "{text}");
+}
+
+#[test]
+fn hook_stats_duration_a_denied_call_still_adds_its_duration() {
+    let fx = Fx::new("dur-deny", true);
+    assert!(fx.bash_event("rvow accept CHG-x", "s1").is_some());
+    assert_eq!(fx.stats().len(), 1);
+    assert_eq!(fx.durations().len(), 1);
+}
+
+#[test]
+fn hook_stats_duration_shows_the_median_and_the_95th_percentile_of_each_hook() {
+    let fx = Fx::new("dur-show", true);
+    fx.put_ms("pre-tool-use", 10, 20);
+    fx.put_ms("pre-tool-use", 200, 1);
+    fx.put_ms("stop", 5, 1);
+    let out = fx.rvow(&["stats"]);
+    assert!(out.contains("pre-tool-use,21,10,10"), "{out}");
+    assert!(out.contains("stop,1,5,5"), "{out}");
+    assert!(out.contains("events: 0"), "durations are not events: {out}");
+    let human = fx.rvow(&["stats", "--human"]);
+    assert!(human.contains("pre-tool-use: median 10 ms, 95th percentile 10 ms"), "{human}");
+}
+
+#[test]
+fn hook_stats_duration_rotates_the_file_when_it_grows() {
+    // Above the limit the file moves aside whole, so no line written by another
+    // hook at the same time is lost, and recent lines still count.
+    let fx = Fx::new("dur-rotate", true);
+    fx.put(1, "pre-tool-use", "deny", Some("ledger"), 1);
+    fx.put_ms("stop", 5, 3);
+    let p = fx.project();
+    rvow_core::stats::record_duration_bounded(&p, rvow_core::stats::Hook::Stop, Some("s1"), 7, 1 << 30);
+    assert_eq!(fx.all_lines().len(), 5, "a small file stays in place");
+    rvow_core::stats::record_duration_bounded(&p, rvow_core::stats::Hook::Stop, Some("s1"), 8, 10);
+    let lines = fx.all_lines();
+    assert_eq!(lines.len(), 1, "the file starts again with the new line: {lines:?}");
+    assert_eq!(lines[0]["duration_ms"], 8, "{lines:?}");
+    let old = p.root.join(rvow_core::stats::ROTATED_FILE);
+    assert_eq!(std::fs::read_to_string(&old).unwrap().lines().count(), 5, "the old lines moved aside whole");
+    let out = fx.rvow(&["stats"]);
+    assert!(out.contains("ledger"), "a moved denial still counts: {out}");
+    assert!(out.contains("stop,5,"), "the 5 durations of both files count: {out}");
+}
+
+#[test]
+fn stats_record_the_project_index_is_closed_to_writes() {
+    let fx = Fx::new("index-closed", true);
+    let file = fx.root.join("home").join(rvow_core::store::INDEX_FILE);
+    for tool in ["Edit", "Write"] {
+        let d = fx.denial(tool, json!({"file_path": file})).unwrap_or_else(|| panic!("{tool} allowed"));
+        assert!(d.reason.contains(rvow_core::store::INDEX_FILE), "{}", d.reason);
+    }
+    assert!(hook::bash_rule(&format!("echo x > {}", file.display())).is_some(), "a shell write is denied");
 }
 
 // The brief names missing work of the newest change before stale work.

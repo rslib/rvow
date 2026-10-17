@@ -92,6 +92,8 @@ mod judge;
 mod literal_paths;
 #[path = "suite/plan_access.rs"]
 mod plan_access;
+#[path = "suite/project_index.rs"]
+mod project_index;
 #[path = "suite/protected_growth.rs"]
 mod protected_growth;
 #[path = "suite/provenance.rs"]
