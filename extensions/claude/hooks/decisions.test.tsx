@@ -144,14 +144,6 @@ test('rvow_archive names the failed task and asks nothing', async ($, on) => {
   expect(ran.filter((l) => l.startsWith('archive'))).toEqual([])
 })
 
-test('rvow_archive waits for the user to decide a pending plan edit', async ($, on) => {
-  const { asked } = fake(on, 'Archive', (line) => lines(line, ['proved'], 1))
-  expect(JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))).toContain(
-    'pending plan edit',
-  )
-  expect(asked).toEqual([])
-})
-
 test('a refused or failed archive is reported to the agent', async ($, on) => {
   const no = fake(on, 'Not yet', (line) => lines(line, ['proved']))
   expect(JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))).toContain(

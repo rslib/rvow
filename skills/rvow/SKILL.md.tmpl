@@ -24,8 +24,8 @@ The brief at session start names the next task. {{cmd:brief}} prints it again.
 
 ## When the plan must change
 
-- Change the plan with {{cmd:put <change> <part>}} or one block with {{cmd:put <task or requirement id>}}, then run {{cmd:amend --reason "..."}} and call the `rvow_confirm` tool, with its optional `id` to ask about one amendment (or ask the user to run `/rvow-confirm`).
-- To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user.
+- Change the plan with {{cmd:put <change> <part>}} or one block with {{cmd:put <task or requirement id>}}, record it with {{cmd:amend --reason "..."}} and keep working. The user confirms all pending amendments once, in the archive dialog.
+- To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user. Call the `rvow_confirm` tool only after an unlock, with its optional `id`.
 - You never run {{cmd:accept}} or {{cmd:confirm}} in a shell. The hooks deny them; use the tools.
 - When every task is proved or stale, call the `rvow_archive` tool: the user answers in a dialog, and a push trusts an archived change.
 

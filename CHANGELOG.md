@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Send the brief once per session: the same brief again sends nothing, a change of only the task counts sends the `tasks:` line, and a compact, a clear or a new next task sends the full brief.
+- Record the files that any writing tool changed, such as an MCP tool or codemode, with one snapshot after the call, and take no snapshot for a read-only tool.
+  A change that no call recorded, such as a background job's, counts for the session at its next shell or editor call and at the Stop hook.
+- Confirm pending amendments once, in the archive dialog of the Claude mod and pi, instead of one dialog per amendment while the agent works.
+  The Stop hook and the brief now name only `rvow amend --reason`, `rvow amend --unlock` keeps its own confirm, and the push gate still fails while an amendment is pending.
 - Re-prove the stale tasks of a change in `rvow archive` before its gate, outside the project lock.
   A failed re-proof stops the archive with the code `gate`.
 - Offer a change with stale tasks in the archive tool of the Claude mod and pi.
@@ -188,6 +193,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the shell rules being skipped for a harness whose shell tool is not named `Bash`, such as OpenCode's `bash`, Codex's `shell` or Gemini CLI's `run_shell_command`: rvow now sorts the tools of every harness from one table.
 - Fix a plan edit confirmed together with a later `rvow amend --unlock` showing as drift again: an unlock no longer moves the drift baseline.
 - Fix `rvow init` leaving files of one machine for git to track: a new store now ignores the hook state, the provenance store, the hook stats, the leases, the yolo state, the rerun cache and, in home mode, the seal key.
 - Fix the Stop hook holding a session for a task it handed off with `rvow delegate`: a task with a live lease that another worker holds, or that no worker took yet, no longer holds the session, and the hold comes back when the lease ends.

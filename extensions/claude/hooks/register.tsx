@@ -13,6 +13,7 @@ import {
   ASK,
   ASK_SCHEMA,
   type Asked,
+  archiveAmendments,
   archiveBlockers,
   BADGE,
   BRANCH,
@@ -91,8 +92,10 @@ let blocks = 0
 let warned = false
 const STDERR_LINES = 20
 const FOLD_LINES = 8
-/** The last brief sent to the model; a prompt carries the brief only when it changed. */
-let sentBrief = ''
+/** Why the next brief request follows a break in the session; rvow sends the full brief for it. */
+let briefSource: 'startup' | 'clear' | 'compact' | undefined = 'startup'
+/** Whether a session has started in this process, so a later start is a clear or a resume. */
+let sessionStarted = false
 /** A tool call carries no session id, so the last prompt's id goes with `pre-tool-use`. */
 let sessionId: string | undefined
 /** The pending judge runs and the subagent answers on their way to them. */
@@ -411,6 +414,83 @@ async function confirmDialog($: EngineInterface, origin: { kind: string }) {
   return { text: done.text }
 }
 
+/**
+ * The archive decision shared by the tool and /rvow-archive: the user answers for the exact set of
+ * pending plan edits, which are accepted before the change is archived.
+ */
+async function archiveFlow(
+  $: EngineInterface,
+  change: string,
+): Promise<{ text: string; archived?: boolean; failed?: boolean }> {
+  const seen = await tellOut($, ['hook', 'claude', 'view'])
+  if (!seen.ok) return { text: failedText(['hook', 'claude', 'view'], seen.out) }
+  let view: {
+    changes?: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }[]
+  }
+  try {
+    view = JSON.parse(seen.out)
+  } catch {
+    return { text: 'rvow: cannot read the state of the branch' }
+  }
+  const blocked = archiveBlockers(
+    view.changes?.find((c) => c.id === change),
+    change,
+  )
+  if (blocked) return { text: blocked }
+  const base = `Every task of ${change} is proved or stale, and archive re-proves the stale ones.`
+  const trust = 'The gate trusts an archived change and never reruns its tasks.'
+  const declined = {
+    text: `The user did not archive ${change}; it stays active and any pending plan edit stays pending. The user can run /rvow-archive ${change} to archive it.`,
+  }
+  const pending = view.changes?.find((c) => c.id === change)?.pending.length ?? 0
+  if (pending === 0) {
+    const answer = await $.ui
+      .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
+      .catch(() => 'Not yet')
+    if (answer !== 'Archive') return declined
+  } else {
+    // The user answers for the exact set they read; a changed set is asked again, never accepted unseen.
+    let ids: string[] = []
+    for (let round = 0; ; round++) {
+      if (round >= 5)
+        return {
+          text: `rvow: the pending plan edits of ${change} keep changing; run /rvow-archive ${change}`,
+        }
+      const listing = await tellOut($, ['confirm'])
+      if (!listing.ok) return { text: failedText(['confirm'], listing.out) }
+      const shown = /^digest (\S+)$/m.exec(listing.out)?.[1]
+      const items = archiveAmendments(listing.out, change)
+      if (items.length === 0) {
+        const answer = await $.ui
+          .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
+          .catch(() => 'Not yet')
+        if (answer !== 'Archive') return declined
+        break
+      }
+      const answer = await $.ui
+        .ask(
+          `${base} ${items.length} plan edit${items.length === 1 ? ' is' : 's are'} pending, weaken first:\n\n${items.map((i) => i.text).join('\n\n')}\n\nAccept ${items.length === 1 ? 'it' : 'all of them'} and archive ${change}? ${trust}`,
+          ['Accept and archive', 'Not yet'],
+        )
+        .catch(() => 'Not yet')
+      if (answer !== 'Accept and archive') return declined
+      const now = await tellOut($, ['confirm'])
+      if (!now.ok) return { text: failedText(['confirm'], now.out) }
+      if (/^digest (\S+)$/m.exec(now.out)?.[1] !== shown) continue
+      ids = items.map((i) => i.id)
+      break
+    }
+    if (ids.length > 0) {
+      const argv = ['confirm', ...ids, '--accept']
+      const accepted = await tellOut($, argv)
+      if (!accepted.ok) return { text: failedText(argv, accepted.out) }
+    }
+  }
+  const done = await tellOut($, ['archive', change])
+  if (!done.ok) return { text: failedText(['archive', change], done.out), failed: true }
+  return { text: done.out, archived: true }
+}
+
 async function userOnly(
   $: EngineInterface,
   origin: { kind: string },
@@ -587,17 +667,18 @@ async function ask($: EngineInterface, change?: string): Promise<string> {
 }
 
 export const register: Register = (on) => {
-  // A compaction that stands folds the brief into a summary, so the next prompt carries it again.
+  // A compaction that stands folds the brief into a summary, so the next brief request says `compact`.
   // A skipped one, a subagent's own and a `precompute` install nothing and leave the brief alone.
   on('session.compact', async (_$, e, next) => {
     const out = await next(e)
-    if (out.messages && !e.agentId && e.trigger !== 'precompute') sentBrief = ''
+    if (out.messages && !e.agentId && e.trigger !== 'precompute') briefSource = 'compact'
     return out
   })
 
   on('session.start', async ($, e, next) => {
     // A new session (startup, clear, resume) has no brief yet, no warning shown, no blocks in a row.
-    sentBrief = ''
+    briefSource = sessionStarted ? 'clear' : 'startup'
+    sessionStarted = true
     warned = false
     blocks = 0
     const started = await next(e)
@@ -735,33 +816,7 @@ export const register: Register = (on) => {
     if (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change)) {
       return { result: 'rvow: change must be a complete CHG id' }
     }
-    const seen = await tellOut($, ['hook', 'claude', 'view'])
-    if (!seen.ok) return { result: failedText(['hook', 'claude', 'view'], seen.out) }
-    let view: {
-      changes?: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }[]
-    }
-    try {
-      view = JSON.parse(seen.out)
-    } catch {
-      return { result: 'rvow: cannot read the state of the branch' }
-    }
-    const blocked = archiveBlockers(
-      view.changes?.find((c) => c.id === change),
-      change,
-    )
-    if (blocked) return { result: blocked }
-    const answer = await $.ui
-      .ask(
-        `Every task of ${change} is proved or stale, and archive re-proves the stale ones. Archive it? The gate trusts an archived change and never reruns its tasks.`,
-        ['Archive', 'Not yet'],
-      )
-      .catch(() => 'Not yet')
-    if (answer !== 'Archive')
-      return {
-        result: `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
-      }
-    const done = await tellOut($, ['archive', change])
-    return { result: done.ok ? done.out : failedText(['archive', change], done.out) }
+    return { result: (await archiveFlow($, change)).text }
   })
 
   on('tool.call', { tool: CONFIRM }, async ($, e) => {
@@ -899,15 +954,26 @@ export const register: Register = (on) => {
     return result
   })
 
-  // The brief goes with each prompt whose brief changed, not with session start: startup never waits
-  // for rvow, and the model learns of an accept, a confirm or an archive the user ran.
+  // The brief request goes with each prompt, not with session start: startup never waits for rvow,
+  // and the model learns of an accept, a confirm or an archive the user ran. rvow keeps the last
+  // brief per session and answers with nothing, the changed line or the full brief.
   on('classic.UserPromptSubmit', async ($, e, next) => {
     sessionId = e.session_id
     const result = await next(e)
-    const out = await Promise.race([hook($, 'session-start', {}), $.clock.sleep(BRIEF_WAIT_MS)])
+    const source = briefSource
+    const out = await Promise.race([
+      hook($, 'session-start', { session_id: e.session_id, source }),
+      $.clock.sleep(BRIEF_WAIT_MS).then(() => 'timeout' as const),
+    ])
+    // rvow records the brief it sent before the mod gets it, so a late answer is lost: have rvow
+    // forget the record and send the full brief with the next prompt.
+    if (out === 'timeout') {
+      if (briefSource === source) briefSource = 'clear'
+      return result
+    }
+    if (out && briefSource === source) briefSource = undefined
     const text = out?.hookSpecificOutput?.additionalContext
-    if (typeof text !== 'string' || !text || text === sentBrief) return result
-    sentBrief = text
+    if (typeof text !== 'string' || !text) return result
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
   })
 
@@ -991,7 +1057,15 @@ export const register: Register = (on) => {
   on('command.run', { command: 'rvow-archive' }, async ($, e) => {
     const id = e.args.trim()
     if (!id) return { text: 'usage: /rvow-archive <CHG-id>' }
-    return userOnly($, e.origin, 'rvow-archive', ['archive', id])
+    if (e.origin.kind !== 'composer')
+      return { text: '/rvow-archive runs only when you type it yourself.' }
+    if (!/^CHG-[a-z0-9]+$/.test(id)) return { text: 'rvow: change must be a complete CHG id' }
+    const r = await archiveFlow($, id)
+    await refresh($)
+    // The engine refuses a submit made while this hook still holds the command.
+    if (r.archived) later($, async () => queue($, `I archived ${id}. The change is closed.`))
+    else if (r.failed) tellAgentOfFailure($, ['archive', id], { tone: 'fail', text: r.text })
+    return { text: r.text }
   })
 
   on('command.run', { command: 'rvow-judge' }, async ($, e) => {

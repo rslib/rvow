@@ -8,6 +8,8 @@ mod agent_mode;
 mod amend_baseline;
 #[path = "suite/amend_fixes.rs"]
 mod amend_fixes;
+#[path = "suite/any_tool_change.rs"]
+mod any_tool_change;
 #[path = "suite/archive_reprove.rs"]
 mod archive_reprove;
 #[path = "suite/attest.rs"]
@@ -56,6 +58,8 @@ mod audit_view;
 mod base_ref;
 #[path = "suite/baseline_at_prove.rs"]
 mod baseline_at_prove;
+#[path = "suite/brief_once.rs"]
+mod brief_once;
 #[path = "suite/cli.rs"]
 mod cli;
 #[path = "suite/committed_tests.rs"]

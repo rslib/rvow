@@ -231,7 +231,7 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
             let all = format!("{out}{full}");
             out = if fits(&all) { all } else { out + &compact(t, c, &living) };
             out.push_str(&format!(
-                "loop: run `rvow prove {}` before the work to record that the check fails, and after the work to prove it; to change the plan run `rvow amend` and call the `rvow_confirm` tool; to read the plan run `rvow show {}`\n",
+                "loop: run `rvow prove {}` before the work to record that the check fails, and after the work to prove it; to change the plan run `rvow amend --reason` and keep working; to read the plan run `rvow show {}`\n",
                 t.id, c.dir.id
             ));
         }
@@ -321,6 +321,16 @@ mod tests {
         let b = brief(&p, &tmp.0.join("home"), &repo).unwrap();
         let line = b.lines().find(|l| l.starts_with("loop:")).unwrap();
         assert!(line.contains(&format!("`rvow prove {task}`")) && line.contains("before the work"), "{line}");
+        assert!(line.contains("rvow amend") && !line.contains("rvow_confirm"), "{line}");
+        assert!(fits(&b), "{b}");
+    }
+
+    #[test]
+    fn confirm_once_at_archive_loop_line_names_amend_not_confirm() {
+        let (tmp, p, repo, _task) = accepted();
+        let b = brief(&p, &tmp.0.join("home"), &repo).unwrap();
+        let line = b.lines().find(|l| l.starts_with("loop:")).unwrap();
+        assert!(line.contains("rvow amend") && !line.contains("rvow_confirm"), "{line}");
         assert!(fits(&b), "{b}");
     }
 

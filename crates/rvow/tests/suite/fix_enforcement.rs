@@ -353,7 +353,7 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     std::fs::write(fx.repo().join("tests/t.sh"), "exit 1").unwrap();
     fx.write_as_session(&fx.repo().join("tests/t.sh"));
     let drift = stop(&fx);
-    assert!(drift.contains("/rvow-confirm"), "{drift}");
+    assert!(drift.contains("rvow amend --reason") && !drift.contains("/rvow-confirm"), "{drift}");
     reasons.push(("drift".into(), drift));
     let _ = id;
 

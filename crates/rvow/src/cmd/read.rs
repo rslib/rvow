@@ -390,7 +390,9 @@ pub fn status(all: bool, json: bool) -> Result<Reply> {
         r.help("Run `rvow amend --reason \"<why>\"` to record the drift for the user to confirm");
     }
     if pending {
-        r.help("Ask the user to run `rvow confirm` to decide the pending amendments");
+        r.help(
+            "The user confirms the pending amendments at archive (`/rvow-archive` or the rvow_archive tool), or now with `/rvow-confirm`",
+        );
     }
     Ok(r)
 }

@@ -33,6 +33,7 @@ case "$1 $2 $3" in
   "hook claude stop") cat > "$RVOW_FAKE/stop.in"; cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
   "hook claude lease-bind") cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" 2>/dev/null ;;
   "hook claude lease-end") cat > "$RVOW_FAKE/end.in" ;;
+  "hook claude session-start") (cat; echo) >> "$RVOW_FAKE/start.in"; cat "$RVOW_FAKE/start.json" 2>/dev/null ;;
   "hook claude "*) ;;
   *)
     case "$1" in
@@ -131,6 +132,7 @@ type Files = Partial<
     | "slow"
     | "slow-view"
     | "bind.json"
+    | "start.json"
     | "fail-view"
     | "fail-accept"
     | "clarify.json"
@@ -2423,4 +2425,29 @@ test("no mouse handler is needed in regular mode: keys still do everything", asy
   const t = await pane(WAITING({ id: "CHG-a", title: "A" }), { "review.txt": "x" });
   await t.status((p) => press(p, "a"));
   assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
+});
+
+test("the brief request carries the session id and the start source", async () => {
+  const brief = "rvow CHG-1: next TSK-1";
+  const t = setup({
+    "view.json": json(EMPTY),
+    "start.json": json({ hookSpecificOutput: { additionalContext: brief } }),
+  });
+  const sent = () =>
+    existsSync(join(process.env.RVOW_FAKE ?? "", "start.in"))
+      ? readFileSync(join(process.env.RVOW_FAKE ?? "", "start.in"), "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l))
+      : [];
+  await t.fire("session_start");
+  await waitFor(() => sent().length === 1);
+  assert.equal(sent()[0].session_id, "pi-sess");
+  assert.equal(sent()[0].source, "startup");
+  await t.fire("session_compact", {});
+  const out = (await t.fire("context", { messages: [] })) as { messages: { content: string }[] };
+  assert.equal(out.messages[0]?.content, brief);
+  assert.equal(sent().length, 2);
+  assert.equal(sent()[1].session_id, "pi-sess");
+  assert.equal(sent()[1].source, "compact");
 });

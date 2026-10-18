@@ -56,7 +56,7 @@ import {
   SLOW_MS,
   shortReview,
 } from "./tools.ts";
-import { registerTypedTools, yoloArgs } from "./typed-tools.ts";
+import { askPendingAmendments, registerTypedTools, yoloArgs } from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
 const MAX_CONTINUES = 8;
@@ -126,8 +126,9 @@ async function brief(
   signal?: AbortSignal,
   timeoutMs = SLOW_MS,
   onFail?: (why: string) => void,
+  extra: { session_id?: string; source?: "startup" | "compact" } = {},
 ): Promise<string | undefined> {
-  const text = (await hook("session-start", cwd, {}, timeoutMs, false, signal, onFail))
+  const text = (await hook("session-start", cwd, extra, timeoutMs, false, signal, onFail))
     ?.hookSpecificOutput?.additionalContext;
   return typeof text === "string" && text ? text : undefined;
 }
@@ -1037,7 +1038,10 @@ export default function (pi: ExtensionAPI) {
     }
     later(async () => {
       const generation = epoch;
-      const text = await brief(ctx.cwd, background.signal);
+      const text = await brief(ctx.cwd, background.signal, undefined, undefined, {
+        session_id: ctx.sessionManager?.getSessionId?.(),
+        source: "startup",
+      });
       if (text && generation === epoch)
         pi.sendMessage({ customType: "rvow", content: text, display: false });
     });
@@ -1104,7 +1108,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("context", async (event, ctx) => {
     if (!resend) return;
     resend = false;
-    const text = await brief(ctx.cwd, undefined, BOUND_MS, enforcementOff(ctx));
+    const text = await brief(ctx.cwd, undefined, BOUND_MS, enforcementOff(ctx), {
+      session_id: ctx.sessionManager?.getSessionId?.(),
+      source: "compact",
+    });
     if (!text) return;
     const msg = {
       role: "custom" as const,
@@ -1341,6 +1348,28 @@ export default function (pi: ExtensionAPI) {
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
+    const answer = await askPendingAmendments(
+      arg,
+      async () => {
+        const r = await rvow(ctx, ["confirm"]);
+        return { ok: r?.code === 0, text: r?.out ?? "" };
+      },
+      (message) => ctx.ui.confirm(`rvow ${arg}`, message),
+      `Archive ${arg}?`,
+    );
+    // An unreadable list accepts nothing: the archive below still refuses what is not ready.
+    if (answer.kind === "no" || answer.kind === "changing")
+      return ctx.ui.notify(
+        `${arg} stays active and its plan edits stay pending; run /rvow-archive ${arg} to try again.`,
+        "info",
+      );
+    if (answer.kind === "yes") {
+      const done = await rvow(ctx, ["confirm", ...answer.ids, "--accept"]);
+      if (done?.code !== 0) {
+        if (done) ctx.ui.notify(done.out.trim(), "error");
+        return;
+      }
+    }
     await decide(ctx, ["archive", arg], GATE_MS);
   });
 

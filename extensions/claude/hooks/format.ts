@@ -291,7 +291,7 @@ export function formatJudgeFindings(id: string, model: string, findings: JudgeFi
 
 export const ARCHIVE = 'mcp__rvow__rvow_archive'
 export const ARCHIVE_DESCRIPTION =
-  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale and no plan edit is pending; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
+  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. When the change has pending plan edits (amendments), the same dialog lists every one, weaken first, and a yes accepts them all and then archives; a no leaves them pending. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
 export const ARCHIVE_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -299,7 +299,7 @@ export const ARCHIVE_SCHEMA = {
   additionalProperties: false,
 }
 
-/** Why a change cannot be archived yet, or `null` when every task is proved or stale and no plan edit is pending. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
+/** Why a change cannot be archived yet, or `null` when every task is proved or stale. A pending plan edit does not block: the archive dialog asks about it. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
 export function archiveBlockers(
   change: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] } | undefined,
   id: string,
@@ -312,10 +312,16 @@ export function archiveBlockers(
     .map((t) => `${t.id} is ${t.state}`)
   if (open.length > 0)
     return `rvow: ${id} is not ready to archive: ${open.join(', ')}; fix them first`
-  if (change.pending.length > 0) {
-    return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`
-  }
   return null
+}
+
+/** The pending amendments of one change in a `rvow confirm` listing, those holding a weaken item first. */
+export function archiveAmendments(listing: string, change: string): Listed[] {
+  const mine = splitListing(listing).filter(
+    (i) => i.text.startsWith(`${i.id} for ${change}\n`) || i.text === `${i.id} for ${change}`,
+  )
+  const weak = (i: Listed) => /^ {2}weaken:/m.test(i.text)
+  return [...mine.filter(weak), ...mine.filter((i) => !weak(i))]
 }
 
 export const ACCEPT_DESCRIPTION =

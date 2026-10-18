@@ -105,9 +105,9 @@ pub fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result
         item.push(("items".to_owned(), Node::List(rows)));
         items.push(Node::Obj(item));
     }
-    r.line("ask the user to run /rvow-confirm (or ! rvow confirm)");
+    r.line("the user confirms the pending amendments when the change is archived (/rvow-archive or the rvow_archive tool), or now with /rvow-confirm");
     r.set("amendments", items);
-    r.help("Ask the user to run /rvow-confirm (or ! rvow confirm) to decide them");
+    r.help("The user confirms them at archive (/rvow-archive or the rvow_archive tool), or now with /rvow-confirm");
     Ok(r)
 }
 

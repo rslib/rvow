@@ -79,7 +79,13 @@ It marks each added task and each changed verify command as baseline pending, so
 A title edit keeps the recorded baseline.
 `rvow amend` mints placeholder ids before it takes the snapshot, as accept does, so a new task keeps its real id after confirm and a later `rvow ids` mints nothing.
 `rvow confirm` lists weaken items first and names each baseline-pending task.
-The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
+The agent records each plan edit with `rvow amend --reason` and keeps working.
+The Stop hook and the brief name only that step.
+The user confirms every pending amendment of the change once, in the archive dialog: the archive tool of the Claude mod and pi lists them, amendments with weaken items first, and a yes accepts them by id and then archives.
+A no leaves them pending and the change active, and an amendment recorded while the dialog is open makes it ask again, so no unseen amendment is accepted.
+The push gate keeps failing while any amendment is pending, so nothing unreviewed leaves the machine.
+`rvow amend --unlock` keeps its own confirm, since a protected test opens only after the user says yes.
+A user who wants to decide earlier reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
 In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.
 With one amendment pending the dialog is a yes or no question that shows its id, reason and items.
@@ -111,6 +117,9 @@ It is held for a task with no proof when it changed a file that the `files:` of 
 It is not held for that task while the task has a live lease that another worker holds, or that no worker took yet: the session handed the task off with `rvow delegate`.
 When the lease ends, the hold comes back, and the session that holds the lease is held as before.
 Around each checked call that may write, the hooks snapshot the work tree with a private git index and object store, and record each changed path with its new git blob id, or deleted, for the session or the subagent of the call.
+rvow sorts a tool once by its name, with the tool names of Claude Code, pi, OpenCode, Codex and Gemini CLI in one table: an editor, a shell, a read-only tool or any other tool.
+An editor or a shell write takes a snapshot before and after the call, any other tool that may write, such as an MCP tool or codemode, takes one snapshot after it and compares it with the session's last recorded tree, and a read-only tool takes none.
+A change that no call recorded, such as one from a background job, counts for the session at its next shell or editor call, which `rvow prove` is, and at the Stop hook.
 The private store lists the repository's own objects as an alternate and lives under the project folder, so nothing is written into the user's `.git`.
 The private objects are transient: the records keep only blob ids, and when the private store passes 64 MiB and no call is in flight, it is deleted and rebuilt from the repository's own objects.
 Records are dropped after 7 days, and a call that never reports back (cancelled or killed) stops counting as in flight after 6 hours.
@@ -315,7 +324,10 @@ An agent that never met rvow still finds it.
 `rvow install` writes the rendered skill to `skills/rvow/SKILL.md` in the pi agent folder, the same text as the Claude skill.
 A user edit of that file is kept like any other managed file, and the install check reports a stale copy.
 The skill description starts with `Load before you` and names the trigger: an accepted change, a denied hook, a failed gate, a stale proof or a `CHG-` or `TSK-` id.
-When the brief names a next task, one `loop:` line says to run `rvow prove <task>` after the work, to change the plan with `rvow amend` and the `rvow_confirm` tool, and to read the plan with `rvow show <change>`.
+When the brief names a next task, one `loop:` line says to run `rvow prove <task>` before the work and after it, to change the plan with `rvow amend --reason`, and to read the plan with `rvow show <change>`.
+rvow sends the same brief once per session: it keeps the last brief it sent in `hook-state/brief-<session>`, sends nothing when the brief is the same, and sends only the `tasks:` line when only the counts changed.
+After a `compact` or a `clear`, and when the next task changes, it sends the full brief again.
+A hook call with no session id gets the full brief each time, so an older mod keeps working.
 A branch with no active change and no backlog plan gets one line naming `rvow new` and `rvow guide proposal` instead.
 `rvow next` prints the next task of the branch with its id, title, state, verify command and files, or says that no task is next.
 

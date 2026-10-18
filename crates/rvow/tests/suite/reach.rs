@@ -186,9 +186,10 @@ fn reach_brief_names_the_work_loop_with_the_next_task() {
     let brief = fx.rvow(&["brief"]);
     let loops: Vec<&str> = brief.lines().filter(|l| l.trim_start().starts_with("loop:")).collect();
     assert_eq!(loops.len(), 1, "one loop line: {brief}");
-    for word in ["rvow prove TSK-", "rvow amend", "rvow_confirm", &format!("rvow show {change}")] {
+    for word in ["rvow prove TSK-", "rvow amend", &format!("rvow show {change}")] {
         assert!(loops[0].contains(word), "{word} missing from {}: {brief}", loops[0]);
     }
+    assert!(!loops[0].contains("rvow_confirm"), "{}", loops[0]);
     assert!(brief.lines().count() <= 25, "{brief}");
     assert!(brief.len() <= 1500, "{} chars", brief.len());
 }

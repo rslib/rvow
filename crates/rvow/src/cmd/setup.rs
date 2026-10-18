@@ -68,15 +68,15 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         let home = store::home_dir()?;
         let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
         if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
-            let out = match store::find(&cwd, &home) {
+            let warnings = skill_warnings(&home)?;
+            return match store::find(&cwd, &home) {
                 Ok(Some(p)) => {
-                    let out = hooks::claude_session_start(&p, &home, &input);
+                    let out = hooks::claude_session_start(Some(&p), &home, &input, &warnings);
                     count_duration(&p, stats::Hook::SessionStart, &input, start);
-                    out?
+                    out
                 }
-                _ => None,
+                _ => hooks::claude_session_start(None, &home, &input, &warnings),
             };
-            return session_start_skill_warning(out, &home);
         }
         let Ok(Some(p)) = store::find(&cwd, &home) else {
             return Ok(None);
@@ -84,7 +84,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         let (counted, out) = match (harness, event) {
             (Harness::Claude, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
             (Harness::Claude, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
-            (Harness::Claude, HookEvent::SessionStart) => (None, hooks::claude_session_start(&p, &home, &input)),
+            (Harness::Claude, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
             (Harness::Claude, HookEvent::Stop) => (Some(stats::Hook::Stop), hooks::claude_stop(&p, &home, &input)),
             (Harness::Claude, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
             (Harness::Claude, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
@@ -112,24 +112,21 @@ fn count_duration(p: &store::Project, hook: stats::Hook, input: &serde_json::Val
     stats::record_duration(p, hook, input.get("session_id").and_then(|v| v.as_str()), ms);
 }
 
-fn session_start_skill_warning(mut out: Option<serde_json::Value>, rvow_home: &Path) -> Result<Option<serde_json::Value>> {
+/// One warning per stale or edited file that `rvow install` manages.
+fn skill_warnings(rvow_home: &Path) -> Result<Vec<String>> {
     let Some(home) = env_dir("HOME") else {
-        return Ok(out);
+        return Ok(Vec::new());
     };
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let rendered = crate::skill::render()?;
     let pi = install::pi_dir(Some(&home));
-    for path in install::stale_managed_files(&claude, rvow_home, pi.as_deref(), &rendered) {
-        let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
-        let warning =
-            format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display());
-        let value = out
-            .get_or_insert_with(|| serde_json::json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ""}}));
-        let context = &mut value["hookSpecificOutput"]["additionalContext"];
-        let previous = context.as_str().unwrap_or("");
-        *context = rvow_core::brief::with_warning(previous, &warning).into();
-    }
-    Ok(out)
+    Ok(install::stale_managed_files(&claude, rvow_home, pi.as_deref(), &rendered)
+        .into_iter()
+        .map(|path| {
+            let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
+            format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display())
+        })
+        .collect())
 }
 
 fn report(r: &mut Reply, what: &str, o: install::Outcome) {

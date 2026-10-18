@@ -36,6 +36,10 @@ async function seed($: Engine, on: On, state: string): Promise<string[]> {
     const stdout = rest === 'hook claude view' ? JSON.stringify(view(state)) : ''
     return { value: procResult(0, stdout) }
   })
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+    const question = e.questions[0]?.question ?? ''
+    return { result: { questions: e.questions, answers: { [question]: 'Archive' } } }
+  })
   await $.command.run(cmd('rvow-status', ''))
   return calls
 }
