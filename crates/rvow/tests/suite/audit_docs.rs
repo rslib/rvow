@@ -150,3 +150,14 @@ fn docs_name_the_brief_once_rule() {
     let unreleased = log.split("## [").nth(1).unwrap_or_default();
     assert!(unreleased.contains("brief once per session"), "the Unreleased changelog lacks the brief rule");
 }
+
+#[test]
+fn docs_name_the_baseline_first_rule() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("`baseline-first`") && how.contains("denies it once"), "how-it-works lacks the baseline-first rule");
+    assert!(how.contains("of every active change on the branch"), "how-it-works lacks the branch-wide proved scope");
+    assert!(!how.contains("gives the agent one line that names"), "how-it-works still names the removed notice");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("`baseline-first`"), "the Unreleased changelog lacks the baseline-first rule");
+}

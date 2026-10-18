@@ -187,6 +187,9 @@ fn tiers_the_bypass_tier_never_holds_a_stop_and_the_others_keep_the_usual_stop()
     let edit = json!({"file_path": fx.repo().join("out.txt")});
     for session in ["s1", "s2", "s3"] {
         let call = json!({"cwd": fx.repo(), "tool_name": "Write", "tool_input": edit, "session_id": session});
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        let first = fx.event("pre-tool-use", call.clone());
+        assert!(first.is_some_and(|v| v.to_string().contains("has no baseline yet")));
         assert_eq!(fx.event("pre-tool-use", call), None);
     }
     let stop = |session: &str| fx.event("stop", json!({"cwd": fx.repo(), "session_id": session}));

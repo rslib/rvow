@@ -112,17 +112,19 @@ impl Fx {
     fn pre(&self, session: &str, id: &str, tool: &str, args: Value) {
         let payload =
             json!({"cwd": self.root.join("repo"), "session_id": session, "tool_use_id": id, "tool_name": tool, "tool_input": args});
-        let out = self.hook("pre-tool-use", &payload);
+        let mut out = self.hook("pre-tool-use", &payload);
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        if out.as_ref().is_some_and(|o| o.to_string().contains("has no baseline yet")) {
+            out = self.hook("pre-tool-use", &payload);
+        }
         assert!(out.is_none(), "the call of {tool} was denied: {out:?}");
     }
 
     /// A post-tool-use call of `session` for call `id`.
     fn post(&self, session: &str, id: &str) {
         let payload = json!({"cwd": self.root.join("repo"), "session_id": session, "tool_use_id": id});
-        // The only answer is the first-edit notice of a baseline-pending task.
         let out = self.hook("post-tool-use", &payload);
-        let notice = out.as_ref().and_then(|o| o["hookSpecificOutput"]["additionalContext"].as_str());
-        assert!(out.is_none() || notice.is_some_and(|n| n.contains("baseline pending")), "{out:?}");
+        assert!(out.is_none(), "{out:?}");
     }
 
     /// A Write call of `session` that sets `rel` to `content`, with call `id`.

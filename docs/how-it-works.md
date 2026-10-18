@@ -146,7 +146,7 @@ rvow learns each baseline in one of three ways, cheapest first.
   When the whole verify is one `cargo test` or `cargo nextest run` with one test filter and only known flags, and no tracked Rust file at the base commit holds the last part of that filter, the test does not exist yet, so the check must fail.
   A name in a comment, a chained command, an unknown flag or anything after `--` keeps the task pending.
 - From the first prove, before the work.
-  While no file in the task's scope differs from the base commit, other than test files (the `test_globs`) and files of the change's proved tasks, `rvow prove` records its run as the baseline.
+  While no file in the task's scope differs from the base commit, other than test files (the `test_globs`) and files of the proved tasks of every active change on the branch, `rvow prove` records its run as the baseline.
   A failure is the red the task needs: prove records it, with the failed JUnit names when the runner writes `{junit}`, and says `baseline: recorded`.
   A pass with tests run is refused with the code `baseline` and records nothing, unless the task says `baseline: pass`, whose first pass is both its baseline and its proof.
   The agent pays nothing extra, since it runs the test first anyway.
@@ -160,11 +160,13 @@ rvow learns each baseline in one of three ways, cheapest first.
 
 A baseline belongs to the task's `verify:` text, so a title edit keeps it and a new check needs a new one.
 
-The cheap path needs the first prove before the work, so rvow says so at the right moment.
-The first time a session edits a source file of a baseline-pending task, rvow allows the edit and gives the agent one line that names `rvow prove <task>`.
-A source file is a file in the task's `files:` that no `test_globs` entry matches, and a Bash command that writes one counts as an edit.
-Each task is named once per session, the line never denies, and a test file, a file outside the task or a task with a recorded baseline gets no line.
-The line rides the post-tool-use answer of the same call: `additionalContext` for the Claude Code settings hooks, the call's `context` in the Claude mod and an added text block of the tool result in pi.
+The cheap path needs the first prove before the work, so rvow holds the agent to that order.
+The first time a session edits a source file of a baseline-pending task, the rule `baseline-first` denies it once, with a line that names `rvow prove <task>`.
+A source file is a file in the task's `files:` that no `test_globs` entry matches, and a shell command that writes one counts as an edit.
+A second try of the edit in the same session goes through, so a task whose check cannot fail yet never blocks the work.
+Any yolo tier turns the rule off.
+A test file, a file outside the task and a task with a recorded baseline are never denied.
+A notice after the edit would come too late: the edit already makes the scope differ from the base commit, so the next prove builds the base commit.
 
 ## The proof and what stale means
 
@@ -274,7 +276,7 @@ The hook sees files and not what a shell command writes, so a lease scopes the e
 
 A rule has a mode.
 Tampering is enforced: the ledger, the enforcement files, the hidden checks, the git hooks, the cache, lease and stats files, `rvow accept` and `rvow confirm`, and edits of archived changes and living specs.
-A lease that you chose with `rvow delegate` and an edit before the plan is accepted are enforced too.
+A lease that you chose with `rvow delegate`, an edit before the plan is accepted and the first source edit before the first prove (`baseline-first`) are enforced too.
 An edit outside the files of every task and an edit of a protected test are audited.
 The call goes through, `rvow stats` counts it, and the gate still blocks the branch: the first as a file outside every task scope and the second as weak drift that you must confirm.
 
@@ -292,7 +294,7 @@ Only you can switch it: an agent cannot run `rvow yolo` in a shell or write its 
 
 | Tier | What changes |
 |------|--------------|
-| `audit` | An edit before the plan is accepted, and a subagent edit outside its lease, are audited and not denied. Tampering stays denied. |
+| `audit` | An edit before the plan is accepted and a subagent edit outside its lease are audited and not denied, and the first source edit before the first prove is allowed. Tampering stays denied. |
 | `auto` | Also lets the agent run `rvow accept` and `rvow confirm`. `rvow ingest` and a faked dialog answer stay denied. |
 | `bypass` | Every hook only audits, and a stop is never held back. |
 

@@ -33,6 +33,8 @@ pub enum Rule {
     History,
     /// The plan files of the rvow store, read and written only through rvow.
     Store,
+    /// The first source edit of a task whose baseline the first prove has not recorded yet.
+    BaselineFirst,
 }
 
 /// What a rule does when it fires.
@@ -62,7 +64,9 @@ impl Rule {
             (Rule::YoloFile, _) => Mode::Enforce,
             (_, None) => self.mode(),
             (_, Some(Tier::Bypass)) => Mode::Audit,
-            (Rule::UnacceptedPlan | Rule::LeaseScope | Rule::OutsideScope | Rule::ProtectedTest, Some(_)) => Mode::Audit,
+            (Rule::UnacceptedPlan | Rule::BaselineFirst | Rule::LeaseScope | Rule::OutsideScope | Rule::ProtectedTest, Some(_)) => {
+                Mode::Audit
+            }
             (_, Some(_)) => Mode::Enforce,
         }
     }
@@ -70,10 +74,13 @@ impl Rule {
     /// A tampering rule guards rvow itself. Its denial stays a denial after any streak,
     /// since the backstop must not turn it into a question that a tired user may allow.
     pub fn tampering(self) -> bool {
-        !matches!(self, Rule::OwnerCommand | Rule::LeaseScope | Rule::UnacceptedPlan | Rule::OutsideScope | Rule::ProtectedTest)
+        !matches!(
+            self,
+            Rule::OwnerCommand | Rule::LeaseScope | Rule::UnacceptedPlan | Rule::BaselineFirst | Rule::OutsideScope | Rule::ProtectedTest
+        )
     }
 
-    pub const ALL: [Rule; 15] = [
+    pub const ALL: [Rule; 16] = [
         Rule::OwnerCommand,
         Rule::GitHooks,
         Rule::Ledger,
@@ -89,6 +96,7 @@ impl Rule {
         Rule::UnacceptedPlan,
         Rule::History,
         Rule::Store,
+        Rule::BaselineFirst,
     ];
 
     pub fn name(self) -> &'static str {
@@ -108,6 +116,7 @@ impl Rule {
             Rule::UnacceptedPlan => "unaccepted-plan",
             Rule::History => "history",
             Rule::Store => "store",
+            Rule::BaselineFirst => "baseline-first",
         }
     }
 }

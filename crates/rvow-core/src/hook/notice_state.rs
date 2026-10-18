@@ -1,4 +1,4 @@
-//! The tasks each session has already been told to prove, so the notice is given once per task.
+//! The tasks each session has already been told to prove, so the first edit is denied once per task.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ pub(super) fn told(project: &Project, session: &str, task: &str) -> bool {
 }
 
 /// Records that `session` was told about `task`. A session without a usable name records nothing.
-fn mark_told(project: &Project, session: &str, task: &str) {
+pub(super) fn mark_told(project: &Project, session: &str, task: &str) {
     let Some(file) = file(project, session) else {
         return;
     };
@@ -31,33 +31,6 @@ fn mark_told(project: &Project, session: &str, task: &str) {
     if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
         let _ = writeln!(out, "{task}");
     }
-}
-
-fn stash_file(project: &Project, session: &str, call: &str) -> Option<PathBuf> {
-    let clean = |s: &str| -> String { s.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect() };
-    let (session, call) = (clean(session), clean(call));
-    (!session.is_empty() && !call.is_empty()).then(|| project.root.join("hook-state").join(format!("notice-out-{session}-{call}")))
-}
-
-/// Keeps the notice about `task` for the post-tool-use of the call `call`.
-pub(super) fn stash(project: &Project, session: &str, call: &str, task: &str, text: &str) {
-    if let Some(file) = stash_file(project, session, call) {
-        let _ = std::fs::write(file, format!("{task}\n{text}"));
-    }
-}
-
-/// The notice that `stash` kept for the call, which is removed. The task counts as told only
-/// here, once the call ran, so a call that is denied after its pre-tool-use loses no notice.
-pub(super) fn take(project: &Project, session: &str, call: &str) -> Option<String> {
-    let file = stash_file(project, session, call)?;
-    let kept = std::fs::read_to_string(&file).ok()?;
-    let _ = std::fs::remove_file(&file);
-    let (task, text) = kept.split_once('\n')?;
-    if text.is_empty() || told(project, session, task) {
-        return None;
-    }
-    mark_told(project, session, task);
-    Some(text.to_string())
 }
 
 /// Removes the `notice-*` records in `dir` that last changed more than `KEEP` ago.

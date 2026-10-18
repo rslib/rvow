@@ -93,7 +93,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Added
 
 - Warn with `shared-scope` in `rvow check` when two tasks of one change share a tracked file, naming both tasks and at most 3 files.
-- Give the agent one notice that names `rvow prove <task>` at the first source edit of a baseline pending task in a session, with the edit allowed.
+- Add the hook rule `baseline-first`, which denies the first source edit of a baseline pending task once per session with a line that names `rvow prove <task>`, so the first prove records the red on the warm tree instead of a base commit build.
+  A second try goes through, and any yolo tier turns the rule off.
   A file in the `test_globs` gets no notice, and a Bash command that writes a source file counts as an edit.
 - Record the duration of each hook call in `hook-stats.jsonl` and print the median and the 95th percentile of each hook in `rvow stats`.
 - A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.

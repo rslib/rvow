@@ -153,7 +153,12 @@ impl Fx {
     /// An allowed Write call of `session` on `rel`, which puts the file in the session's record.
     fn edit(&self, session: &str, rel: &str) {
         let input = json!({"file_path": self.repo().join(rel)});
-        let out = self.event("pre-tool-use", json!({"tool_name": "Write", "tool_input": input, "session_id": session}));
+        let call = json!({"tool_name": "Write", "tool_input": input, "session_id": session});
+        let mut out = self.event("pre-tool-use", call.clone());
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        if out.as_ref().is_some_and(|v| v.to_string().contains("has no baseline yet")) {
+            out = self.event("pre-tool-use", call);
+        }
         assert_eq!(out, None);
     }
 }

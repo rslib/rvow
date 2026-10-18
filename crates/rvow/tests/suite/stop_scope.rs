@@ -77,10 +77,17 @@ impl Fx {
     fn edit(&self, rel: &str) {
         let input = json!({"file_path": self.root.join("repo").join(rel)});
         let payload = json!({"cwd": self.root.join("repo"), "tool_name": "Write", "tool_input": input, "session_id": "s1"});
-        let mut child =
-            self.cmd(RVOW).args(["hook", "claude", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
-        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        let send = || {
+            let mut child =
+                self.cmd(RVOW).args(["hook", "claude", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+            String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+        };
+        let mut out = send();
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        if out.contains("has no baseline yet") {
+            out = send();
+        }
         assert_eq!(out.trim(), "", "the edit of {rel} was held back");
     }
 

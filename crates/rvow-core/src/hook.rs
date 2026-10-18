@@ -702,7 +702,12 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let session = input.get("session_id").and_then(Value::as_str);
     let tier = yolo::active(project).map(|on| on.tier);
-    let found = pre_tool_use_denial(project, input)?;
+    let found = match pre_tool_use_denial(project, input)? {
+        Some(d) => Some(d),
+        // Under yolo the rule is off: an audit would use up the session's one denial unseen.
+        None if Rule::BaselineFirst.mode_in(tier) == Mode::Enforce => session.and_then(|s| baseline_first(project, s, input)),
+        None => None,
+    };
     // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
     let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
     let mode = |d: &Denial| {
@@ -720,12 +725,6 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
             streak::reset(project, s);
             record_changes(project, s, input);
             record_before_snapshot(project, s, input);
-            // The notice rides the post-tool-use answer of the same call, so an allowed call stays silent here.
-            if let Some(id) = input.get("tool_use_id").and_then(Value::as_str)
-                && let Some((task, text)) = first_edit_notice(project, s, input)
-            {
-                notice_state::stash(project, s, id, &task, &text);
-            }
         }
         return Ok(None);
     };
@@ -834,10 +833,10 @@ fn changed_rels(input: &Value, cwd: &Path, top: &Path) -> Vec<String> {
     }
 }
 
-/// The task id and the one-line notice for the first source edit of a baseline-pending task in
-/// `session`, or `None`. A source file is a file in the `files:` scope of the task that no `test_globs` entry
-/// matches. Each task is named once per session. Any failure gives no notice.
-fn first_edit_notice(project: &Project, session: &str, input: &Value) -> Option<(String, String)> {
+/// The denial of the first source edit of a baseline-pending task in `session`, or `None`. A source
+/// file is a file in the `files:` scope of the task that no `test_globs` entry matches. Each task is
+/// denied once per session, so a second try goes through. Any failure denies nothing.
+fn baseline_first(project: &Project, session: &str, input: &Value) -> Option<Denial> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let top = git::toplevel(&cwd).ok()?;
     let rels: Vec<String> = changed_rels(input, &cwd, &top).into_iter().filter(|r| !r.starts_with(':')).collect();
@@ -865,10 +864,13 @@ fn first_edit_notice(project: &Project, session: &str, input: &Value) -> Option<
                 continue;
             }
             if !notice_state::told(project, session, &id) {
-                let text = format!(
-                    "rvow: {id} is baseline pending. Run `rvow prove {id}` now, before more source edits. It records that the check fails, which is cheap now and a base commit build later."
+                notice_state::mark_told(project, session, &id);
+                return denial(
+                    Rule::BaselineFirst,
+                    format!(
+                        "{id} has no baseline yet. Run `rvow prove {id}` first, then make this edit: before the work the check fails on the warm tree, which is cheap, and after it rvow builds the base commit. This edit is denied once."
+                    ),
                 );
-                return Some((id, text));
             }
         }
     }
@@ -911,8 +913,7 @@ fn record_before_snapshot(project: &Project, session: &str, input: &Value) {
 /// Claude Code `PostToolUse`: snapshots the tree after a checked call, diffs it
 /// against the before snapshot of the same call, and records each changed path
 /// with its new blob id for the session (or its subagent). A call with no
-/// before record (a read) takes no snapshot and records nothing. The answer carries the first
-/// edit notice that the pre-tool-use of the same call kept, as additional context.
+/// before record (a read) takes no snapshot and records nothing.
 pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let Some(session) = input.get("session_id").and_then(Value::as_str) else {
         return Ok(None);
@@ -926,14 +927,7 @@ pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<V
     };
     let agent = input.get("agent_id").and_then(Value::as_str);
     crate::provenance::after_call(project, &top, session, agent, id);
-    // The same handler answers PostToolUseFailure, and the event name must match the call's.
-    let event = input.get("hook_event_name").and_then(Value::as_str).unwrap_or("PostToolUse");
-    Ok(notice_state::take(project, session, id).map(|text| {
-        json!({"hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": text,
-        }})
-    }))
+    Ok(None)
 }
 
 /// Whether drift item text names `path` as a whole word, so a short name
@@ -1768,12 +1762,21 @@ mod tests {
 
     fn pre(p: &Project, repo: &Path, session: &str, tool: &str, input: Value) -> Option<Value> {
         let call = json!({"session_id": session, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
-        claude_pre_tool_use(p, &call).unwrap()
+        retried(p, &call)
     }
 
     fn pre_agent(p: &Project, repo: &Path, session: &str, agent: &str, tool: &str, input: Value) -> Option<Value> {
         let call = json!({"session_id": session, "agent_id": agent, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
-        claude_pre_tool_use(p, &call).unwrap()
+        retried(p, &call)
+    }
+
+    /// The pre-tool-use answer of `call`; the first source edit is denied once for the baseline, and an agent retries it.
+    fn retried(p: &Project, call: &Value) -> Option<Value> {
+        let out = claude_pre_tool_use(p, call).unwrap();
+        if out.as_ref().is_some_and(|v| v.to_string().contains("has no baseline yet")) {
+            return claude_pre_tool_use(p, call).unwrap();
+        }
+        out
     }
 
     fn stop_of(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {
