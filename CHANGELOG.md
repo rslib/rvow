@@ -193,6 +193,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the first `rvow prove` of a task refusing a good red when another active change on the branch had proved its work in a shared file: that work no longer counts as the task's own.
+- Fix a chained verify such as `cargo test a && cargo test b` passing when the filter of one cargo run matched no test: a cargo run that ran 0 tests now makes the whole run count 0 tests.
 - Fix the shell rules being skipped for a harness whose shell tool is not named `Bash`, such as OpenCode's `bash`, Codex's `shell` or Gemini CLI's `run_shell_command`: rvow now sorts the tools of every harness from one table.
 - Fix a plan edit confirmed together with a later `rvow amend --unlock` showing as drift again: an unlock no longer moves the drift baseline.
 - Fix `rvow init` leaving files of one machine for git to track: a new store now ignores the hook state, the provenance store, the hook stats, the leases, the yolo state, the rerun cache and, in home mode, the seal key.

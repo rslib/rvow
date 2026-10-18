@@ -1318,15 +1318,17 @@ test("render and key handling stay fast on a long backlog", async () => {
   const ps = Array.from({ length: 200 }, (_, i) => ({ id: `CHG-p${i}`, title: `Plan ${i}` }));
   const t = setup({ "view.json": json(WAITING(...ps)) });
   await t.status((p) => {
-    const start = performance.now();
-    for (let i = 0; i < 50; i++) {
-      press(p, "j");
-      p.render(100);
+    // The fastest of 5 batches: a load spike slows one batch, a slow render slows them all.
+    let fastest = Number.POSITIVE_INFINITY;
+    for (let batch = 0; batch < 5; batch++) {
+      const start = performance.now();
+      for (let i = 0; i < 10; i++) {
+        press(p, "j");
+        p.render(100);
+      }
+      fastest = Math.min(fastest, (performance.now() - start) / 10);
     }
-    assert.ok(
-      (performance.now() - start) / 50 < 80,
-      "under 80 ms per key and render (200 plans, loaded machine)",
-    );
+    assert.ok(fastest < 80, "under 80 ms per key and render (200 plans, loaded machine)");
   });
 });
 

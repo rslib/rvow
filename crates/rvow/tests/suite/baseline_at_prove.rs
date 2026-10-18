@@ -226,3 +226,38 @@ fn baseline_at_first_prove_red_keeps_the_task_open_after_the_work_starts() {
     let out = r.status();
     assert!(out.contains("missing") && !out.contains("stale"), "{out}");
 }
+
+/// Accepts a change of one task on `main` and returns the task id.
+fn one_task(r: &Repo, title: &str, verify: &str, files: &str) -> String {
+    let out = r.ok(&["new", title]);
+    let id = out.lines().find_map(|l| l.strip_prefix("created: ")).unwrap().to_string();
+    let dir = PathBuf::from(out.lines().find_map(|l| l.strip_prefix("path: ")).unwrap());
+    std::fs::write(
+        dir.join("proposal.md"),
+        format!("branch: main\n\n# {title}\n\n## Why\nw\n\n## What changes\nw\n\n## Out of scope\nNone.\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("tasks.md"), format!("- TSK-new1 {title}\n  verify: {verify}\n  files: {files}\n")).unwrap();
+    r.ok(&["accept", &id, "--yes"]);
+    let tasks = std::fs::read_to_string(
+        PathBuf::from(r.ok(&["path", &id]).lines().find_map(|l| l.strip_prefix("path: ")).unwrap()).join("tasks.md"),
+    )
+    .unwrap();
+    tasks.lines().find_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).unwrap()
+}
+
+#[test]
+fn baseline_shared_scope_work_of_another_changes_proved_task_is_not_this_tasks() {
+    // Change A proved its work in src.txt. Change B shares the file, so the
+    // first prove of B runs on the live tree, where its check fails, and not on
+    // the base commit, where it passes.
+    let r = Repo::new("shared-scope");
+    let a = one_task(&r, "First", CHECK, "src.txt");
+    r.ok(&["prove", &a]);
+    std::fs::write(r.repo.join("src.txt"), "ok\n").unwrap();
+    assert!(r.ok(&["prove", &a]).contains("result: proved"));
+    let b = one_task(&r, "Second", "grep -q old src.txt && echo 'test result: ok. 1 passed; 0 failed;'", "src.txt");
+    let (out, code) = r.rvow(&["prove", &b]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("baseline: recorded"), "{out}");
+}

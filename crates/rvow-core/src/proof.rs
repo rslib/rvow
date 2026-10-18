@@ -624,7 +624,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     // the scope of a proved task, whose work may be this task's too.
     let (work, hidden) = match (pending, change.base_commit()) {
         (true, Some(base)) => {
-            let done = done_scope(project, home, change, task, &now)?;
+            let done = done_scope(project, home, &changes, change, task, &now)?;
             let work = crate::baseline::work_files(&top, &config, base, task, &done)?;
             let hidden = work.is_empty() && !done.is_empty() && !crate::baseline::work_files(&top, &config, base, task, &[])?.is_empty();
             (Some(work), hidden)
@@ -836,13 +836,20 @@ fn base_baseline(
     Ok((out, hint))
 }
 
-/// The scope of the change's proved tasks other than `task`: work there was
-/// done for those tasks, not for this one.
-fn done_scope(project: &Project, home: &Path, change: &Active, task: &Task, now: &Now) -> Result<Vec<String>> {
+/// The scope of the proved tasks other than `task`, of its change and of every
+/// other active change on its branch: work there was done for those tasks, not
+/// for this one.
+fn done_scope(project: &Project, home: &Path, changes: &[Active], change: &Active, task: &Task, now: &Now) -> Result<Vec<String>> {
+    let others = match change.branch() {
+        Some(branch) => on_branch(changes, branch).into_iter().filter(|c| c.dir.id != change.dir.id).collect(),
+        None => Vec::new(),
+    };
     let mut out = Vec::new();
-    for t in change.loaded.tasks.iter().filter(|t| t.id != task.id) {
-        if state_for(project, home, change, t, now)? == State::Proved {
-            out.extend(t.files.iter().cloned());
+    for c in std::iter::once(change).chain(others) {
+        for t in c.loaded.tasks.iter().filter(|t| t.id != task.id) {
+            if state_for(project, home, c, t, now)? == State::Proved {
+                out.extend(t.files.iter().cloned());
+            }
         }
     }
     Ok(out)
