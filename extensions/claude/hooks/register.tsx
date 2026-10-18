@@ -752,7 +752,7 @@ export const register: Register = (on) => {
     if (blocked) return { result: blocked }
     const answer = await $.ui
       .ask(
-        `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
+        `Every task of ${change} is proved or stale, and archive re-proves the stale ones. Archive it? The gate trusts an archived change and never reruns its tasks.`,
         ['Archive', 'Not yet'],
       )
       .catch(() => 'Not yet')

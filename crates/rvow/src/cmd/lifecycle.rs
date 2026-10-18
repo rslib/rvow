@@ -46,6 +46,12 @@ pub fn archive(target: &str) -> Result<Reply> {
     let judged = matches!(rvow_core::review::judge_for(&p, &cwd()?, target), Ok(Some(_)));
     let a = archive::archive(&p, &home, &cwd()?, target)?;
     let mut r = Reply::new();
+    for task in &a.reproved {
+        r.line(format!("  reproved {task}"));
+    }
+    if !a.reproved.is_empty() {
+        r.set("reproved", a.reproved.clone());
+    }
     let mut rows = Vec::new();
     for (op, id) in &a.merged {
         r.line(format!("  {} {id}", op.word()));

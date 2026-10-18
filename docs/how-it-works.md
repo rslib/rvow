@@ -163,6 +163,7 @@ A proof ties a passing run to what the run saw: the task, the requirements it co
 A proof is stale when one of those has changed since the run.
 The reasons are task changed, requirement changed, inputs changed, private policy changed and environment changed.
 A stale task needs a new proof, and `rvow prove --stale` runs them all.
+`rvow archive` re-proves the stale tasks of the change before its gate, outside the project lock, and a failed re-proof stops the archive with the code `gate`.
 
 A task is flaky only when a pass and a failure share the same run key and the same worktree fingerprint.
 Each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, so a fix outside the task's files changes the fingerprint and clears the failure instead of marking it flaky.
@@ -192,7 +193,7 @@ Work written before the plan is accepted fails too: while a backlog plan names t
 It runs every verify command again in a clean worktree of HEAD, so a proof that depended on an uncommitted file or a local state fails.
 The rerun skips a task whose proof is current and whose files are all committed: it was proved on this very content, so the state "proved" is what the push trusts.
 It runs the tasks that are not proved, or whose files changed since the proof.
-A task of an archived change is never rerun, because archiving needs every task proved and is a decision of the user.
+A task of an archived change is never rerun, because archiving needs every task proved, after it re-proves the stale ones, and is a decision of the user.
 Set `rerun_proven = true` to rerun proven tasks as well.
 `rvow gate --out` writes the rerun results to a file, and `rvow ingest` adds them to the ledger of a home store.
 
@@ -297,7 +298,7 @@ Both the Claude mod and the pi extension give the agent these tools:
 
 - `rvow_accept` asks you to accept a ready plan. You read the review and the checklist in a dialog, and nothing is accepted unless you say yes.
 - `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
-- `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved and no plan edit is pending, and it names what is missing otherwise. An archived change is trusted, and a push never reruns its tasks.
+- `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved or stale and no plan edit is pending, and it names what is missing otherwise, such as a missing, failed, flaky or blocked task. `rvow archive` then re-proves the stale tasks. An archived change is trusted, and a push never reruns its tasks.
 - `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
 - `rvow_judge` runs the spec conformance judge for a change in a clean read-only session with no rvow extension, and records its findings with the model it ran on.
   In pi the judge session also starts with `--no-skills` and `--no-context-files`, so it loads no skill and no AGENTS.md or CLAUDE.md. Type `/rvow-judge [CHG-id] [model]` yourself instead.

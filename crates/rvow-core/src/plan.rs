@@ -205,6 +205,43 @@ fn wide_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
         .collect()
 }
 
+/// The most shared files a `shared-scope` warning lists by name.
+const SHARED_LISTED: usize = 3;
+
+/// A warning for each pair of tasks whose `files:` match a common tracked file: the proof
+/// of both goes stale when that file changes.
+fn shared_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
+    if tasks.len() < 2 {
+        return Vec::new();
+    }
+    let Ok(listing) = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]) else {
+        return Vec::new();
+    };
+    let sets: Vec<_> = tasks.iter().map(|t| crate::fingerprint::globset(&t.files).ok()).collect();
+    let mut shared: BTreeMap<(usize, usize), Vec<&str>> = BTreeMap::new();
+    for file in listing.lines() {
+        let hits: Vec<usize> =
+            sets.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.is_match(file))).map(|(i, _)| i).collect();
+        for (n, &a) in hits.iter().enumerate() {
+            for &b in &hits[n + 1..] {
+                shared.entry((a, b)).or_default().push(file);
+            }
+        }
+    }
+    shared
+        .into_iter()
+        .map(|((a, b), files)| {
+            let listed = files.iter().take(SHARED_LISTED).copied().collect::<Vec<_>>().join(", ");
+            let rest = files.len().saturating_sub(SHARED_LISTED);
+            let more = if rest > 0 { format!(" and {rest} more") } else { String::new() };
+            let noun = if files.len() == 1 { "file" } else { "files" };
+            let message =
+                format!("{} and {} share {} {noun}: {listed}{more}; their proofs go stale together", tasks[a].id, tasks[b].id, files.len());
+            (change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::SharedScope, tasks[b].line, message))
+        })
+        .collect()
+}
+
 /// Shell operators that make a verify command more than one program, so the
 /// single-program rules below do not apply.
 const OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", ">", "<", "`", "$(", "\\", "\n"];
@@ -335,6 +372,7 @@ fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded,
     findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
+    findings.extend(shared_scopes(top, &loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
     let missing = blamed_programs(top, &loaded.tasks, &runners, &filled);
     Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
@@ -503,6 +541,56 @@ mod tests {
         assert_eq!(wide.len(), 1, "{:?}", r.findings);
         assert!(wide[0].1.message.contains("src/**") && wide[0].1.message.contains("goes stale"), "{}", wide[0].1.message);
         assert_eq!(wide[0].1.rule.severity(), crate::diag::Severity::Warning);
+    }
+
+    fn shared_scope_findings(tasks: &str, files: &[&str]) -> Vec<String> {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for f in files {
+            std::fs::write(repo.join(f), "x").unwrap();
+        }
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "files"]);
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(c.path.join("tasks.md"), tasks).unwrap();
+        let r = &check(&p, &repo, None).unwrap()[0];
+        r.findings
+            .iter()
+            .filter(|(_, d)| d.rule == crate::diag::Rule::SharedScope)
+            .map(|(_, d)| {
+                assert_eq!(d.rule.severity(), crate::diag::Severity::Warning);
+                assert_eq!(d.rule.code(), "shared-scope");
+                d.message.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn check_warns_about_a_shared_scope_names_both_tasks() {
+        let tasks = "- TSK-new1 A\n  verify: true\n  files: src/a.rs\n- TSK-new2 B\n  verify: true\n  files: src/a.rs\n";
+        let msgs = shared_scope_findings(tasks, &["src/a.rs"]);
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(msgs[0].contains("TSK-new1") && msgs[0].contains("TSK-new2") && msgs[0].contains("src/a.rs"), "{}", msgs[0]);
+    }
+
+    #[test]
+    fn check_warns_about_a_shared_scope_cuts_after_three_files() {
+        let tasks = "- TSK-new1 A\n  verify: true\n  files: src/*.rs\n- TSK-new2 B\n  verify: true\n  files: src/**\n";
+        let names = ["a", "b", "c", "d", "e"].map(|n| format!("src/{n}.rs"));
+        let files: Vec<&str> = names.iter().map(String::as_str).collect();
+        let msgs = shared_scope_findings(tasks, &files);
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(msgs[0].contains("src/a.rs") && msgs[0].contains("src/c.rs"), "{}", msgs[0]);
+        assert!(!msgs[0].contains("src/d.rs") && msgs[0].contains("2 more"), "{}", msgs[0]);
+    }
+
+    #[test]
+    fn check_warns_about_a_shared_scope_stays_quiet_for_separate_scopes() {
+        let tasks = "- TSK-new1 A\n  verify: true\n  files: src/a.rs\n- TSK-new2 B\n  verify: true\n  files: src/b.rs\n";
+        let msgs = shared_scope_findings(tasks, &["src/a.rs", "src/b.rs"]);
+        assert!(msgs.is_empty(), "{msgs:?}");
     }
 
     #[test]

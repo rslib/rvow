@@ -344,6 +344,27 @@ test("rvow_archive asks only when every task is proved, and archives on a yes", 
   await assert.rejects(yoloCall(value, { change: "CHG-a1" }, { hasUI: false }), /no one is here/);
 });
 
+test("rvow_archive asks the user when a task is stale", async () => {
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    return args[0] === "hook"
+      ? { code: 0, out: viewOf(["proved", "stale"]) }
+      : { code: 0, out: "archived CHG-a1\n" };
+  });
+  const asked: string[] = [];
+  await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(seen.at(-1), ["archive", "CHG-a1"]);
+  for (const state of ["stale (inputs changed)"])
+    assert.equal(archiveBlockers({ id: "C", tasks: [{ id: "T", state }], pending: [] }, "C"), null);
+  for (const state of ["missing", "failed", "flaky", "blocked"])
+    assert.match(
+      archiveBlockers({ id: "C", tasks: [{ id: "T", state }], pending: [] }, "C") ?? "",
+      new RegExp(`T is ${state}`),
+    );
+});
+
 test("rvow_archive waits for the gate checks instead of the 60 s default", async () => {
   const waits = new Map<string, number>();
   const value = tool("rvow_archive", async (args, _cwd, _stdin, timeoutMs) => {
@@ -371,7 +392,7 @@ test("rvow_accept waits the fixed accept time, since accept runs no check", asyn
 
 test("rvow_archive names what is missing and asks nothing", async () => {
   for (const [states, pending, text] of [
-    [["proved", "stale"], 0, /TSK-1 is stale/],
+    [["proved", "failed"], 0, /TSK-1 is failed/],
     [["proved"], 1, /pending plan edit/],
   ] as const) {
     const value = tool("rvow_archive", async () => ({

@@ -8,6 +8,8 @@ mod agent_mode;
 mod amend_baseline;
 #[path = "suite/amend_fixes.rs"]
 mod amend_fixes;
+#[path = "suite/archive_reprove.rs"]
+mod archive_reprove;
 #[path = "suite/attest.rs"]
 mod attest;
 #[path = "suite/audit_build.rs"]

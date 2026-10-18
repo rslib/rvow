@@ -291,7 +291,7 @@ export function formatJudgeFindings(id: string, model: string, findings: JudgeFi
 
 export const ARCHIVE = 'mcp__rvow__rvow_archive'
 export const ARCHIVE_DESCRIPTION =
-  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.'
+  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale and no plan edit is pending; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
 export const ARCHIVE_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -299,7 +299,7 @@ export const ARCHIVE_SCHEMA = {
   additionalProperties: false,
 }
 
-/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+/** Why a change cannot be archived yet, or `null` when every task is proved or stale and no plan edit is pending. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
 export function archiveBlockers(
   change: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] } | undefined,
   id: string,
@@ -307,9 +307,11 @@ export function archiveBlockers(
   if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`
   if (change.tasks.length === 0)
     return `rvow: ${id} has no task, so there is nothing proved to archive`
-  const open = change.tasks.filter((t) => t.state !== 'proved').map((t) => `${t.id} is ${t.state}`)
+  const open = change.tasks
+    .filter((t) => t.state !== 'proved' && !t.state.startsWith('stale'))
+    .map((t) => `${t.id} is ${t.state}`)
   if (open.length > 0)
-    return `rvow: ${id} is not ready to archive: ${open.join(', ')}; prove them first`
+    return `rvow: ${id} is not ready to archive: ${open.join(', ')}; fix them first`
   if (change.pending.length > 0) {
     return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`
   }

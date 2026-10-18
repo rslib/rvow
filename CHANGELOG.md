@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Re-prove the stale tasks of a change in `rvow archive` before its gate, outside the project lock.
+  A failed re-proof stops the archive with the code `gate`.
+- Offer a change with stale tasks in the archive tool of the Claude mod and pi.
+  The tool refuses only for a missing, failed, flaky or blocked task or a pending plan edit.
 - Reuse one warm worktree per project for the base commit baseline, so its build output stays warm and only changed files build again.
   A busy or broken one falls back to a temporary worktree.
 - Make each hook find its project from a local index in the rvow home instead of walking the home, which cuts about 70 ms from every hook call.
@@ -83,6 +87,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Warn with `shared-scope` in `rvow check` when two tasks of one change share a tracked file, naming both tasks and at most 3 files.
 - Give the agent one notice that names `rvow prove <task>` at the first source edit of a baseline pending task in a session, with the edit allowed.
   A file in the `test_globs` gets no notice, and a Bash command that writes a source file counts as an edit.
 - Record the duration of each hook call in `hook-stats.jsonl` and print the median and the 95th percentile of each hook in `rvow stats`.

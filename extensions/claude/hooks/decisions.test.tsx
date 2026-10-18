@@ -128,10 +128,18 @@ test('rvow_archive asks only when every task is proved, and archives on a yes', 
   expect(out).toContain('archived CHG-a1')
 })
 
-test('rvow_archive names what is missing and asks nothing when the change is not ready', async ($, on) => {
+test('rvow_archive asks the user when a task is stale and archives on a yes', async ($, on) => {
   const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'stale']))
   const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
-  expect(out).toContain('TSK-1 is stale')
+  expect(asked.length).toBe(1)
+  expect(ran.filter((l) => l.startsWith('archive'))).toEqual(['archive CHG-a1'])
+  expect(out).toContain('archived CHG-a1')
+})
+
+test('rvow_archive names the failed task and asks nothing', async ($, on) => {
+  const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'failed']))
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(out).toContain('TSK-1 is failed')
   expect(asked).toEqual([])
   expect(ran.filter((l) => l.startsWith('archive'))).toEqual([])
 })
@@ -163,4 +171,9 @@ test('archiveBlockers reads the state of one change', () => {
   expect(archiveBlockers(ok, 'CHG-a1')).toBeNull()
   expect(archiveBlockers(undefined, 'CHG-a1')).toContain('not an active change')
   expect(archiveBlockers({ ...ok, tasks: [] }, 'CHG-a1')).toContain('no task')
+  const task = (state: string) => ({ ...ok, tasks: [{ id: 'TSK-1', state }] })
+  expect(archiveBlockers(task('stale'), 'CHG-a1')).toBeNull()
+  expect(archiveBlockers(task('stale (inputs changed)'), 'CHG-a1')).toBeNull()
+  for (const state of ['missing', 'failed', 'flaky', 'blocked'])
+    expect(archiveBlockers(task(state), 'CHG-a1')).toContain(`TSK-1 is ${state}`)
 })

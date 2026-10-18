@@ -20,9 +20,9 @@ export type ConfirmInput = { decision?: "accept" | "reject"; id?: string };
 export const ACCEPT_DESCRIPTION =
   "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
 export const ARCHIVE_DESCRIPTION =
-  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.";
+  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale and no plan edit is pending; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.";
 
-/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+/** Why a change cannot be archived yet, or `null` when every task is proved or stale and no plan edit is pending. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
 export function archiveBlockers(
   found: { id: string; tasks?: { id: string; state?: string }[]; pending?: unknown[] } | undefined,
   id: string,
@@ -32,10 +32,10 @@ export function archiveBlockers(
   if (change.tasks.length === 0)
     return `rvow: ${id} has no task, so there is nothing proved to archive`;
   const open = change.tasks
-    .filter((t) => t.state !== "proved")
+    .filter((t) => t.state !== "proved" && !t.state?.startsWith("stale"))
     .map((t) => `${t.id} is ${t.state ?? "unknown"}`);
   if (open.length > 0)
-    return `rvow: ${id} is not ready to archive: ${open.join(", ")}; prove them first`;
+    return `rvow: ${id} is not ready to archive: ${open.join(", ")}; fix them first`;
   if (change.pending.length > 0)
     return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`;
   return null;
@@ -406,7 +406,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         };
       const yes = await ctx.ui.confirm(
         `rvow ${change}`,
-        `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
+        `Every task of ${change} is proved or stale, and archive re-proves the stale ones. Archive it? The gate trusts an archived change and never reruns its tasks.`,
       );
       if (!yes)
         return declined(

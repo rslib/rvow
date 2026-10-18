@@ -84,6 +84,13 @@ mod tests {
     }
 
     #[test]
+    fn the_skill_says_archive_reproves_stale_tasks() {
+        let text = render().unwrap();
+        assert!(text.contains("`rvow archive` re-proves stale tasks"), "{text}");
+        assert!(text.contains("proved or stale, call the `rvow_archive` tool"), "{text}");
+    }
+
+    #[test]
     fn skill_description_names_the_trigger_words_and_fits_the_budget() {
         let text = render().unwrap();
         let description = text.lines().find(|l| l.starts_with("description: ")).unwrap().trim_start_matches("description: ");

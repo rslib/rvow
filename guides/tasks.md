@@ -7,7 +7,7 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 - Title: one line that says what the task delivers.
 - `covers:` the requirement ids the task delivers, ids only; a small change needs none.
 - `verify:` the command that proves the task. Required.
-- `files:` the paths the task may touch. Required. Avoid `**`: a proof goes stale when any file in scope changes, and `rvow check` warns past 40 files.
+- `files:` the paths the task may touch. Required. Avoid `**`: a proof goes stale when a scope file changes (`rvow archive` re-proves it); `rvow check` warns past 40 files.
 - `baseline: pass` only when the command is expected to pass before the work starts.
 - `mutants:` an extra check after `verify:` passes, such as `cargo mutants --in-diff "$RVOW_DIFF"`. Set it when the tests could pass without proving anything. `RVOW_DIFF` holds the task's diff against the base commit. A failing run fails the task.
 - `timeout:` such as `90s`, `20m` or `1h`, only when the config default is too short.
