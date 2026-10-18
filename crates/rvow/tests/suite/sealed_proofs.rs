@@ -430,10 +430,14 @@ fn seal_trust_a_respaced_copy_of_a_sealed_line_is_rerun() {
     // The same sealed pass line again with added whitespace. It parses to the
     // same event and its seal still checks, but its parents are stale. The
     // copy must be the newest proof, and equal timestamps break by line hash,
-    // so try whitespace until the copy wins that tie.
+    // so try whitespace until the copy wins that tie. A high pass hash needs
+    // many tries: the bits of n pick a space or a tab for each position.
     let pass_hash = rvow_core::ledger::short_hash(pass.as_bytes());
-    let copy = (1..=64)
-        .map(|n| format!("{pass}{}", " ".repeat(n)))
+    let copy = (1u32..=1_000_000)
+        .map(|n| {
+            let tail: String = (0..=n.ilog2()).map(|bit| if n >> bit & 1 == 1 { '\t' } else { ' ' }).collect();
+            format!("{pass}{tail}")
+        })
         .find(|line| rvow_core::ledger::short_hash(line.as_bytes()) > pass_hash)
         .expect("no whitespace variant made the copy the newest proof");
     fx.append_raw(&copy);
