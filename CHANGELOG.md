@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Write the Claude Code mod to `$XDG_DATA_HOME/rvow/claude-plugin`, or `~/.local/share/rvow/claude-plugin`, even when `RVOW_HOME` names another folder, so a synced plan store holds no mod code.
+  `rvow install` removes the old copy at `$RVOW_HOME/claude-plugin` and moves the Claude marketplace to the new folder.
 - Send the brief once per session: the same brief again sends nothing, a change of only the task counts sends the `tasks:` line, and a compact, a clear or a new next task sends the full brief.
 - Record the files that any writing tool changed, such as an MCP tool or codemode, with one snapshot after the call, and take no snapshot for a read-only tool.
   A change that no call recorded, such as a background job's, counts for the session at its next shell or editor call and at the Stop hook.

@@ -152,10 +152,10 @@ fn audit_upgrade_a_second_install_refreshes_every_managed_file_of_an_older_one()
     let f = Fixture::new("whole");
     std::fs::create_dir_all(f.0.join("pi")).unwrap();
     assert!(f.cli(&["install"]).status.success());
-    let (claude, store, pi) = (f.0.join(".claude"), f.0.join("store"), f.0.join("pi"));
-    let plugin = store.join("claude-plugin/plugins/rvow");
+    let (claude, mod_dir, pi) = (f.0.join(".claude"), f.0.join("data/rvow/claude-plugin"), f.0.join("pi"));
+    let plugin = mod_dir.join("plugins/rvow");
     let skill_text = std::fs::read_to_string(plugin.join("skills/rvow/SKILL.md")).unwrap();
-    let stale = || install::stale_managed_files(&claude, &store, Some(&pi), &skill_text);
+    let stale = || install::stale_managed_files(&claude, &mod_dir, Some(&pi), &skill_text);
     assert_eq!(stale(), Vec::<PathBuf>::new(), "a fresh install is current");
 
     // The files an older binary wrote: the mod's files hold other text, the others carry a valid marker for it.

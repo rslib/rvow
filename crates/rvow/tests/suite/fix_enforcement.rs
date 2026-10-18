@@ -810,7 +810,7 @@ fn a_changed_bundled_skill_is_named_as_stale() {
     let old = "---\nname: rvow\ndescription: a\n---\nold text\n";
     let new = "---\nname: rvow\ndescription: a\n---\nnew text\n";
     install::skill(&claude, old).unwrap();
-    let stale = |text: &str| install::stale_managed_files(&claude, &fx.rvow_home(), None, text);
+    let stale = |text: &str| install::stale_managed_files(&claude, &fx.home().join(".local/share/rvow/claude-plugin"), None, text);
     assert_eq!(stale(old), Vec::<PathBuf>::new());
     assert_eq!(stale(new), vec![claude.join("skills/rvow/SKILL.md")]);
     install::skill(&claude, new).unwrap();
@@ -829,7 +829,7 @@ fn session_start_warns_about_a_stale_skill_mod_and_pi_file() {
     let tools = pi.join("extensions/rvow/tools.ts");
     let body = "export const old = 1;\n";
     std::fs::write(&tools, format!("// rvow-managed sha256:{}\n{body}", rvow_core::vow::sha256_hex(body.as_bytes()))).unwrap();
-    let plugin = fx.rvow_home().join("claude-plugin/plugins/rvow/hooks");
+    let plugin = fx.home().join(".local/share/rvow/claude-plugin/plugins/rvow/hooks");
     std::fs::create_dir_all(&plugin).unwrap();
     std::fs::write(plugin.join("format.ts"), "// old\n").unwrap();
 

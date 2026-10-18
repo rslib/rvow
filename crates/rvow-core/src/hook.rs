@@ -255,9 +255,7 @@ fn added_lines(diff: &str) -> String {
 /// Code's plugins and settings, the pi extension and the signing trust file.
 fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(home) = crate::store::home_dir() {
-        out.push(home.join(crate::install::MARKETPLACE_DIR));
-    }
+    out.extend(crate::install::mod_dir());
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
     if let Some(h) = &home {
         let claude = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|c| !c.is_empty()).map_or_else(|| h.join(".claude"), PathBuf::from);

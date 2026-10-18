@@ -59,6 +59,31 @@ pub fn pi_dir(home: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("PI_CODING_AGENT_DIR").filter(|d| !d.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| h.join(".pi/agent")))
 }
 
+/// The folder of the Claude Code mod marketplace: `<XDG_DATA_HOME>/rvow/claude-plugin`,
+/// else `<HOME>/.local/share/rvow/claude-plugin`. It is never under `RVOW_HOME`,
+/// which can name a synced plan store.
+pub fn mod_dir() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share"))).map(|d| d.join("rvow").join(MARKETPLACE_DIR))
+}
+
+/// Removes the rvow marketplace an older install wrote at `old`, when `old` is
+/// not `current`. A folder that does not hold the rvow marketplace stays.
+pub fn remove_old_mod(old: &Path, current: &Path) -> Result<Option<PathBuf>> {
+    if old == current {
+        return Ok(None);
+    }
+    let ours = std::fs::read_to_string(old.join(".claude-plugin/marketplace.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|m| m.get("name").and_then(Value::as_str) == Some("rvow"));
+    if !ours {
+        return Ok(None);
+    }
+    std::fs::remove_dir_all(old).map_err(|e| Error::io(old, e))?;
+    Ok(Some(old.to_path_buf()))
+}
+
 /// `text` as one shell word in single quotes; a single quote inside becomes `'\''`.
 pub(crate) fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
@@ -365,7 +390,7 @@ pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
 /// the skill, the mod's files and the pi extension files. An edited file
 /// counts too, since `rvow install` keeps edits and the user decides. A file
 /// that is not installed is not listed.
-pub fn stale_managed_files(claude_dir: &Path, rvow_home: &Path, pi_dir: Option<&Path>, skill_text: &str) -> Vec<PathBuf> {
+pub fn stale_managed_files(claude_dir: &Path, mod_dir: &Path, pi_dir: Option<&Path>, skill_text: &str) -> Vec<PathBuf> {
     let mut stale = Vec::new();
     let mut check = |path: PathBuf, current: &dyn Fn(&str) -> bool| {
         if std::fs::read_to_string(&path).is_ok_and(|installed| !current(&installed)) {
@@ -373,7 +398,7 @@ pub fn stale_managed_files(claude_dir: &Path, rvow_home: &Path, pi_dir: Option<&
         }
     };
     check(claude_dir.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
-    let plugin = rvow_home.join(MARKETPLACE_DIR).join("plugins/rvow");
+    let plugin = mod_dir.join("plugins/rvow");
     check(plugin.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
     check(plugin.join("hooks/hooks.json"), &|t| t == MOD_HOOKS_JSON);
     check(plugin.join("types/index.d.ts"), &|t| t == MOD_TYPES);

@@ -68,7 +68,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         let home = store::home_dir()?;
         let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
         if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
-            let warnings = skill_warnings(&home)?;
+            let warnings = skill_warnings()?;
             return match store::find(&cwd, &home) {
                 Ok(Some(p)) => {
                     let out = hooks::claude_session_start(Some(&p), &home, &input, &warnings);
@@ -113,14 +113,14 @@ fn count_duration(p: &store::Project, hook: stats::Hook, input: &serde_json::Val
 }
 
 /// One warning per stale or edited file that `rvow install` manages.
-fn skill_warnings(rvow_home: &Path) -> Result<Vec<String>> {
-    let Some(home) = env_dir("HOME") else {
+fn skill_warnings() -> Result<Vec<String>> {
+    let (Some(home), Some(mod_dir)) = (env_dir("HOME"), install::mod_dir()) else {
         return Ok(Vec::new());
     };
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let rendered = crate::skill::render()?;
     let pi = install::pi_dir(Some(&home));
-    Ok(install::stale_managed_files(&claude, rvow_home, pi.as_deref(), &rendered)
+    Ok(install::stale_managed_files(&claude, &mod_dir, pi.as_deref(), &rendered)
         .into_iter()
         .map(|path| {
             let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
@@ -174,7 +174,7 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
 }
 
 fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
-    let dir = store::home_dir()?.join(install::MARKETPLACE_DIR);
+    let dir = install::mod_dir().ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
     report(r, "Claude Code mod", install::claude_mod(&dir, rvow, &crate::skill::render()?)?);
     report(r, "old settings hooks", install::remove_claude_settings(settings)?);
     match which("claude") {
@@ -194,6 +194,9 @@ fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
             r.line(format!("  claude plugin marketplace add {}", dir.display()));
             r.line("  claude plugin install rvow@rvow");
         }
+    }
+    if let Some(old) = install::remove_old_mod(&store::home_dir()?.join(install::MARKETPLACE_DIR), &dir)? {
+        r.line(format!("old Claude Code mod: removed {}", old.display()));
     }
     Ok(())
 }
