@@ -88,6 +88,17 @@ impl Worktree {
         Some(Worktree { repo: repo.to_path_buf(), path: dir.to_path_buf(), warm: Some(lock) })
     }
 
+    /// The cargo build folder of the tree, never the user's. A warm tree keeps
+    /// it next to itself, so `git clean` never empties it. A temporary tree
+    /// keeps it inside, so it goes when the tree goes.
+    pub(crate) fn cargo_target(&self) -> Option<PathBuf> {
+        let name = self.path.file_name()?.to_string_lossy().into_owned();
+        Some(match self.warm {
+            Some(_) => self.path.with_file_name(format!("{name}-target")),
+            None => self.path.join(".rvow-cargo-target"),
+        })
+    }
+
     /// Links each `rerun_links` directory of the real repo into the tree.
     /// Nothing is linked unless the config names it: the tree stays a clean
     /// checkout of HEAD.
@@ -373,6 +384,18 @@ mod tests {
         let tree = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
         assert_eq!(std::fs::read_to_string(tree.path.join("a.txt")).unwrap(), "b", "the tracked file equals the new commit");
         assert!(!tree.path.join("stray.txt").exists(), "an untracked file that git does not ignore is gone");
+    }
+
+    #[test]
+    fn warm_target_of_each_tree_is_never_the_users() {
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        let held = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(held.cargo_target(), Some(dir.with_file_name(format!("{name}-target"))), "the warm tree builds next to itself");
+        let other = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        let target = other.cargo_target().unwrap();
+        assert!(target.starts_with(&other.path), "a busy warm tree's fallback builds inside itself: {target:?}");
     }
 
     #[test]

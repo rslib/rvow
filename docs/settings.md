@@ -83,12 +83,14 @@ The same holds for `rerun_proven`. By default a push trusts a task whose proof i
 
 The base commit baseline of `rvow prove` builds in one warm worktree per project, at `worktrees/<project key>/` in the rvow home.
 rvow moves it to the base commit and keeps its git-ignored build output, such as a CMake `build/` folder, so a second run builds only what changed.
+For cargo it has its own cargo build folder, `worktrees/<project key>-target/`, set through `CARGO_TARGET_DIR` whatever the cargo config or `rerun_env` says, and the temporary worktree of a busy warm one gets a throwaway folder inside itself.
+Cargo names the artifacts of two checkouts of one repository alike, so a warm worktree that shared the build folder of your checkout would overwrite your test binaries, and cargo would then call them fresh.
 When another run holds it, or a git step on it fails, the run uses a clean temporary worktree instead.
 A fixed path under the home folder also lets ccache, with `base_dir` set to the home folder, reuse compile results from other checkouts.
-rvow never removes a warm worktree; delete the folder at any time, and the next run makes it again.
+rvow never removes a warm worktree or its build folder; delete either at any time, and the next run makes it again.
 
 `rvow gate --rerun` keeps its promise of a clean checkout of HEAD: it builds in a new temporary worktree each time, never in the warm one.
-For a Rust project, point that build at a shared directory and link `target` in, so the reruns reuse the build of your own checkout:
+For a Rust project, point that build at a directory that only reruns use, or link `target` in, so the reruns start warm:
 
 ```toml
 rerun_env = { CARGO_TARGET_DIR = "/Users/me/.cache/rvow-target" }
@@ -97,7 +99,7 @@ rerun_links = ["target"]
 
 Use a directory of your own for `CARGO_TARGET_DIR`.
 `rvow accept` runs no verify command, and the first prove before the work runs in your own checkout, so these keys do not touch either.
-A new git worktree starts with an empty `target/`; export `CARGO_TARGET_DIR` in your shell to share one build folder between worktrees.
+Do not point two checkouts that both stay on disk, such as two git worktrees of one repository, at one cargo build folder: each overwrites the other's binaries.
 `rvow prove` prints one hint that says this when a base commit baseline takes more than 60 seconds and neither key is set.
 `rerun_links` turns the rerun cache off, as the section on linked build output says.
 

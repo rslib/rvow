@@ -138,6 +138,8 @@ mod syntax_units;
 mod tamper_holes;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
+#[path = "suite/warm_target.rs"]
+mod warm_target;
 #[path = "suite/warm_worktree.rs"]
 mod warm_worktree;
 #[path = "suite/worktrees.rs"]

@@ -161,3 +161,14 @@ fn docs_name_the_baseline_first_rule() {
     let unreleased = log.split("## [").nth(1).unwrap_or_default();
     assert!(unreleased.contains("`baseline-first`"), "the Unreleased changelog lacks the baseline-first rule");
 }
+
+#[test]
+fn docs_name_the_warm_target() {
+    let settings = doc("docs/settings.md");
+    assert!(settings.contains("its own cargo build folder"), "settings lacks the warm worktree's own build folder");
+    assert!(!settings.contains("share one build folder between worktrees"), "settings still says to share one build folder");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("its own cargo build folder"), "the Unreleased changelog lacks the warm build folder");
+    assert!(!unreleased.contains("<shared dir>"), "the Unreleased changelog still names a shared build folder");
+}

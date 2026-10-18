@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Record a task's baseline at its first `rvow prove` before the work: a failure is the red the task needs, with the failed JUnit names, and a pass is refused with the code `baseline` unless the task says `baseline: pass`.
   Work counts only outside the `test_globs` files and the files of the change's proved tasks.
 - Run the baseline on the vow's base commit at prove when the work came first, in a clean worktree set up like the gate rerun, and print one hint when it takes more than 60 seconds and the project sets neither `rerun_env` nor `rerun_links`.
-  The hint names `rerun_env = { CARGO_TARGET_DIR = "<shared dir>" }` and `rerun_links = ["target"]`.
+  The hint names `rerun_env` and `rerun_links = ["target"]` for gate reruns.
 - Make the brief loop line and the skill say to run `rvow prove <task>` once before the work and again after it.
 - Let a project query free a test: a query file named in `test_queries` is protected at accept, a change to it is drift, and a unit that a trusted query marks `@test` with a fresh name is free under the same rules as a shipped mark.
   A query file that was not protected at accept, such as one named after accept, still only names tests.
@@ -194,6 +194,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix a proof that could run base commit code: the base commit baseline in the warm worktree now builds into its own cargo build folder, so it no longer overwrites the test binaries of your checkout when every cargo run shares one build folder.
 - Fix the first `rvow prove` of a task refusing a good red when another active change on the branch had proved its work in a shared file: that work no longer counts as the task's own.
 - Fix a chained verify such as `cargo test a && cargo test b` passing when the filter of one cargo run matched no test: a cargo run that ran 0 tests now makes the whole run count 0 tests.
 - Fix the shell rules being skipped for a harness whose shell tool is not named `Bash`, such as OpenCode's `bash`, Codex's `shell` or Gemini CLI's `run_shell_command`: rvow now sorts the tools of every harness from one table.

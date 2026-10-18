@@ -220,7 +220,7 @@ pub const SLOW_BASELINE: Duration = Duration::from_secs(60);
 pub fn baseline_hint(slowest: Duration, limit: Duration, rerun_env: &BTreeMap<String, String>, rerun_links: &[String]) -> Option<String> {
     (slowest > limit && rerun_env.is_empty() && rerun_links.is_empty()).then(|| {
         format!(
-            "a baseline run took {} s; a new worktree starts with an empty build folder, so export CARGO_TARGET_DIR=<shared dir> in your shell to share builds between worktrees, and set rerun_env = {{ CARGO_TARGET_DIR = \"<shared dir>\" }} or rerun_links = [\"target\"] in config.toml for gate reruns (see docs/settings.md)",
+            "a baseline run took {} s; the warm worktree keeps its own build folder, so the next base commit run builds only what changed; for gate reruns set rerun_env = {{ CARGO_TARGET_DIR = \"<a folder only reruns use>\" }} or rerun_links = [\"target\"] in config.toml (see docs/settings.md)",
             slowest.as_secs()
         )
     })
@@ -276,6 +276,14 @@ pub(crate) fn baseline(
         }
     }
     let tree = rerun::Worktree::warm(top, base_commit, &links, &crate::store::warm_tree(home, project))?;
+    // Cargo names the artifacts of two checkouts of one repo alike, so a warm
+    // tree that shares the user's build folder overwrites the user's binaries
+    // and cargo then calls them fresh. It always builds in its own folder.
+    let mut env = env;
+    if let Some(target) = tree.cargo_target() {
+        env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
+        env.push(("CARGO_TARGET_DIR".to_string(), target.to_string_lossy().into_owned()));
+    }
     let mut sink = std::io::sink();
     for cmd in &setup {
         if !runner::run(cmd, &tree.path, &env, config.timeout(), &mut sink)?.passed() {
