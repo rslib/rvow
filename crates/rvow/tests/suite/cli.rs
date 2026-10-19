@@ -516,3 +516,54 @@ fn show_change_keeps_task_rows() {
     assert!(shown.lines().any(|l| l == "  TSK-new2 Second"), "{shown}");
     assert!(!shown.contains("verify:"), "{shown}");
 }
+
+#[test]
+fn stop_reproves_a_finished_change_in_the_background() {
+    let (r, root, _id) = accepted("bgreprove");
+    let brief = r.ok(&["brief"]);
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    assert!(r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap().status.success());
+    std::fs::write(r.repo().join("out.txt"), "ok again").unwrap();
+    assert!(r.ok(&["status"]).contains("stale"));
+    let mut hook = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["hook", "stop"]).stdin(std::process::Stdio::piped()).spawn().unwrap();
+    let input = serde_json::json!({ "cwd": r.repo(), "session_id": "s1" }).to_string();
+    std::io::Write::write_all(hook.stdin.as_mut().unwrap(), input.as_bytes()).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let log = || std::fs::read_to_string(root.join("hook-state/reprove.log")).unwrap_or_default();
+    while r.ok(&["status"]).contains("stale") {
+        assert!(std::time::Instant::now() < deadline, "no background re-prove: {}", log());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(r.ok(&["status"]).contains("proved"));
+}
+
+#[test]
+fn prove_records_nothing_when_the_check_changes_its_own_files() {
+    let r = Repo::new("selfedit");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo more >> out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("specs/out.md"),
+        "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+    )
+    .unwrap();
+    assert!(r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap().status.success());
+    let brief = r.ok(&["brief"]);
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    let proved = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap();
+    let out = String::from_utf8_lossy(&proved.stdout);
+    assert_eq!(proved.status.code(), Some(1), "{out}");
+    assert!(out.contains("changed while its check ran"), "{out}");
+}

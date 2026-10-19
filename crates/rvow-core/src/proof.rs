@@ -645,6 +645,15 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let started = ledger::now_ms();
     let mut watch = Watch { inner: echo, reconfigured: false };
     let outcome = runner::run(&cmd, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut watch)?;
+    // The run may have read files that changed under it, so its result
+    // stands for neither the old content nor the new one.
+    if now.inputs(task)?.hash != inputs.hash {
+        return Err(Error::new(
+            "inputs-changed",
+            format!("the files of {id} changed while its check ran, so no proof was recorded"),
+            format!("run rvow prove {id} again when the edits are done"),
+        ));
+    }
     let note = watch.note(&plan);
     let verdict = if first { baseline_verdict(task, &plan, &outcome, &cmd) } else { Ok(None) };
     let junit_baseline = match verdict {

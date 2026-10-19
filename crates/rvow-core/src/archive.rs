@@ -141,6 +141,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
             "only an accepted change can be archived",
         ));
     }
+    crate::reprove::wait(project, &mut std::io::stderr());
     let reproved = reprove_stale(project, home, cwd, &dir)?;
     let lock = project.lock()?;
     let texts = change::living_texts(project)?;
@@ -239,6 +240,12 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
 /// Proves each stale task of `dir` again, in the worktree of its branch, and
 /// refuses with the code `gate` when one fails. It runs before archive takes
 /// the project lock, since a prove takes that lock for its ledger append.
+/// Proves the stale tasks of the change `input` again, in order, and stops at
+/// the first one that fails. Returns the tasks it proved.
+pub fn reprove(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<Vec<String>> {
+    reprove_stale(project, home, cwd, &change::resolve(project, input)?)
+}
+
 fn reprove_stale(project: &Project, home: &Path, cwd: &Path, dir: &ChangeDir) -> Result<Vec<String>> {
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;

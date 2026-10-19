@@ -33,6 +33,7 @@ pub mod provenance;
 pub mod put;
 pub mod record;
 pub mod registry;
+pub mod reprove;
 pub mod review;
 pub mod runner;
 pub mod seal;

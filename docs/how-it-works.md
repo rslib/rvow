@@ -175,6 +175,9 @@ A proof is stale when one of those has changed since the run.
 The reasons are task changed, requirement changed, inputs changed, private policy changed and environment changed.
 A stale task needs a new proof, and `rvow prove --stale` runs them all.
 `rvow archive` re-proves the stale tasks of the change before its gate, outside the project lock, and a failed re-proof stops the archive with the code `gate`.
+When the agent's turn ends and every task of a change on the branch is proved or stale, the Stop hook starts `rvow reprove` in the background, so the archive usually finds the proofs current.
+Its output is in `hook-state/reprove.log` in the project folder, and `rvow archive` waits for a run that is still going.
+A proof whose task files changed while its check ran is not recorded.
 
 A task is flaky only when a pass and a failure share the same run key and the same worktree fingerprint.
 Each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, so a fix outside the task's files changes the fingerprint and clears the failure instead of marking it flaky.

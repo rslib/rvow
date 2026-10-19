@@ -101,6 +101,26 @@ pub fn prove(task: &str) -> Result<Reply> {
     Ok(r)
 }
 
+/// The background re-prove: proves the stale tasks of every change on the
+/// branch whose other tasks are proved, unless another run holds the slot.
+pub fn background() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let cwd = cwd()?;
+    let mut r = Reply::new();
+    let Some(_slot) = rvow_core::reprove::claim(&p)? else {
+        r.line("a background re-prove already runs");
+        return Ok(r);
+    };
+    for change in rvow_core::reprove::ready(&p, &home, &cwd)? {
+        match rvow_core::archive::reprove(&p, &home, &cwd, &change) {
+            Ok(proved) => r.line(format!("{change}: reproved {}", proved.join(", "))),
+            Err(e) => r.line(format!("{change}: {}: {}", e.code, e.message)),
+        }
+    }
+    Ok(r)
+}
+
 pub fn prove_stale() -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;

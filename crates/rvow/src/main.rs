@@ -190,6 +190,9 @@ enum Cmd {
         #[arg(value_enum)]
         event: Option<HookEvent>,
     },
+    /// Prove the stale tasks of each finished change again; the Stop hook starts it in the background.
+    #[command(hide = true)]
+    Reprove,
     /// Show how often the hooks denied or blocked in the last days.
     Stats {
         /// How many days back to count.
@@ -488,6 +491,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
+        Cmd::Reprove => prove::background(),
         Cmd::Stats { days } => cmd::stats::stats(days),
         Cmd::Delegate { task } => cmd::delegate::delegate(&task),
         Cmd::Yolo { tier, length } => cmd::yolo::yolo(

@@ -85,7 +85,13 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
             (Harness::Claude, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
             (Harness::Claude, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
             (Harness::Claude, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
-            (Harness::Claude, HookEvent::Stop) => (Some(stats::Hook::Stop), hooks::claude_stop(&p, &home, &input)),
+            (Harness::Claude, HookEvent::Stop) => {
+                let out = hooks::claude_stop(&p, &home, &input);
+                if matches!(out, Ok(None)) && input.get("agent_id").is_none() {
+                    start_reprove(&p, &home, &cwd);
+                }
+                (Some(stats::Hook::Stop), out)
+            }
             (Harness::Claude, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
             (Harness::Claude, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
             (Harness::Claude, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
@@ -104,6 +110,33 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
     }
     ExitCode::SUCCESS
+}
+
+/// Starts `rvow reprove` detached when a finished change has stale tasks, so
+/// it runs while the person reads the answer. A failure here only costs the
+/// head start: `rvow archive` proves the stale tasks itself.
+fn start_reprove(p: &store::Project, home: &Path, cwd: &Path) {
+    if rvow_core::reprove::running(p) || !rvow_core::reprove::ready(p, home, cwd).is_ok_and(|r| !r.is_empty()) {
+        return;
+    }
+    let (Ok(exe), Ok(top)) = (std::env::current_exe(), git::toplevel(cwd)) else {
+        return;
+    };
+    let path = rvow_core::reprove::log_path(p);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let Ok(log) = std::fs::File::create(&path) else {
+        return;
+    };
+    let Ok(err) = log.try_clone() else {
+        return;
+    };
+    let mut c = std::process::Command::new(exe);
+    c.arg("reprove").current_dir(top).stdin(std::process::Stdio::null()).stdout(log).stderr(err);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
+    let _ = c.spawn();
 }
 
 /// Counts one hook call with its duration, the session id and nothing else.

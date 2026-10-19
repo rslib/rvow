@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Re-prove the stale tasks of a finished change in the background when the agent's turn ends, so `rvow archive` usually finds them current.
+  The Stop hook starts `rvow reprove` when every task of a change on the branch is proved or stale, writes its output to `hook-state/reprove.log` in the project folder, and `rvow archive` waits for a run that is still going.
+- Record no proof when the files of a task change while its check runs, and say to run `rvow prove` again.
 - Make `rvow confirm` list only the item names of each amendment and a count of the hidden changed lines, so the confirm tool of the Claude mod and pi no longer fills the agent's context.
   `rvow confirm <AMD-id>` shows the changed lines of one amendment, cut at 500 characters, and `--full` shows them whole, as the dialogs do.
 - Tell the agent once that several plan edits were accepted, in one sentence that names each id, instead of one sentence for each edit.

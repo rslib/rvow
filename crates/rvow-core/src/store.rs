@@ -496,6 +496,8 @@ mod tests {
             "yolo.json",
             "rerun-cache.jsonl",
             ".lock",
+            "hook-state/reprove.pid",
+            "hook-state/reprove.log",
         ];
         let shared = ["ids.jsonl", "config.toml", "project.toml", "spec-record.json", "backlog/x/proposal.md"];
 
