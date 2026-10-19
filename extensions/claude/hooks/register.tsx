@@ -40,6 +40,7 @@ import {
   JUDGE_SCHEMA,
   JUDGE_TOOLS,
   JudgeInbox,
+  joinDecisions,
   judgeArgs,
   judgeRecordArgv,
   judgeSpawnPrompt,
@@ -373,26 +374,28 @@ async function confirmEach(
 async function confirmDialog($: EngineInterface, origin: { kind: string }) {
   if (origin.kind !== 'composer')
     return { text: '/rvow-confirm runs only when you type it yourself.' }
-  const listing = await rvow($, ['confirm'])
+  const listing = await rvow($, ['confirm', '--full'])
   await refresh($)
   if (listing.tone === 'fail') return { text: listing.text }
   const digest = /^digest (\S+)$/m.exec(listing.text)?.[1]
   if (!digest) return { text: listing.text }
   const items = splitListing(listing.text)
   if (items.length > 1) {
-    const prompts: string[] = []
+    const decided: Record<'accept' | 'reject', string[]> = { accept: [], reject: [] }
     const lines = await confirmEach($, items, 'accept', async (item, verb) => {
       const argv = ['confirm', item.id, `--${verb}`]
       const done = await rvow($, argv)
-      const prompt = done.tone === 'ok' ? decisionPrompt(argv, done.text) : null
-      if (prompt) prompts.push(prompt)
+      if (done.tone === 'ok') decided[verb].push(item.id)
       tellAgentOfFailure($, argv, done)
       return done.text
     })
     await refresh($)
+    const prompts = (['accept', 'reject'] as const)
+      .filter((verb) => decided[verb].length > 0)
+      .map((verb) => decisionPrompt(['confirm', `--${verb}`, ...decided[verb]], ''))
     // The engine refuses a submit made while this hook still holds the command.
     if (prompts.length > 0) later($, async () => queue($, prompts.join(' ')))
-    return { text: lines.join('\n') }
+    return { text: joinDecisions(lines) }
   }
   const answer = await $.ui
     .ask(`${listing.text}\n\nAccept all, reject all, or decide later?`, [
@@ -456,8 +459,8 @@ async function archiveFlow(
         return {
           text: `rvow: the pending plan edits of ${change} keep changing; run /rvow-archive ${change}`,
         }
-      const listing = await tellOut($, ['confirm'])
-      if (!listing.ok) return { text: failedText(['confirm'], listing.out) }
+      const listing = await tellOut($, ['confirm', '--full'])
+      if (!listing.ok) return { text: failedText(['confirm', '--full'], listing.out) }
       const shown = /^digest (\S+)$/m.exec(listing.out)?.[1]
       const items = archiveAmendments(listing.out, change)
       if (items.length === 0) {
@@ -474,8 +477,8 @@ async function archiveFlow(
         )
         .catch(() => 'Not yet')
       if (answer !== 'Accept and archive') return declined
-      const now = await tellOut($, ['confirm'])
-      if (!now.ok) return { text: failedText(['confirm'], now.out) }
+      const now = await tellOut($, ['confirm', '--full'])
+      if (!now.ok) return { text: failedText(['confirm', '--full'], now.out) }
       if (/^digest (\S+)$/m.exec(now.out)?.[1] !== shown) continue
       ids = items.map((i) => i.id)
       break
@@ -828,12 +831,19 @@ export const register: Register = (on) => {
     if (named !== undefined && (typeof named !== 'string' || !/^AMD-[a-z0-9]+$/.test(named))) {
       return { result: 'rvow: id must be an AMD- id' }
     }
-    const listing = await tellOut($, ['confirm'])
-    if (!listing.ok) return { result: failedText(['confirm'], listing.out) }
+    if (decision === undefined) {
+      const argv = named === undefined ? ['confirm'] : ['confirm', named]
+      const shown = await tellOut($, argv)
+      if (shown.ok) return { result: shown.out }
+      if (named !== undefined && /not (a )?pending/i.test(shown.out))
+        return { result: `${named} is not pending.` }
+      return { result: failedText(argv, shown.out) }
+    }
+    const listing = await tellOut($, ['confirm', '--full'])
+    if (!listing.ok) return { result: failedText(['confirm', '--full'], listing.out) }
     if (named !== undefined) {
       const item = splitListing(listing.out).find((i) => i.id === named)
       if (!item) return { result: `${named} is not pending.` }
-      if (decision === undefined) return { result: item.text }
       const answer = await $.ui
         .ask(`${item.text}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} ${named}?`, [
           'Yes',
@@ -849,7 +859,6 @@ export const register: Register = (on) => {
       const done = await tellOut($, argv)
       return { result: done.ok ? done.out : failedText(argv, done.out) }
     }
-    if (decision === undefined) return { result: listing.out }
     const items = splitListing(listing.out)
     if (items.length > 1) {
       const lines = await confirmEach($, items, decision, async (item, verb) => {
@@ -857,7 +866,7 @@ export const register: Register = (on) => {
         const done = await tellOut($, argv)
         return done.ok ? done.out : failedText(argv, done.out)
       })
-      return { result: lines.join('\n') }
+      return { result: joinDecisions(lines) }
     }
     const digest = /^digest (\S+)$/m.exec(listing.out)?.[1]
     if (!digest) return { result: listing.out || 'There are no pending plan edits.' }
@@ -1323,7 +1332,7 @@ export const register: Register = (on) => {
                 'Review amendments',
                 hot('c'),
                 async () => {
-                  const r = await rvow($, ['confirm'])
+                  const r = await rvow($, ['confirm', '--full'])
                   await update($, amendmentsAtom, () => r.text)
                 },
                 true,

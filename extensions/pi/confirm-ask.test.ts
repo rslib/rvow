@@ -17,7 +17,7 @@ writeFileSync(
   `#!/bin/sh
 echo "$*" >> "$RVOW_FAKE/argv.log"
 case "$1" in
-  confirm) if [ "$#" -eq 1 ]; then cat "$RVOW_FAKE/list.txt"; else echo "$2: decided"; fi ;;
+  confirm) if [ "$#" -eq 1 ] || [ "$2" = "--full" ]; then cat "$RVOW_FAKE/list.txt"; else echo "$2: decided"; fi ;;
   clarify) echo '{"questions":[],"remaining":0}' ;;
   *) ;;
 esac
@@ -91,14 +91,14 @@ test("confirm with an id asks only about that amendment and decides it by id", a
   assert.equal(asked.length, 1);
   assert.match(asked[0] ?? "", /AMD-b2/);
   assert.doesNotMatch(asked[0] ?? "", /AMD-a1/);
-  assert.deepEqual(argv(), ["confirm", "confirm AMD-b2 --reject"]);
+  assert.deepEqual(argv(), ["confirm --full", "confirm AMD-b2 --reject"]);
   assert.match(JSON.stringify(out.content), /AMD-b2: decided/);
 });
 
 test("confirm with an id the user declines decides nothing", async () => {
   clear();
   const out = await call("rvow_confirm", { decision: "accept", id: "AMD-a1" }, false);
-  assert.deepEqual(argv(), ["confirm"]);
+  assert.deepEqual(argv(), ["confirm --full"]);
   assert.match(JSON.stringify(out.content), /AMD-a1, so it is still pending/);
 });
 
@@ -115,7 +115,7 @@ test("confirm without an id keeps the digest path", async () => {
   const asked: string[] = [];
   await call("rvow_confirm", { decision: "accept" }, true, asked);
   assert.match(asked[0] ?? "", /Accept all of these\?/);
-  assert.deepEqual(argv(), ["confirm", "confirm --accept --all def456"]);
+  assert.deepEqual(argv(), ["confirm --full", "confirm --accept --all def456"]);
 });
 
 test("confirm refuses an id that is not an AMD id", async () => {
@@ -132,4 +132,16 @@ test("ask without a change runs clarify as before", async () => {
   clear();
   await call("rvow_ask", {});
   assert.deepEqual(argv(), ["clarify --json"]);
+});
+
+test("confirm with no input runs the plain short listing", async () => {
+  clear();
+  await call("rvow_confirm", {}, true);
+  assert.deepEqual(argv(), ["confirm"]);
+});
+
+test("confirm with an id and no decision reads only that amendment", async () => {
+  clear();
+  await call("rvow_confirm", { id: "AMD-b2" }, true);
+  assert.deepEqual(argv(), ["confirm AMD-b2"]);
 });

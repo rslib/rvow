@@ -139,11 +139,36 @@ fn confirm_shows_changed_lines_only() {
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     std::fs::write(dir.join("tasks.md"), tasks.replace("echo 'test", "echo 'tests")).unwrap();
     r.ok(&["amend", "--reason", "edit"]);
-    let out = r.ok(&["confirm"]);
+    let out = r.ok(&["confirm", "--full"]);
     assert!(out.contains("\n    - "), "{out}");
     assert!(out.contains("\n    + "), "{out}");
     assert!(!out.contains("before:") && !out.contains("after:"), "{out}");
     assert!(!out.contains("    - - TSK-new1 Write ok"), "{out}");
+}
+
+#[test]
+fn confirm_list_hides_the_diff_and_one_id_cuts_long_lines() {
+    let (r, root, id) = accepted("confirmshort");
+    let dir =
+        std::fs::read_dir(root.join("active")).unwrap().map(|e| e.unwrap().path()).find(|p| p.to_string_lossy().contains(&id)).unwrap();
+    let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    let long = format!("echo '{}' >/dev/null && echo 'test", "x".repeat(600));
+    std::fs::write(dir.join("tasks.md"), tasks.replace("echo 'test", &long)).unwrap();
+    r.ok(&["amend", "--reason", "edit"]);
+    let list = r.ok(&["confirm"]);
+    let amd = list.lines().find_map(|l| l.split(" for ").next().filter(|s| s.starts_with("AMD-"))).unwrap().to_owned();
+    assert!(!list.contains("\n    - ") && !list.contains("\n    + "), "{list}");
+    assert!(list.contains("verify changed"), "{list}");
+    assert!(list.contains(&format!("  diff: 2 changed lines hidden; rvow confirm {amd} shows them")), "{list}");
+    assert!(list.contains("digest "), "{list}");
+    let one = r.ok(&["confirm", &amd]);
+    assert!(one.contains("\n    + ") && one.contains("... (cut, "), "{one}");
+    assert!(!one.contains(&"x".repeat(600)), "{one}");
+    assert!(one.contains(&format!("rvow confirm {amd} --full")), "{one}");
+    let full = r.ok(&["confirm", &amd, "--full"]);
+    assert!(full.contains(&"x".repeat(600)) && !full.contains("(cut, "), "{full}");
+    let (out, code) = r.rvow(&["confirm", "--full", "--accept", "--all", "x"]);
+    assert_eq!(code, 2, "{out}");
 }
 
 #[test]

@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make `rvow confirm` list only the item names of each amendment and a count of the hidden changed lines, so the confirm tool of the Claude mod and pi no longer fills the agent's context.
+  `rvow confirm <AMD-id>` shows the changed lines of one amendment, cut at 500 characters, and `--full` shows them whole, as the dialogs do.
+- Tell the agent once that several plan edits were accepted, in one sentence that names each id, instead of one sentence for each edit.
+- Cut the text that a pi tool returns to the agent at 4,000 characters instead of 16,000.
 - Write the Claude Code mod to `$XDG_DATA_HOME/rvow/claude-plugin`, or `~/.local/share/rvow/claude-plugin`, even when `RVOW_HOME` names another folder, so a synced plan store holds no mod code.
   `rvow install` removes the old copy at `$RVOW_HOME/claude-plugin` and moves the Claude marketplace to the new folder.
 - Send the brief once per session: the same brief again sends nothing, a change of only the task counts sends the `tasks:` line, and a compact, a clear or a new next task sends the full brief.

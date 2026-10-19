@@ -29,7 +29,7 @@ function fake(on: On, answer: string, pending: number, lists: string[]) {
     const line = [...e.argv].slice(1).join(' ')
     ran.push(line)
     if (line === 'hook claude view') return { value: procResult(0, view(pending)) }
-    if (line === 'confirm') {
+    if (line === 'confirm --full') {
       const out = lists[Math.min(reads, lists.length - 1)] ?? ''
       reads += 1
       return { value: procResult(0, out) }
@@ -46,7 +46,7 @@ function fake(on: On, answer: string, pending: number, lists: string[]) {
 }
 
 const call = () => ({ tool: ARCHIVE, change: 'CHG-a1' }) as never
-const decided = (ran: string[]) => ran.filter((l) => /^(confirm |archive)/.test(l))
+const decided = (ran: string[]) => ran.filter((l) => /^(confirm (?!--full)|archive)/.test(l))
 
 const three = list(
   'd3',
@@ -95,7 +95,7 @@ test('with no pending amendment the dialog only asks whether to archive', async 
   const out = JSON.stringify(await $.tool.call(call()))
   expect(asked.length).toBe(1)
   expect(asked[0]).toContain('Archive it?')
-  expect(ran).not.toContain('confirm')
+  expect(ran).not.toContain('confirm --full')
   expect(decided(ran)).toEqual(['archive CHG-a1'])
   expect(out).toContain('archived CHG-a1')
 })

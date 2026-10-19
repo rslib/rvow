@@ -286,12 +286,15 @@ test("rvow_confirm lists without a dialog and decides with one", async () => {
   const seen: string[][] = [];
   const value = tool("rvow_confirm", async (args) => {
     seen.push(args);
-    return args.length === 1 ? { code: 0, out: LIST } : { code: 0, out: "AMD-a1 accepted\n" };
+    return args.length === 1 || args[1] === "--full"
+      ? { code: 0, out: LIST }
+      : { code: 0, out: "AMD-a1 accepted\n" };
   });
   const asked: string[] = [];
   const listed = await yoloCall(value, {}, { hasUI: false, asked });
   assert.match(JSON.stringify(listed.content), /digest abc123/);
   assert.deepEqual(asked, []);
+  assert.deepEqual(seen, [["confirm"]]);
 
   await yoloCall(value, { decision: "accept" }, { hasUI: true, answer: true, asked });
   assert.match(asked[0] ?? "", /Accept all of these\?/);
@@ -299,7 +302,7 @@ test("rvow_confirm lists without a dialog and decides with one", async () => {
 
   seen.length = 0;
   const no = await yoloCall(value, { decision: "reject" }, { hasUI: true, answer: false });
-  assert.deepEqual(seen, [["confirm"]]);
+  assert.deepEqual(seen, [["confirm", "--full"]]);
   assert.match(JSON.stringify(no.content), /still pending/);
   assert.match(JSON.stringify(no.content), /\/rvow-confirm/);
 });
@@ -417,7 +420,7 @@ function archiveFake(lists: string[], seen: string[][]) {
   return tool("rvow_archive", async (args) => {
     seen.push(args);
     if (args[0] === "hook") return { code: 0, out: viewOf(["proved"], 3) };
-    if (args[0] === "confirm" && args.length === 1)
+    if (args[0] === "confirm" && args[1] === "--full")
       return { code: 0, out: lists[Math.min(reads++, lists.length - 1)] ?? "" };
     if (args[0] === "confirm") return { code: 0, out: "decided\n" };
     return { code: 0, out: "archived CHG-a1\n" };
@@ -452,7 +455,7 @@ test("rvow_archive on a no leaves the amendments pending and names /rvow-archive
   const seen: string[][] = [];
   const value = archiveFake([three], seen);
   const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: false });
-  assert.ok(seen.every((a) => a[0] === "hook" || (a[0] === "confirm" && a.length === 1)));
+  assert.ok(seen.every((a) => a[0] === "hook" || (a[0] === "confirm" && a[1] === "--full")));
   assert.match(JSON.stringify(out.content), /\/rvow-archive CHG-a1/);
   assert.match(JSON.stringify(out.content), /pending/);
 });
@@ -479,7 +482,7 @@ test("rvow_archive asks again when an amendment is recorded before the answer", 
   assert.equal(asked.length, 2);
   assert.doesNotMatch(asked[0] ?? "", /AMD-d/);
   assert.match(asked[1] ?? "", /AMD-d/);
-  const accepts = seen.filter((a) => a[0] === "confirm" && a.length > 1);
+  const accepts = seen.filter((a) => a[0] === "confirm" && a[1] !== "--full");
   assert.equal(accepts.length, 1);
   assert.ok(accepts[0]?.includes("AMD-d"));
 });
@@ -490,12 +493,12 @@ test("rvow_archive gives up when the list keeps changing and accepts nothing", a
   const value = tool("rvow_archive", async (args) => {
     seen.push(args);
     if (args[0] === "hook") return { code: 0, out: viewOf(["proved"], 1) };
-    if (args[0] === "confirm" && args.length === 1)
+    if (args[0] === "confirm" && args[1] === "--full")
       return { code: 0, out: listing([amd(`AMD-n${n++}`, "CHG-a1", "add")]) };
     return { code: 0, out: "ok\n" };
   });
   const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
-  assert.ok(!seen.some((a) => a[0] === "archive" || (a[0] === "confirm" && a.length > 1)));
+  assert.ok(!seen.some((a) => a[0] === "archive" || (a[0] === "confirm" && a[1] !== "--full")));
   assert.match(JSON.stringify(out.content), /\/rvow-archive CHG-a1/);
 });
 
@@ -504,7 +507,7 @@ test("rvow_archive does not archive when the accept fails", async () => {
   const value = tool("rvow_archive", async (args) => {
     seen.push(args);
     if (args[0] === "hook") return { code: 0, out: viewOf(["proved"], 1) };
-    if (args.length === 1) return { code: 0, out: listing([amd("AMD-a", "CHG-a1", "add")]) };
+    if (args[1] === "--full") return { code: 0, out: listing([amd("AMD-a", "CHG-a1", "add")]) };
     return { code: 1, out: "error: nope\n" };
   });
   const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });

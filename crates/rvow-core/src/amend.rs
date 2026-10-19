@@ -97,10 +97,12 @@ impl Pending {
     }
 
     /// The confirm listing of this amendment: the header, the items weaken
-    /// first, each baseline result, and the reason. The digest line comes
-    /// from `listing`, so `--all` decides exactly the set that was read.
-    pub fn render(&self) -> Vec<String> {
+    /// first, each baseline result, and the reason. `detail` sets how much of
+    /// each changed line it shows. The digest line comes from `listing`, so
+    /// `--all` decides exactly the set that was read.
+    pub fn render(&self, detail: Detail) -> Vec<String> {
         let mut lines = vec![format!("{} for {}", self.id, self.change)];
+        let (mut hidden, mut cut) = (0, false);
         for i in self.ordered_items() {
             let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
             let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
@@ -109,13 +111,27 @@ impl Pending {
                 let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
                 let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
                 let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
-                for line in &old[head..old.len() - tail] {
-                    lines.push(format!("    - {line}"));
-                }
-                for line in &new[head..new.len() - tail] {
-                    lines.push(format!("    + {line}"));
+                let changed =
+                    old[head..old.len() - tail].iter().map(|l| ('-', *l)).chain(new[head..new.len() - tail].iter().map(|l| ('+', *l)));
+                for (sign, line) in changed {
+                    match detail {
+                        Detail::Summary => hidden += 1,
+                        Detail::Clipped => {
+                            let (shown, was_cut) = clip(line);
+                            cut |= was_cut;
+                            lines.push(format!("    {sign} {shown}"));
+                        }
+                        Detail::Full => lines.push(format!("    {sign} {line}")),
+                    }
                 }
             }
+        }
+        if hidden > 0 {
+            let noun = if hidden == 1 { "line" } else { "lines" };
+            lines.push(format!("  diff: {hidden} changed {noun} hidden; rvow confirm {} shows them", self.id));
+        }
+        if cut {
+            lines.push(format!("  cut: long lines are cut; rvow confirm {} --full shows them whole", self.id));
         }
         for b in &self.baseline {
             lines.push(format!("  baseline: {}", b.line()));
@@ -128,12 +144,35 @@ impl Pending {
     }
 }
 
-/// The full confirm listing of every pending amendment, ending with the
-/// digest line that `--all` decides with.
-pub fn listing(pending: &[Pending]) -> Vec<String> {
+/// How much of each changed line a confirm listing shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// Only the item names and a count of the changed lines.
+    Summary,
+    /// Each changed line, cut at `CLIP_CHARS`.
+    Clipped,
+    /// Each changed line whole, as the user reads it before a decision.
+    Full,
+}
+
+/// The longest changed line that `Detail::Clipped` shows whole.
+pub const CLIP_CHARS: usize = 500;
+
+fn clip(line: &str) -> (String, bool) {
+    let total = line.chars().count();
+    if total <= CLIP_CHARS {
+        return (line.to_string(), false);
+    }
+    let kept: String = line.chars().take(CLIP_CHARS).collect();
+    (format!("{kept}... (cut, {total} chars)"), true)
+}
+
+/// The confirm listing of every pending amendment, ending with the digest
+/// line that `--all` decides with.
+pub fn listing(pending: &[Pending], detail: Detail) -> Vec<String> {
     let mut lines = Vec::new();
     for p in pending {
-        lines.extend(p.render());
+        lines.extend(p.render(detail));
     }
     lines.push(format!("digest {}", digest(pending)));
     lines

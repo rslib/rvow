@@ -46,11 +46,12 @@ async function run($: Engine, args: string) {
   return JSON.stringify(out)
 }
 
-const decided = (ran: string[]) => ran.filter((l) => l.startsWith('confirm --'))
+const decided = (ran: string[]) =>
+  ran.filter((l) => l.startsWith('confirm --') && l !== 'confirm --full')
 
 test('no argument opens the dialog and Accept all decides with the digest', async ($, on) => {
   const { ran, asked } = fake(on, 'Accept all', (line) =>
-    line === 'confirm'
+    line === 'confirm --full'
       ? [0, ONE]
       : line === 'confirm --accept --all abc123'
         ? [0, 'AMD-a1: accepted\nnext: the plan edit stands; continue the tasks\n']
@@ -65,7 +66,7 @@ test('no argument opens the dialog and Accept all decides with the digest', asyn
 
 test('all with two pending asks about each and Reject rejects both', async ($, on) => {
   const { ran, asked } = fake(on, 'Reject', (line) =>
-    line === 'confirm'
+    line === 'confirm --full'
       ? [0, TWO]
       : line.startsWith('confirm AMD-')
         ? [0, `${line.split(' ')[1]}: rejected\nnext: undo the rejected plan edit\n`]
@@ -80,8 +81,24 @@ test('all with two pending asks about each and Reject rejects both', async ($, o
   expect(out).toContain('AMD-b2: rejected')
 })
 
+test('two accepted amendments queue one prompt naming both', async ($, on) => {
+  const { prompts } = fake(on, 'Accept', (line) =>
+    line === 'confirm --full'
+      ? [0, TWO]
+      : line.startsWith('confirm AMD-')
+        ? [0, `${line.split(' ')[1]}: accepted\n`]
+        : [0, ''],
+  )
+  await run($, 'all')
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]?.match(/Continue the tasks\./g)).toHaveLength(1)
+  expect(prompts[0]).toContain('AMD-a1, AMD-b2')
+})
+
 test('Later decides nothing', async ($, on) => {
-  const { ran, asked } = fake(on, 'Later', (line) => (line === 'confirm' ? [0, ONE] : [0, '']))
+  const { ran, asked } = fake(on, 'Later', (line) =>
+    line === 'confirm --full' ? [0, ONE] : [0, ''],
+  )
   const out = await run($, '')
   expect(asked).toHaveLength(1)
   expect(decided(ran)).toEqual([])
@@ -90,7 +107,7 @@ test('Later decides nothing', async ($, on) => {
 
 test('nothing pending says so and asks nothing', async ($, on) => {
   const { ran, asked } = fake(on, 'Accept all', (line) =>
-    line === 'confirm' ? [0, 'no pending amendments\n'] : [0, ''],
+    line === 'confirm --full' ? [0, 'no pending amendments\n'] : [0, ''],
   )
   const out = await run($, '')
   expect(asked).toEqual([])

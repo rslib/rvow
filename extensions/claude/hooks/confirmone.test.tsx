@@ -34,7 +34,7 @@ const call = (tool: string, input: Record<string, unknown>) => ({ tool, ...input
 const decided = (ran: string[]) => ran.filter((l) => /^confirm AMD-/.test(l))
 
 const reply = (line: string): [number, string] =>
-  line === 'confirm'
+  line === 'confirm --full'
     ? [0, TWO]
     : line.startsWith('confirm AMD-')
       ? [0, `${line.split(' ')[1]}: decided\n`]

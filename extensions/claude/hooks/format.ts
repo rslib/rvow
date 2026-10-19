@@ -327,7 +327,7 @@ export function archiveAmendments(listing: string, change: string): Listed[] {
 export const ACCEPT_DESCRIPTION =
   'Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.'
 export const CONFIRM_DESCRIPTION =
-  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. When several are pending the user answers for each one. Pass id to ask only about that amendment. The result tells you what happened, and when it failed it says why.'
+  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject them. With no decision it only lists them, with the item names and a note of how many diff lines are hidden; pass id to see the diff of that amendment. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. When several are pending the user answers for each one. With a decision, pass id to ask only about that amendment. The result tells you what happened, and when it failed it says why.'
 export const ACCEPT_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -364,6 +364,13 @@ export function splitListing(listing: string): Listed[] {
     }
   }
   return out
+}
+
+/** The outputs of several decisions as one text, with each distinct `next:` line once, at the end. */
+export function joinDecisions(outputs: string[]): string {
+  const lines = outputs.flatMap((o) => o.split('\n')).filter((l) => l.trim())
+  const next = [...new Set(lines.filter((l) => l.startsWith('next:')))]
+  return [...lines.filter((l) => !l.startsWith('next:')), ...next].join('\n')
 }
 
 /** What a failed command tells the agent inside a tool result: the command and its own words. */

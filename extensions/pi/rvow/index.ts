@@ -1183,7 +1183,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   async function confirmAmendments(ctx: ExtensionContext) {
-    const list = await run(["confirm"], ctx.cwd, "", SLOW_MS);
+    const list = await run(["confirm", "--full"], ctx.cwd, "", SLOW_MS);
     if (!list) return ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
     const ids = list.out
       .split("\n")
@@ -1351,7 +1351,7 @@ export default function (pi: ExtensionAPI) {
     const answer = await askPendingAmendments(
       arg,
       async () => {
-        const r = await rvow(ctx, ["confirm"]);
+        const r = await rvow(ctx, ["confirm", "--full"]);
         return { ok: r?.code === 0, text: r?.out ?? "" };
       },
       (message) => ctx.ui.confirm(`rvow ${arg}`, message),

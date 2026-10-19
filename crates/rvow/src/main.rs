@@ -257,6 +257,9 @@ enum Cmd {
         /// Explicit principal in the allowed-signers file.
         #[arg(long, requires = "sign", value_name = "IDENTITY")]
         signer: Option<String>,
+        /// List every changed line whole. A plain list shows only the item names.
+        #[arg(long, conflicts_with = "decision")]
+        full: bool,
     },
     /// Run a task's stored verify command and record the proof.
     #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
@@ -499,8 +502,8 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Block { task, reason } => lifecycle::block(&task, &reason),
         Cmd::Note { kind, text } => lifecycle::note(kind, &text.join(" ")),
         Cmd::Amend { reason, change, unlock } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
-        Cmd::Confirm { ids, accept, reject, all, sign, signer } => {
-            lifecycle::confirm(&ids, accept, reject, all.as_deref(), sign, signer.as_deref()).map(Reply::done)
+        Cmd::Confirm { ids, accept, reject, all, sign, signer, full } => {
+            lifecycle::confirm(&ids, accept, reject, all.as_deref(), sign, signer.as_deref(), full).map(Reply::done)
         }
         Cmd::Prove { task: Some(t), .. } => prove::prove(&t),
         Cmd::Prove { .. } => prove::prove_stale(),

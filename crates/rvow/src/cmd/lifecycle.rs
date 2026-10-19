@@ -111,7 +111,7 @@ pub fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result
     Ok(r)
 }
 
-pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
+pub fn list_pending(p: &store::Project, ids: &[String], full: bool) -> Result<bool> {
     let (living, _) = change::load_living(p)?;
     let pending = amend::pending(&proof::active(p, &living)?);
     if pending.is_empty() {
@@ -129,8 +129,13 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
             })
             .collect::<Result<_>>()?
     };
+    let detail = match (full, ids.is_empty()) {
+        (true, _) => amend::Detail::Full,
+        (false, true) => amend::Detail::Summary,
+        (false, false) => amend::Detail::Clipped,
+    };
     for a in shown {
-        for line in a.render() {
+        for line in a.render(detail) {
             println!("{line}");
         }
     }
@@ -141,14 +146,22 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
     Ok(true)
 }
 
-pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>, sign: bool, signer: Option<&str>) -> Result<bool> {
+pub fn confirm(
+    ids: &[String],
+    accept: bool,
+    reject: bool,
+    all: Option<&str>,
+    sign: bool,
+    signer: Option<&str>,
+    full: bool,
+) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     if !accept && !reject {
         if all.is_some() {
             return Err(Error::new("decision", "say what to do with the amendments", "add --accept or --reject"));
         }
-        return list_pending(&p, ids);
+        return list_pending(&p, ids, full);
     }
     let decision = if accept { amend::Decision::Accept } else { amend::Decision::Reject };
     let cfg = rvow_core::config::load(&p, &home)?;
@@ -176,7 +189,7 @@ pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>, si
     };
     let decided = amend::confirm_signed(&p, ids, decision, all, signing).inspect_err(|e| {
         if e.code == "digest" {
-            let _ = list_pending(&p, &[]);
+            let _ = list_pending(&p, &[], false);
         }
     })?;
     for id in decided {

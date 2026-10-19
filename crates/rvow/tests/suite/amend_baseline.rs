@@ -263,7 +263,7 @@ fn confirm_list_weaken_first_with_digest() {
     amend::amend(&s.project, &s.home, &s.repo, None, "retitle and recheck", None).unwrap();
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1, "{pend:?}");
-    let lines = amend::listing(&pend);
+    let lines = amend::listing(&pend, amend::Detail::Full);
     let weaken = lines.iter().position(|l| l.starts_with("  weaken:")).unwrap();
     let free = lines.iter().position(|l| l.starts_with("  free:")).unwrap();
     assert!(weaken < free, "weaken items lead: {lines:?}");
@@ -280,7 +280,7 @@ fn confirm_list_shows_the_baseline_result() {
     amend::amend(&s.project, &s.home, &s.repo, None, "add a check", None).unwrap();
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1, "{pend:?}");
-    let lines = amend::listing(&pend);
+    let lines = amend::listing(&pend, amend::Detail::Full);
     assert!(lines.iter().any(|l| l.contains("baseline pending")), "{lines:?}");
     assert!(lines.iter().all(|l| !l.contains("TSK-new2")), "amend mints before the snapshot: {lines:?}");
     let minted = &pend[0].baseline_pending[0];
@@ -349,7 +349,11 @@ fn amend_marks_a_changed_check_pending() {
     assert!(pend[0].baseline.is_empty(), "{:?}", pend[0].baseline);
     let marker = task_id_with_title(&dir, "Marker");
     assert_eq!(pend[0].baseline_pending, std::slice::from_ref(&marker), "{pend:?}");
-    assert!(amend::listing(&pend).iter().any(|l| l.contains(&marker) && l.contains("baseline pending")), "{:?}", amend::listing(&pend));
+    assert!(
+        amend::listing(&pend, amend::Detail::Full).iter().any(|l| l.contains(&marker) && l.contains("baseline pending")),
+        "{:?}",
+        amend::listing(&pend, amend::Detail::Full)
+    );
     amend::confirm(&s.project, &[pend[0].id.to_string()], amend::Decision::Accept, None).unwrap();
     assert!(baseline_pending(&s, "Marker"));
 

@@ -40,7 +40,7 @@ case "$1 $2 $3" in
       review) cat "$RVOW_FAKE/review.txt" ;;
       show) [ -f "$RVOW_FAKE/slow" ] && sleep 0.4; if [ -f "$RVOW_FAKE/show-$2.txt" ]; then cat "$RVOW_FAKE/show-$2.txt"; else echo "$2"; echo "shown $2"; fi ;;
       clarify) cat "$RVOW_FAKE/clarify.json" ;;
-      confirm) if [ $# -eq 1 ]; then cat "$RVOW_FAKE/confirm.txt"; else echo "ran $*"; fi ;;
+      confirm) if [ $# -eq 1 ] || [ "$2" = "--full" ]; then cat "$RVOW_FAKE/confirm.txt"; else echo "ran $*"; fi ;;
       accept) if [ -f "$RVOW_FAKE/fail-accept" ]; then echo "error: CHG-a has no passing check"; echo "code: not-ready"; exit 1; fi; echo "accepted"; echo "next: TSK-1 first"; ;;
       *) echo "ran $*" ;;
     esac ;;

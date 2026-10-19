@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect } from 'claude-code/testing'
-import { ACCEPT, ARCHIVE, archiveBlockers, CONFIRM, failedText } from './format'
+import { ACCEPT, ARCHIVE, archiveBlockers, CONFIRM, failedText, joinDecisions } from './format'
 import { procResult, test } from './testkit'
 
 const LIST = 'AMD-a1 weaken T1 verify changed\ndigest abc123\n'
@@ -27,7 +27,7 @@ function fake(on: On, answer: string, reply: (line: string) => [number, string])
 }
 
 const call = (tool: string, input: Record<string, unknown>) => ({ tool, ...input }) as never
-const mutating = (ran: string[]) => ran.filter((l) => /^(accept|confirm --)/.test(l))
+const mutating = (ran: string[]) => ran.filter((l) => /^(accept|confirm --(?!full))/.test(l))
 
 test('rvow_accept shows the review, and the user decides', async ($, on) => {
   const { ran, asked } = fake(on, 'Accept', (line) =>
@@ -77,12 +77,15 @@ test('rvow_accept refuses an id that is not complete', async ($, on) => {
 
 test('rvow_confirm lists without a dialog and decides with one', async ($, on) => {
   const { ran, asked } = fake(on, 'Yes', (line) =>
-    line === 'confirm' ? [0, LIST] : [0, 'AMD-a1 accepted\n'],
+    line === 'confirm' || line === 'confirm --full' ? [0, LIST] : [0, 'AMD-a1 accepted\n'],
   )
   expect(JSON.stringify(await $.tool.call(call(CONFIRM, {})))).toContain('digest abc123')
   expect(asked).toEqual([])
+  expect(ran).toContain('confirm')
+  expect(ran).not.toContain('confirm --full')
   const out = JSON.stringify(await $.tool.call(call(CONFIRM, { decision: 'accept' })))
   expect(asked[0]).toContain('Accept all of these?')
+  expect(ran).toContain('confirm --full')
   expect(mutating(ran)).toEqual(['confirm --accept --all abc123'])
   expect(out).toContain('AMD-a1 accepted')
 })
@@ -105,6 +108,17 @@ test('the failure text names the command and keeps its own words', () => {
   expect(failedText(['accept', 'CHG-a'], 'error: x\n\ncode: y\n')).toBe(
     'rvow accept CHG-a failed:\nerror: x\ncode: y',
   )
+})
+
+test('several decisions say each next step once, at the end', () => {
+  const next = 'next: the plan edit stands; continue the tasks'
+  expect(
+    joinDecisions([
+      `AMD-a: accepted\n${next}\n`,
+      `AMD-b: accepted\n${next}\n`,
+      'AMD-c is still pending.',
+    ]),
+  ).toBe(`AMD-a: accepted\nAMD-b: accepted\nAMD-c is still pending.\n${next}`)
 })
 
 const view = (states: string[], pending = 0) =>

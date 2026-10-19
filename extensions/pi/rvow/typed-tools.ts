@@ -39,8 +39,10 @@ export function archiveBlockers(
   return null;
 }
 
+const MODEL_TEXT_CAP = 4_000;
+
 export const CONFIRM_DESCRIPTION =
-  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. Pass id to ask only about that one amendment. The result tells you what happened, and when it failed it says why.";
+  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them by item name; pass id to see the diff of one amendment. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. With a decision, pass id to ask only about that one amendment. The result tells you what happened, and when it failed it says why.";
 
 export function acceptArgs(input: unknown): string {
   const value = closed(input, ["change"]);
@@ -330,9 +332,9 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     const output = value ?? { code: 1, out: "rvow: cannot run the configured binary" };
     const details = parseOutput(args, output.code, output.out);
     const text =
-      output.out.length <= 16_000
+      output.out.length <= MODEL_TEXT_CAP
         ? output.out
-        : `${output.out.slice(0, 16_000)}\n[output truncated; read rvow ${args[0] === "prove" ? `show ${args[1]} --full` : args.join(" ")} in a terminal for more detail]`;
+        : `${output.out.slice(0, MODEL_TEXT_CAP)}\n[output truncated; read rvow ${args[0] === "prove" ? `show ${args[1]} --full` : args.join(" ")} in a terminal for more detail]`;
     return {
       content: [{ type: "text" as const, text }],
       details,
@@ -472,7 +474,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         const answer = await askPendingAmendments(
           change,
           async () => {
-            const list = await queue(() => result(["confirm"], ctx.cwd, signal, SLOW_MS));
+            const list = await queue(() => result(["confirm", "--full"], ctx.cwd, signal, SLOW_MS));
             return { ok: list.details.kind === "decision", text: text(list) };
           },
           (message) => ctx.ui.confirm(`rvow ${change}`, message),
@@ -532,7 +534,11 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     execute: async (_id, params, signal, _update, ctx) => {
       const decision = confirmDecision(params);
       const named = confirmId(params);
-      const list = await queue(() => result(["confirm"], ctx.cwd, signal, SLOW_MS));
+      if (decision === undefined)
+        return queue(() =>
+          result(named === undefined ? ["confirm"] : ["confirm", named], ctx.cwd, signal, SLOW_MS),
+        );
+      const list = await queue(() => result(["confirm", "--full"], ctx.cwd, signal, SLOW_MS));
       if (named !== undefined && decision !== undefined && list.details.kind === "decision") {
         const block = amendmentBlock(text(list), named);
         if (!block) return declined(`${named} is not pending.`);
@@ -549,7 +555,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         return queue(() => result(["confirm", named, `--${decision}`], ctx.cwd, signal, SLOW_MS));
       }
       const digest = /^digest (\S+)$/m.exec(text(list))?.[1];
-      if (decision === undefined || list.details.kind !== "decision" || !digest) return list;
+      if (list.details.kind !== "decision" || !digest) return list;
       if (!ctx.hasUI) throw new Error("rvow: only the user can decide, and no one is here to ask");
       const yes = await ctx.ui.confirm(
         "rvow confirm",
