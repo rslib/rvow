@@ -37,7 +37,8 @@ pub fn put(project: &Project, cwd: &Path, target: &str, part: Option<&str>, text
     Ok(Outcome { change: dir, lines })
 }
 
-/// One part of one change: `proposal`, `tasks` or `spec:<name>`.
+/// One part of one change: `proposal`, `tasks`, `design` or `spec:<name>`.
+/// `design` and `spec:<name>` are created when they do not exist yet.
 fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<ChangeDir> {
     let dir = change::resolve(project, target)?;
     if !matches!(dir.stage, Stage::Backlog | Stage::Active) {
@@ -51,6 +52,7 @@ fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<C
     let want = match part {
         "proposal" => Some(change::PROPOSAL.to_string()),
         "tasks" => Some(change::TASKS.to_string()),
+        "design" => Some(change::DESIGN.to_string()),
         other => other.strip_prefix("spec:").and_then(|cap| {
             (cap.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
                 && cap.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
@@ -65,7 +67,7 @@ fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<C
         ));
     };
     let is_spec = part.starts_with("spec:");
-    if !is_spec && loaded.texts.iter().all(|(k, _)| k != &want) {
+    if !is_spec && part != "design" && loaded.texts.iter().all(|(k, _)| k != &want) {
         return Err(wrong());
     }
     let path = dir.path.join(&want);

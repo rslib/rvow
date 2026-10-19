@@ -106,7 +106,12 @@ fn base_commit_amend_after_confirmed_amend() {
     assert_eq!(out.len(), 1);
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1);
-    assert!(!pend[0].baseline.is_empty(), "changed check runs on the base commit");
+    assert_eq!(pend[0].baseline_pending.len(), 1, "the changed check is baseline pending: {pend:?}");
+    // The work came first, so prove runs the baseline on the vow's base commit.
+    std::fs::write(s.repo.join("out.txt"), "work\n").unwrap();
+    let task_id = real_id(&s, "TSK-new1");
+    proof::prove(&s.project, &s.home, &s.repo, &task_id, &mut std::io::sink())
+        .unwrap_or_else(|e| panic!("the base commit run after a confirmed amend failed: {e:?}"));
 }
 
 #[test]
@@ -154,7 +159,9 @@ fn base_commit_missing_names_workable_step() {
         ),
     )
     .unwrap();
-    let err = amend::amend(&s.project, &s.home, &s.repo, None, "changed check", None).unwrap_err();
+    amend::amend(&s.project, &s.home, &s.repo, None, "changed check", None).unwrap();
+    let task_id = real_id(&s, "TSK-new1");
+    let err = proof::prove(&s.project, &s.home, &s.repo, &task_id, &mut std::io::sink()).err().expect("the baseline must refuse");
     assert_eq!(err.code, "baseline");
     assert!(!err.fix.to_lowercase().contains("accept"), "help must not say accept: {:?}", err.fix);
     assert!(err.fix.contains("rvow block"), "help names a step for an active change: {:?}", err.fix);

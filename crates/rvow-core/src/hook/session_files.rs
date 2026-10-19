@@ -68,15 +68,15 @@ fn record_to(file: &PathBuf, known: &BTreeSet<String>, paths: &[String]) {
     }
 }
 
-/// Removes the per-session `files-*` and `stop-*` records in `dir` that last changed more than `KEEP` ago.
-fn prune(dir: &Path) {
+/// Removes the per-session `files-*`, `stop-*` and `brief-*` records in `dir` that last changed more than `KEEP` ago.
+pub(super) fn prune(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !(name.starts_with("files-") || name.starts_with("stop-")) {
+        if !(name.starts_with("files-") || name.starts_with("stop-") || name.starts_with("brief-")) {
             continue;
         }
         let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > KEEP);

@@ -273,25 +273,31 @@ export function judgeRecordArgv(id: string, model: string): string[] {
   return ['review', id, '--record', '-', '--judge', '--harness', JUDGE_HARNESS, '--model', model]
 }
 
-/** The findings as shown after the record: one line per finding. */
-export function formatJudgeFindings(id: string, model: string, findings: JudgeFinding[]): string {
+/** The findings as shown after the record: one line per finding, each message cut at `width` characters when given. */
+export function formatJudgeFindings(
+  id: string,
+  model: string,
+  findings: JudgeFinding[],
+  width?: number,
+): string {
   const head = `judged ${id} with ${model}: ${findings.length} finding${findings.length === 1 ? '' : 's'}`
   if (findings.length === 0) return `${head}\nthe judge found no problems`
   return [
     head,
-    ...findings.map((f) =>
-      f.path !== undefined && f.line !== undefined
-        ? `${f.path}:${f.line}: ${f.message}`
+    ...findings.map((f) => {
+      const message = width === undefined ? f.message : cut(f.message, width)
+      return f.path !== undefined && f.line !== undefined
+        ? `${f.path}:${f.line}: ${message}`
         : f.path !== undefined
-          ? `${f.path}: ${f.message}`
-          : f.message,
-    ),
+          ? `${f.path}: ${message}`
+          : message
+    }),
   ].join('\n')
 }
 
 export const ARCHIVE = 'mcp__rvow__rvow_archive'
 export const ARCHIVE_DESCRIPTION =
-  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.'
+  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. When the change has pending plan edits (amendments), the same dialog lists every one, weaken first, and a yes accepts them all and then archives; a no leaves them pending. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
 export const ARCHIVE_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -299,7 +305,7 @@ export const ARCHIVE_SCHEMA = {
   additionalProperties: false,
 }
 
-/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+/** Why a change cannot be archived yet, or `null` when every task is proved or stale. A pending plan edit does not block: the archive dialog asks about it. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
 export function archiveBlockers(
   change: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] } | undefined,
   id: string,
@@ -307,19 +313,27 @@ export function archiveBlockers(
   if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`
   if (change.tasks.length === 0)
     return `rvow: ${id} has no task, so there is nothing proved to archive`
-  const open = change.tasks.filter((t) => t.state !== 'proved').map((t) => `${t.id} is ${t.state}`)
+  const open = change.tasks
+    .filter((t) => t.state !== 'proved' && !t.state.startsWith('stale'))
+    .map((t) => `${t.id} is ${t.state}`)
   if (open.length > 0)
-    return `rvow: ${id} is not ready to archive: ${open.join(', ')}; prove them first`
-  if (change.pending.length > 0) {
-    return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`
-  }
+    return `rvow: ${id} is not ready to archive: ${open.join(', ')}; fix them first`
   return null
+}
+
+/** The pending amendments of one change in a `rvow confirm` listing, those holding a weaken item first. */
+export function archiveAmendments(listing: string, change: string): Listed[] {
+  const mine = splitListing(listing).filter(
+    (i) => i.text.startsWith(`${i.id} for ${change}\n`) || i.text === `${i.id} for ${change}`,
+  )
+  const weak = (i: Listed) => /^ {2}weaken:/m.test(i.text)
+  return [...mine.filter(weak), ...mine.filter((i) => !weak(i))]
 }
 
 export const ACCEPT_DESCRIPTION =
   'Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.'
 export const CONFIRM_DESCRIPTION =
-  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. When several are pending the user answers for each one. Pass id to ask only about that amendment. The result tells you what happened, and when it failed it says why.'
+  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject them. With no decision it only lists them, with the item names and a note of how many diff lines are hidden; pass id to see the diff of that amendment. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. When several are pending the user answers for each one. With a decision, pass id to ask only about that amendment. The result tells you what happened, and when it failed it says why.'
 export const ACCEPT_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -358,6 +372,13 @@ export function splitListing(listing: string): Listed[] {
   return out
 }
 
+/** The outputs of several decisions as one text, with each distinct `next:` line once, at the end. */
+export function joinDecisions(outputs: string[]): string {
+  const lines = outputs.flatMap((o) => o.split('\n')).filter((l) => l.trim())
+  const next = [...new Set(lines.filter((l) => l.startsWith('next:')))]
+  return [...lines.filter((l) => !l.startsWith('next:')), ...next].join('\n')
+}
+
 /** What a failed command tells the agent inside a tool result: the command and its own words. */
 export function failedText(argv: string[], out: string): string {
   return `rvow ${argv.join(' ')} failed:\n${out
@@ -365,6 +386,13 @@ export function failedText(argv: string[], out: string): string {
     .filter((l) => l.trim())
     .slice(0, 12)
     .join('\n')}`
+}
+
+/** The last `max` lines of a long output, led by a line that counts the lines cut. */
+export function capLines(out: string, max = 40): string {
+  const lines = out.split('\n')
+  if (lines.length <= max) return out
+  return [`(${lines.length - max} earlier lines cut)`, ...lines.slice(-max)].join('\n')
 }
 
 /** What each yolo tier changes, as the user reads it in the dialog and the model reads it in the tool text. */

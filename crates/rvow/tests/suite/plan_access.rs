@@ -344,6 +344,36 @@ fn plan_access_put_creates_a_new_spec_file() {
     assert!(shown.contains("spec:demo"), "{shown}");
 }
 
+const DESIGN: &str = "# Design\n\nUse one task per capability and prove each with a test.\n";
+
+/// `rvow put <change> design` writes a new design.md and `rvow show` reads it
+/// back and lists the part; a change without one gives a clear error.
+#[test]
+fn plan_access_design_part() {
+    let (r, _root, id, dir) = change("design");
+    let shown = r.ok(&["show", &id]);
+    assert!(!shown.contains("design"), "no design part before the file exists: {shown}");
+    // A missing design errors with a fix that names the put command.
+    let (out, code) = r.rvow(&["show", &id, "design"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("design"), "{out}");
+    assert!(out.contains(&format!("rvow put {id} design")), "{out}");
+    // Put creates design.md when it does not exist.
+    let (out, code) = r.pipe(&["--human", "put", &id, "design"], DESIGN);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("design.md")).unwrap(), DESIGN);
+    // Show reads it back and lists the part.
+    let (out, code) = r.pipe(&["--human", "show", &id, "design"], "");
+    assert_eq!((code, out.as_str()), (0, DESIGN));
+    let shown = r.ok(&["show", &id]);
+    assert!(shown.contains("parts: proposal, tasks, design"), "{shown}");
+    // A second change without a design still errors.
+    let (id2, _dir2) = second_change(&r);
+    let (out, code) = r.rvow(&["show", &id2, "design"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains(&format!("rvow put {id2} design")), "{out}");
+}
+
 #[test]
 fn plan_access_put_refuses_a_bad_spec_name() {
     let (r, _root, id, dir) = change("put-bad-spec");

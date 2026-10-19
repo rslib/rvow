@@ -22,6 +22,8 @@ use crate::stats::{self, Hook, Outcome, STATS_FILE, StopReason};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 use crate::yolo::{self, Tier, YOLO_FILE};
 
+mod brief_state;
+mod notice_state;
 mod rule;
 mod session_files;
 mod shell;
@@ -78,7 +80,83 @@ pub(crate) fn key(p: &Path) -> String {
 
 /// The argument names that carry a file path for a writing tool.
 const FILE_ARGS: &[&str] =
-    &["file_path", "notebook_path", "path", "filename", "file", "dest", "destination", "target", "to", "output", "out"];
+    &["file_path", "filePath", "notebook_path", "path", "filename", "file", "dest", "destination", "target", "to", "output", "out"];
+
+/// What a tool call can do, decided once from the tool's name, so the same rules
+/// hold for every harness that sends its calls to the hooks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolKind {
+    /// Changes the files its arguments name.
+    Editor,
+    /// Runs a shell command, which the shell rules read.
+    Shell,
+    /// Changes no file.
+    ReadOnly,
+    /// Any other tool, such as an MCP tool or codemode: it may change files.
+    Other,
+}
+
+/// The editor, shell and read-only tool names of Claude Code, pi, OpenCode,
+/// Codex and Gemini CLI, compared without case. A name in none of them is
+/// read from its words.
+const EDITOR_TOOLS: &[&str] =
+    &["edit", "write", "multiedit", "multi_edit", "notebookedit", "patch", "apply_patch", "write_file", "replace", "create_file"];
+const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "shell_command", "local_shell", "exec_command", "run_shell_command"];
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+const READ_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "ls",
+    "list",
+    "find",
+    "notebookread",
+    "webfetch",
+    "web_fetch",
+    "websearch",
+    "google_web_search",
+    "todowrite",
+    "todoread",
+    "task",
+    "agent",
+    "read_file",
+    "read_many_files",
+    "list_directory",
+    "search_file_content",
+];
+
+/// The kind of the tool named `tool`.
+pub fn tool_kind(tool: &str) -> ToolKind {
+    let lower = tool.to_ascii_lowercase();
+    if EDITOR_TOOLS.contains(&lower.as_str()) {
+        return ToolKind::Editor;
+    }
+    if SHELL_TOOLS.contains(&lower.as_str()) {
+        return ToolKind::Shell;
+    }
+    if READ_TOOLS.contains(&lower.as_str()) {
+        return ToolKind::ReadOnly;
+    }
+    if writes_files(tool) { ToolKind::Other } else { ToolKind::ReadOnly }
+}
+
+/// The command of a shell tool call: a string, or an argv such as Codex's
+/// `["bash", "-lc", "<command>"]`. Only a shell's `-c` text is a command;
+/// another program's argv stays whole.
+fn shell_command(args: &Value) -> Option<String> {
+    match args.get("command")? {
+        Value::String(c) => Some(c.clone()),
+        Value::Array(words) => {
+            let words: Vec<&str> = words.iter().filter_map(Value::as_str).collect();
+            let is_shell = |w: &str| SHELLS.contains(&w.rsplit('/').next().unwrap_or(w));
+            match words.as_slice() {
+                [sh, flag, cmd] if is_shell(sh) && matches!(*flag, "-c" | "-lc") => Some((*cmd).to_string()),
+                _ => Some(words.join(" ")),
+            }
+        }
+        _ => None,
+    }
+}
 
 /// The files a tool call names: path arguments, and the file headers of a
 /// patch text (`*** Update File: x`, `+++ b/x`).
@@ -96,14 +174,15 @@ fn file_args(input: &Value) -> Vec<String> {
     out
 }
 
-/// Whether a tool changes files. The built-in editors do, and so does any
-/// other tool unless its name says it only reads; an unknown name that
-/// carries a file argument counts as a writer.
+/// Whether a tool changes files, from its name: a known editor does, a known
+/// reader or shell does not here, and any other tool does unless its name says
+/// it only reads.
 fn writes_files(tool: &str) -> bool {
-    if matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+    let lower = tool.to_ascii_lowercase();
+    if EDITOR_TOOLS.contains(&lower.as_str()) {
         return true;
     }
-    if matches!(tool, "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "WebFetch" | "WebSearch" | "TodoWrite" | "Task" | "Agent") {
+    if READ_TOOLS.contains(&lower.as_str()) || SHELL_TOOLS.contains(&lower.as_str()) {
         return false;
     }
     let name = tool.rsplit("__").next().unwrap_or(tool).to_lowercase();
@@ -176,9 +255,7 @@ fn added_lines(diff: &str) -> String {
 /// Code's plugins and settings, the pi extension and the signing trust file.
 fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(home) = crate::store::home_dir() {
-        out.push(home.join(crate::install::MARKETPLACE_DIR));
-    }
+    out.extend(crate::install::mod_dir());
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
     if let Some(h) = &home {
         let claude = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|c| !c.is_empty()).map_or_else(|| h.join(".claude"), PathBuf::from);
@@ -459,7 +536,13 @@ fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) 
         if name == CACHE_FILE {
             return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
         }
-        if name == STATS_FILE {
+        if name == crate::store::INDEX_FILE {
+            return denial(
+                Rule::CacheFile,
+                format!("{} is written and read only by rvow; delete it to make rvow look the project up again", crate::store::INDEX_FILE),
+            );
+        }
+        if name == STATS_FILE || Some(name) == Path::new(stats::ROTATED_FILE).file_name().and_then(|n| n.to_str()) {
             return denial(
                 Rule::StatsFile,
                 format!("{STATS_FILE} is written and read only by rvow; run `rvow stats` to see the counts instead"),
@@ -484,6 +567,12 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
     let is = |name: &str| target == key(&real_path(&project.root.join(name), cwd));
     if is(CACHE_FILE) {
         return denial(Rule::CacheFile, format!("{CACHE_FILE} is written and read only by rvow gate; run `rvow gate --rerun` instead"));
+    }
+    if Path::new(file).file_name().and_then(|n| n.to_str()) == Some(crate::store::INDEX_FILE) {
+        return denial(
+            Rule::CacheFile,
+            format!("{} is written and read only by rvow; delete it to make rvow look the project up again", crate::store::INDEX_FILE),
+        );
     }
     if is(STATS_FILE) {
         return denial(
@@ -523,9 +612,21 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
         format!(
             "{rel} is outside the files of {task}, the task leased to this agent; edit only {files}, or run rvow block {task} --reason \"...\" if the task needs it",
             task = lease.task,
-            files = lease.files.join(", ")
+            files = lease_files_text(&lease.files)
         ),
     ))
+}
+
+const MAX_LEASE_FILES: usize = 5;
+
+/// The leased globs for a deny text: at most `MAX_LEASE_FILES`, then a count.
+fn lease_files_text(files: &[String]) -> String {
+    let more = files.len().saturating_sub(MAX_LEASE_FILES);
+    let mut shown = files[..files.len() - more].join(", ");
+    if more > 0 {
+        shown.push_str(&format!(" and {more} more"));
+    }
+    shown
 }
 
 /// Why a subagent that holds a lease must not run this `rvow prove`: it proves
@@ -554,10 +655,11 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
-    if tool == "Bash" {
-        let Some(c) = args.get("command").and_then(Value::as_str) else {
+    if tool_kind(tool) == ToolKind::Shell {
+        let Some(c) = shell_command(&args) else {
             return Ok(None);
         };
+        let c = c.as_str();
         let top = git::toplevel(&cwd).ok();
         let trust = top.as_deref().and_then(|t| signers_path(project, t));
         let committed = |path: &Path| committed_test_text(project, top.as_deref(), path);
@@ -610,7 +712,12 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let session = input.get("session_id").and_then(Value::as_str);
     let tier = yolo::active(project).map(|on| on.tier);
-    let found = pre_tool_use_denial(project, input)?;
+    let found = match pre_tool_use_denial(project, input)? {
+        Some(d) => Some(d),
+        // Under yolo the rule is off: an audit would use up the session's one denial unseen.
+        None if Rule::BaselineFirst.mode_in(tier) == Mode::Enforce => session.and_then(|s| baseline_first(project, s, input)),
+        None => None,
+    };
     // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
     let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
     let mode = |d: &Denial| {
@@ -670,12 +777,24 @@ fn repo_rel(file: &str, cwd: &Path, top: &Path) -> Option<String> {
 /// The main session stop reads only the main record.
 fn record_changes(project: &Project, session: &str, input: &Value) {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else { return };
+    let rels = changed_rels(input, &cwd, &top);
+    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
+        session_files::record_agent(project, session, agent, &rels);
+    } else {
+        session_files::record(project, session, &rels);
+    }
+}
+
+/// The repo-relative files a tool call may change: the file arguments of a writing tool, and the
+/// files that a Bash command writes. Empty for a call that only reads.
+fn changed_rels(input: &Value, cwd: &Path, top: &Path) -> Vec<String> {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
-    let Ok(top) = git::toplevel(&cwd) else { return };
-    let rels: Vec<String> = if tool == "Bash" {
-        let Some(c) = args.get("command").and_then(Value::as_str).filter(|c| !reads_only(c)) else { return };
-        let changes = bash_changes(c, &cwd);
+    let cwd = cwd.to_path_buf();
+    if tool_kind(tool) == ToolKind::Shell {
+        let Some(c) = shell_command(&args).filter(|c| !reads_only(c)) else { return Vec::new() };
+        let changes = bash_changes(&c, &cwd);
         let bases: Vec<PathBuf> = std::iter::once(cwd.clone()).chain(changes.dirs.iter().map(|d| cwd.join(d))).collect();
         let mut seen = std::collections::BTreeSet::new();
         let mut rels: Vec<String> = Vec::new();
@@ -696,7 +815,7 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
             if at.exists() && std::fs::metadata(&at).is_ok_and(|m| m.is_dir()) {
                 continue;
             }
-            if let Some(rel) = repo_rel(f, base, &top) {
+            if let Some(rel) = repo_rel(f, base, top) {
                 push(rel);
             }
         }
@@ -709,7 +828,7 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
             if !keep {
                 continue;
             }
-            if let Some(rel) = repo_rel(f, base, &top) {
+            if let Some(rel) = repo_rel(f, base, top) {
                 push(rel);
             }
         }
@@ -718,27 +837,64 @@ fn record_changes(project: &Project, session: &str, input: &Value) {
         }
         rels
     } else if writes_files(tool) {
-        file_args(&args).iter().filter_map(|f| repo_rel(f, &cwd, &top)).collect()
+        file_args(&args).iter().filter_map(|f| repo_rel(f, &cwd, top)).collect()
     } else {
-        return;
-    };
-    if let Some(agent) = input.get("agent_id").and_then(Value::as_str) {
-        session_files::record_agent(project, session, agent, &rels);
-    } else {
-        session_files::record(project, session, &rels);
+        Vec::new()
     }
+}
+
+/// The denial of the first source edit of a baseline-pending task in `session`, or `None`. A source
+/// file is a file in the `files:` scope of the task that no `test_globs` entry matches. Each task is
+/// denied once per session, so a second try goes through. Any failure denies nothing.
+fn baseline_first(project: &Project, session: &str, input: &Value) -> Option<Denial> {
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let top = git::toplevel(&cwd).ok()?;
+    let rels: Vec<String> = changed_rels(input, &cwd, &top).into_iter().filter(|r| !r.starts_with(':')).collect();
+    if rels.is_empty() {
+        return None;
+    }
+    let home = crate::store::home_dir().ok()?;
+    let tests = fingerprint::globset(&config::load(project, &home).ok()?.test_globs).ok()?;
+    let sources: Vec<&String> = rels.iter().filter(|r| !tests.is_match(r.as_str())).collect();
+    if sources.is_empty() {
+        return None;
+    }
+    let (living, _) = change::load_living(project).ok()?;
+    let branch = git::branch(&top).ok()?.unwrap_or_default();
+    let active = proof::active(project, &living).ok()?;
+    for change in proof::on_branch(&active, &branch) {
+        for task in &change.loaded.tasks {
+            let id = task.id.to_string();
+            let Some(verify) = task.verify.as_deref() else { continue };
+            if change.baseline_known(&id, verify) {
+                continue;
+            }
+            let Ok(scope) = fingerprint::globset(&task.files) else { continue };
+            if !sources.iter().any(|r| scope.is_match(r.as_str())) {
+                continue;
+            }
+            if !notice_state::told(project, session, &id) {
+                notice_state::mark_told(project, session, &id);
+                return denial(
+                    Rule::BaselineFirst,
+                    format!(
+                        "{id} has no baseline yet. Run `rvow prove {id}` first, then make this edit: before the work the check fails on the warm tree, which is cheap, and after it rvow builds the base commit. This edit is denied once."
+                    ),
+                );
+            }
+        }
+    }
+    None
 }
 
 /// Whether a tool call may write the work tree, so a before snapshot is taken
 /// around it. Read, Grep, Glob and a read-only Bash command are skipped.
 fn may_write(tool: &str, args: &Value) -> bool {
-    if writes_files(tool) {
-        return true;
+    match tool_kind(tool) {
+        ToolKind::Editor | ToolKind::Other => true,
+        ToolKind::Shell => shell_command(args).is_some_and(|c| !reads_only(&c)),
+        ToolKind::ReadOnly => false,
     }
-    if tool == "Bash" {
-        return args.get("command").and_then(Value::as_str).is_some_and(|c| !reads_only(c));
-    }
-    false
 }
 
 /// The pre-tool-use provenance: snapshots the work tree before an allowed
@@ -755,7 +911,13 @@ fn record_before_snapshot(project: &Project, session: &str, input: &Value) {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let Ok(top) = git::toplevel(&cwd) else { return };
     let agent = input.get("agent_id").and_then(Value::as_str);
-    crate::provenance::before_call(project, &top, session, agent, id);
+    // The editors and the shell keep a before snapshot, since overlapping calls of
+    // other sessions are judged by it; any other writer takes one snapshot after.
+    if matches!(tool_kind(tool), ToolKind::Editor | ToolKind::Shell) {
+        crate::provenance::before_call(project, &top, session, agent, id);
+    } else {
+        crate::provenance::before_call_light(project, &top, session, agent, id);
+    }
 }
 
 /// Claude Code `PostToolUse`: snapshots the tree after a checked call, diffs it
@@ -815,16 +977,39 @@ pub fn claude_lease_end(project: &Project, input: &Value) -> Result<Option<Value
     Ok(None)
 }
 
-/// Claude Code `SessionStart`: the brief as added context, or `None` when the
-/// branch has no active change.
-pub fn claude_session_start(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
+/// Claude Code `SessionStart`: the brief with each of `warnings` as added
+/// context, or `None` when there is nothing new for the session. Outside a
+/// project only the warnings go.
+pub fn claude_session_start(project: Option<&Project>, home: &Path, input: &Value, warnings: &[String]) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let mut text = brief::brief(project, home, &cwd)?;
-    if let Some(on) = yolo::active(project) {
+    let mut text = match project {
+        Some(p) => brief::brief(p, home, &cwd)?,
+        None => String::new(),
+    };
+    if let Some(on) = project.and_then(yolo::active) {
         let warning = format!("rvow: yolo {} is on and ends by itself; the hooks relax, the gate still checks at push", on.tier.name());
         text = brief::with_warning(&text, &warning);
     }
-    Ok((!text.is_empty()).then(|| {
+    for warning in warnings {
+        text = brief::with_warning(&text, warning);
+    }
+    let state = project.map_or_else(|| home.join("hook-state"), |p| p.root.join("hook-state"));
+    let session = input.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let send = match session {
+        Some(s) if !text.is_empty() => {
+            if matches!(input.get("source").and_then(Value::as_str), Some("compact" | "clear")) {
+                brief_state::clear(&state, s);
+            }
+            let sent = brief_state::load(&state, s);
+            brief_state::store(&state, s, &text);
+            match sent {
+                Some(last) => brief_delta(&last, &text),
+                None => Some(text),
+            }
+        }
+        _ => Some(text),
+    };
+    Ok(send.filter(|t| !t.is_empty()).map(|text| {
         json!({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": text,
@@ -832,7 +1017,33 @@ pub fn claude_session_start(project: &Project, home: &Path, input: &Value) -> Re
     }))
 }
 
+/// What a session still needs of `text` after it got `last`: nothing for the same brief, only the
+/// `tasks:` line when only that line differs, else the full brief.
+fn brief_delta(last: &str, text: &str) -> Option<String> {
+    if last == text {
+        return None;
+    }
+    let (old, new): (Vec<&str>, Vec<&str>) = (last.lines().collect(), text.lines().collect());
+    let mut changed = old.iter().zip(&new).filter(|(a, b)| a != b);
+    match (old.len() == new.len(), changed.next(), changed.next()) {
+        (true, Some((was, line)), None) if was.starts_with("tasks:") && line.starts_with("tasks:") => Some(format!("{line}\n")),
+        _ => Some(text.to_string()),
+    }
+}
+
 const MAX_DRIFT_ITEMS: usize = 3;
+
+/// The stop text for a plan change without an amendment: at most `MAX_DRIFT_ITEMS` items, then a count.
+fn unamended_text(blocking: &[String]) -> String {
+    let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
+    let mut shown = blocking[..blocking.len() - more].join("; ");
+    if more > 0 {
+        shown.push_str(&format!("; and {more} more"));
+    }
+    format!(
+        "the plan changed without an amendment ({shown}); run rvow amend --reason \"...\"; the user confirms it when the change is archived"
+    )
+}
 
 /// True while a rebase, merge or cherry-pick is half done in the repository at `top`.
 fn git_operation_running(top: &Path) -> bool {
@@ -909,14 +1120,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         if !own {
             continue;
         }
-        let more = blocking.len().saturating_sub(MAX_DRIFT_ITEMS);
-        let mut shown = blocking[..blocking.len() - more].join("; ");
-        if more > 0 {
-            shown.push_str(&format!("; and {more} more"));
-        }
-        let text = format!(
-            "the plan changed without an amendment ({shown}); run rvow amend --reason \"...\" and ask the user to run /rvow-confirm (or ! rvow confirm)"
-        );
+        let text = unamended_text(&blocking);
         return Ok(Some(StopHold { kind: StopReason::Drift, text }));
     }
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
@@ -1028,6 +1232,10 @@ fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option
         return Ok(None);
     }
     let session = input.get("session_id").and_then(Value::as_str);
+    // A change that no call of the session recorded, such as a background job's, still counts.
+    if let (Some(s), Ok(top)) = (session, git::toplevel(&cwd)) {
+        crate::provenance::catch_up_at_stop(project, &top, s, None);
+    }
     let Some(hold) = stop_reason(project, home, &cwd, session)? else {
         if let Some(s) = session {
             stop_state::clear(project, s);
@@ -1044,6 +1252,13 @@ fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option
 mod tests {
     use super::*;
     use crate::proof::tests::accepted;
+
+    #[test]
+    fn any_tool_change_only_a_shell_argv_drops_the_program() {
+        let cmd = |v: Value| shell_command(&json!({ "command": v }));
+        assert_eq!(cmd(json!(["/bin/bash", "-lc", "rvow accept CHG-x"])).as_deref(), Some("rvow accept CHG-x"));
+        assert_eq!(cmd(json!(["python3", "-c", "print(1)"])).as_deref(), Some("python3 -c print(1)"));
+    }
 
     #[test]
     fn a_literal_glob_matches_a_casewise_edited_path_on_macos() {
@@ -1067,6 +1282,37 @@ mod tests {
         assert!(next.iter().any(|n| reason.contains(n)), "no next step: {reason}");
     }
 
+    fn items(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("f{i}")).collect()
+    }
+
+    #[test]
+    fn lease_deny_lists_five_files_and_counts_the_rest() {
+        let files: Vec<String> = (0..8).map(|i| format!("f{i}.rs")).collect();
+        assert_eq!(lease_files_text(&files), "f0.rs, f1.rs, f2.rs, f3.rs, f4.rs and 3 more");
+        assert_eq!(lease_files_text(&files[..2]), "f0.rs, f1.rs");
+    }
+
+    #[test]
+    fn confirm_once_at_archive_lists_three_and_counts_the_rest() {
+        let text = unamended_text(&items(5));
+        assert!(text.contains("f1; f2; f3; and 2 more)"), "{text}");
+        assert!(!text.contains("f4"), "{text}");
+    }
+
+    #[test]
+    fn confirm_once_at_archive_lists_one_item_without_a_count() {
+        let text = unamended_text(&items(1));
+        assert!(text.contains("(f1)") && !text.contains("more"), "{text}");
+    }
+
+    #[test]
+    fn confirm_once_at_archive_names_amend_and_not_confirm() {
+        let text = unamended_text(&items(2));
+        assert!(text.contains("rvow amend --reason"), "{text}");
+        assert!(!text.contains("/rvow-confirm") && !text.contains("rvow confirm"), "{text}");
+    }
+
     #[test]
     fn every_deny_reason_names_a_next_step() {
         for reason in [
@@ -1078,7 +1324,7 @@ mod tests {
             "t.sh is a protected test or test setup file; to change it, run rvow amend --unlock t.sh --reason \"...\" and ask the user to confirm",
             "t.sh is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm",
             "the plan CHG-x is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept CHG-x (or ! rvow accept CHG-x) before you edit code",
-            "the plan changed without an amendment (a); run rvow amend --reason \"...\" and ask the user to run ! rvow confirm",
+            "the plan changed without an amendment (a); run rvow amend --reason \"...\"; the user confirms it when the change is archived",
             "rvow accept belongs to the user; the hooks deny it for agents. Ask the user to run /rvow-accept <id>, or to type ! rvow accept",
             "--no-verify skips the hooks that check the plan; run git commit and git push without it",
             "git commit -n skips the hooks that check the plan; run git commit without -n",
@@ -1446,6 +1692,7 @@ mod tests {
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         let vowed = crate::vow::commit(&p, prepared).unwrap();
         let task = vowed.minted[0].1.to_string();
+        assert!(proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
 
         assert!(edit(&p, &repo, "tests/t.sh").is_some());
         let err = amend::amend(&p, &home, &repo, None, "fix", Some("src/x.rs")).unwrap_err();
@@ -1526,18 +1773,27 @@ mod tests {
             status_line(&p, &home, &repo).unwrap().unwrap(),
             format!("rvow {}: 1/1 proved, 1 drift, 1 pending", dir.file_name().unwrap().to_str().unwrap().get(..10).unwrap())
         );
-        let start = claude_session_start(&p, &home, &input).unwrap().unwrap();
+        let start = claude_session_start(Some(&p), &home, &input, &[]).unwrap().unwrap();
         assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("tasks:"));
     }
 
     fn pre(p: &Project, repo: &Path, session: &str, tool: &str, input: Value) -> Option<Value> {
         let call = json!({"session_id": session, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
-        claude_pre_tool_use(p, &call).unwrap()
+        retried(p, &call)
     }
 
     fn pre_agent(p: &Project, repo: &Path, session: &str, agent: &str, tool: &str, input: Value) -> Option<Value> {
         let call = json!({"session_id": session, "agent_id": agent, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
-        claude_pre_tool_use(p, &call).unwrap()
+        retried(p, &call)
+    }
+
+    /// The pre-tool-use answer of `call`; the first source edit is denied once for the baseline, and an agent retries it.
+    fn retried(p: &Project, call: &Value) -> Option<Value> {
+        let out = claude_pre_tool_use(p, call).unwrap();
+        if out.as_ref().is_some_and(|v| v.to_string().contains("has no baseline yet")) {
+            return claude_pre_tool_use(p, call).unwrap();
+        }
+        out
     }
 
     fn stop_of(p: &Project, home: &Path, repo: &Path, session: &str) -> Option<String> {

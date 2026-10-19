@@ -157,7 +157,8 @@ fn reach_pi_skill_keeps_a_user_edit_and_names_it_kept() {
     assert!(std::fs::read_to_string(&path).unwrap().ends_with("my note\n"), "the edit survives reinstall");
     assert!(out.contains("kept") && out.contains("SKILL.md"), "the output names the kept file: {out}");
     let raw = current.lines().filter(|l| !l.contains("rvow-managed skill-sha256")).collect::<Vec<_>>().join("\n") + "\n";
-    let stale = install::stale_managed_files(&fx.root.join("claude"), &fx.root.join("rh"), Some(&pi), &raw);
+    let stale =
+        install::stale_managed_files(&fx.root.join("claude"), &fx.root.join("home/.local/share/rvow/claude-plugin"), Some(&pi), &raw);
     assert!(stale.contains(&path), "a stale pi skill is reported: {stale:?}");
 }
 
@@ -186,9 +187,10 @@ fn reach_brief_names_the_work_loop_with_the_next_task() {
     let brief = fx.rvow(&["brief"]);
     let loops: Vec<&str> = brief.lines().filter(|l| l.trim_start().starts_with("loop:")).collect();
     assert_eq!(loops.len(), 1, "one loop line: {brief}");
-    for word in ["rvow prove TSK-", "rvow amend", "rvow_confirm", &format!("rvow show {change}")] {
+    for word in ["rvow prove TSK-", "rvow amend", &format!("rvow show {change}")] {
         assert!(loops[0].contains(word), "{word} missing from {}: {brief}", loops[0]);
     }
+    assert!(!loops[0].contains("rvow_confirm"), "{}", loops[0]);
     assert!(brief.lines().count() <= 25, "{brief}");
     assert!(brief.len() <= 1500, "{} chars", brief.len());
 }
@@ -261,11 +263,13 @@ fn reach_pi_skill_stale_copy_is_reported() {
     fx.install(Some(&pi));
     let path = pi.join("skills/rvow/SKILL.md");
     let other = "---\nname: rvow\ndescription: changed\n---\nChanged body\n";
-    let stale = install::stale_managed_files(&fx.root.join("claude"), &fx.root.join("rh"), Some(&pi), other);
+    let stale =
+        install::stale_managed_files(&fx.root.join("claude"), &fx.root.join("home/.local/share/rvow/claude-plugin"), Some(&pi), other);
     assert!(stale.contains(&path), "a stale pi skill is reported: {stale:?}");
     let current = std::fs::read_to_string(&path).unwrap();
     let raw = current.lines().filter(|l| !l.contains("rvow-managed skill-sha256")).collect::<Vec<_>>().join("\n") + "\n";
-    let fresh = install::stale_managed_files(&fx.root.join("claude"), &fx.root.join("rh"), Some(&pi), &raw);
+    let fresh =
+        install::stale_managed_files(&fx.root.join("claude"), &fx.root.join("home/.local/share/rvow/claude-plugin"), Some(&pi), &raw);
     assert!(!fresh.contains(&path), "a current pi skill is not reported: {fresh:?}");
 }
 
@@ -275,4 +279,43 @@ fn reach_pi_skill_no_dir_writes_nothing_and_does_not_fail() {
     fx.install(None);
     assert!(!fx.root.join("home/.pi").exists(), "the default pi dir stays untouched");
     assert!(!fx.root.join("pi").exists(), "no pi skill is written");
+}
+
+fn install_mod(fx: &Fx, xdg_data: Option<&std::path::Path>) {
+    let mut c = fx.cmd();
+    c.arg("install");
+    if let Some(d) = xdg_data {
+        c.env("XDG_DATA_HOME", d);
+    }
+    let out = c.output().unwrap();
+    assert!(out.status.success(), "rvow install failed: {}", String::from_utf8_lossy(&out.stdout));
+}
+
+#[test]
+fn reach_mod_lands_in_the_xdg_data_folder_not_the_store() {
+    let fx = Fx::new("mod-xdg");
+    let data = fx.root.join("data");
+    install_mod(&fx, Some(&data));
+    assert!(data.join("rvow/claude-plugin/plugins/rvow/hooks/register.tsx").is_file(), "the mod is in the data folder");
+    assert!(!fx.root.join("rh/claude-plugin").exists(), "the store holds no mod");
+}
+
+#[test]
+fn reach_mod_lands_in_local_share_without_xdg_data() {
+    let fx = Fx::new("mod-local");
+    install_mod(&fx, None);
+    assert!(fx.root.join("home/.local/share/rvow/claude-plugin/plugins/rvow/hooks/register.tsx").is_file());
+    assert!(!fx.root.join("rh/claude-plugin").exists(), "the store holds no mod");
+}
+
+#[test]
+fn reach_mod_old_copy_in_the_store_is_removed() {
+    let fx = Fx::new("mod-old");
+    let old = fx.root.join("rh/claude-plugin");
+    install::claude_mod(&old, std::path::Path::new("/bin/rvow"), "---\nname: rvow\ndescription: a\n---\nold\n").unwrap();
+    std::fs::write(fx.root.join("rh/keep.txt"), "store data").unwrap();
+    install_mod(&fx, None);
+    assert!(!old.exists(), "the old mod copy is gone");
+    assert!(fx.root.join("rh/keep.txt").is_file(), "the store data stays");
+    assert!(fx.root.join("home/.local/share/rvow/claude-plugin/plugins/rvow").is_dir());
 }

@@ -1,10 +1,9 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
-  acceptTimeoutMs,
+  ACCEPT_MS,
   createAcceptMemory,
   declinedAcceptReason,
   GATE_MS,
-  planBudget,
   repeatAcceptResult,
   run,
   SLOW_MS,
@@ -21,9 +20,9 @@ export type ConfirmInput = { decision?: "accept" | "reject"; id?: string };
 export const ACCEPT_DESCRIPTION =
   "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
 export const ARCHIVE_DESCRIPTION =
-  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved and no plan edit is pending; otherwise the result names what is missing and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved, instead of asking the user to type /rvow-archive.";
+  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Pending plan edits (amendments) of the change do not block it: the same dialog lists them, weaken ones first, and a yes accepts them all and then archives. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.";
 
-/** Why a change cannot be archived yet, or `null` when every task is proved and no plan edit is pending. */
+/** Why a change cannot be archived yet, or `null` when every task is proved or stale. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
 export function archiveBlockers(
   found: { id: string; tasks?: { id: string; state?: string }[]; pending?: unknown[] } | undefined,
   id: string,
@@ -33,17 +32,17 @@ export function archiveBlockers(
   if (change.tasks.length === 0)
     return `rvow: ${id} has no task, so there is nothing proved to archive`;
   const open = change.tasks
-    .filter((t) => t.state !== "proved")
+    .filter((t) => t.state !== "proved" && !t.state?.startsWith("stale"))
     .map((t) => `${t.id} is ${t.state ?? "unknown"}`);
   if (open.length > 0)
-    return `rvow: ${id} is not ready to archive: ${open.join(", ")}; prove them first`;
-  if (change.pending.length > 0)
-    return `rvow: ${id} has ${change.pending.length} pending plan edit(s); the user decides them first with rvow_confirm`;
+    return `rvow: ${id} is not ready to archive: ${open.join(", ")}; fix them first`;
   return null;
 }
 
+const MODEL_TEXT_CAP = 4_000;
+
 export const CONFIRM_DESCRIPTION =
-  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. Pass id to ask only about that one amendment. The result tells you what happened, and when it failed it says why.";
+  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them by item name; pass id to see the diff of one amendment. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. With a decision, pass id to ask only about that one amendment. The result tells you what happened, and when it failed it says why.";
 
 export function acceptArgs(input: unknown): string {
   const value = closed(input, ["change"]);
@@ -71,6 +70,68 @@ export function amendmentBlock(listing: string, id: string): string | undefined 
     if (inside && line.trim()) lines.push(line);
   }
   return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+export type ChangeAmendment = { id: string; block: string };
+
+/** The pending amendments of one change in a `rvow confirm` listing, those holding a weaken item first. */
+export function changeAmendments(listing: string, change: string): ChangeAmendment[] {
+  const found: ChangeAmendment[] = [];
+  let current: { id: string; change: string; lines: string[] } | undefined;
+  const flush = () => {
+    if (current?.change === change) found.push({ id: current.id, block: current.lines.join("\n") });
+    current = undefined;
+  };
+  for (const line of listing.split("\n")) {
+    if (/^digest \S+$/.test(line) || /^decide with:/.test(line)) break;
+    const head = /^(AMD-[\w-]+) for (\S+)/.exec(line);
+    if (head) {
+      flush();
+      current = { id: head[1] ?? "", change: head[2] ?? "", lines: [line] };
+    } else if (current && line.trim()) current.lines.push(line);
+  }
+  flush();
+  const weakens = (a: ChangeAmendment) => /^ {2}weaken:/m.test(a.block);
+  return [...found.filter(weakens), ...found.filter((a) => !weakens(a))];
+}
+
+const ASK_ROUNDS = 3;
+
+export type ArchiveAsk =
+  | { kind: "none" }
+  | { kind: "yes"; ids: string[] }
+  | { kind: "no" }
+  | { kind: "changing" }
+  | { kind: "unreadable"; text: string };
+
+/**
+ * Show every pending amendment of `change` in one dialog and, on a yes, re-read the list: when it is
+ * not the list the user saw, ask again with the new one, so no unseen amendment is ever accepted.
+ * `rvow confirm --all` decides every pending amendment of the branch, so the caller accepts by id.
+ */
+export async function askPendingAmendments(
+  change: string,
+  read: () => Promise<{ ok: boolean; text: string }>,
+  confirm: (message: string) => Promise<boolean>,
+  tail: string,
+): Promise<ArchiveAsk> {
+  for (let round = 0; round < ASK_ROUNDS; round++) {
+    const first = await read();
+    if (!first.ok) return { kind: "unreadable", text: first.text };
+    const shown = changeAmendments(first.text, change);
+    if (shown.length === 0) return { kind: "none" };
+    const body = shown.map((a) => a.block).join("\n");
+    const yes = await confirm(
+      `${change} has ${shown.length} pending plan edit(s), weaken ones first. Archiving accepts all of them:\n\n${body}\n\n${tail}`,
+    );
+    if (!yes) return { kind: "no" };
+    const again = await read();
+    if (!again.ok) return { kind: "unreadable", text: again.text };
+    const now = changeAmendments(again.text, change);
+    if (now.map((a) => a.block).join("\n") === body)
+      return { kind: "yes", ids: shown.map((a) => a.id) };
+  }
+  return { kind: "changing" };
 }
 
 export function confirmDecision(input: unknown): "accept" | "reject" | undefined {
@@ -271,9 +332,9 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     const output = value ?? { code: 1, out: "rvow: cannot run the configured binary" };
     const details = parseOutput(args, output.code, output.out);
     const text =
-      output.out.length <= 16_000
+      output.out.length <= MODEL_TEXT_CAP
         ? output.out
-        : `${output.out.slice(0, 16_000)}\n[output truncated; read rvow ${args[0] === "prove" ? `show ${args[1]} --full` : args.join(" ")} in a terminal for more detail]`;
+        : `${output.out.slice(0, MODEL_TEXT_CAP)}\n[output truncated; read rvow ${args[0] === "prove" ? `show ${args[1]} --full` : args.join(" ")} in a terminal for more detail]`;
     return {
       content: [{ type: "text" as const, text }],
       details,
@@ -366,14 +427,9 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         acceptMemory.remember(change, reviewText, reason, true);
         return declined(repeatAcceptResult(reason, change));
       }
-      // The wait covers every baseline check of the plan, not a fixed ten minutes.
-      // A view that cannot be read keeps the fixed wait.
-      const seen = await queue(() =>
-        result(["hook", "view"], ctx.cwd, signal, SLOW_MS).catch(() => null),
+      const done = await queue(() =>
+        result(["accept", change, "--yes"], ctx.cwd, signal, ACCEPT_MS),
       );
-      const view = seen?.details.kind === "view" ? seen.details.data : null;
-      const wait = acceptTimeoutMs(planBudget(view, change));
-      const done = await queue(() => result(["accept", change, "--yes"], ctx.cwd, signal, wait));
       if (done.details.kind === "decision") {
         acceptMemory.forget(change);
         return done;
@@ -410,14 +466,55 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
           content: [{ type: "text" as const, text: blocked }],
           details: { kind: "failure" as const, code: 1, error: blocked, stdout: "" },
         };
-      const yes = await ctx.ui.confirm(
-        `rvow ${change}`,
-        `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
-      );
-      if (!yes)
-        return declined(
-          `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
+      const found = seen.details.data?.changes.find((c) => c.id === change);
+      const tail = `Archive ${change}? The gate trusts an archived change and never reruns its tasks.`;
+      let accept: string[] = [];
+      let asked = false;
+      if ((found?.pending ?? []).length > 0) {
+        const answer = await askPendingAmendments(
+          change,
+          async () => {
+            const list = await queue(() => result(["confirm", "--full"], ctx.cwd, signal, SLOW_MS));
+            return { ok: list.details.kind === "decision", text: text(list) };
+          },
+          (message) => ctx.ui.confirm(`rvow ${change}`, message),
+          tail,
         );
+        if (answer.kind === "unreadable")
+          return {
+            content: [{ type: "text" as const, text: answer.text }],
+            details: { kind: "failure" as const, code: 1, error: answer.text, stdout: "" },
+            isError: true as const,
+          };
+        if (answer.kind === "changing")
+          return declined(
+            `The pending plan edits of ${change} kept changing, so nothing was accepted and it stays active. The user can run /rvow-archive ${change} to decide them and archive it.`,
+          );
+        if (answer.kind === "no")
+          return declined(
+            `The user did not archive ${change}; it stays active and its plan edits stay pending. The user can run /rvow-archive ${change} to decide them and archive it.`,
+          );
+        if (answer.kind === "yes") {
+          accept = answer.ids;
+          asked = true;
+        }
+      }
+      if (!asked) {
+        const yes = await ctx.ui.confirm(
+          `rvow ${change}`,
+          `Every task of ${change} is proved or stale, and archive re-proves the stale ones. Archive it? The gate trusts an archived change and never reruns its tasks.`,
+        );
+        if (!yes)
+          return declined(
+            `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
+          );
+      }
+      if (accept.length > 0) {
+        const done = await queue(() =>
+          result(["confirm", ...accept, "--accept"], ctx.cwd, signal, SLOW_MS),
+        );
+        if (done.details.kind !== "decision") return done;
+      }
       return queue(() => result(["archive", change], ctx.cwd, signal, GATE_MS));
     },
   });
@@ -437,7 +534,11 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     execute: async (_id, params, signal, _update, ctx) => {
       const decision = confirmDecision(params);
       const named = confirmId(params);
-      const list = await queue(() => result(["confirm"], ctx.cwd, signal, SLOW_MS));
+      if (decision === undefined)
+        return queue(() =>
+          result(named === undefined ? ["confirm"] : ["confirm", named], ctx.cwd, signal, SLOW_MS),
+        );
+      const list = await queue(() => result(["confirm", "--full"], ctx.cwd, signal, SLOW_MS));
       if (named !== undefined && decision !== undefined && list.details.kind === "decision") {
         const block = amendmentBlock(text(list), named);
         if (!block) return declined(`${named} is not pending.`);
@@ -454,7 +555,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         return queue(() => result(["confirm", named, `--${decision}`], ctx.cwd, signal, SLOW_MS));
       }
       const digest = /^digest (\S+)$/m.exec(text(list))?.[1];
-      if (decision === undefined || list.details.kind !== "decision" || !digest) return list;
+      if (list.details.kind !== "decision" || !digest) return list;
       if (!ctx.hasUI) throw new Error("rvow: only the user can decide, and no one is here to ask");
       const yes = await ctx.ui.confirm(
         "rvow confirm",

@@ -1,10 +1,9 @@
-//! `rvow accept`: validate a backlog change, run the baseline, mint real ids,
-//! store the vowed content and move the change to `active/`.
+//! `rvow accept`: validate a backlog change, mint real ids, store the vowed
+//! content and move the change to `active/`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -20,7 +19,7 @@ use crate::ledger::{self, Kind};
 use crate::lint::{Finding, clarifications};
 use crate::proof;
 use crate::registry;
-use crate::runner::{self, Outcome};
+use crate::runner::Outcome;
 use crate::spec::{DeltaOp, Requirement, Spec, StepKind};
 use crate::store::{Lock, Project};
 use crate::tasks::Task;
@@ -109,9 +108,28 @@ pub(crate) fn replace_token(text: &str, from: &str, to: &str) -> String {
 pub struct Baseline {
     pub task: Ref,
     pub outcome: Outcome,
+    pub from: BaselineFrom,
 }
 
-/// A change that passed validation and its baseline run, ready to vow.
+/// How rvow learned a task's baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineFrom {
+    /// The verify command ran.
+    Run,
+    /// The source at the base commit shows the check must fail, with no run.
+    Source,
+}
+
+impl BaselineFrom {
+    pub fn name(self) -> &'static str {
+        match self {
+            BaselineFrom::Run => "run",
+            BaselineFrom::Source => "source",
+        }
+    }
+}
+
+/// A change that passed validation, ready to vow.
 #[derive(Debug)]
 pub struct Prepared {
     pub change: ChangeDir,
@@ -124,8 +142,6 @@ pub struct Prepared {
     pub baseline: Vec<Baseline>,
     /// The failed test names each task's JUnit report named, by task id.
     pub junit: BTreeMap<String, Vec<String>>,
-    /// The hint for a slow baseline run, when the project has no rerun setting.
-    pub hint: Option<String>,
 }
 
 fn findings_error(code: &'static str, what: &str, items: &[String], fix: &str) -> Error {
@@ -147,8 +163,8 @@ fn base_commit(top: &Path, base: &str) -> Result<String> {
     }
 }
 
-/// Validates a backlog change and runs every verify command once. Fails when a
-/// check would pass before any work starts.
+/// Validates a backlog change. Runs no verify command: each task's baseline
+/// stays pending until its first prove.
 pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, echo: &mut dyn Write) -> Result<Prepared> {
     if change.stage != Stage::Backlog {
         return Err(Error::new(
@@ -226,9 +242,7 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
     let config = config::load(project, home)?;
     let base_commit = base_commit(&top, &config.base)?;
     let mut baseline = Vec::new();
-    let mut junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut refused = Vec::new();
-    let mut slowest = Duration::ZERO;
+    let junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for task in &loaded.tasks {
         let plan = crate::template::plan(&runners, task)?;
         if let Some(path) = plan.missing_need(&top) {
@@ -238,62 +252,15 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
                 format!("configure {} first (for example with `cmake --preset ...`), then run rvow accept again", path),
             ));
         }
-        let cmd = plan.command.as_str();
-        let _ = writeln!(echo, "baseline {}: {cmd}", task.id);
-        let timeout = task.timeout.or(plan.timeout).unwrap_or(config.timeout());
-        let started = Instant::now();
-        let outcome = runner::run(cmd, &top, &plan.env, timeout, echo)?;
-        slowest = slowest.max(started.elapsed());
-        let ran_tests = outcome.tests_run != Some(0);
-        if outcome.passed() && ran_tests && !task.baseline_pass {
-            refused.push(format!(
-                "{} passes before any work ({} tests run): {cmd}",
-                task.id,
-                outcome.tests_run.map_or("unknown".into(), |n| n.to_string())
-            ));
+        if plan.junit.is_none() && crate::baseline::known_red(&top, &base_commit, &plan.command)? {
+            let _ = writeln!(echo, "baseline {}: {} (fails: its test is not in the base commit)", task.id, plan.command);
+            let outcome = Outcome { exit: None, timed_out: false, tests_run: Some(0), duration_ms: 0, tail: Vec::new() };
+            baseline.push(Baseline { task: task.id.clone(), outcome, from: BaselineFrom::Source });
+        } else {
+            let _ = writeln!(echo, "baseline {}: {} (pending, runs at the first prove)", task.id, plan.command);
         }
-        if task.baseline_pass && !outcome.passed() {
-            refused.push(format!("{} says baseline: pass but fails now: {cmd}", task.id));
-        }
-        // A runner that names {junit} writes a report: the failed test names
-        // it holds are the task's proof target, so it must name at least one.
-        // A `baseline: pass` task instead needs a report with at least one
-        // passed case and no failed one, and records no names.
-        if let Some(report) = &plan.junit {
-            match crate::junit::read(report) {
-                Ok(cases) if task.baseline_pass => {
-                    if let Some(bad) = cases.iter().find(|c| c.failed) {
-                        refused.push(format!("{}: the test {} failed, but the task says baseline: pass", task.id, bad.name));
-                    } else if cases.is_empty() {
-                        refused.push(format!("{}: its JUnit report names no test cases, but the task says baseline: pass", task.id));
-                    }
-                    junit.insert(task.id.to_string(), Vec::new());
-                }
-                Ok(cases) => {
-                    let failed: Vec<String> = cases.iter().filter(|c| c.failed).map(|c| c.name.clone()).collect();
-                    if failed.is_empty() {
-                        refused.push(format!("{}: its JUnit report names no failed test, so no test is the proof target", task.id));
-                    }
-                    junit.insert(task.id.to_string(), failed);
-                }
-                Err(e) => {
-                    refused.push(format!("{}: {}", task.id, e.message));
-                    junit.insert(task.id.to_string(), Vec::new());
-                }
-            }
-        }
-        baseline.push(Baseline { task: task.id.clone(), outcome });
     }
-    if !refused.is_empty() {
-        return Err(findings_error(
-            "baseline",
-            "the baseline run refused some tasks",
-            &refused,
-            "make each check fail before the work, or mark a check that must stay green with baseline: pass",
-        ));
-    }
-    let hint = crate::amend::baseline_hint(slowest, crate::amend::SLOW_BASELINE, &config.rerun_env, &config::rerun_links(project, home)?);
-    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit, hint })
+    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit })
 }
 
 /// The result of a vow.
@@ -477,7 +444,7 @@ pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
 
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
-    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit, hint: _ } = prepared;
+    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit } = prepared;
     let lock = project.lock()?;
 
     let minted = mint_placeholders(project, &lock, &change, &loaded)?;
@@ -493,7 +460,8 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
         .map(|b| {
             let key = b.task.to_string();
             let key = minted_names.get(&key).cloned().unwrap_or(key);
-            let v = json!({"exit": b.outcome.exit, "tests_run": b.outcome.tests_run, "timed_out": b.outcome.timed_out});
+            let v =
+                json!({"exit": b.outcome.exit, "tests_run": b.outcome.tests_run, "timed_out": b.outcome.timed_out, "from": b.from.name()});
             (key, v)
         })
         .collect();
@@ -553,7 +521,7 @@ mod tests {
         let (tmp, p, repo, c) =
             setup("- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 0 passed; 0 failed;'\n  files: src/**\n");
         let prepared = prepare(&p, &tmp.0.join("home"), c, &repo, &mut std::io::sink()).unwrap();
-        assert_eq!(prepared.baseline[0].outcome.tests_run, Some(0));
+        assert!(prepared.baseline.is_empty(), "accept runs no verify command");
         let vowed = commit(&p, prepared).unwrap();
         assert_eq!(vowed.minted.len(), 2);
         assert!(vowed.path.starts_with(p.root.join("active")));
@@ -569,19 +537,21 @@ mod tests {
     }
 
     #[test]
-    fn baseline_refuses_a_check_that_already_passes() {
+    fn accept_leaves_a_passing_check_pending() {
         let (tmp, p, repo, c) =
             setup("- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 2 passed; 0 failed;'\n  files: src/**\n");
-        let err = prepare(&p, &tmp.0.join("home"), c, &repo, &mut std::io::sink()).unwrap_err();
-        assert_eq!(err.code, "baseline");
+        let mut echo = Vec::new();
+        let prepared = prepare(&p, &tmp.0.join("home"), c, &repo, &mut echo).unwrap();
+        assert!(prepared.baseline.is_empty());
+        let echo = String::from_utf8(echo).unwrap();
+        assert!(echo.contains("baseline TSK-new1: echo") && echo.contains("pending"), "{echo}");
     }
 
     #[test]
-    fn baseline_pass_must_hold_and_branch_must_match() {
+    fn a_failing_guard_is_accepted_and_branch_must_match() {
         let (tmp, p, repo, c) = setup("- TSK-new1 Tail\n  covers: REQ-new1\n  verify: false\n  files: src/**\n  baseline: pass\n");
         let home = tmp.0.join("home");
-        let err = prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).unwrap_err();
-        assert_eq!(err.code, "baseline");
+        assert!(prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).is_ok(), "a guard is checked at its first prove");
         git(&repo, &["checkout", "-q", "-b", "other"]);
         let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
         assert_eq!(err.code, "branch");

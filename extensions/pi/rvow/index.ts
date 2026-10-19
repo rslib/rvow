@@ -46,20 +46,18 @@ import { judgeArgs, judgeRun } from "./judge.ts";
 import { decisionPrompt, failedPrompt, refinePrompt } from "./prompts.ts";
 import { refreshLoop } from "./refresh.ts";
 import {
+  ACCEPT_MS,
   type AcceptMemoryStore,
-  acceptTimeoutMs,
   BIN,
-  baselineNotice,
   createAcceptMemory,
+  cut,
   FAST_MS,
   GATE_MS,
-  type PlanBudget,
-  planBudget,
   run,
   SLOW_MS,
   shortReview,
 } from "./tools.ts";
-import { registerTypedTools, yoloArgs } from "./typed-tools.ts";
+import { askPendingAmendments, registerTypedTools, yoloArgs } from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
 const MAX_CONTINUES = 8;
@@ -129,8 +127,9 @@ async function brief(
   signal?: AbortSignal,
   timeoutMs = SLOW_MS,
   onFail?: (why: string) => void,
+  extra: { session_id?: string; source?: "startup" | "compact" } = {},
 ): Promise<string | undefined> {
-  const text = (await hook("session-start", cwd, {}, timeoutMs, false, signal, onFail))
+  const text = (await hook("session-start", cwd, extra, timeoutMs, false, signal, onFail))
     ?.hookSpecificOutput?.additionalContext;
   return typeof text === "string" && text ? text : undefined;
 }
@@ -143,9 +142,15 @@ type Ask = { ref: string; question: string; header?: string; options: Option[] }
 const OTHER = "Other (type your own answer)";
 const EDIT_HINT = "Edit the text each answer changes.";
 
+const ASK_CAP = 200;
+
 function asked(a: Ask): string {
-  const opts = a.options.map((o) => `  - ${o.label}${o.description ? `: ${o.description}` : ""}`);
-  return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${a.question}`, ...opts].join("\n");
+  const opts = a.options.map(
+    (o) => `  - ${cut(o.label, ASK_CAP)}${o.description ? `: ${cut(o.description, ASK_CAP)}` : ""}`,
+  );
+  return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${cut(a.question, ASK_CAP)}`, ...opts].join(
+    "\n",
+  );
 }
 
 async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
@@ -184,7 +189,7 @@ async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
     const a = await run(["answer", q.ref, choice, "--via", "dialog"], ctx.cwd, "", SLOW_MS);
     if (a?.code !== 0)
       return [...done, `cannot record ${q.ref}; still open: ${open(i).join(", ")}`].join("\n");
-    done.push(`${q.ref} ${q.question} -> ${choice}`);
+    done.push(`${q.ref} ${cut(q.question, ASK_CAP)} -> ${choice}`);
   }
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join("\n");
 }
@@ -1040,7 +1045,10 @@ export default function (pi: ExtensionAPI) {
     }
     later(async () => {
       const generation = epoch;
-      const text = await brief(ctx.cwd, background.signal);
+      const text = await brief(ctx.cwd, background.signal, undefined, undefined, {
+        session_id: ctx.sessionManager?.getSessionId?.(),
+        source: "startup",
+      });
       if (text && generation === epoch)
         pi.sendMessage({ customType: "rvow", content: text, display: false });
     });
@@ -1078,7 +1086,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     // After the call returns, report its outcome so rvow records the blobs the
     // call changed, with the same call id that pre-tool-use carried.
-    await hook(
+    const out = await hook(
       "post-tool-use",
       ctx.cwd,
       {
@@ -1094,6 +1102,10 @@ export default function (pi: ExtensionAPI) {
     const cmd = (event.input as Record<string, unknown>).command;
     if (event.toolName === "bash" && typeof cmd === "string" && /\brvow\b/.test(cmd))
       later(() => refresh(ctx));
+    // A notice that rvow kept for this call goes to the model with the call's result.
+    const notice = out?.hookSpecificOutput?.additionalContext;
+    if (typeof notice !== "string" || !notice) return;
+    return { content: [...event.content, { type: "text" as const, text: notice }] };
   });
 
   pi.on("session_compact", () => {
@@ -1103,7 +1115,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("context", async (event, ctx) => {
     if (!resend) return;
     resend = false;
-    const text = await brief(ctx.cwd, undefined, BOUND_MS, enforcementOff(ctx));
+    const text = await brief(ctx.cwd, undefined, BOUND_MS, enforcementOff(ctx), {
+      session_id: ctx.sessionManager?.getSessionId?.(),
+      source: "compact",
+    });
     if (!text) return;
     const msg = {
       role: "custom" as const,
@@ -1175,7 +1190,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   async function confirmAmendments(ctx: ExtensionContext) {
-    const list = await run(["confirm"], ctx.cwd, "", SLOW_MS);
+    const list = await run(["confirm", "--full"], ctx.cwd, "", SLOW_MS);
     if (!list) return ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
     const ids = list.out
       .split("\n")
@@ -1301,20 +1316,7 @@ export default function (pi: ExtensionAPI) {
     const repeat = acceptMemory.remembered(id, r.out) !== null;
     if (!(await ctx.ui.confirm(`rvow ${id}`, `${shortReview(r.out, id).trim()}\n\nAccept ${id}?`)))
       return;
-    // The notice names the baseline count from the view, and the wait covers the
-    // plan's own budget: the sum of its task timeouts.
-    await refresh(ctx);
-    let budget: PlanBudget | null = null;
-    try {
-      budget = planBudget(S.view, id);
-    } catch {}
-    ctx.ui.notify(
-      budget
-        ? baselineNotice(budget.tasks)
-        : "rvow accept: baseline checks will run; this can take a while",
-      "info",
-    );
-    return decide(ctx, ["accept", id], budget ? acceptTimeoutMs(budget) : SLOW_MS, !repeat);
+    return decide(ctx, ["accept", id], ACCEPT_MS, !repeat);
   }
 
   userCommand(
@@ -1353,6 +1355,28 @@ export default function (pi: ExtensionAPI) {
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
+    const answer = await askPendingAmendments(
+      arg,
+      async () => {
+        const r = await rvow(ctx, ["confirm", "--full"]);
+        return { ok: r?.code === 0, text: r?.out ?? "" };
+      },
+      (message) => ctx.ui.confirm(`rvow ${arg}`, message),
+      `Archive ${arg}?`,
+    );
+    // An unreadable list accepts nothing: the archive below still refuses what is not ready.
+    if (answer.kind === "no" || answer.kind === "changing")
+      return ctx.ui.notify(
+        `${arg} stays active and its plan edits stay pending; run /rvow-archive ${arg} to try again.`,
+        "info",
+      );
+    if (answer.kind === "yes") {
+      const done = await rvow(ctx, ["confirm", ...answer.ids, "--accept"]);
+      if (done?.code !== 0) {
+        if (done) ctx.ui.notify(done.out.trim(), "error");
+        return;
+      }
+    }
     await decide(ctx, ["archive", arg], GATE_MS);
   });
 
@@ -1391,6 +1415,7 @@ export default function (pi: ExtensionAPI) {
       const { text } = await judgeRun(ctx.cwd, {
         ...(change ? { change } : {}),
         ...(model ? { model } : {}),
+        forModel: true,
       });
       await refresh(ctx);
       return { content: [{ type: "text", text }], details: {} };

@@ -66,7 +66,9 @@ fn node_file_result(line: &str) -> bool {
 
 #[derive(Debug, Default)]
 struct TestCount {
-    libtest: Option<u64>,
+    /// The libtest count of each cargo run: a `Finished` line starts the next run.
+    libtest: Vec<u64>,
+    cargo_finished: bool,
     pytest: Option<u64>,
     nextest: Option<u64>,
     jest: Option<u64>,
@@ -178,8 +180,18 @@ impl TestCount {
         let plain = uncolored(line);
         let line = plain.as_ref();
         let t = line.trim();
+        if t.starts_with("Finished `") && t.contains(" target(s) in ") {
+            self.cargo_finished = true;
+            return;
+        }
         if t.starts_with("test result:") {
-            *self.libtest.get_or_insert(0) += count_before(t, &["passed", "failed"]);
+            if self.cargo_finished || self.libtest.is_empty() {
+                self.libtest.push(0);
+                self.cargo_finished = false;
+            }
+            if let Some(run) = self.libtest.last_mut() {
+                *run += count_before(t, &["passed", "failed"]);
+            }
             return;
         }
         if t.starts_with('=') && t.ends_with('=') && t.contains(" in ") {
@@ -263,8 +275,14 @@ impl TestCount {
         let go = (self.go_empty > 0 && self.go_real == 0).then_some(0);
         // Mocha always prints `N passing`, so a lone `N failing` line is not its summary.
         let mocha = self.mocha_passing.map(|p| p + self.mocha_failing.unwrap_or(0));
+        // A cargo run in a chain that ran nothing proves nothing, like a runner that ran nothing.
+        let libtest = match self.libtest.as_slice() {
+            [] => None,
+            runs if runs.len() > 1 && runs.contains(&0) => Some(0),
+            runs => Some(runs.iter().sum()),
+        };
         let counters: Vec<u64> = [
-            self.libtest,
+            libtest,
             self.pytest,
             self.nextest,
             self.jest,
@@ -769,6 +787,18 @@ mod tests {
             t,
         );
         assert_eq!(docs.tests_run, Some(5), "a crate with no doc tests and 5 unit tests is 5, not 0");
+    }
+
+    #[test]
+    fn counts_chain_a_cargo_run_that_ran_nothing_is_zero() {
+        let t = Duration::from_secs(10);
+        let fin = "echo '    Finished `test` profile [unoptimized] target(s) in 0.1s'";
+        let zero = "echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0s'";
+        let five = "echo 'test result: ok. 5 passed; 0 failed;'";
+        let chain = quiet(&format!("{fin}; {zero}; {zero}; {fin}; {five}"), t);
+        assert_eq!(chain.tests_run, Some(0), "the first cargo run matched no test, so the chain proves nothing");
+        let both = quiet(&format!("{fin}; {zero}; {five}; {fin}; {five}"), t);
+        assert_eq!(both.tests_run, Some(10), "two cargo runs that each ran tests add up");
     }
 
     #[test]

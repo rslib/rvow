@@ -139,11 +139,36 @@ fn confirm_shows_changed_lines_only() {
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     std::fs::write(dir.join("tasks.md"), tasks.replace("echo 'test", "echo 'tests")).unwrap();
     r.ok(&["amend", "--reason", "edit"]);
-    let out = r.ok(&["confirm"]);
+    let out = r.ok(&["confirm", "--full"]);
     assert!(out.contains("\n    - "), "{out}");
     assert!(out.contains("\n    + "), "{out}");
     assert!(!out.contains("before:") && !out.contains("after:"), "{out}");
     assert!(!out.contains("    - - TSK-new1 Write ok"), "{out}");
+}
+
+#[test]
+fn confirm_list_hides_the_diff_and_one_id_cuts_long_lines() {
+    let (r, root, id) = accepted("confirmshort");
+    let dir =
+        std::fs::read_dir(root.join("active")).unwrap().map(|e| e.unwrap().path()).find(|p| p.to_string_lossy().contains(&id)).unwrap();
+    let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+    let long = format!("echo '{}' >/dev/null && echo 'test", "x".repeat(600));
+    std::fs::write(dir.join("tasks.md"), tasks.replace("echo 'test", &long)).unwrap();
+    r.ok(&["amend", "--reason", "edit"]);
+    let list = r.ok(&["confirm"]);
+    let amd = list.lines().find_map(|l| l.split(" for ").next().filter(|s| s.starts_with("AMD-"))).unwrap().to_owned();
+    assert!(!list.contains("\n    - ") && !list.contains("\n    + "), "{list}");
+    assert!(list.contains("verify changed"), "{list}");
+    assert!(list.contains(&format!("  diff: 2 changed lines hidden; rvow confirm {amd} shows them")), "{list}");
+    assert!(list.contains("digest "), "{list}");
+    let one = r.ok(&["confirm", &amd]);
+    assert!(one.contains("\n    + ") && one.contains("... (cut, "), "{one}");
+    assert!(!one.contains(&"x".repeat(600)), "{one}");
+    assert!(one.contains(&format!("rvow confirm {amd} --full")), "{one}");
+    let full = r.ok(&["confirm", &amd, "--full"]);
+    assert!(full.contains(&"x".repeat(600)) && !full.contains("(cut, "), "{full}");
+    let (out, code) = r.rvow(&["confirm", "--full", "--accept", "--all", "x"]);
+    assert_eq!(code, 2, "{out}");
 }
 
 #[test]
@@ -490,4 +515,55 @@ fn show_change_keeps_task_rows() {
     assert!(shown.lines().any(|l| l == "  TSK-new1 Write tail"), "{shown}");
     assert!(shown.lines().any(|l| l == "  TSK-new2 Second"), "{shown}");
     assert!(!shown.contains("verify:"), "{shown}");
+}
+
+#[test]
+fn stop_reproves_a_finished_change_in_the_background() {
+    let (r, root, _id) = accepted("bgreprove");
+    let brief = r.ok(&["brief"]);
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    assert!(r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap().status.success());
+    std::fs::write(r.repo().join("out.txt"), "ok again").unwrap();
+    assert!(r.ok(&["status"]).contains("stale"));
+    let mut hook = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["hook", "stop"]).stdin(std::process::Stdio::piped()).spawn().unwrap();
+    let input = serde_json::json!({ "cwd": r.repo(), "session_id": "s1" }).to_string();
+    std::io::Write::write_all(hook.stdin.as_mut().unwrap(), input.as_bytes()).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let log = || std::fs::read_to_string(root.join("hook-state/reprove.log")).unwrap_or_default();
+    while r.ok(&["status"]).contains("stale") {
+        assert!(std::time::Instant::now() < deadline, "no background re-prove: {}", log());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(r.ok(&["status"]).contains("proved"));
+}
+
+#[test]
+fn prove_records_nothing_when_the_check_changes_its_own_files() {
+    let r = Repo::new("selfedit");
+    r.ok(&["init"]);
+    let out = r.ok(&["new", "--spec", "Out"]);
+    let id = field(&out, "created").to_owned();
+    let dir = Path::new(field(&out, "path")).to_owned();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo more >> out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("specs/out.md"),
+        "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+    )
+    .unwrap();
+    assert!(r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["accept", &id, "--yes"]).output().unwrap().status.success());
+    let brief = r.ok(&["brief"]);
+    let task =
+        brief.lines().find_map(|l| l.trim_start().strip_prefix("next: ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    std::fs::write(r.repo().join("out.txt"), "ok").unwrap();
+    let proved = r.cmd(env!("CARGO_BIN_EXE_rvow")).args(["prove", &task]).output().unwrap();
+    let out = String::from_utf8_lossy(&proved.stdout);
+    assert_eq!(proved.status.code(), Some(1), "{out}");
+    assert!(out.contains("changed while its check ran"), "{out}");
 }

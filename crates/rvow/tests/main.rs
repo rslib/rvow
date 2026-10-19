@@ -8,6 +8,10 @@ mod agent_mode;
 mod amend_baseline;
 #[path = "suite/amend_fixes.rs"]
 mod amend_fixes;
+#[path = "suite/any_tool_change.rs"]
+mod any_tool_change;
+#[path = "suite/archive_reprove.rs"]
+mod archive_reprove;
 #[path = "suite/attest.rs"]
 mod attest;
 #[path = "suite/audit_build.rs"]
@@ -52,6 +56,10 @@ mod audit_upgrade;
 mod audit_view;
 #[path = "suite/base_ref.rs"]
 mod base_ref;
+#[path = "suite/baseline_at_prove.rs"]
+mod baseline_at_prove;
+#[path = "suite/brief_once.rs"]
+mod brief_once;
 #[path = "suite/cli.rs"]
 mod cli;
 #[path = "suite/committed_tests.rs"]
@@ -64,6 +72,8 @@ mod diff_mutants;
 mod done_scope;
 #[path = "suite/drift_fixes.rs"]
 mod drift_fixes;
+#[path = "suite/first_edit_notice.rs"]
+mod first_edit_notice;
 #[path = "suite/fix_enforcement.rs"]
 mod fix_enforcement;
 #[path = "suite/fix_export.rs"]
@@ -90,6 +100,8 @@ mod judge;
 mod literal_paths;
 #[path = "suite/plan_access.rs"]
 mod plan_access;
+#[path = "suite/project_index.rs"]
+mod project_index;
 #[path = "suite/protected_growth.rs"]
 mod protected_growth;
 #[path = "suite/provenance.rs"]
@@ -126,6 +138,10 @@ mod syntax_units;
 mod tamper_holes;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
+#[path = "suite/warm_target.rs"]
+mod warm_target;
+#[path = "suite/warm_worktree.rs"]
+mod warm_worktree;
 #[path = "suite/worktrees.rs"]
 mod worktrees;
 #[path = "suite/yolo.rs"]

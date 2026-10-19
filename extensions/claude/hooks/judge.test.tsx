@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { expect } from 'claude-code/testing'
-import { JUDGE_AGENT, JUDGE_KEPT, JUDGE_NO_FINDINGS, JudgeInbox } from './format'
+import { JUDGE, JUDGE_AGENT, JUDGE_KEPT, JUDGE_NO_FINDINGS, JudgeInbox } from './format'
 import { cmd, procResult, test } from './testkit'
 
 const ID = 'CHG-judge1'
@@ -105,6 +105,52 @@ test('/rvow-judge spawns the read-only judge type and records its findings', asy
   expect(JSON.parse(String(record?.stdin))).toEqual(JSON.parse(ANSWER))
   expect(r.text).toContain('returns 42 for the tested input')
   expect(r.text).toContain('src/a.rs:3')
+})
+
+const longFindings = () =>
+  Array.from({ length: 25 }, (_, i) => ({
+    message: `${'x'.repeat(400)}${i}`,
+    path: 'src/a.rs',
+    line: i + 1,
+    severity: 'error',
+  }))
+
+test('the judge tool caps findings and their messages, the slash command does not', async ($, on) => {
+  const runs: Run[] = []
+  seed(on, runs, [], [])
+  const answer = JSON.stringify({ packet: PACKET, findings: longFindings() })
+  const slash = $.command.run(cmd('rvow-judge', ''))
+  await complete($, answer)
+  const full = (await slash).text ?? ''
+  expect(full).toContain(`src/a.rs:1: ${'x'.repeat(400)}0`)
+  const tool = $.tool.call({ tool: JUDGE, change: ID } as never)
+  await complete($, answer)
+  const lines = JSON.stringify(await tool).split('\\n')
+  expect(lines).toHaveLength(21)
+  expect(lines[1]).toBe(`src/a.rs:1: ${'x'.repeat(297)}...`)
+})
+
+test('a failed judge record tells the agent in at most 12 lines', async ($, on) => {
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('turn.complete', async () => ({ text: '' }))
+  on('agent.spawn', async () => ({ model: 'judge-model', agentId: 'j1' }))
+  on('agent.register', async () => ({ value: { agent: 'rvow:judge' } }))
+  on('process.run', async (_$, e) => {
+    const rest = [...(e.argv as string[])].slice(1).join(' ')
+    if (rest === 'hook claude view') return { value: procResult(0, JSON.stringify(VIEW)) }
+    if (rest === `review ${ID} --packet --human`)
+      return { value: procResult(0, `identity: ${PACKET}\nChange: ${ID}\n`) }
+    if (rest.startsWith('guide judge')) return { value: procResult(0, GUIDE) }
+    return {
+      value: procResult(1, Array.from({ length: 30 }, (_, i) => `bad line ${i + 1}`).join('\n')),
+    }
+  })
+  const done = $.command.run(cmd('rvow-judge', ''))
+  await complete($, ANSWER)
+  const r = await done
+  expect(r.text).toContain('failed:')
+  expect((r.text ?? '').split('\n')).toHaveLength(13)
 })
 
 test('/rvow-judge picks the model per run', async ($, on) => {

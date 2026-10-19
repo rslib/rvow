@@ -127,3 +127,48 @@ fn audit_docs_guide_examples_still_parse_as_one_change() {
     assert!(examples[0].contains("branch:"));
     assert!(examples[2].contains(&tasks[0].covers[0].to_string()));
 }
+
+#[test]
+fn docs_name_the_archive_confirm() {
+    let how = doc("docs/how-it-works.md");
+    assert!(
+        how.contains("confirms every pending amendment of the change once, in the archive dialog"),
+        "how-it-works lacks the archive confirm"
+    );
+    assert!(how.contains("`rvow amend --unlock`") && how.contains("its own confirm"), "how-it-works lacks the unlock exception");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("archive dialog"), "the Unreleased changelog lacks the archive confirm");
+}
+
+#[test]
+fn docs_name_the_brief_once_rule() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("sends the same brief once per session"), "how-it-works lacks the brief once rule");
+    assert!(how.contains("`compact`") && how.contains("`clear`"), "how-it-works lacks the compact and clear rule");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("brief once per session"), "the Unreleased changelog lacks the brief rule");
+}
+
+#[test]
+fn docs_name_the_baseline_first_rule() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("`baseline-first`") && how.contains("denies it once"), "how-it-works lacks the baseline-first rule");
+    assert!(how.contains("of every active change on the branch"), "how-it-works lacks the branch-wide proved scope");
+    assert!(!how.contains("gives the agent one line that names"), "how-it-works still names the removed notice");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("`baseline-first`"), "the Unreleased changelog lacks the baseline-first rule");
+}
+
+#[test]
+fn docs_name_the_warm_target() {
+    let settings = doc("docs/settings.md");
+    assert!(settings.contains("its own cargo build folder"), "settings lacks the warm worktree's own build folder");
+    assert!(!settings.contains("share one build folder between worktrees"), "settings still says to share one build folder");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("its own cargo build folder"), "the Unreleased changelog lacks the warm build folder");
+    assert!(!unreleased.contains("<shared dir>"), "the Unreleased changelog still names a shared build folder");
+}

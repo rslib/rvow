@@ -80,6 +80,7 @@ impl Fx {
         c.current_dir(self.repo())
             .env("HOME", self.root.join("home"))
             .env("RVOW_HOME", self.root.join("rh"))
+            .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -132,10 +133,17 @@ impl Fx {
     fn edit(&self, session: &str, rel: &str) {
         let payload =
             json!({"cwd": self.repo(), "tool_name": "Write", "tool_input": {"file_path": self.repo().join(rel)}, "session_id": session});
-        let mut child =
-            self.cmd(RVOW).args(["hook", "claude", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
-        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        let send = || {
+            let mut child =
+                self.cmd(RVOW).args(["hook", "claude", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+            String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+        };
+        let mut out = send();
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        if out.contains("has no baseline yet") {
+            out = send();
+        }
         assert_eq!(out.trim(), "", "the edit of {rel} was held back");
     }
 }

@@ -13,30 +13,90 @@ use crate::runner;
 use crate::tasks::Task;
 use crate::vow::sha256_hex;
 
-/// A temporary detached worktree of one commit, removed on drop. This is the
-/// one place where rvow writes to git. The gate rerun and the amend baseline
-/// share it, so both run in a clean checkout set up the same way.
+/// How many times a warm tree lock is tried before the run falls back to a temporary tree.
+const LOCK_TRIES: u32 = 10;
+/// The wait between two tries of the warm tree lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// A detached worktree of one commit. This is the one place where rvow writes
+/// to git. The gate rerun uses a clean temporary one; the base commit baseline
+/// uses the project's warm one, set up the same way.
 pub(crate) struct Worktree {
     repo: PathBuf,
     pub(crate) path: PathBuf,
+    /// The held lock of a warm tree, which drop keeps. A temporary tree has
+    /// none, and drop removes it.
+    warm: Option<std::fs::File>,
 }
 
 impl Worktree {
-    pub(crate) fn add(repo: &Path, links: &[String]) -> Result<Worktree> {
-        Self::add_at(repo, "HEAD", links)
-    }
-
-    /// The same clean checkout at `commit`, for the amend baseline on the
-    /// vow's base commit.
+    /// A temporary clean checkout at `commit`, removed on drop.
     pub(crate) fn add_at(repo: &Path, commit: &str, links: &[String]) -> Result<Worktree> {
         let b = Error::random::<6>()?;
         let name: String = b.iter().map(|x| format!("{x:02x}")).collect();
         let path = std::env::temp_dir().join(format!("rvow-rerun-{name}"));
         let p = path.to_string_lossy().into_owned();
         git::run(repo, &["worktree", "add", "--detach", "--quiet", &p, commit])?;
-        let tree = Worktree { repo: repo.to_path_buf(), path };
+        let tree = Worktree { repo: repo.to_path_buf(), path, warm: None };
         tree.link(links)?;
         Ok(tree)
+    }
+
+    /// The clean checkout at `commit` in the project's warm tree at `dir`, so
+    /// ignored build output from earlier runs stays and builds start warm. A
+    /// busy warm tree, or any git step that fails on it, falls back to a
+    /// temporary tree, so a run never waits and never fails because of it.
+    pub(crate) fn warm(repo: &Path, commit: &str, links: &[String], dir: &Path) -> Result<Worktree> {
+        match Self::try_warm(repo, commit, dir) {
+            Some(tree) => {
+                tree.link(links)?;
+                Ok(tree)
+            }
+            None => Self::add_at(repo, commit, links),
+        }
+    }
+
+    fn try_warm(repo: &Path, commit: &str, dir: &Path) -> Option<Worktree> {
+        // `git clean` runs here, so only ever on a folder under a `worktrees` folder.
+        let parent = dir.parent()?;
+        if parent.file_name()? != "worktrees" {
+            return None;
+        }
+        std::fs::create_dir_all(parent).ok()?;
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.with_extension("lock")).ok()?;
+        // A child process that another thread starts holds a copy of the lock
+        // for a moment, so a few short tries tell that from a real other run.
+        let mut tries = 0;
+        while lock.try_lock().is_err() {
+            tries += 1;
+            if tries == LOCK_TRIES {
+                return None;
+            }
+            std::thread::sleep(LOCK_WAIT);
+        }
+        // A name such as HEAD means the repository's commit, not the warm tree's.
+        let sha = git::run(repo, &["rev-parse", "--verify", &format!("{commit}^{{commit}}")]).ok()?;
+        let p = dir.to_string_lossy().into_owned();
+        let moved = same_repo(repo, dir)
+            && git::run(dir, &["checkout", "--detach", "--force", "--quiet", &sha]).is_ok()
+            && git::run(dir, &["clean", "-fdq"]).is_ok();
+        if !moved {
+            let _ = std::fs::remove_dir_all(dir);
+            let _ = git::run(repo, &["worktree", "prune"]);
+            git::run(repo, &["worktree", "add", "--detach", "--quiet", &p, &sha]).ok()?;
+        }
+        Some(Worktree { repo: repo.to_path_buf(), path: dir.to_path_buf(), warm: Some(lock) })
+    }
+
+    /// The cargo build folder of the tree, never the user's. A warm tree keeps
+    /// it next to itself, so `git clean` never empties it. A temporary tree
+    /// keeps it inside, so it goes when the tree goes.
+    pub(crate) fn cargo_target(&self) -> Option<PathBuf> {
+        let name = self.path.file_name()?.to_string_lossy().into_owned();
+        Some(match self.warm {
+            Some(_) => self.path.with_file_name(format!("{name}-target")),
+            None => self.path.join(".rvow-cargo-target"),
+        })
     }
 
     /// Links each `rerun_links` directory of the real repo into the tree.
@@ -68,6 +128,18 @@ impl Worktree {
                 continue;
             }
             let dst = self.path.join(rel);
+            // A warm tree keeps the link, or build output, of an earlier run. Clear it only when
+            // its folder is really inside the tree: through an earlier link it is the user's.
+            let inside = || {
+                let tree = self.path.canonicalize().ok()?;
+                dst.parent()?.canonicalize().ok().filter(|p| p.starts_with(&tree))
+            };
+            if self.warm.is_some()
+                && let Ok(meta) = dst.symlink_metadata()
+                && inside().is_some()
+            {
+                let _ = if meta.is_dir() { std::fs::remove_dir_all(&dst) } else { std::fs::remove_file(&dst) };
+            }
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
             }
@@ -97,8 +169,17 @@ fn symlink_dir(_src: &Path, dst: &Path) -> Result<()> {
     ))
 }
 
+/// Whether `dir` is a worktree of the repository at `repo`.
+fn same_repo(repo: &Path, dir: &Path) -> bool {
+    let common = |d: &Path| git::run(d, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok();
+    dir.join(".git").exists() && common(dir).is_some() && common(dir) == common(repo)
+}
+
 impl Drop for Worktree {
     fn drop(&mut self) {
+        if self.warm.is_some() {
+            return;
+        }
         let p = self.path.to_string_lossy().into_owned();
         if git::run(&self.repo, &["worktree", "remove", "--force", &p]).is_err() {
             let _ = std::fs::remove_dir_all(&self.path);
@@ -170,7 +251,8 @@ impl<'a> Lazy<'a> {
         if let Some(tree) = &self.tree {
             return Ok(Some(tree.path.clone()));
         }
-        let tree = Worktree::add(self.top, &self.links)?;
+        // The gate promises a clean checkout of HEAD, so it never uses the warm tree.
+        let tree = Worktree::add_at(self.top, "HEAD", &self.links)?;
         let dir = tree.path.clone();
         self.tree = Some(tree);
         for cmd in &self.setup {
@@ -260,4 +342,100 @@ pub(super) fn prove_data(
 
 fn invocation() -> String {
     Error::random::<8>().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testrepo::*;
+
+    /// A repository that ignores `build/`, and the warm tree path under a home.
+    fn fixture(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::write(repo.join(".gitignore"), "build/\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "-q", "-m", "ignore"]);
+        (repo, tmp.0.join("home").join("worktrees").join("p"))
+    }
+
+    #[test]
+    fn warm_worktree_reuses_the_folder_and_keeps_ignored_output() {
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        let tree = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        assert_eq!(tree.path, dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/out.o"), "o").unwrap();
+        drop(tree);
+        let tree = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        assert_eq!(tree.path, dir, "the same folder");
+        assert!(dir.join("build/out.o").is_file(), "ignored build output stays");
+    }
+
+    #[test]
+    fn warm_worktree_matches_the_commit() {
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        drop(Worktree::warm(&repo, "HEAD", &[], &dir).unwrap());
+        std::fs::write(dir.join("a.txt"), "edited").unwrap();
+        std::fs::write(dir.join("stray.txt"), "s").unwrap();
+        std::fs::write(repo.join("a.txt"), "b").unwrap();
+        git(&repo, &["commit", "-q", "-am", "b"]);
+        let tree = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        assert_eq!(std::fs::read_to_string(tree.path.join("a.txt")).unwrap(), "b", "the tracked file equals the new commit");
+        assert!(!tree.path.join("stray.txt").exists(), "an untracked file that git does not ignore is gone");
+    }
+
+    #[test]
+    fn warm_target_of_each_tree_is_never_the_users() {
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        let held = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(held.cargo_target(), Some(dir.with_file_name(format!("{name}-target"))), "the warm tree builds next to itself");
+        let other = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        let target = other.cargo_target().unwrap();
+        assert!(target.starts_with(&other.path), "a busy warm tree's fallback builds inside itself: {target:?}");
+    }
+
+    #[test]
+    fn warm_worktree_falls_back_when_busy() {
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        let held = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        let other = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        assert_ne!(other.path, dir, "a busy warm tree falls back to a temporary one");
+        assert!(other.path.join("a.txt").is_file());
+        let temp = other.path.clone();
+        drop(other);
+        assert!(!temp.exists(), "the temporary tree is removed");
+        drop(held);
+        assert!(dir.join("a.txt").is_file(), "the warm tree stays");
+    }
+
+    #[test]
+    fn warm_worktree_never_clears_a_folder_through_a_link() {
+        // `build/sub` sits under the `build` link, so its place is the user's folder.
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        std::fs::create_dir_all(repo.join("build/sub")).unwrap();
+        std::fs::write(repo.join("build/sub/keep.txt"), "mine").unwrap();
+        let links = ["build".to_string(), "build/sub".to_string()];
+        let first = Worktree::warm(&repo, "HEAD", &links, &dir);
+        drop(first);
+        let second = Worktree::warm(&repo, "HEAD", &links, &dir);
+        drop(second);
+        assert!(repo.join("build/sub/keep.txt").is_file(), "the user's folder behind a link was deleted");
+    }
+
+    #[test]
+    fn warm_worktree_is_made_again_after_removal() {
+        let tmp = TempDir::new();
+        let (repo, dir) = fixture(&tmp);
+        drop(Worktree::warm(&repo, "HEAD", &[], &dir).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+        let tree = Worktree::warm(&repo, "HEAD", &[], &dir).unwrap();
+        assert_eq!(tree.path, dir);
+        assert!(dir.join("a.txt").is_file());
+    }
 }

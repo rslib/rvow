@@ -7,11 +7,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Re-prove the stale tasks of a finished change in the background when the agent's turn ends, so `rvow archive` usually finds them current.
+  The Stop hook starts `rvow reprove` when every task of a change on the branch is proved or stale, writes its output to `hook-state/reprove.log` in the project folder, and `rvow archive` waits for a run that is still going.
+- Record no proof when the files of a task change while its check runs, and say to run `rvow prove` again.
+- Cut the text that the Claude mod and pi return to the agent: the accept result to its last 40 lines, each judge finding to 300 characters and each question and option of the ask tool to 200 characters.
+  The dialogs and `/rvow-judge` still show the full text.
+- List at most 5 files of the leased task when a hook denies a subagent's edit outside its lease.
+- Make `rvow confirm` list only the item names of each amendment and a count of the hidden changed lines, so the confirm tool of the Claude mod and pi no longer fills the agent's context.
+  `rvow confirm <AMD-id>` shows the changed lines of one amendment, cut at 500 characters, and `--full` shows them whole, as the dialogs do.
+- Tell the agent once that several plan edits were accepted, in one sentence that names each id, instead of one sentence for each edit.
+- Cut the text that a pi tool returns to the agent at 4,000 characters instead of 16,000.
+- Write the Claude Code mod to `$XDG_DATA_HOME/rvow/claude-plugin`, or `~/.local/share/rvow/claude-plugin`, even when `RVOW_HOME` names another folder, so a synced plan store holds no mod code.
+  `rvow install` removes the old copy at `$RVOW_HOME/claude-plugin` and moves the Claude marketplace to the new folder.
+- Send the brief once per session: the same brief again sends nothing, a change of only the task counts sends the `tasks:` line, and a compact, a clear or a new next task sends the full brief.
+- Record the files that any writing tool changed, such as an MCP tool or codemode, with one snapshot after the call, and take no snapshot for a read-only tool.
+  A change that no call recorded, such as a background job's, counts for the session at its next shell or editor call and at the Stop hook.
+- Confirm pending amendments once, in the archive dialog of the Claude mod and pi, instead of one dialog per amendment while the agent works.
+  The Stop hook and the brief now name only `rvow amend --reason`, `rvow amend --unlock` keeps its own confirm, and the push gate still fails while an amendment is pending.
+- Re-prove the stale tasks of a change in `rvow archive` before its gate, outside the project lock.
+  A failed re-proof stops the archive with the code `gate`.
+- Offer a change with stale tasks in the archive tool of the Claude mod and pi.
+  The tool refuses only for a missing, failed, flaky or blocked task or a pending plan edit.
+- Reuse one warm worktree per project for the base commit baseline, so its build output stays warm and only changed files build again.
+  A busy or broken one falls back to a temporary worktree.
+- Make each hook find its project from a local index in the rvow home instead of walking the home, which cuts about 70 ms from every hook call.
+  rvow trusts an entry only for a project folder inside the home whose root commit the repository still holds, and walks again for any other entry.
 - Run `rvow accept`, `rvow amend`, `rvow archive` and `rvow check` in the worktree where the branch of the change is checked out, so a plan made in a second worktree works from the main checkout.
   When no worktree has the branch, accept names `git checkout <branch>` and `git worktree add <path> <branch>`.
-- Print one hint when an accept baseline run takes more than 60 seconds and the project sets neither `rerun_env` nor `rerun_links`.
-  The hint names `rerun_env = { CARGO_TARGET_DIR = "<shared dir>" }` and `rerun_links = ["target"]`.
-
+- Make `rvow accept` run no verify command, so a slow build no longer stands between accept and the first task.
+  Each task starts baseline pending, and `rvow status` shows `(baseline pending)` after it and lists it under `baseline_pending` in TOON.
+- Know a red baseline at accept with no run when the whole verify is one `cargo test` or `cargo nextest run` with one test filter that no tracked Rust file at the base commit holds.
+- Record a task's baseline at its first `rvow prove` before the work: a failure is the red the task needs, with the failed JUnit names, and a pass is refused with the code `baseline` unless the task says `baseline: pass`.
+  Work counts only outside the `test_globs` files and the files of the change's proved tasks.
+- Run the baseline on the vow's base commit at prove when the work came first, in a clean worktree set up like the gate rerun, and print one hint when it takes more than 60 seconds and the project sets neither `rerun_env` nor `rerun_links`.
+  The hint names `rerun_env` and `rerun_links = ["target"]` for gate reruns.
+- Make the brief loop line and the skill say to run `rvow prove <task>` once before the work and again after it.
 - Let a project query free a test: a query file named in `test_queries` is protected at accept, a change to it is drift, and a unit that a trusted query marks `@test` with a fresh name is free under the same rules as a shipped mark.
   A query file that was not protected at accept, such as one named after accept, still only names tests.
 - Free a new `mod NAME;` line in a protected Rust test file when its module file is new since accept, its only attributes are `#[path = "..."]` and `#[cfg(test)]`, and the module file calls no process exit and focuses no run.
@@ -25,13 +55,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Skip a configured `checks` command that already passed on the same commit, keyed by the command text, the HEAD tree id and the tool fingerprint, and print `cached check: <cmd>` on the check stream.
   An uncommitted change in the check's scope runs the check again and records nothing, and `rerun_cache = "off"` turns the check cache off.
 - Do not try a grammar fetch again for one hour after it fails in prove or gate, treating the language as one with no grammar; `rvow grammar fetch` always tries and a success clears the record.
-- In pi, wait for the gate checks on archive and for the plan's whole baseline on accept instead of a fixed 60 s or 10 min, and say when a run timed out instead of returning no output.
+- In pi, wait for the gate checks on archive instead of a fixed 60 s, and say when a run timed out instead of returning no output.
 - Keep the accept dialog short: it shows at most 10 checklist lines and names `rvow review <id>` for the rest, and the accept tool asks nothing again while the plan is unchanged, returning the earlier reason with the `/rvow-accept <id>` command the user can run.
 - Measure drift from the snapshot of the accepted amendment recorded last, so a confirm of several amendments at once no longer leaves drift that the user just confirmed.
 - Make `cargo test --locked` fast: one integration test binary, optimized wasmtime and cranelift in the dev profile, no nested `cargo build` or npm audit in a plain run (CI passes `--include-ignored`), and `RVOW_GRAMMAR_OFFLINE` stops tests from downloading grammars.
 - Read only the added lines of a changed test file, not the whole file, so committed owner command text no longer denies a test run.
 - Ignore slash command names such as `/rvow-accept` in script text, so a name that cannot run from a script is not treated as an owner command.
-
+- Make the skill name the parts of a plan, say how to start one with `rvow new` or `rvow new --spec`, and say when to write a `design` with `rvow guide design`.
+  It also says that `rvow put` alone changes a plan before accept, and that the hooks protect the installed hooks, mod and gate, not their source in a repository.
 - Measure the vow and the gate from the newer merge base of the local and the remote base branch, so unpushed commits on the base branch never count as outside every task.
   When the two merge bases diverge, the remote one wins.
 - Fail `rvow gate` on code that differs from the base while a backlog plan names the branch and no change is active on it, naming the waiting plan.
@@ -46,10 +77,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Audit an edit outside every task scope and an edit of a protected test instead of denying it. The hook counts it, and the gate still blocks the branch.
 - Ask the user after 3 denials in a row in one session, instead of denying a fourth time.
 - Tell the agent when an accept, a confirm or an archive that the user ran fails, with the command and the reason.
-- Run the baseline of an added or changed check at amend time: `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up like the gate rerun, and refuses with the code `baseline` a check that passes there without `baseline: pass`, or a `baseline: pass` check that fails there.
-  The amendment records each run's task id, exit code and test count, and `rvow confirm` lists weaken items first with each baseline result.
-- Read the base commit from the vow, also after a confirmed amendment, so `rvow amend` and the mutants diff keep working.
-  When the vow has no base commit, the amend error names `rvow block` instead of accept.
+- Make `rvow amend` mark an added task and a changed verify command baseline pending instead of running them, so the task's next prove records a new baseline.
+  A title edit keeps the recorded baseline, a rejected amendment changes nothing, and `rvow confirm` names each baseline-pending task.
+- Read the base commit from the vow, also after a confirmed amendment, so the base commit baseline at prove and the mutants diff keep working.
+  When the vow has no base commit, the error names `rvow block` instead of accept.
 - Mint placeholder ids before the amend snapshot, so a new task keeps its real id after confirm and `rvow ids` mints nothing afterwards.
 - Call a task flaky only on the same worktree: each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, and a pass and a failure count as flaky only with the same run key and fingerprint.
   An old failure with no fingerprint does not count.
@@ -58,7 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Treat a change of a task title as free drift.
 - Stop showing `config changed` drift for a new default value of a newer rvow.
   A value that your config files set, now or at the baseline, still counts.
-- Stop showing a placeholder that `rvow ids` minted as a removed and an added item, and run no amend baseline for it.
+- Stop showing a placeholder that `rvow ids` minted as a removed and an added item.
 - Start the pi judge session with `--no-skills` and `--no-context-files`.
 - Let a subagent that holds a lease prove only its own task.
 - Make the brief name missing or failed work of the newest change before a stale task of an older change.
@@ -73,6 +104,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Warn with `shared-scope` in `rvow check` when two tasks of one change share a tracked file, naming both tasks and at most 3 files.
+- Add the hook rule `baseline-first`, which denies the first source edit of a baseline pending task once per session with a line that names `rvow prove <task>`, so the first prove records the red on the warm tree instead of a base commit build.
+  A second try goes through, and any yolo tier turns the rule off.
+  A file in the `test_globs` gets no notice, and a Bash command that writes a source file counts as an edit.
+- Record the duration of each hook call in `hook-stats.jsonl` and print the median and the 95th percentile of each hook in `rvow stats`.
 - A task verify can name a project runner with `@<runner> key=value`: rvow fills the runner's `run` command from the `[runners]` table of the project config with the task's keys and the runner's defaults, applies its `env` and `timeout`, and `rvow review` shows the filled command.
   A changed runner is weaken drift for each task that uses it, and a runner no task uses changes with no drift.
 - Compare a protected test file by syntax unit when its grammar is in the cache: a unit is an item with the attributes, decorators and comments right before it, and a module, class, namespace or `@group` call splits into a header unit plus one unit per body item.
@@ -82,13 +118,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Query files name the changed test: shipped queries mark the test units of JavaScript and TypeScript, Python, Rust, C++ and Go, and `test_queries = { <lang> = "<path>" }` in the project config adds a query file per language.
   A gtest `TEST(Suite, Name)` is named `Suite.Name`, and a `@group` capture marks a call as a container that splits into a header plus its body items.
   The drift item prints the test's title or function name, a unit no query marks keeps today's item text, and `rvow check` warns with `test-query` about a query file that is missing or does not compile.
-- A runner that fills `{junit}` writes a JUnit report that accept and prove read: accept records the failed test names and refuses when the report names none, and a proof passes only when each recorded name passes and no test case failed.
+- A runner that fills `{junit}` writes a JUnit report that the baseline run and prove read: the baseline records the failed test names and refuses when the report names none, and a proof passes only when each recorded name passes and no test case failed.
   A missing `needs` path refuses the run and names the path, `rvow check` warns `configure-in-verify` about a CMake configure step in a verify, and a `Re-running CMake` output adds a note to the prove result.
-
-- `rvow show <change>` prints an outline of the change (each proposal section with its word count, each requirement with its title, each task with its state, and the parts), and `rvow show <change> <part>` prints the full text of one part: `proposal`, `tasks` or `spec:<name>`.
+- `rvow show <change>` prints an outline of the change (each proposal section with its word count, each requirement with its title, each task with its state, and the parts), and `rvow show <change> <part>` prints the full text of one part: `proposal`, `tasks`, `design` or `spec:<name>`.
 - `rvow put` replaces one part of an open change, or one task or requirement block, with the text on stdin, writes it atomically and prints `ok` or the check findings of the change.
+  `rvow put <change> design` also writes a `design.md` that does not exist yet, so an agent can write the design that the guides ask for.
 - The hooks deny a direct read, write or search of the plan files in the rvow store of a home-mode project, and the reason names the `rvow show` or `rvow put` command for the need; a search from the root names `rvow ls` and `rvow show`.
-- `rvow check` warns with `full-suite` about a task whose verify runs the whole suite instead of one target, the mods show how many baseline checks accept will run and size the accept timeout to the plan's task timeouts, and `rvow archive` prints each gate check on stderr while it runs.
+- `rvow check` warns with `full-suite` about a task whose verify runs the whole suite instead of one target, and `rvow archive` prints each gate check on stderr while it runs.
 - Compare a protected file by its syntax tree when both texts parse with the grammar of its language, so a file that only lost a blank line or a comment is not drift.
   `rvow grammar fetch [<lang>...]` fills the grammar cache with pinned checksummed `.wasm` grammars and `rvow grammar list` shows each pinned language and whether the cache holds it.
 - Count comment text in the syntax compare, fetch missing grammars in prove and gate with a short timeout, and save each compare result under `grammars/` for reuse.
@@ -123,13 +159,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Add `rvow attest <change> --out <file>` to export the current proofs as in-toto statements, one Test Result line per proved or failed task and one summary line for the change.
   Pass `--sign` to write an ssh signature of the file with the `signing_key` of the global config.
   The rerun worktree and `setup` now wait until a task needs them.
-
 - Write the rendered skill to `skills/rvow/SKILL.md` in the pi agent folder on `rvow install`, keeping a user edit and reporting a stale copy in the install check.
-- Add one `loop:` line to the brief with the next task, naming `rvow prove`, `rvow amend` with the `rvow_confirm` tool, and `rvow show`.
+- Add one `loop:` line to the brief with the next task, naming `rvow prove` before and after the work, `rvow amend` with the `rvow_confirm` tool, and `rvow show`.
   A branch with no active change and no backlog plan gets one line naming `rvow new` and `rvow guide proposal`.
 - Add `rvow next` to print the next task of the branch with its id, title, state, verify command and files, or to say that no task is next.
 - Add `rvow init`, `rvow new` and `rvow validate` to create the rvow tree, plan a change and check it.
-- Add `rvow accept` to run the baseline and record the plan as the vow.
+- Add `rvow accept` to record the plan as the vow.
 - Add `rvow prove` to run a task's stored verify command and record the proof, and `rvow status` and `rvow gate` to show where the branch stands.
 - Add drift detection for plan edits made after accept.
   Record each edit with `rvow amend` and let the user decide with `rvow confirm`.
@@ -171,6 +206,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the archive tool and `/rvow-archive` of the Claude mod failing with "no tool.call hook answered this call" when `rvow archive` runs longer than 10 minutes.
+  The mod now waits for the archive with no time limit and returns its last 40 lines to the agent.
+- Fix a proof that could run base commit code: the base commit baseline in the warm worktree now builds into its own cargo build folder, so it no longer overwrites the test binaries of your checkout when every cargo run shares one build folder.
+- Fix the first `rvow prove` of a task refusing a good red when another active change on the branch had proved its work in a shared file: that work no longer counts as the task's own.
+- Fix a chained verify such as `cargo test a && cargo test b` passing when the filter of one cargo run matched no test: a cargo run that ran 0 tests now makes the whole run count 0 tests.
+- Fix the shell rules being skipped for a harness whose shell tool is not named `Bash`, such as OpenCode's `bash`, Codex's `shell` or Gemini CLI's `run_shell_command`: rvow now sorts the tools of every harness from one table.
+- Fix a plan edit confirmed together with a later `rvow amend --unlock` showing as drift again: an unlock no longer moves the drift baseline.
 - Fix `rvow init` leaving files of one machine for git to track: a new store now ignores the hook state, the provenance store, the hook stats, the leases, the yolo state, the rerun cache and, in home mode, the seal key.
 - Fix the Stop hook holding a session for a task it handed off with `rvow delegate`: a task with a live lease that another worker holds, or that no worker took yet, no longer holds the session, and the hold comes back when the lease ends.
 - Fix `rvow install` and the gate disagreeing about a pre-push hook that another tool wrote: install now moves that hook to `pre-push.rvow-prev` and writes its own hook, which runs the old hook first with the same arguments and pushed refs and stops the push when it fails.
@@ -178,7 +220,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   Under `core.hooksPath` install prints `'<rvow>' gate --strict --rerun || exit 1` to add as the first command of the hook, and the gate accepts that hook only when it runs as a shell script.
 - Hold no session for the files it only named in plan or note text: heredoc and quoted text count for changed files only when an interpreter or a shell runs it, and an `rvow` command records no file.
 - Fix the session record counting formatter runs, folders and code words as changes: a formatter run records nothing beyond the files it names, folders are never recorded, and script text counts only for an existing file or a path with a `/` in an existing folder.
-
 - Fix `rvow check` and `rvow clarify` reading the worktree of the current checkout for a change named by id: they now read the worktree of that change's branch, so a check from the main checkout reports the same as a check from the worktree of the branch.
 - Fix a protected C or C++ test file falling back to the raw line rules when its text holds a parse error such as a default argument of `= {}`: it is now compared by syntax unit, with each error region part of the unit around it, so a change inside one is drift.
 - Fix a new test reaching a process exit through a string or a symbol going unnoticed: `getattr(sys, "exit")(0)`, `process["exit"](0)`, `Reflect.get(process, "exit")(0)` and `Kernel.send(:exit)` are drift, while a string that only names exit stays free.

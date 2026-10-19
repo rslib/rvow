@@ -105,7 +105,7 @@ async function seed($: Engine, on: On, view: object | null, shows: Record<string
         ? view
           ? JSON.stringify(view)
           : ''
-        : rest === 'confirm'
+        : rest === 'confirm' || rest === 'confirm --full'
           ? LISTING
           : argv[1] === 'show'
             ? (shows[argv[2] ?? ''] ?? '')

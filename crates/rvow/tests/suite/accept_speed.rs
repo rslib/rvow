@@ -172,14 +172,17 @@ fn proved(name: &str, checks: &str) -> (Repo, String, String) {
     let id = r.plan("Write ok", "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'");
     let out = r.ok(&["accept", &id, "--yes"]);
     assert!(out.contains(&format!("accepted {id} at ")), "{out}");
-    std::fs::write(r.repo.join("out.txt"), "ok").unwrap();
-    let git = |args: &[&str]| assert!(git_command(&r.repo).args(args).status().unwrap().success(), "git {args:?}");
-    git(&["add", "out.txt"]);
-    git(&["commit", "-q", "-m", "ok"]);
     let dir = r.ok(&["path", &id]);
     let dir = PathBuf::from(dir.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().to_string());
     let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
     let task = tasks.lines().find_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).unwrap();
+    // The first prove, before the work, records the red baseline.
+    let out = r.ok(&["prove", &task]);
+    assert!(out.contains("baseline: recorded"), "{out}");
+    std::fs::write(r.repo.join("out.txt"), "ok").unwrap();
+    let git = |args: &[&str]| assert!(git_command(&r.repo).args(args).status().unwrap().success(), "git {args:?}");
+    git(&["add", "out.txt"]);
+    git(&["commit", "-q", "-m", "ok"]);
     let out = r.ok(&["prove", &task]);
     assert!(out.contains("result: proved"), "{out}");
     (r, id, task)
@@ -253,4 +256,57 @@ fn full_suite_counts_only_programs_after_a_bang_or_env_assignment() {
     let id = r.plan("Count", "X=1 cargo fmt && ! cargo clippy && grep -q x a.md && cargo test");
     let out = r.ok(&["check", &id]);
     assert!(out.contains("chains 3 commands"), "{out}");
+}
+
+/// REQ-fccv4b: accept runs no verify command and marks each task baseline
+/// pending, a `baseline: pass` guard included.
+#[test]
+fn accept_runs_no_verify_command() {
+    let r = Repo::new("no-run");
+    let id = r.plan("One", "true");
+    let dir = r.ok(&["path", &id]);
+    let dir = PathBuf::from(dir.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().to_string());
+    let mut tasks = String::new();
+    for (n, extra) in [(1, ""), (2, ""), (3, "  baseline: pass\n")] {
+        tasks.push_str(&format!("- TSK-new{n} Task {n}\n  covers: REQ-new1\n  verify: touch m{n} && echo 'test result: ok. 1 passed; 0 failed;'\n  files: a.txt\n{extra}"));
+    }
+    std::fs::write(dir.join("tasks.md"), tasks).unwrap();
+    let out = r.ok(&["accept", &id, "--yes"]);
+    assert!(out.contains(&format!("accepted {id} at ")), "{out}");
+    for n in 1..=3 {
+        assert!(!r.repo.join(format!("m{n}")).exists(), "accept ran the verify of task {n}");
+    }
+    let out = r.ok(&["--human", "status"]);
+    assert_eq!(out.matches("baseline pending").count(), 3, "{out}");
+}
+
+/// REQ-ah0t5x: a lone cargo filter that no tracked Rust file at the base commit
+/// holds is a known red; a name in a comment or a chained command keeps the
+/// task pending.
+#[test]
+fn cargo_filter_is_a_known_red() {
+    let r = Repo::new("known-red");
+    std::fs::write(r.repo.join("lib.rs"), "// keeps_old_tail is planned\nfn other() {}\n").unwrap();
+    let git = |args: &[&str]| assert!(git_command(&r.repo).args(args).status().unwrap().success(), "git {args:?}");
+    git(&["add", "lib.rs"]);
+    git(&["commit", "-q", "-m", "lib"]);
+    let id = r.plan("One", "true");
+    let dir = r.ok(&["path", &id]);
+    let dir = PathBuf::from(dir.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().to_string());
+    let tasks = [
+        "cargo test --locked -p out tail::output_tail",
+        "cargo test --locked keeps_old_tail",
+        "cargo build && cargo test output_tail",
+        "cargo nextest run --locked fresh_case",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, v)| format!("- TSK-new{} Task {}\n  covers: REQ-new1\n  verify: {v}\n  files: a.txt\n", i + 1, i + 1))
+    .collect::<String>();
+    std::fs::write(dir.join("tasks.md"), tasks).unwrap();
+    r.ok(&["accept", &id, "--yes"]);
+    let out = r.ok(&["--human", "status"]);
+    let pending: Vec<&str> = out.lines().filter(|l| l.contains("baseline pending")).collect();
+    assert_eq!(pending.len(), 2, "{out}");
+    assert!(pending.iter().any(|l| l.contains("Task 2")) && pending.iter().any(|l| l.contains("Task 3")), "{out}");
 }

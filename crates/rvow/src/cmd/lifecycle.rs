@@ -27,12 +27,9 @@ pub fn accept(target: &str) -> Result<bool> {
     let c = change::resolve(&p, target)?;
     let prepared = vow::prepare(&p, &home, c, &cwd()?, &mut std::io::stderr())?;
     for b in &prepared.baseline {
-        if b.outcome.exit.is_none() {
+        if b.from == vow::BaselineFrom::Run && b.outcome.exit.is_none() {
             println!("warning: {} baseline ended by a signal or timeout", b.task);
         }
-    }
-    if let Some(hint) = &prepared.hint {
-        println!("hint: {hint}");
     }
     let tasks = prepared.loaded.tasks.len();
     let base = prepared.base_commit[..12.min(prepared.base_commit.len())].to_string();
@@ -49,6 +46,12 @@ pub fn archive(target: &str) -> Result<Reply> {
     let judged = matches!(rvow_core::review::judge_for(&p, &cwd()?, target), Ok(Some(_)));
     let a = archive::archive(&p, &home, &cwd()?, target)?;
     let mut r = Reply::new();
+    for task in &a.reproved {
+        r.line(format!("  reproved {task}"));
+    }
+    if !a.reproved.is_empty() {
+        r.set("reproved", a.reproved.clone());
+    }
     let mut rows = Vec::new();
     for (op, id) in &a.merged {
         r.line(format!("  {} {id}", op.word()));
@@ -102,13 +105,13 @@ pub fn amend(reason: &str, target: Option<&str>, unlock: Option<&str>) -> Result
         item.push(("items".to_owned(), Node::List(rows)));
         items.push(Node::Obj(item));
     }
-    r.line("ask the user to run /rvow-confirm (or ! rvow confirm)");
+    r.line("the user confirms the pending amendments when the change is archived (/rvow-archive or the rvow_archive tool), or now with /rvow-confirm");
     r.set("amendments", items);
-    r.help("Ask the user to run /rvow-confirm (or ! rvow confirm) to decide them");
+    r.help("The user confirms them at archive (/rvow-archive or the rvow_archive tool), or now with /rvow-confirm");
     Ok(r)
 }
 
-pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
+pub fn list_pending(p: &store::Project, ids: &[String], full: bool) -> Result<bool> {
     let (living, _) = change::load_living(p)?;
     let pending = amend::pending(&proof::active(p, &living)?);
     if pending.is_empty() {
@@ -126,8 +129,13 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
             })
             .collect::<Result<_>>()?
     };
+    let detail = match (full, ids.is_empty()) {
+        (true, _) => amend::Detail::Full,
+        (false, true) => amend::Detail::Summary,
+        (false, false) => amend::Detail::Clipped,
+    };
     for a in shown {
-        for line in a.render() {
+        for line in a.render(detail) {
             println!("{line}");
         }
     }
@@ -138,14 +146,22 @@ pub fn list_pending(p: &store::Project, ids: &[String]) -> Result<bool> {
     Ok(true)
 }
 
-pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>, sign: bool, signer: Option<&str>) -> Result<bool> {
+pub fn confirm(
+    ids: &[String],
+    accept: bool,
+    reject: bool,
+    all: Option<&str>,
+    sign: bool,
+    signer: Option<&str>,
+    full: bool,
+) -> Result<bool> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     if !accept && !reject {
         if all.is_some() {
             return Err(Error::new("decision", "say what to do with the amendments", "add --accept or --reject"));
         }
-        return list_pending(&p, ids);
+        return list_pending(&p, ids, full);
     }
     let decision = if accept { amend::Decision::Accept } else { amend::Decision::Reject };
     let cfg = rvow_core::config::load(&p, &home)?;
@@ -173,7 +189,7 @@ pub fn confirm(ids: &[String], accept: bool, reject: bool, all: Option<&str>, si
     };
     let decided = amend::confirm_signed(&p, ids, decision, all, signing).inspect_err(|e| {
         if e.code == "digest" {
-            let _ = list_pending(&p, &[]);
+            let _ = list_pending(&p, &[], false);
         }
     })?;
     for id in decided {

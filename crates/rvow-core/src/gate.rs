@@ -547,7 +547,9 @@ mod tests {
         assert_eq!(r.timings.len(), 1);
         std::fs::remove_file(p.root.join("config.toml")).unwrap();
         let list = git::run(&repo, &["worktree", "list"]).unwrap();
-        assert_eq!(list.lines().count(), 1, "the rerun tree is removed");
+        // A prove of this fixture may leave the warm baseline tree; the rerun tree is removed.
+        let temporary = list.lines().skip(1).filter(|l| !l.contains("/worktrees/")).count();
+        assert_eq!(temporary, 0, "the rerun tree is removed: {list}");
 
         std::fs::write(repo.join("out.txt"), "ok\n").unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());

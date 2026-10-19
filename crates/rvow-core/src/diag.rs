@@ -32,6 +32,7 @@ pub enum Rule {
     LedgerTail,
     ClarifyForm,
     WideScope,
+    SharedScope,
     WeakVerify,
     Runner,
     ConfigureInVerify,
@@ -52,6 +53,7 @@ impl Rule {
             | Rule::LedgerTail
             | Rule::ClarifyForm
             | Rule::WideScope
+            | Rule::SharedScope
             | Rule::WeakVerify
             | Rule::ConfigureInVerify
             | Rule::TestQuery => Severity::Warning,
@@ -84,6 +86,7 @@ impl Rule {
             Rule::LedgerTail => "ledger-tail",
             Rule::ClarifyForm => "clarify-form",
             Rule::WideScope => "wide-scope",
+            Rule::SharedScope => "shared-scope",
             Rule::WeakVerify => "weak-verify",
             Rule::Runner => "runner",
             Rule::ConfigureInVerify => "configure-in-verify",
@@ -116,6 +119,7 @@ impl Rule {
             Rule::LedgerTail => "none needed, the next write removes the partial line",
             Rule::ClarifyForm => "write [NEEDS CLARIFICATION: question | recommended: answer]",
             Rule::WideScope => "list the files the task changes in files:, so a change elsewhere does not make its proof stale",
+            Rule::SharedScope => "keep the files: of the two tasks apart, so a change to one does not make the proof of the other stale",
             Rule::WeakVerify => {
                 "make the verify command run the check that fails today, and use a counted test runner when it sets baseline: pass"
             }

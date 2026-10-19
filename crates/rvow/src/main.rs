@@ -100,7 +100,7 @@ enum Cmd {
     Show {
         /// A REQ, TSK or CHG id or a unique prefix of it.
         id: String,
-        /// One part of a change: `proposal`, `tasks` or `spec:<name>`.
+        /// One part of a change: `proposal`, `tasks`, `design` or `spec:<name>`.
         part: Option<String>,
         /// Print long text in full in TOON.
         #[arg(long)]
@@ -110,7 +110,7 @@ enum Cmd {
     Put {
         /// A CHG id with `part`, or a TSK or REQ id whose block the stdin replaces.
         target: String,
-        /// One part of a change: `proposal`, `tasks` or `spec:<name>`.
+        /// One part of a change: `proposal`, `tasks`, `design` or `spec:<name>`.
         part: Option<String>,
     },
     /// Read the living specs.
@@ -190,6 +190,9 @@ enum Cmd {
         #[arg(value_enum)]
         event: Option<HookEvent>,
     },
+    /// Prove the stale tasks of each finished change again; the Stop hook starts it in the background.
+    #[command(hide = true)]
+    Reprove,
     /// Show how often the hooks denied or blocked in the last days.
     Stats {
         /// How many days back to count.
@@ -257,6 +260,9 @@ enum Cmd {
         /// Explicit principal in the allowed-signers file.
         #[arg(long, requires = "sign", value_name = "IDENTITY")]
         signer: Option<String>,
+        /// List every changed line whole. A plain list shows only the item names.
+        #[arg(long, conflicts_with = "decision")]
+        full: bool,
     },
     /// Run a task's stored verify command and record the proof.
     #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
@@ -485,6 +491,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
+        Cmd::Reprove => prove::background(),
         Cmd::Stats { days } => cmd::stats::stats(days),
         Cmd::Delegate { task } => cmd::delegate::delegate(&task),
         Cmd::Yolo { tier, length } => cmd::yolo::yolo(
@@ -499,8 +506,8 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Block { task, reason } => lifecycle::block(&task, &reason),
         Cmd::Note { kind, text } => lifecycle::note(kind, &text.join(" ")),
         Cmd::Amend { reason, change, unlock } => lifecycle::amend(&reason, change.as_deref(), unlock.as_deref()),
-        Cmd::Confirm { ids, accept, reject, all, sign, signer } => {
-            lifecycle::confirm(&ids, accept, reject, all.as_deref(), sign, signer.as_deref()).map(Reply::done)
+        Cmd::Confirm { ids, accept, reject, all, sign, signer, full } => {
+            lifecycle::confirm(&ids, accept, reject, all.as_deref(), sign, signer.as_deref(), full).map(Reply::done)
         }
         Cmd::Prove { task: Some(t), .. } => prove::prove(&t),
         Cmd::Prove { .. } => prove::prove_stale(),

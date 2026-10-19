@@ -92,13 +92,31 @@ struct After {
     end: u64,
 }
 
+/// The tree a session's latest recorded call left, which a light call (one
+/// with no before snapshot) is compared with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Last {
+    session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
+    tree: String,
+    end: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Record {
     Start(Start),
     Post(Post),
     After(After),
+    Last(Last),
 }
+
+/// The `before` of a light call's Start record: compare with the session's last tree.
+const LIGHT: &str = ":last";
+
+/// The call id of an After record that the catch-up wrote for a change no call recorded.
+const UNRECORDED: &str = ":unrecorded";
 
 /// The private store of one worktree and the object store it reads through.
 struct Store {
@@ -258,6 +276,104 @@ pub(crate) fn before_call(project: &Project, top: &Path, session: &str, agent_id
     let Ok(before) = tree(top, &store) else {
         return;
     };
+    let _ = catch_up(top, &store, session, agent_id, &before);
+    let start = Start {
+        session: session.to_string(),
+        agent_id: agent_id.map(String::from),
+        tool_use_id: tool_use_id.to_string(),
+        before,
+        start: now_ms(),
+    };
+    let _ = append(&store.dir, &[Record::Start(start)]);
+}
+
+/// Records each path that differs between the session's last recorded tree and
+/// `now`, a change that no call of the session recorded, such as one from a
+/// background job, and makes `now` the session's last tree. A write that a
+/// call of another session or agent recorded in the window is not the session's.
+fn catch_up(top: &Path, store: &Store, session: &str, agent_id: Option<&str>, now: &str) -> Result<()> {
+    let mut records = load(&store.dir);
+    let mine = |s: &str, a: &Option<String>| s == session && a.as_deref() == agent_id;
+    let Some(last) = records.iter().rev().find_map(|r| match r {
+        Record::Last(l) if mine(&l.session, &l.agent_id) => Some(l.clone()),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    if last.tree == now {
+        return Ok(());
+    }
+    let theirs = recorded_by_others(&records, session, agent_id, last.end);
+    let changes = changed(top, store, &last.tree, now)?;
+    let end = now_ms();
+    records.retain(|r| !matches!(r, Record::Last(l) if mine(&l.session, &l.agent_id)));
+    let changes = changes.into_iter().filter(|c| !theirs.contains(c));
+    records.extend(changes.map(|(path, blob)| {
+        Record::After(After {
+            session: session.to_string(),
+            agent_id: agent_id.map(String::from),
+            tool_use_id: UNRECORDED.to_string(),
+            path,
+            blob,
+            start: last.end,
+            end,
+        })
+    }));
+    records.push(Record::Last(Last { session: session.to_string(), agent_id: agent_id.map(String::from), tree: now.to_string(), end }));
+    rewrite(&store.dir, &records)
+}
+
+/// The Stop hook's catch-up: records the changes since the session's last
+/// recorded tree. Fails silently, like every hook.
+/// The (path, blob) pairs that a call of another session or agent recorded
+/// after `since`. An unrecorded change is no call, so it never counts.
+fn recorded_by_others(records: &[Record], session: &str, agent_id: Option<&str>, since: u64) -> BTreeSet<(String, String)> {
+    records
+        .iter()
+        .filter_map(|r| match r {
+            Record::After(a)
+                if !(a.session == session && a.agent_id.as_deref() == agent_id) && a.tool_use_id != UNRECORDED && a.end >= since =>
+            {
+                Some((a.path.clone(), a.blob.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn catch_up_at_stop(project: &Project, top: &Path, session: &str, agent_id: Option<&str>) {
+    let Ok(store) = locate(project, top) else {
+        return;
+    };
+    let Ok(_lock) = project.lock() else {
+        return;
+    };
+    if let Ok(now) = tree(top, &store) {
+        let _ = catch_up(top, &store, session, agent_id, &now);
+    }
+}
+
+/// The pre-tool-use handler of a tool that may write but is neither an editor
+/// tool nor a shell: it records the call with no snapshot, so post-tool-use
+/// compares one snapshot with the session's last recorded tree. With no last
+/// tree yet, it snapshots like an editor call, so the first call is seen too.
+pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) {
+    let Ok(store) = locate(project, top) else {
+        return;
+    };
+    let Ok(_lock) = project.lock() else {
+        return;
+    };
+    let has_last =
+        load(&store.dir).iter().any(|r| matches!(r, Record::Last(l) if l.session == session && l.agent_id.as_deref() == agent_id));
+    let before = if has_last {
+        LIGHT.to_string()
+    } else {
+        let Ok(tree) = tree(top, &store) else {
+            return;
+        };
+        tree
+    };
     let start = Start {
         session: session.to_string(),
         agent_id: agent_id.map(String::from),
@@ -285,19 +401,34 @@ pub(crate) fn after_call(project: &Project, top: &Path, session: &str, agent_id:
     }) else {
         return;
     };
-    if let Ok(after) = tree(top, &store)
-        && let Ok(changes) = changed(top, &store, &start.before, &after)
+    let mine = |session_: &str, agent: &Option<String>| session_ == session && agent.as_deref() == agent_id;
+    // A light call has no before snapshot: it starts from the session's last tree,
+    // so its window opens there and a write that another call recorded in it is not its own.
+    let (before, from, theirs) = if start.before == LIGHT {
+        let last = records.iter().rev().find_map(|r| match r {
+            Record::Last(l) if mine(&l.session, &l.agent_id) => Some(l.clone()),
+            _ => None,
+        });
+        let from = last.as_ref().map_or(start.start, |l| l.end.min(start.start));
+        (last.map(|l| l.tree), from, recorded_by_others(&records, session, agent_id, from))
+    } else {
+        (Some(start.before.clone()), start.start, BTreeSet::new())
+    };
+    let after = tree(top, &store).ok();
+    if let (Some(before), Some(after)) = (&before, &after)
+        && let Ok(changes) = changed(top, &store, before, after)
     {
+        let changes = changes.into_iter().filter(|c| !theirs.contains(c));
         let end = now_ms();
         records.push(Record::Post(Post { session: session.to_string(), tool_use_id: tool_use_id.to_string(), end }));
-        records.extend(changes.into_iter().map(|(path, blob)| {
+        records.extend(changes.map(|(path, blob)| {
             Record::After(After {
                 session: session.to_string(),
                 agent_id: agent_id.map(String::from),
                 tool_use_id: tool_use_id.to_string(),
                 path,
                 blob,
-                start: start.start,
+                start: from,
                 end,
             })
         }));
@@ -307,24 +438,31 @@ pub(crate) fn after_call(project: &Project, top: &Path, session: &str, agent_id:
         Record::Start(s) => !is_call(s, session, agent_id, tool_use_id) && now.saturating_sub(s.start) < STALE_MS,
         Record::Post(p) => now.saturating_sub(p.end) < KEEP_MS,
         Record::After(a) => now.saturating_sub(a.end) < KEEP_MS,
+        Record::Last(l) => !mine(&l.session, &l.agent_id) && now.saturating_sub(l.end) < KEEP_MS,
     });
+    if let Some(after) = after {
+        records.push(Record::Last(Last { session: session.to_string(), agent_id: agent_id.map(String::from), tree: after, end: now }));
+    }
     let _ = rewrite(&store.dir, &records);
-    // A live call of another session still needs its before tree.
-    if !records.iter().any(|r| matches!(r, Record::Start(_))) {
-        prune_objects(&store.dir);
+    // A live call of another session still needs its before tree. A pruned
+    // last tree is gone, so the next call of each session snapshots afresh.
+    if !records.iter().any(|r| matches!(r, Record::Start(_))) && prune_objects(&store.dir) {
+        records.retain(|r| !matches!(r, Record::Last(_)));
+        let _ = rewrite(&store.dir, &records);
     }
 }
 
 /// The private object store grows with every distinct blob version hashed.
 /// The records keep only blob ids, so past a bound the whole objects folder is
 /// deleted and a later snapshot rebuilds what it needs.
-fn prune_objects(dir: &Path) {
+fn prune_objects(dir: &Path) -> bool {
     let objects = dir.join("objects");
     if dir_size(&objects) <= MAX_OBJECTS {
-        return;
+        return false;
     }
     let _ = std::fs::remove_dir_all(&objects);
     let _ = std::fs::remove_file(dir.join("index"));
+    true
 }
 
 fn dir_size(dir: &Path) -> u64 {
@@ -354,7 +492,8 @@ fn overlaps(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
 /// The session owns a path when its latest call on that path produced the
 /// file's current blob (or deleted a file that is still gone), and no call of
 /// another session or of a subagent that overlapped that call recorded the
-/// same (path, blob). A subagent's own records never count for the session.
+/// same (path, blob). A subagent's own records never count for the session,
+/// and a change no call recorded never takes a path from a call that did.
 pub(crate) fn owned(project: &Project, top: &Path, session: &str) -> Result<Option<BTreeSet<String>>> {
     let store = locate(project, top)?;
     let _lock = project.lock()?;
@@ -362,7 +501,7 @@ pub(crate) fn owned(project: &Project, top: &Path, session: &str) -> Result<Opti
     let had_after = records.iter().any(|r| match r {
         Record::Post(p) => p.session == session,
         Record::After(a) => a.session == session,
-        Record::Start(_) => false,
+        Record::Start(_) | Record::Last(_) => false,
     });
     if !had_after {
         return Ok(None);
@@ -392,9 +531,13 @@ pub(crate) fn owned(project: &Project, top: &Path, session: &str) -> Result<Opti
         .filter(|(path, rec)| {
             let now = current.get(*path).map(String::as_str);
             let same = if rec.blob == DELETED { now.is_none() } else { now == Some(rec.blob.as_str()) };
-            same && !afters
-                .iter()
-                .any(|o| !mine(o) && o.path == *path && o.blob == rec.blob && overlaps(rec.start, rec.end, o.start, o.end))
+            same && !afters.iter().any(|o| {
+                !mine(o)
+                    && o.tool_use_id != UNRECORDED
+                    && o.path == *path
+                    && o.blob == rec.blob
+                    && overlaps(rec.start, rec.end, o.start, o.end)
+            })
         })
         .map(|(path, _)| path.to_string())
         .collect();
@@ -433,6 +576,109 @@ mod tests {
 
     fn set(paths: &[&str]) -> BTreeSet<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn run_light(p: &Project, repo: &Path, session: &str, id: &str, write: impl FnOnce()) {
+        before_call_light(p, repo, session, None, id);
+        write();
+        after_call(p, repo, session, None, id);
+    }
+
+    #[test]
+    fn unrecorded_change_from_a_background_job_counts_at_stop() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        std::fs::write(repo.join("bg.txt"), "from a background job").unwrap();
+        catch_up_at_stop(&p, &repo, "s1", None);
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt", "bg.txt"]));
+    }
+
+    #[test]
+    fn unrecorded_change_counts_at_the_next_call() {
+        // `rvow prove` runs inside a shell call, whose before snapshot catches up first.
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        std::fs::write(repo.join("bg.txt"), "from a background job").unwrap();
+        run_call(&p, &repo, "s1", None, "c2", || {});
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt", "bg.txt"]));
+    }
+
+    #[test]
+    fn unrecorded_change_of_nothing_records_nothing() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        let before = records(&p, &repo);
+        catch_up_at_stop(&p, &repo, "s1", None);
+        assert_eq!(records(&p, &repo), before, "an unchanged tree writes no record");
+    }
+
+    #[test]
+    fn any_tool_change_a_light_call_compares_with_the_last_tree() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        run_light(&p, &repo, "s1", "c2", || std::fs::write(repo.join("b.txt"), "mcp").unwrap());
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt", "b.txt"]), "the light call's write counts");
+        let text = records(&p, &repo);
+        assert_eq!(text.matches("\"kind\":\"last\"").count(), 1, "one last tree per session: {text}");
+    }
+
+    #[test]
+    fn any_tool_change_a_first_light_call_snapshots_before() {
+        let (_tmp, p, repo) = setup();
+        run_light(&p, &repo, "s1", "c1", || std::fs::write(repo.join("b.txt"), "mcp").unwrap());
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["b.txt"]), "the first light call's write counts");
+        run_light(&p, &repo, "s1", "c2", || std::fs::write(repo.join("c.txt"), "next").unwrap());
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["b.txt", "c.txt"]), "the next light call compares with the last tree");
+    }
+
+    #[test]
+    fn any_tool_change_a_light_call_leaves_another_sessions_recorded_write() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        run_call(&p, &repo, "s2", None, "d1", || std::fs::write(repo.join("b.txt"), "theirs").unwrap());
+        run_light(&p, &repo, "s1", "c2", || {});
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt"]), "s2's write is not s1's");
+        assert_eq!(owned(&p, &repo, "s2").unwrap().unwrap(), set(&["b.txt"]), "s2 keeps its write");
+    }
+
+    #[test]
+    fn any_tool_change_a_light_call_after_a_prune_still_records() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        grow(&dir(&p, &repo));
+        run_call(&p, &repo, "s1", None, "c2", || {});
+        run_light(&p, &repo, "s1", "c3", || std::fs::write(repo.join("c.txt"), "mcp").unwrap());
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt", "c.txt"]), "the pruned last tree is not used");
+    }
+
+    #[test]
+    fn unrecorded_change_leaves_another_sessions_recorded_write() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s2", None, "d1", || {});
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        catch_up_at_stop(&p, &repo, "s2", None);
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt"]), "s2's catch-up does not take s1's write");
+        assert!(owned(&p, &repo, "s2").unwrap().is_none_or(|o| o.is_empty()), "s2 does not claim it");
+    }
+
+    #[test]
+    fn unrecorded_change_never_takes_a_path_from_a_recorded_call() {
+        // The catch-up of s2 runs while s1's call is still open, so it cannot see s1's record.
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s2", None, "d1", || {});
+        before_call(&p, &repo, "s1", None, "c1");
+        std::fs::write(repo.join("a.txt"), "first").unwrap();
+        catch_up_at_stop(&p, &repo, "s2", None);
+        after_call(&p, &repo, "s1", None, "c1");
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt"]));
+    }
+
+    #[test]
+    fn any_tool_change_a_light_call_that_writes_nothing_records_nothing() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        run_light(&p, &repo, "s1", "c2", || {});
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt"]));
     }
 
     #[test]

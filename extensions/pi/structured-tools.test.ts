@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { GATE_MS, type run, SLOW_MS } from "./rvow/tools.ts";
+import { ACCEPT_MS, GATE_MS, type run, SLOW_MS } from "./rvow/tools.ts";
 import {
   archiveBlockers,
   proofArgs,
@@ -248,7 +248,6 @@ test("rvow_accept shows the review and accepts only when the user says yes", asy
   assert.match(asked[0] ?? "", /the checklist[\s\S]*Accept CHG-a1\?/);
   assert.deepEqual(seen, [
     ["review", "CHG-a1"],
-    ["hook", "view"],
     ["accept", "CHG-a1", "--yes"],
   ]);
   assert.equal((yes.details as { kind: string }).kind, "decision");
@@ -287,12 +286,15 @@ test("rvow_confirm lists without a dialog and decides with one", async () => {
   const seen: string[][] = [];
   const value = tool("rvow_confirm", async (args) => {
     seen.push(args);
-    return args.length === 1 ? { code: 0, out: LIST } : { code: 0, out: "AMD-a1 accepted\n" };
+    return args.length === 1 || args[1] === "--full"
+      ? { code: 0, out: LIST }
+      : { code: 0, out: "AMD-a1 accepted\n" };
   });
   const asked: string[] = [];
   const listed = await yoloCall(value, {}, { hasUI: false, asked });
   assert.match(JSON.stringify(listed.content), /digest abc123/);
   assert.deepEqual(asked, []);
+  assert.deepEqual(seen, [["confirm"]]);
 
   await yoloCall(value, { decision: "accept" }, { hasUI: true, answer: true, asked });
   assert.match(asked[0] ?? "", /Accept all of these\?/);
@@ -300,7 +302,7 @@ test("rvow_confirm lists without a dialog and decides with one", async () => {
 
   seen.length = 0;
   const no = await yoloCall(value, { decision: "reject" }, { hasUI: true, answer: false });
-  assert.deepEqual(seen, [["confirm"]]);
+  assert.deepEqual(seen, [["confirm", "--full"]]);
   assert.match(JSON.stringify(no.content), /still pending/);
   assert.match(JSON.stringify(no.content), /\/rvow-confirm/);
 });
@@ -345,6 +347,27 @@ test("rvow_archive asks only when every task is proved, and archives on a yes", 
   await assert.rejects(yoloCall(value, { change: "CHG-a1" }, { hasUI: false }), /no one is here/);
 });
 
+test("rvow_archive asks the user when a task is stale", async () => {
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    return args[0] === "hook"
+      ? { code: 0, out: viewOf(["proved", "stale"]) }
+      : { code: 0, out: "archived CHG-a1\n" };
+  });
+  const asked: string[] = [];
+  await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(seen.at(-1), ["archive", "CHG-a1"]);
+  for (const state of ["stale (inputs changed)"])
+    assert.equal(archiveBlockers({ id: "C", tasks: [{ id: "T", state }], pending: [] }, "C"), null);
+  for (const state of ["missing", "failed", "flaky", "blocked"])
+    assert.match(
+      archiveBlockers({ id: "C", tasks: [{ id: "T", state }], pending: [] }, "C") ?? "",
+      new RegExp(`T is ${state}`),
+    );
+});
+
 test("rvow_archive waits for the gate checks instead of the 60 s default", async () => {
   const waits = new Map<string, number>();
   const value = tool("rvow_archive", async (args, _cwd, _stdin, timeoutMs) => {
@@ -358,29 +381,20 @@ test("rvow_archive waits for the gate checks instead of the 60 s default", async
   assert.ok(GATE_MS > SLOW_MS);
 });
 
-test("rvow_accept waits for the plan's whole baseline", async () => {
+test("rvow_accept waits the fixed accept time, since accept runs no check", async () => {
   const waits = new Map<string, number>();
-  const view = {
-    ...dashboard,
-    backlog: [
-      { id: "CHG-a1", tasks: 3, task_timeouts_secs: [1200, 0, 0], default_timeout_secs: 600 },
-    ],
-  };
   const value = tool("rvow_accept", async (args, _cwd, _stdin, timeoutMs) => {
     waits.set(args[0] ?? "", timeoutMs);
     if (args[0] === "review") return { code: 0, out: "checklist\n" };
-    if (args[0] === "hook") return { code: 0, out: JSON.stringify(view) };
     return { code: 0, out: "accepted CHG-a1\n" };
   });
   await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
-  assert.equal(waits.get("accept"), 2_400_000);
+  assert.equal(waits.get("accept"), ACCEPT_MS);
+  assert.ok(!waits.has("hook"), "accept reads no plan budget");
 });
 
 test("rvow_archive names what is missing and asks nothing", async () => {
-  for (const [states, pending, text] of [
-    [["proved", "stale"], 0, /TSK-1 is stale/],
-    [["proved"], 1, /pending plan edit/],
-  ] as const) {
+  for (const [states, pending, text] of [[["proved", "failed"], 0, /TSK-1 is failed/]] as const) {
     const value = tool("rvow_archive", async () => ({
       code: 0,
       out: viewOf([...states], pending),
@@ -394,6 +408,128 @@ test("rvow_archive names what is missing and asks nothing", async () => {
   assert.equal(
     archiveBlockers({ id: "CHG-a", tasks: [{ id: "T", state: "proved" }], pending: [] }, "CHG-a"),
     null,
+  );
+});
+
+const amd = (id: string, change: string, class_: string) =>
+  `${id} for ${change}\n  ${class_}: TSK-1 something\n  reason (from the agent): why ${id}\n`;
+const listing = (blocks: string[], digest = "d1") => `${blocks.join("")}digest ${digest}\n`;
+
+function archiveFake(lists: string[], seen: string[][]) {
+  let reads = 0;
+  return tool("rvow_archive", async (args) => {
+    seen.push(args);
+    if (args[0] === "hook") return { code: 0, out: viewOf(["proved"], 3) };
+    if (args[0] === "confirm" && args[1] === "--full")
+      return { code: 0, out: lists[Math.min(reads++, lists.length - 1)] ?? "" };
+    if (args[0] === "confirm") return { code: 0, out: "decided\n" };
+    return { code: 0, out: "archived CHG-a1\n" };
+  });
+}
+
+const three = listing([
+  amd("AMD-a", "CHG-a1", "add"),
+  amd("AMD-other", "CHG-zz", "weaken"),
+  amd("AMD-b", "CHG-a1", "add"),
+  amd("AMD-w", "CHG-a1", "weaken"),
+]);
+
+test("rvow_archive lists the change's amendments weaken first, accepts them by id, then archives", async () => {
+  const seen: string[][] = [];
+  const value = archiveFake([three], seen);
+  const asked: string[] = [];
+  const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+  assert.equal(asked.length, 1);
+  const text = asked[0] ?? "";
+  assert.ok(text.indexOf("AMD-w") >= 0 && text.indexOf("AMD-w") < text.indexOf("AMD-a"));
+  assert.ok(text.indexOf("AMD-a") < text.indexOf("AMD-b"));
+  assert.doesNotMatch(text, /AMD-other/);
+  assert.deepEqual(seen.slice(-2), [
+    ["confirm", "AMD-w", "AMD-a", "AMD-b", "--accept"],
+    ["archive", "CHG-a1"],
+  ]);
+  assert.equal((out.details as { kind: string }).kind, "decision");
+});
+
+test("rvow_archive on a no leaves the amendments pending and names /rvow-archive", async () => {
+  const seen: string[][] = [];
+  const value = archiveFake([three], seen);
+  const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: false });
+  assert.ok(seen.every((a) => a[0] === "hook" || (a[0] === "confirm" && a[1] === "--full")));
+  assert.match(JSON.stringify(out.content), /\/rvow-archive CHG-a1/);
+  assert.match(JSON.stringify(out.content), /pending/);
+});
+
+test("rvow_archive asks again when an amendment is recorded before the answer", async () => {
+  const seen: string[][] = [];
+  const four = listing(
+    [
+      amd("AMD-a", "CHG-a1", "add"),
+      amd("AMD-b", "CHG-a1", "add"),
+      amd("AMD-w", "CHG-a1", "weaken"),
+      amd("AMD-d", "CHG-a1", "add"),
+    ],
+    "d2",
+  );
+  const three3 = listing([
+    amd("AMD-a", "CHG-a1", "add"),
+    amd("AMD-b", "CHG-a1", "add"),
+    amd("AMD-w", "CHG-a1", "weaken"),
+  ]);
+  const value = archiveFake([three3, four, four, four], seen);
+  const asked: string[] = [];
+  await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+  assert.equal(asked.length, 2);
+  assert.doesNotMatch(asked[0] ?? "", /AMD-d/);
+  assert.match(asked[1] ?? "", /AMD-d/);
+  const accepts = seen.filter((a) => a[0] === "confirm" && a[1] !== "--full");
+  assert.equal(accepts.length, 1);
+  assert.ok(accepts[0]?.includes("AMD-d"));
+});
+
+test("rvow_archive gives up when the list keeps changing and accepts nothing", async () => {
+  const seen: string[][] = [];
+  let n = 0;
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    if (args[0] === "hook") return { code: 0, out: viewOf(["proved"], 1) };
+    if (args[0] === "confirm" && args[1] === "--full")
+      return { code: 0, out: listing([amd(`AMD-n${n++}`, "CHG-a1", "add")]) };
+    return { code: 0, out: "ok\n" };
+  });
+  const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
+  assert.ok(!seen.some((a) => a[0] === "archive" || (a[0] === "confirm" && a[1] !== "--full")));
+  assert.match(JSON.stringify(out.content), /\/rvow-archive CHG-a1/);
+});
+
+test("rvow_archive does not archive when the accept fails", async () => {
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    if (args[0] === "hook") return { code: 0, out: viewOf(["proved"], 1) };
+    if (args[1] === "--full") return { code: 0, out: listing([amd("AMD-a", "CHG-a1", "add")]) };
+    return { code: 1, out: "error: nope\n" };
+  });
+  const out = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
+  assert.ok(!seen.some((a) => a[0] === "archive"));
+  assert.match(JSON.stringify(out.content), /nope/);
+});
+
+test("rvow_archive with no pending amendment asks only whether to archive", async () => {
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    return args[0] === "hook"
+      ? { code: 0, out: viewOf(["proved"], 0) }
+      : { code: 0, out: "archived CHG-a1\n" };
+  });
+  const asked: string[] = [];
+  await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true, asked });
+  assert.equal(asked.length, 1);
+  assert.doesNotMatch(asked[0] ?? "", /AMD-/);
+  assert.deepEqual(
+    seen.map((a) => a[0]),
+    ["hook", "archive"],
   );
 });
 
@@ -464,4 +600,15 @@ test("a changed plan after a failure asks again", async () => {
   await yoloCall(value, { change: "CHG-m4" }, { hasUI: true, answer: true, asked });
   await yoloCall(value, { change: "CHG-m4" }, { hasUI: true, answer: true, asked });
   assert.equal(asked.length, 2);
+});
+
+test("rvow_accept caps a long accept result for the model", async () => {
+  const value = tool("rvow_accept", async (args) => ({
+    code: 0,
+    out: args[0] === "review" ? "the checklist\n" : "x".repeat(10_000),
+  }));
+  const done = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
+  const [first] = done.content;
+  assert.ok(first && first.type === "text" && first.text.length < 4_500);
+  assert.match(JSON.stringify(done.content), /output truncated/);
 });

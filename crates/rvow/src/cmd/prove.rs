@@ -14,6 +14,8 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
     let tests = o.tests_run.map_or("unknown".to_string(), |n| n.to_string());
     let verdict = if p.proved {
         "proved".to_string()
+    } else if p.baseline_recorded {
+        "baseline recorded".to_string()
     } else if p.mutants.as_ref().is_some_and(|check| !check.passed()) {
         "failed: mutation check".to_string()
     } else if p.private_check.as_ref().is_some_and(|check| !check.passed) {
@@ -32,6 +34,12 @@ pub fn proof_run(r: &mut Reply, p: &proof::Proved) -> (Obj, Vec<String>) {
     let mut warnings: Vec<String> = p.lfs_pointers.iter().map(|f| format!("{f} is a Git LFS pointer, run git lfs pull")).collect();
     if let Some(note) = &p.note {
         r.line(format!("note: {note}"));
+    }
+    if let Some(hint) = &p.hint {
+        r.line(format!("hint: {hint}"));
+    }
+    if p.baseline_recorded {
+        r.line("baseline: recorded: the check fails before the work, as it must; do the work, then prove again");
     }
     let junit = match &p.junit {
         Some(rvow_core::junit::Check::Failed(why)) => {
@@ -86,7 +94,30 @@ pub fn prove(task: &str) -> Result<Reply> {
             r.help("Run `rvow gate` to check the branch before push");
         }
     }
-    r.ok = proved.proved;
+    if proved.baseline_recorded {
+        r.set("baseline", "recorded");
+    }
+    r.ok = proved.proved || proved.baseline_recorded;
+    Ok(r)
+}
+
+/// The background re-prove: proves the stale tasks of every change on the
+/// branch whose other tasks are proved, unless another run holds the slot.
+pub fn background() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let cwd = cwd()?;
+    let mut r = Reply::new();
+    let Some(_slot) = rvow_core::reprove::claim(&p)? else {
+        r.line("a background re-prove already runs");
+        return Ok(r);
+    };
+    for change in rvow_core::reprove::ready(&p, &home, &cwd)? {
+        match rvow_core::archive::reprove(&p, &home, &cwd, &change) {
+            Ok(proved) => r.line(format!("{change}: reproved {}", proved.join(", "))),
+            Err(e) => r.line(format!("{change}: {}: {}", e.code, e.message)),
+        }
+    }
     Ok(r)
 }
 

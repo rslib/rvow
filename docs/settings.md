@@ -5,7 +5,10 @@ The global file lives inside the rvow home (the directory named in `RVOW_HOME`).
 The project file is `config.toml` in the rvow tree root of the project.
 That root is the project folder of the home store in home mode, and the `rvow/` folder of the repository in repository mode.
 `rvow init` adds the files of one machine in that root to `.gitignore`: `.lock`, `hook-state/`, `provenance/`, `hook-stats.jsonl`, `leases.jsonl`, `yolo.json` and `rerun-cache.jsonl`.
-In home mode it also ignores `claude-plugin/` and the seal key of the rvow home.
+In home mode it also ignores `claude-plugin/`, the seal key, `project-index.json` and `worktrees/` of the rvow home.
+`project-index.json` is a local cache from a repository to its project folder, so rvow walks the rvow home only for a repository it has no valid entry for.
+rvow trusts an entry only for a project folder inside the rvow home whose root commit the repository still holds, and the hooks deny agent writes to the file.
+Delete it at any time.
 A store made before this change needs these lines added by hand.
 The project value wins when both set a key, and a project list replaces the global list instead of extending it.
 
@@ -76,11 +79,18 @@ A verify command can write through a link into the real directory, so list only 
 `rerun_links` is not part of the vow, so changing it is not drift.
 The same holds for `rerun_proven`. By default a push trusts a task whose proof is current and whose files are all committed, because it was proved on that very content. A task of an archived change is never rerun, since archiving needs every task proved. Set `rerun_proven = true` when you want a clean-checkout run of proven tasks too.
 
-## A fast baseline for a Rust project
+## A fast baseline
 
-The reruns of `rvow amend` and `rvow gate --rerun` build in a clean temporary worktree.
-A Rust project then compiles from nothing each time.
-Point the build at a shared directory and link `target` in, so the reruns reuse the build:
+The base commit baseline of `rvow prove` builds in one warm worktree per project, at `worktrees/<project key>/` in the rvow home.
+rvow moves it to the base commit and keeps its git-ignored build output, such as a CMake `build/` folder, so a second run builds only what changed.
+For cargo it has its own cargo build folder, `worktrees/<project key>-target/`, set through `CARGO_TARGET_DIR` whatever the cargo config or `rerun_env` says, and the temporary worktree of a busy warm one gets a throwaway folder inside itself.
+Cargo names the artifacts of two checkouts of one repository alike, so a warm worktree that shared the build folder of your checkout would overwrite your test binaries, and cargo would then call them fresh.
+When another run holds it, or a git step on it fails, the run uses a clean temporary worktree instead.
+A fixed path under the home folder also lets ccache, with `base_dir` set to the home folder, reuse compile results from other checkouts.
+rvow never removes a warm worktree or its build folder; delete either at any time, and the next run makes it again.
+
+`rvow gate --rerun` keeps its promise of a clean checkout of HEAD: it builds in a new temporary worktree each time, never in the warm one.
+For a Rust project, point that build at a directory that only reruns use, or link `target` in, so the reruns start warm:
 
 ```toml
 rerun_env = { CARGO_TARGET_DIR = "/Users/me/.cache/rvow-target" }
@@ -88,9 +98,9 @@ rerun_links = ["target"]
 ```
 
 Use a directory of your own for `CARGO_TARGET_DIR`.
-The `rvow accept` baseline runs in your own checkout, not in a temporary worktree, so these keys do not speed it up.
-A new git worktree starts with an empty `target/`; export `CARGO_TARGET_DIR` in your shell to share one build folder between worktrees, and the accept baseline uses it.
-`rvow accept` prints one hint that says this when a baseline run takes more than 60 seconds and neither key is set.
+`rvow accept` runs no verify command, and the first prove before the work runs in your own checkout, so these keys do not touch either.
+Do not point two checkouts that both stay on disk, such as two git worktrees of one repository, at one cargo build folder: each overwrites the other's binaries.
+`rvow prove` prints one hint that says this when a base commit baseline takes more than 60 seconds and neither key is set.
 `rerun_links` turns the rerun cache off, as the section on linked build output says.
 
 ## Scoping setup and checks to files
@@ -310,11 +320,12 @@ Each value lands inside a shell command, so it may hold only `A-Z a-z 0-9 _ . : 
 A `default` value follows the same char rule and the same `params` list.
 A task's own `timeout:` wins over the runner's `timeout`.
 
-When `run` holds `{junit}`, accept reads the JUnit report after the baseline run, records the failed test names in the vow and refuses when the report names no failed test.
+When `run` holds `{junit}`, the baseline run reads the JUnit report, records the failed test names and refuses when the report names no failed test.
 A case is failed when it holds a `<failure>` or an `<error>` child, and its name is the `name` attribute, or `classname.name` when both are there.
 At prove and at the gate rerun the proof passes only when the command exits 0, the report exists, each recorded name is there and passed, and no test case failed.
-An amendment that adds or changes such a task records its failed names at the amend baseline, and the recorded names hold after the amendment.
-A `baseline: pass` task on such a runner records no names: its report must hold at least one passed case and no failed case, at accept and at each prove.
+An amendment that adds or changes such a task makes it baseline pending, and its next baseline run records the new names.
+The names of the other tasks hold after the amendment.
+A `baseline: pass` task on such a runner records no names: its report must hold at least one passed case and no failed case, at its baseline and at each prove.
 
 Each path of `needs` is filled with the same params and must exist before anything runs: accept, prove and the gate rerun run no command and name the missing path, so configure that build dir first.
 

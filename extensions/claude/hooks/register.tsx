@@ -1,15 +1,7 @@
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
-import {
-  acceptTimeoutMs,
-  baselineNotice,
-  declinedAcceptReason,
-  type PlanBudget,
-  planBudget,
-  repeatAcceptResult,
-  shortReview,
-} from './accept'
+import { ACCEPT_MS, declinedAcceptReason, repeatAcceptResult, shortReview } from './accept'
 import {
   ACCENT,
   ACCEPT,
@@ -21,6 +13,7 @@ import {
   ASK,
   ASK_SCHEMA,
   type Asked,
+  archiveAmendments,
   archiveBlockers,
   BADGE,
   BRANCH,
@@ -28,6 +21,7 @@ import {
   CONFIRM,
   CONFIRM_DESCRIPTION,
   CONFIRM_SCHEMA,
+  capLines,
   cut,
   DRIFT,
   decisionPrompt,
@@ -47,6 +41,7 @@ import {
   JUDGE_SCHEMA,
   JUDGE_TOOLS,
   JudgeInbox,
+  joinDecisions,
   judgeArgs,
   judgeRecordArgv,
   judgeSpawnPrompt,
@@ -99,8 +94,10 @@ let blocks = 0
 let warned = false
 const STDERR_LINES = 20
 const FOLD_LINES = 8
-/** The last brief sent to the model; a prompt carries the brief only when it changed. */
-let sentBrief = ''
+/** Why the next brief request follows a break in the session; rvow sends the full brief for it. */
+let briefSource: 'startup' | 'clear' | 'compact' | undefined = 'startup'
+/** Whether a session has started in this process, so a later start is a clear or a resume. */
+let sessionStarted = false
 /** A tool call carries no session id, so the last prompt's id goes with `pre-tool-use`. */
 let sessionId: string | undefined
 /** The pending judge runs and the subagent answers on their way to them. */
@@ -197,107 +194,12 @@ async function refresh($: EngineInterface) {
   await refreshStatus($)
 }
 
-/** Runs `rvow accept` with the plan's own budget: a notice first, then a
- *  wait that covers every baseline check, so a long plan is not cut off. */
-async function acceptPlan($: EngineInterface, argv: string[]): Promise<RvowNotice> {
-  const seen = await tellOut($, ['hook', 'claude', 'view'])
-  let budget: PlanBudget | null = null
-  try {
-    budget = planBudget(JSON.parse(seen.out), argv[1] ?? '')
-  } catch {}
-  // The notice names the count when the view answers; either way the user knows accept is slow.
-  const notice = budget
-    ? baselineNotice(budget.tasks)
-    : 'rvow accept: baseline checks will run; this can take a while'
-  await update($, noticeAtom, () => ({ tone: 'busy', text: notice }))
-  // The host caps a one-shot process.run at ten minutes and a plan's baseline can
-  // outlast that, so accept streams as a child bounded by the plan's own budget.
-  const streamed = await acceptStreamed($, argv, budget)
-  if (streamed) return streamed
-  return acceptRun($, argv, budget)
-}
-
-/** `rvow accept` as a streamed child, or null when the engine offers no child. */
-async function acceptStreamed(
-  $: EngineInterface,
-  argv: string[],
-  budget: PlanBudget | null,
-): Promise<RvowNotice | null> {
-  let stdout = ''
-  let stderr = ''
-  let saw = false
-  let tick: { cancel: () => void } | undefined
-  try {
-    const cwd = await $.session.cwd()
-    const parts = $.process.spawn({ argv: [BIN, ...argv], cwd })[Symbol.asyncIterator]()
-    // The deadline is set before the first pull, and each pull races the remaining
-    // time, so a child that goes quiet still ends the wait.
-    const deadline = (await $.clock.now()) + acceptTimeoutMs(budget)
-    for (;;) {
-      const remaining = Math.max(deadline - (await $.clock.now()), 0)
-      let fired = false
-      const overdue = new Promise<'overdue'>((resolve) => {
-        tick = $.clock.after(remaining, () => {
-          fired = true
-          resolve('overdue')
-        })
-      })
-      const step = await Promise.race([parts.next(), overdue])
-      if (!fired) tick?.cancel()
-      if (step === 'overdue') {
-        // Ending the stream kills the child; rvow also bounds each baseline run itself.
-        await (parts.return as ((value?: unknown) => Promise<unknown>) | undefined)?.(undefined)
-        return {
-          tone: 'fail',
-          text: `rvow ${argv.join(' ')}: the plan's task timeouts passed before accept finished`,
-        }
-      }
-      if (step.done) {
-        const end = step.value as { code?: number | null } | undefined
-        const code = end && typeof end === 'object' ? (end.code ?? null) : null
-        await refresh($)
-        // stderr holds the live output of the baseline; it shows only when there is no result.
-        const text = stdout.trim() || stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
-        return { tone: code === 0 ? 'ok' : 'fail', text: text || 'no output' }
-      }
-      saw = true
-      const piece = step.value
-      if (piece.stream === 'stdout') stdout += piece.text
-      else stderr += piece.text
-    }
-  } catch (err) {
-    // A child that already spoke does not restart; an engine without one falls back.
-    if (saw) return { tone: 'fail', text: `cannot run ${BIN}: ${String(err)}` }
-    return null
-  }
-}
-
-/** The capped one-shot run, for an engine without a streamed child. */
-async function acceptRun(
-  $: EngineInterface,
-  argv: string[],
-  budget: PlanBudget | null,
-): Promise<RvowNotice> {
-  try {
-    const r = await $.process.run([BIN, ...argv], {
-      cwd: await $.session.cwd(),
-      timeoutMs: Math.min(acceptTimeoutMs(budget), 600_000),
-    })
-    await refresh($)
-    const text = r.stdout.trim() || r.stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
-    return { tone: r.exitCode === 0 ? 'ok' : 'fail', text: text || 'no output' }
-  } catch (err) {
-    return { tone: 'fail', text: `cannot run ${BIN}: ${String(err)}` }
-  }
-}
-
-/** Runs `rvow <argv>`; the timeout covers `accept`, whose baseline runs every verify command. */
+/** Runs `rvow <argv>` with one bounded wait. */
 async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
-  if (argv[0] === 'accept') return acceptPlan($, argv)
   try {
     const r = await $.process.run([BIN, ...argv], {
       cwd: await $.session.cwd(),
-      timeoutMs: 600_000,
+      timeoutMs: ACCEPT_MS,
     })
     // stderr holds the live output of check runs; it shows only when there is no result.
     const text = r.stdout.trim() || r.stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
@@ -309,11 +211,35 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
 
 /** Runs `rvow <argv>` for a tool and returns its words, so a failure reaches the agent in the tool result. */
 async function tellOut($: EngineInterface, argv: string[]) {
-  const cwd = await $.session.cwd()
-  const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
-  const out = ran.stdout.trim() || ran.stderr.trim()
-  await refresh($)
-  return { ok: ran.exitCode === 0, out }
+  try {
+    const cwd = await $.session.cwd()
+    const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
+    const out = ran.stdout.trim() || ran.stderr.trim()
+    await refresh($)
+    return { ok: ran.exitCode === 0, out }
+  } catch (err) {
+    return { ok: false, out: `cannot run ${BIN}: ${String(err)}` }
+  }
+}
+
+/** Like tellOut for a run that may outlast the ten minutes `process.run` allows, such as `rvow archive`. */
+async function tellLong($: EngineInterface, argv: string[]) {
+  try {
+    const cwd = await $.session.cwd()
+    const child = $.process.spawn({ argv: [BIN, ...argv], cwd })
+    let stdout = ''
+    let stderr = ''
+    let next = await child.next()
+    while (!next.done) {
+      if (next.value.stream === 'stdout') stdout += next.value.text
+      else stderr += next.value.text
+      next = await child.next()
+    }
+    await refresh($)
+    return { ok: next.value.code === 0, out: stdout.trim() || stderr.trim() }
+  } catch (err) {
+    return { ok: false, out: `cannot run ${BIN}: ${String(err)}` }
+  }
 }
 
 async function waiting($: EngineInterface) {
@@ -330,9 +256,14 @@ function list(ps: { id: string; title: string }[]) {
 /** A pane press: runs rvow, keeps the outcome's short form as the notice, then refreshes. */
 async function act($: EngineInterface, argv: string[]) {
   await update($, noticeAtom, () => ({ tone: 'busy', text: `running rvow ${argv.join(' ')}` }))
-  const r = await rvow($, argv)
+  const r = argv[0] === 'archive' ? await longNotice($, argv) : await rvow($, argv)
   await settle($, r)
   tellAgentOfFailure($, argv, r)
+}
+
+async function longNotice($: EngineInterface, argv: string[]): Promise<RvowNotice> {
+  const r = await tellLong($, argv)
+  return { tone: r.ok ? 'ok' : 'fail', text: r.out || 'no output' }
 }
 
 /** A decision that failed is not silent for the agent: it is told what failed and why. */
@@ -473,26 +404,28 @@ async function confirmEach(
 async function confirmDialog($: EngineInterface, origin: { kind: string }) {
   if (origin.kind !== 'composer')
     return { text: '/rvow-confirm runs only when you type it yourself.' }
-  const listing = await rvow($, ['confirm'])
+  const listing = await rvow($, ['confirm', '--full'])
   await refresh($)
   if (listing.tone === 'fail') return { text: listing.text }
   const digest = /^digest (\S+)$/m.exec(listing.text)?.[1]
   if (!digest) return { text: listing.text }
   const items = splitListing(listing.text)
   if (items.length > 1) {
-    const prompts: string[] = []
+    const decided: Record<'accept' | 'reject', string[]> = { accept: [], reject: [] }
     const lines = await confirmEach($, items, 'accept', async (item, verb) => {
       const argv = ['confirm', item.id, `--${verb}`]
       const done = await rvow($, argv)
-      const prompt = done.tone === 'ok' ? decisionPrompt(argv, done.text) : null
-      if (prompt) prompts.push(prompt)
+      if (done.tone === 'ok') decided[verb].push(item.id)
       tellAgentOfFailure($, argv, done)
       return done.text
     })
     await refresh($)
+    const prompts = (['accept', 'reject'] as const)
+      .filter((verb) => decided[verb].length > 0)
+      .map((verb) => decisionPrompt(['confirm', `--${verb}`, ...decided[verb]], ''))
     // The engine refuses a submit made while this hook still holds the command.
     if (prompts.length > 0) later($, async () => queue($, prompts.join(' ')))
-    return { text: lines.join('\n') }
+    return { text: joinDecisions(lines) }
   }
   const answer = await $.ui
     .ask(`${listing.text}\n\nAccept all, reject all, or decide later?`, [
@@ -512,6 +445,83 @@ async function confirmDialog($: EngineInterface, origin: { kind: string }) {
   if (prompt) later($, async () => queue($, prompt))
   tellAgentOfFailure($, argv, done)
   return { text: done.text }
+}
+
+/**
+ * The archive decision shared by the tool and /rvow-archive: the user answers for the exact set of
+ * pending plan edits, which are accepted before the change is archived.
+ */
+async function archiveFlow(
+  $: EngineInterface,
+  change: string,
+): Promise<{ text: string; archived?: boolean; failed?: boolean }> {
+  const seen = await tellOut($, ['hook', 'claude', 'view'])
+  if (!seen.ok) return { text: failedText(['hook', 'claude', 'view'], seen.out) }
+  let view: {
+    changes?: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }[]
+  }
+  try {
+    view = JSON.parse(seen.out)
+  } catch {
+    return { text: 'rvow: cannot read the state of the branch' }
+  }
+  const blocked = archiveBlockers(
+    view.changes?.find((c) => c.id === change),
+    change,
+  )
+  if (blocked) return { text: blocked }
+  const base = `Every task of ${change} is proved or stale, and archive re-proves the stale ones.`
+  const trust = 'The gate trusts an archived change and never reruns its tasks.'
+  const declined = {
+    text: `The user did not archive ${change}; it stays active and any pending plan edit stays pending. The user can run /rvow-archive ${change} to archive it.`,
+  }
+  const pending = view.changes?.find((c) => c.id === change)?.pending.length ?? 0
+  if (pending === 0) {
+    const answer = await $.ui
+      .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
+      .catch(() => 'Not yet')
+    if (answer !== 'Archive') return declined
+  } else {
+    // The user answers for the exact set they read; a changed set is asked again, never accepted unseen.
+    let ids: string[] = []
+    for (let round = 0; ; round++) {
+      if (round >= 5)
+        return {
+          text: `rvow: the pending plan edits of ${change} keep changing; run /rvow-archive ${change}`,
+        }
+      const listing = await tellOut($, ['confirm', '--full'])
+      if (!listing.ok) return { text: failedText(['confirm', '--full'], listing.out) }
+      const shown = /^digest (\S+)$/m.exec(listing.out)?.[1]
+      const items = archiveAmendments(listing.out, change)
+      if (items.length === 0) {
+        const answer = await $.ui
+          .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
+          .catch(() => 'Not yet')
+        if (answer !== 'Archive') return declined
+        break
+      }
+      const answer = await $.ui
+        .ask(
+          `${base} ${items.length} plan edit${items.length === 1 ? ' is' : 's are'} pending, weaken first:\n\n${items.map((i) => i.text).join('\n\n')}\n\nAccept ${items.length === 1 ? 'it' : 'all of them'} and archive ${change}? ${trust}`,
+          ['Accept and archive', 'Not yet'],
+        )
+        .catch(() => 'Not yet')
+      if (answer !== 'Accept and archive') return declined
+      const now = await tellOut($, ['confirm', '--full'])
+      if (!now.ok) return { text: failedText(['confirm', '--full'], now.out) }
+      if (/^digest (\S+)$/m.exec(now.out)?.[1] !== shown) continue
+      ids = items.map((i) => i.id)
+      break
+    }
+    if (ids.length > 0) {
+      const argv = ['confirm', ...ids, '--accept']
+      const accepted = await tellOut($, argv)
+      if (!accepted.ok) return { text: failedText(argv, accepted.out) }
+    }
+  }
+  const done = await tellLong($, ['archive', change])
+  if (!done.ok) return { text: failedText(['archive', change], done.out), failed: true }
+  return { text: capLines(done.out), archived: true }
 }
 
 async function userOnly(
@@ -580,18 +590,26 @@ async function judgeChanges($: EngineInterface): Promise<{ id: string; title: st
  * agent, and records its findings with the model the subagent ran on. The mod
  * records, never the agent: the hook denies an agent's own `--judge` call.
  */
-async function judgeRun($: EngineInterface, argsText: string): Promise<{ text: string }> {
+async function judgeRun(
+  $: EngineInterface,
+  argsText: string,
+  forModel = false,
+): Promise<{ text: string }> {
   // Counted from the start, not from the spawn: an answer can arrive before
   // the spawn returns, and it is kept only while a run is pending.
   judgePending.begin()
   try {
-    return await judgeOnce($, argsText)
+    return await judgeOnce($, argsText, forModel)
   } finally {
     judgePending.end()
   }
 }
 
-async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: string }> {
+async function judgeOnce(
+  $: EngineInterface,
+  argsText: string,
+  forModel: boolean,
+): Promise<{ text: string }> {
   // The type is registered at session start; this covers a session that
   // started before the registration landed, and is a no-op replace after.
   await registerJudgeAgent($)
@@ -612,7 +630,9 @@ async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: 
     id = only.id
   }
   const packet = await rvow($, ['review', id, '--packet', '--human'])
-  if (packet.tone !== 'ok') return { text: packet.text }
+  if (packet.tone !== 'ok') {
+    return { text: failedText(['review', id, '--packet', '--human'], packet.text) }
+  }
   const identity = /^identity: (\S+)/m.exec(packet.text)?.[1]
   if (!identity) return { text: `cannot read the packet of ${id}` }
   const body = packet.text.split('\n').slice(1).join('\n')
@@ -649,14 +669,17 @@ async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: 
     return { text: `cannot record the judge: ${String(err)}` }
   }
   if (recorded.exitCode !== 0) {
-    return { text: recorded.stdout.trim() || recorded.stderr.trim() || 'cannot record the judge' }
+    const out = recorded.stdout.trim() || recorded.stderr.trim() || 'cannot record the judge'
+    return { text: failedText(judgeRecordArgv(id, started.model), out) }
   }
   await refresh($)
-  return { text: formatJudgeFindings(id, started.model, parsed.findings) }
+  return {
+    text: formatJudgeFindings(id, started.model, parsed.findings, forModel ? 300 : undefined),
+  }
 }
 
 /** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
-async function ask($: EngineInterface, change?: string): Promise<string> {
+async function ask($: EngineInterface, change?: string, forModel = false): Promise<string> {
   const cwd = await $.session.cwd()
   const run = (argv: string[]) => $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
   let round: { questions?: Asked[]; remaining?: number }
@@ -684,29 +707,34 @@ async function ask($: EngineInterface, change?: string): Promise<string> {
     }
     const r = await run(['answer', q.ref, choice, '--via', 'dialog']).catch(() => undefined)
     if (r?.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
-    done.push(`${q.ref} ${q.question} -> ${choice}`)
+    done.push(
+      forModel
+        ? `${q.ref} ${cut(q.question, 200)} -> ${cut(choice, 200)}`
+        : `${q.ref} ${q.question} -> ${choice}`,
+    )
   }
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join('\n')
 }
 
 export const register: Register = (on) => {
-  // A compaction that stands folds the brief into a summary, so the next prompt carries it again.
+  // A compaction that stands folds the brief into a summary, so the next brief request says `compact`.
   // A skipped one, a subagent's own and a `precompute` install nothing and leave the brief alone.
   on('session.compact', async (_$, e, next) => {
     const out = await next(e)
-    if (out.messages && !e.agentId && e.trigger !== 'precompute') sentBrief = ''
+    if (out.messages && !e.agentId && e.trigger !== 'precompute') briefSource = 'compact'
     return out
   })
 
   on('session.start', async ($, e, next) => {
     // A new session (startup, clear, resume) has no brief yet, no warning shown, no blocks in a row.
-    sentBrief = ''
+    briefSource = sessionStarted ? 'clear' : 'startup'
+    sessionStarted = true
     warned = false
     blocks = 0
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
-      description: 'Run the baseline and record the vow for a plan: <CHG-id>',
+      description: 'Record the vow for a plan: <CHG-id>',
     })
     await $.command.register({
       name: 'rvow-review',
@@ -816,14 +844,14 @@ export const register: Register = (on) => {
       }))
       return { result: repeatAcceptResult(reason, change) }
     }
-    const done = await acceptPlan($, ['accept', change, '--yes'])
+    const done = await rvow($, ['accept', change, '--yes'])
     if (done.tone === 'ok') {
       await update($, acceptMemoryAtom, (m) => {
         const next = { ...((m as unknown as AcceptMemory) ?? {}) }
         delete next[change]
         return next
       })
-      return { result: done.text }
+      return { result: capLines(done.text) }
     }
     const reason = failedText(['accept', change], done.text)
     await update($, acceptMemoryAtom, (m) => ({
@@ -838,33 +866,7 @@ export const register: Register = (on) => {
     if (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change)) {
       return { result: 'rvow: change must be a complete CHG id' }
     }
-    const seen = await tellOut($, ['hook', 'claude', 'view'])
-    if (!seen.ok) return { result: failedText(['hook', 'claude', 'view'], seen.out) }
-    let view: {
-      changes?: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }[]
-    }
-    try {
-      view = JSON.parse(seen.out)
-    } catch {
-      return { result: 'rvow: cannot read the state of the branch' }
-    }
-    const blocked = archiveBlockers(
-      view.changes?.find((c) => c.id === change),
-      change,
-    )
-    if (blocked) return { result: blocked }
-    const answer = await $.ui
-      .ask(
-        `Every task of ${change} is proved. Archive it? The gate trusts an archived change and never reruns its tasks.`,
-        ['Archive', 'Not yet'],
-      )
-      .catch(() => 'Not yet')
-    if (answer !== 'Archive')
-      return {
-        result: `The user did not archive ${change}; it stays active. The user can run /rvow-archive ${change} to archive it.`,
-      }
-    const done = await tellOut($, ['archive', change])
-    return { result: done.ok ? done.out : failedText(['archive', change], done.out) }
+    return { result: (await archiveFlow($, change)).text }
   })
 
   on('tool.call', { tool: CONFIRM }, async ($, e) => {
@@ -876,12 +878,19 @@ export const register: Register = (on) => {
     if (named !== undefined && (typeof named !== 'string' || !/^AMD-[a-z0-9]+$/.test(named))) {
       return { result: 'rvow: id must be an AMD- id' }
     }
-    const listing = await tellOut($, ['confirm'])
-    if (!listing.ok) return { result: failedText(['confirm'], listing.out) }
+    if (decision === undefined) {
+      const argv = named === undefined ? ['confirm'] : ['confirm', named]
+      const shown = await tellOut($, argv)
+      if (shown.ok) return { result: shown.out }
+      if (named !== undefined && /not (a )?pending/i.test(shown.out))
+        return { result: `${named} is not pending.` }
+      return { result: failedText(argv, shown.out) }
+    }
+    const listing = await tellOut($, ['confirm', '--full'])
+    if (!listing.ok) return { result: failedText(['confirm', '--full'], listing.out) }
     if (named !== undefined) {
       const item = splitListing(listing.out).find((i) => i.id === named)
       if (!item) return { result: `${named} is not pending.` }
-      if (decision === undefined) return { result: item.text }
       const answer = await $.ui
         .ask(`${item.text}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} ${named}?`, [
           'Yes',
@@ -897,7 +906,6 @@ export const register: Register = (on) => {
       const done = await tellOut($, argv)
       return { result: done.ok ? done.out : failedText(argv, done.out) }
     }
-    if (decision === undefined) return { result: listing.out }
     const items = splitListing(listing.out)
     if (items.length > 1) {
       const lines = await confirmEach($, items, decision, async (item, verb) => {
@@ -905,7 +913,7 @@ export const register: Register = (on) => {
         const done = await tellOut($, argv)
         return done.ok ? done.out : failedText(argv, done.out)
       })
-      return { result: lines.join('\n') }
+      return { result: joinDecisions(lines) }
     }
     const digest = /^digest (\S+)$/m.exec(listing.out)?.[1]
     if (!digest) return { result: listing.out || 'There are no pending plan edits.' }
@@ -930,7 +938,7 @@ export const register: Register = (on) => {
     if (change !== undefined && (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change))) {
       return { result: 'rvow: change must be a CHG- id' }
     }
-    const result = await ask($, change)
+    const result = await ask($, change, true)
     await refresh($)
     return { result }
   })
@@ -942,7 +950,7 @@ export const register: Register = (on) => {
     const input = e as Record<string, unknown>
     const change = typeof input.change === 'string' ? input.change : ''
     const model = typeof input.model === 'string' ? input.model : ''
-    const { text } = await judgeRun($, [change, model].filter(Boolean).join(' '))
+    const { text } = await judgeRun($, [change, model].filter(Boolean).join(' '), true)
     return { result: text }
   })
 
@@ -968,16 +976,22 @@ export const register: Register = (on) => {
     }
     // After the call runs or fails, report its outcome so rvow records the
     // blobs the call changed. A denied call never ran, so it is not reported.
+    let result: Awaited<ReturnType<typeof next>>
+    let post: HookOutput | undefined
     try {
-      return await next(e)
+      result = await next(e)
     } finally {
-      await hook($, 'post-tool-use', {
+      post = await hook($, 'post-tool-use', {
         session_id: sessionId,
         agent_id: typeof agentId === 'string' ? agentId : undefined,
         tool_use_id,
       })
       if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
     }
+    // A notice that rvow kept for this call goes to the model after the tool's result.
+    const notice = post?.hookSpecificOutput?.additionalContext
+    if (typeof notice !== 'string' || !notice || result.deny !== undefined) return result
+    return { ...result, context: [...(result.context ?? []), notice] }
   })
 
   // A subagent whose prompt starts with the `lease:` line of `rvow delegate` is bound to that lease, so
@@ -996,15 +1010,26 @@ export const register: Register = (on) => {
     return result
   })
 
-  // The brief goes with each prompt whose brief changed, not with session start: startup never waits
-  // for rvow, and the model learns of an accept, a confirm or an archive the user ran.
+  // The brief request goes with each prompt, not with session start: startup never waits for rvow,
+  // and the model learns of an accept, a confirm or an archive the user ran. rvow keeps the last
+  // brief per session and answers with nothing, the changed line or the full brief.
   on('classic.UserPromptSubmit', async ($, e, next) => {
     sessionId = e.session_id
     const result = await next(e)
-    const out = await Promise.race([hook($, 'session-start', {}), $.clock.sleep(BRIEF_WAIT_MS)])
+    const source = briefSource
+    const out = await Promise.race([
+      hook($, 'session-start', { session_id: e.session_id, source }),
+      $.clock.sleep(BRIEF_WAIT_MS).then(() => 'timeout' as const),
+    ])
+    // rvow records the brief it sent before the mod gets it, so a late answer is lost: have rvow
+    // forget the record and send the full brief with the next prompt.
+    if (out === 'timeout') {
+      if (briefSource === source) briefSource = 'clear'
+      return result
+    }
+    if (out && briefSource === source) briefSource = undefined
     const text = out?.hookSpecificOutput?.additionalContext
-    if (typeof text !== 'string' || !text || text === sentBrief) return result
-    sentBrief = text
+    if (typeof text !== 'string' || !text) return result
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
   })
 
@@ -1088,7 +1113,15 @@ export const register: Register = (on) => {
   on('command.run', { command: 'rvow-archive' }, async ($, e) => {
     const id = e.args.trim()
     if (!id) return { text: 'usage: /rvow-archive <CHG-id>' }
-    return userOnly($, e.origin, 'rvow-archive', ['archive', id])
+    if (e.origin.kind !== 'composer')
+      return { text: '/rvow-archive runs only when you type it yourself.' }
+    if (!/^CHG-[a-z0-9]+$/.test(id)) return { text: 'rvow: change must be a complete CHG id' }
+    const r = await archiveFlow($, id)
+    await refresh($)
+    // The engine refuses a submit made while this hook still holds the command.
+    if (r.archived) later($, async () => queue($, `I archived ${id}. The change is closed.`))
+    else if (r.failed) tellAgentOfFailure($, ['archive', id], { tone: 'fail', text: r.text })
+    return { text: r.text }
   })
 
   on('command.run', { command: 'rvow-judge' }, async ($, e) => {
@@ -1346,7 +1379,7 @@ export const register: Register = (on) => {
                 'Review amendments',
                 hot('c'),
                 async () => {
-                  const r = await rvow($, ['confirm'])
+                  const r = await rvow($, ['confirm', '--full'])
                   await update($, amendmentsAtom, () => r.text)
                 },
                 true,

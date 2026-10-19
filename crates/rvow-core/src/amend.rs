@@ -31,14 +31,17 @@ pub struct Pending {
     pub reason: String,
     pub items: Vec<Value>,
     pub snapshot: String,
-    /// One record per baseline run of the amendment, in run order.
+    /// One record per baseline run of the amendment, in run order. An
+    /// amendment from before baselines moved to prove holds them.
     pub baseline: Vec<BaselineRun>,
+    /// The added or changed tasks whose baseline runs at their next prove.
+    pub baseline_pending: Vec<String>,
     /// The task ids the amendment's items name, or `None` for an amendment
     /// recorded before this key existed. `None` releases the whole change.
     pub tasks: Option<Vec<String>>,
 }
 
-/// One verify command run on the vow's base commit at amend time.
+/// One verify command run on the vow's base commit by an older amend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineRun {
     pub task: String,
@@ -94,10 +97,12 @@ impl Pending {
     }
 
     /// The confirm listing of this amendment: the header, the items weaken
-    /// first, each baseline result, and the reason. The digest line comes
-    /// from `listing`, so `--all` decides exactly the set that was read.
-    pub fn render(&self) -> Vec<String> {
+    /// first, each baseline result, and the reason. `detail` sets how much of
+    /// each changed line it shows. The digest line comes from `listing`, so
+    /// `--all` decides exactly the set that was read.
+    pub fn render(&self, detail: Detail) -> Vec<String> {
         let mut lines = vec![format!("{} for {}", self.id, self.change)];
+        let (mut hidden, mut cut) = (0, false);
         for i in self.ordered_items() {
             let class = i.get("class").and_then(|v| v.as_str()).unwrap_or("");
             let what = i.get("what").and_then(|v| v.as_str()).unwrap_or("");
@@ -106,28 +111,68 @@ impl Pending {
                 let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
                 let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
                 let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
-                for line in &old[head..old.len() - tail] {
-                    lines.push(format!("    - {line}"));
-                }
-                for line in &new[head..new.len() - tail] {
-                    lines.push(format!("    + {line}"));
+                let changed =
+                    old[head..old.len() - tail].iter().map(|l| ('-', *l)).chain(new[head..new.len() - tail].iter().map(|l| ('+', *l)));
+                for (sign, line) in changed {
+                    match detail {
+                        Detail::Summary => hidden += 1,
+                        Detail::Clipped => {
+                            let (shown, was_cut) = clip(line);
+                            cut |= was_cut;
+                            lines.push(format!("    {sign} {shown}"));
+                        }
+                        Detail::Full => lines.push(format!("    {sign} {line}")),
+                    }
                 }
             }
         }
+        if hidden > 0 {
+            let noun = if hidden == 1 { "line" } else { "lines" };
+            lines.push(format!("  diff: {hidden} changed {noun} hidden; rvow confirm {} shows them", self.id));
+        }
+        if cut {
+            lines.push(format!("  cut: long lines are cut; rvow confirm {} --full shows them whole", self.id));
+        }
         for b in &self.baseline {
             lines.push(format!("  baseline: {}", b.line()));
+        }
+        for task in &self.baseline_pending {
+            lines.push(format!("  baseline: {task} baseline pending, it runs at the task's next prove"));
         }
         lines.push(format!("  reason (from the agent): {}", self.reason));
         lines
     }
 }
 
-/// The full confirm listing of every pending amendment, ending with the
-/// digest line that `--all` decides with.
-pub fn listing(pending: &[Pending]) -> Vec<String> {
+/// How much of each changed line a confirm listing shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// Only the item names and a count of the changed lines.
+    Summary,
+    /// Each changed line, cut at `CLIP_CHARS`.
+    Clipped,
+    /// Each changed line whole, as the user reads it before a decision.
+    Full,
+}
+
+/// The longest changed line that `Detail::Clipped` shows whole.
+pub const CLIP_CHARS: usize = 500;
+
+fn clip(line: &str) -> (String, bool) {
+    let total = line.chars().count();
+    if total <= CLIP_CHARS {
+        return (line.to_string(), false);
+    }
+    let kept: String = line.chars().take(CLIP_CHARS).collect();
+    (format!("{kept}... (cut, {total} chars)"), true)
+}
+
+/// The confirm listing of every pending amendment, ending with the digest
+/// line that `--all` decides with.
+pub fn listing(pending: &[Pending], detail: Detail) -> Vec<String> {
     let mut lines = Vec::new();
     for p in pending {
-        lines.extend(p.render());
+        lines.extend(p.render(detail));
     }
     lines.push(format!("digest {}", digest(pending)));
     lines
@@ -165,6 +210,12 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(BaselineRun::of).collect())
                     .unwrap_or_default(),
+                baseline_pending: e
+                    .data
+                    .get("baseline_pending")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default(),
                 tasks: e
                     .data
                     .get("tasks")
@@ -184,9 +235,8 @@ pub fn digest(pending: &[Pending]) -> String {
     short_hash(lines.join("\n").as_bytes())[..8].to_string()
 }
 
-/// The tasks whose verify command the baseline must run: each added task
-/// and each task whose verify command changed. A title-only edit runs
-/// nothing.
+/// The tasks whose baseline the amendment makes pending: each added task and
+/// each task whose verify command changed. A title-only edit keeps it.
 fn baseline_candidates<'a>(before: &[Task], after: &'a [Task]) -> Vec<&'a Task> {
     after
         .iter()
@@ -209,7 +259,7 @@ pub const SLOW_BASELINE: Duration = Duration::from_secs(60);
 pub fn baseline_hint(slowest: Duration, limit: Duration, rerun_env: &BTreeMap<String, String>, rerun_links: &[String]) -> Option<String> {
     (slowest > limit && rerun_env.is_empty() && rerun_links.is_empty()).then(|| {
         format!(
-            "a baseline run took {} s; a new worktree starts with an empty build folder, so export CARGO_TARGET_DIR=<shared dir> in your shell to share builds between worktrees, and set rerun_env = {{ CARGO_TARGET_DIR = \"<shared dir>\" }} or rerun_links = [\"target\"] in config.toml for gate reruns (see docs/settings.md)",
+            "a baseline run took {} s; the warm worktree keeps its own build folder, so the next base commit run builds only what changed; for gate reruns set rerun_env = {{ CARGO_TARGET_DIR = \"<a folder only reruns use>\" }} or rerun_links = [\"target\"] in config.toml (see docs/settings.md)",
             slowest.as_secs()
         )
     })
@@ -225,19 +275,19 @@ fn tests_word(tests_run: Option<u64>) -> String {
 
 /// The amend baseline: one run record per candidate task, with the failed
 /// JUnit names each `{junit}` runner recorded.
-struct BaselineOut {
-    runs: Vec<Value>,
-    junit: BTreeMap<String, Vec<String>>,
+pub(crate) struct BaselineOut {
+    pub(crate) runs: Vec<Value>,
+    pub(crate) junit: BTreeMap<String, Vec<String>>,
 }
 
 /// Runs each candidate verify command on the vow's base commit, in a clean
 /// worktree set up the same way as the gate rerun (setup, rerun_links,
 /// rerun_env), and refuses a check that would pass before any work starts.
 /// A `@runner` verify runs filled from the project config, with the runner
-/// env, timeout and needs check, as `vow::prepare` runs it. Returns one
-/// record per run for the amendment event, with the failed JUnit names each
-/// `{junit}` runner recorded, by the same rule as accept.
-fn baseline(
+/// env, timeout and needs check. Returns one record per run, with the failed
+/// JUnit names each `{junit}` runner recorded. Prove calls it when the work
+/// of a baseline-pending task came first.
+pub(crate) fn baseline(
     project: &Project,
     home: &Path,
     top: &Path,
@@ -264,7 +314,15 @@ fn baseline(
             setup.push(step.run().to_string());
         }
     }
-    let tree = rerun::Worktree::add_at(top, base_commit, &links)?;
+    let tree = rerun::Worktree::warm(top, base_commit, &links, &crate::store::warm_tree(home, project))?;
+    // Cargo names the artifacts of two checkouts of one repo alike, so a warm
+    // tree that shares the user's build folder overwrites the user's binaries
+    // and cargo then calls them fresh. It always builds in its own folder.
+    let mut env = env;
+    if let Some(target) = tree.cargo_target() {
+        env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
+        env.push(("CARGO_TARGET_DIR".to_string(), target.to_string_lossy().into_owned()));
+    }
     let mut sink = std::io::sink();
     for cmd in &setup {
         if !runner::run(cmd, &tree.path, &env, config.timeout(), &mut sink)?.passed() {
@@ -416,21 +474,19 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                     continue;
                 }
                 let before = drift::baseline_tasks(project, c)?;
-                let candidates = baseline_candidates(&before, &c.loaded.tasks);
-                let out = baseline(project, home, &top, &config, c, &candidates)?;
-                let (runs, junit_new) = (out.runs, out.junit);
+                let pending: Vec<String> = baseline_candidates(&before, &c.loaded.tasks).iter().map(|t| t.id.to_string()).collect();
                 let mut snapshot = drift::snapshot_now(project, &top, &config, c)?;
-                // The recorded JUnit names hold after the amendment: the
-                // old baseline's names carry forward, with the amended
-                // tasks' fresh names on top.
+                // The recorded JUnit names of the other tasks hold after the
+                // amendment; a pending task records new ones at its baseline.
                 let mut junit: Map<String, Value> =
                     c.baseline().and_then(|b| b.get("junit")).and_then(Value::as_object).cloned().unwrap_or_default();
-                for (task, names) in junit_new {
-                    junit.insert(task, Value::Array(names.into_iter().map(Value::String).collect()));
+                for task in &pending {
+                    junit.remove(task);
                 }
                 snapshot.insert("junit".into(), Value::Object(junit));
                 data.insert("snapshot".into(), Value::Object(snapshot));
-                data.insert("baseline".into(), Value::Array(runs));
+                data.insert("baseline".into(), Value::Array(Vec::new()));
+                data.insert("baseline_pending".into(), json!(pending));
                 items
             }
         };

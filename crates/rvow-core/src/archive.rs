@@ -32,6 +32,8 @@ pub struct Archived {
     pub path: PathBuf,
     /// Each merged requirement with its op, in delta order.
     pub merged: Vec<(DeltaOp, String)>,
+    /// The stale tasks that archive proved again before its gate, in task order.
+    pub reproved: Vec<String>,
 }
 
 /// Today's local date as `YYYY-MM-DD`.
@@ -139,6 +141,8 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
             "only an accepted change can be archived",
         ));
     }
+    crate::reprove::wait(project, &mut std::io::stderr());
+    let reproved = reprove_stale(project, home, cwd, &dir)?;
     let lock = project.lock()?;
     let texts = change::living_texts(project)?;
     let (living, findings) = change::living_from(&texts);
@@ -230,7 +234,41 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     }
     ledger::append(&dir.path.join(LEDGER), &lock, Kind::Archive, data)?;
     let path = retire(project, &dir, Stage::Done)?;
-    Ok(Archived { id: dir.id, path, merged })
+    Ok(Archived { id: dir.id, path, merged, reproved })
+}
+
+/// Proves each stale task of `dir` again, in the worktree of its branch, and
+/// refuses with the code `gate` when one fails. It runs before archive takes
+/// the project lock, since a prove takes that lock for its ledger append.
+/// Proves the stale tasks of the change `input` again, in order, and stops at
+/// the first one that fails. Returns the tasks it proved.
+pub fn reprove(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<Vec<String>> {
+    reprove_stale(project, home, cwd, &change::resolve(project, input)?)
+}
+
+fn reprove_stale(project: &Project, home: &Path, cwd: &Path, dir: &ChangeDir) -> Result<Vec<String>> {
+    let (living, _) = change::load_living(project)?;
+    let changes = proof::active(project, &living)?;
+    let Some(c) = changes.iter().find(|a| a.dir.id == dir.id) else {
+        return Ok(Vec::new());
+    };
+    let top = c.branch().and_then(|b| git::top_for_branch(cwd, b).ok().flatten()).unwrap_or_else(|| cwd.to_path_buf());
+    let mine: BTreeSet<String> = c.loaded.tasks.iter().map(|t| t.id.to_string()).collect();
+    let stale: Vec<String> = proof::stale_tasks(project, home, &top)?.into_iter().filter(|t| mine.contains(t)).collect();
+    let mut echo = std::io::stderr();
+    for task in &stale {
+        let _ = std::io::Write::write_fmt(&mut echo, format_args!("re-prove: {task}\n"));
+        let proved = proof::prove(project, home, &top, task, &mut echo)?;
+        if !proved.proved {
+            let exit = proved.outcome.exit.map_or_else(|| "a signal or timeout".to_string(), |e| format!("exit {e}"));
+            return Err(Error::new(
+                "gate",
+                format!("{task} of {} is stale and failed when archive proved it again: {exit}", dir.id),
+                format!("fix the work so `rvow prove {task}` passes, then run rvow archive again"),
+            ));
+        }
+    }
+    Ok(stale)
 }
 
 /// Updates spec-record.json for the merge and returns the new hash of each

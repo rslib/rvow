@@ -130,9 +130,16 @@ impl Fx {
     /// An allowed Write call of session `s1`, which puts the file in the session's record.
     fn write_as_session(&self, file: &Path) {
         let payload = json!({"cwd": self.repo(), "tool_name": "Write", "tool_input": {"file_path": file}, "session_id": "s1"});
-        let mut child = self.cmd(RVOW).args(["hook", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
-        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        let send = || {
+            let mut child = self.cmd(RVOW).args(["hook", "pre-tool-use"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+            String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+        };
+        let mut out = send();
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        if out.contains("has no baseline yet") {
+            out = send();
+        }
         assert_eq!(out.trim(), "", "the write of {} was held back", file.display());
     }
 
@@ -353,7 +360,7 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     std::fs::write(fx.repo().join("tests/t.sh"), "exit 1").unwrap();
     fx.write_as_session(&fx.repo().join("tests/t.sh"));
     let drift = stop(&fx);
-    assert!(drift.contains("/rvow-confirm"), "{drift}");
+    assert!(drift.contains("rvow amend --reason") && !drift.contains("/rvow-confirm"), "{drift}");
     reasons.push(("drift".into(), drift));
     let _ = id;
 
@@ -803,7 +810,7 @@ fn a_changed_bundled_skill_is_named_as_stale() {
     let old = "---\nname: rvow\ndescription: a\n---\nold text\n";
     let new = "---\nname: rvow\ndescription: a\n---\nnew text\n";
     install::skill(&claude, old).unwrap();
-    let stale = |text: &str| install::stale_managed_files(&claude, &fx.rvow_home(), None, text);
+    let stale = |text: &str| install::stale_managed_files(&claude, &fx.home().join(".local/share/rvow/claude-plugin"), None, text);
     assert_eq!(stale(old), Vec::<PathBuf>::new());
     assert_eq!(stale(new), vec![claude.join("skills/rvow/SKILL.md")]);
     install::skill(&claude, new).unwrap();
@@ -822,7 +829,7 @@ fn session_start_warns_about_a_stale_skill_mod_and_pi_file() {
     let tools = pi.join("extensions/rvow/tools.ts");
     let body = "export const old = 1;\n";
     std::fs::write(&tools, format!("// rvow-managed sha256:{}\n{body}", rvow_core::vow::sha256_hex(body.as_bytes()))).unwrap();
-    let plugin = fx.rvow_home().join("claude-plugin/plugins/rvow/hooks");
+    let plugin = fx.home().join(".local/share/rvow/claude-plugin/plugins/rvow/hooks");
     std::fs::create_dir_all(&plugin).unwrap();
     std::fs::write(plugin.join("format.ts"), "// old\n").unwrap();
 

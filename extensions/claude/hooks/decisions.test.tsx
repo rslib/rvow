@@ -1,7 +1,15 @@
 import type { On } from 'claude-code'
 import { expect } from 'claude-code/testing'
-import { ACCEPT, ARCHIVE, archiveBlockers, CONFIRM, failedText } from './format'
-import { procResult, test } from './testkit'
+import {
+  ACCEPT,
+  ARCHIVE,
+  archiveBlockers,
+  CONFIRM,
+  capLines,
+  failedText,
+  joinDecisions,
+} from './format'
+import { procResult, spawnHook, test } from './testkit'
 
 const LIST = 'AMD-a1 weaken T1 verify changed\ndigest abc123\n'
 
@@ -18,6 +26,11 @@ function fake(on: On, answer: string, reply: (line: string) => [number, string])
     const [code, out] = reply(line)
     return { value: procResult(code, out) }
   })
+  on('process.spawn', async function* (_$, e) {
+    const line = [...e.argv].slice(1).join(' ')
+    ran.push(line)
+    return yield* spawnHook(reply)(_$, e)
+  })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
     const question = e.questions[0]?.question ?? ''
     asked.push(question)
@@ -27,7 +40,7 @@ function fake(on: On, answer: string, reply: (line: string) => [number, string])
 }
 
 const call = (tool: string, input: Record<string, unknown>) => ({ tool, ...input }) as never
-const mutating = (ran: string[]) => ran.filter((l) => /^(accept|confirm --)/.test(l))
+const mutating = (ran: string[]) => ran.filter((l) => /^(accept|confirm --(?!full))/.test(l))
 
 test('rvow_accept shows the review, and the user decides', async ($, on) => {
   const { ran, asked } = fake(on, 'Accept', (line) =>
@@ -77,12 +90,15 @@ test('rvow_accept refuses an id that is not complete', async ($, on) => {
 
 test('rvow_confirm lists without a dialog and decides with one', async ($, on) => {
   const { ran, asked } = fake(on, 'Yes', (line) =>
-    line === 'confirm' ? [0, LIST] : [0, 'AMD-a1 accepted\n'],
+    line === 'confirm' || line === 'confirm --full' ? [0, LIST] : [0, 'AMD-a1 accepted\n'],
   )
   expect(JSON.stringify(await $.tool.call(call(CONFIRM, {})))).toContain('digest abc123')
   expect(asked).toEqual([])
+  expect(ran).toContain('confirm')
+  expect(ran).not.toContain('confirm --full')
   const out = JSON.stringify(await $.tool.call(call(CONFIRM, { decision: 'accept' })))
   expect(asked[0]).toContain('Accept all of these?')
+  expect(ran).toContain('confirm --full')
   expect(mutating(ran)).toEqual(['confirm --accept --all abc123'])
   expect(out).toContain('AMD-a1 accepted')
 })
@@ -107,6 +123,17 @@ test('the failure text names the command and keeps its own words', () => {
   )
 })
 
+test('several decisions say each next step once, at the end', () => {
+  const next = 'next: the plan edit stands; continue the tasks'
+  expect(
+    joinDecisions([
+      `AMD-a: accepted\n${next}\n`,
+      `AMD-b: accepted\n${next}\n`,
+      'AMD-c is still pending.',
+    ]),
+  ).toBe(`AMD-a: accepted\nAMD-b: accepted\nAMD-c is still pending.\n${next}`)
+})
+
 const view = (states: string[], pending = 0) =>
   JSON.stringify({
     changes: [
@@ -128,20 +155,47 @@ test('rvow_archive asks only when every task is proved, and archives on a yes', 
   expect(out).toContain('archived CHG-a1')
 })
 
-test('rvow_archive names what is missing and asks nothing when the change is not ready', async ($, on) => {
-  const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'stale']))
+test('archive output that arrives through spawn reaches the tool result, capped', async ($, on) => {
+  const long = Array.from({ length: 45 }, (_, i) => `line ${i}`).join('\n')
+  const { ran } = fake(on, 'Archive', (line) =>
+    line === 'archive CHG-a1' ? [0, long] : lines(line, ['proved']),
+  )
   const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
-  expect(out).toContain('TSK-1 is stale')
-  expect(asked).toEqual([])
-  expect(ran.filter((l) => l.startsWith('archive'))).toEqual([])
+  expect(ran).toContain('archive CHG-a1')
+  expect(out).toContain('(5 earlier lines cut)')
+  expect(out).toContain('line 44')
+  expect(out).not.toContain('line 4\\n')
 })
 
-test('rvow_archive waits for the user to decide a pending plan edit', async ($, on) => {
-  const { asked } = fake(on, 'Archive', (line) => lines(line, ['proved'], 1))
-  expect(JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))).toContain(
-    'pending plan edit',
-  )
+test('a process.run that rejects gives a failure result, not a dropped hook', async ($, on) => {
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('process.run', async () => {
+    throw new Error('still running after 600000 ms')
+  })
+  const out = JSON.stringify(await $.tool.call(call(CONFIRM, {})))
+  expect(out).toContain('cannot run')
+})
+
+test('capLines keeps the last lines and counts the cut ones', () => {
+  expect(capLines('a\nb', 3)).toBe('a\nb')
+  expect(capLines('a\nb\nc\nd\ne', 3)).toBe('(2 earlier lines cut)\nc\nd\ne')
+})
+
+test('rvow_archive asks the user when a task is stale and archives on a yes', async ($, on) => {
+  const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'stale']))
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(asked.length).toBe(1)
+  expect(ran.filter((l) => l.startsWith('archive'))).toEqual(['archive CHG-a1'])
+  expect(out).toContain('archived CHG-a1')
+})
+
+test('rvow_archive names the failed task and asks nothing', async ($, on) => {
+  const { ran, asked } = fake(on, 'Archive', (line) => lines(line, ['proved', 'failed']))
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(out).toContain('TSK-1 is failed')
   expect(asked).toEqual([])
+  expect(ran.filter((l) => l.startsWith('archive'))).toEqual([])
 })
 
 test('a refused or failed archive is reported to the agent', async ($, on) => {
@@ -163,4 +217,9 @@ test('archiveBlockers reads the state of one change', () => {
   expect(archiveBlockers(ok, 'CHG-a1')).toBeNull()
   expect(archiveBlockers(undefined, 'CHG-a1')).toContain('not an active change')
   expect(archiveBlockers({ ...ok, tasks: [] }, 'CHG-a1')).toContain('no task')
+  const task = (state: string) => ({ ...ok, tasks: [{ id: 'TSK-1', state }] })
+  expect(archiveBlockers(task('stale'), 'CHG-a1')).toBeNull()
+  expect(archiveBlockers(task('stale (inputs changed)'), 'CHG-a1')).toBeNull()
+  for (const state of ['missing', 'failed', 'flaky', 'blocked'])
+    expect(archiveBlockers(task(state), 'CHG-a1')).toContain(`TSK-1 is ${state}`)
 })

@@ -5,6 +5,7 @@ use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::hook as hooks;
 use rvow_core::install;
+use rvow_core::stats;
 use rvow_core::store::{self, Mode, Rebind};
 use rvow_core::view;
 
@@ -62,28 +63,46 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     }
     let input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
     let run = || -> Result<Option<serde_json::Value>> {
+        // Timed from here, so a hook's duration includes finding the project.
+        let start = std::time::Instant::now();
         let home = store::home_dir()?;
         let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
         if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
-            let out = match store::find(&cwd, &home) {
-                Ok(Some(p)) => hooks::claude_session_start(&p, &home, &input)?,
-                _ => None,
+            let warnings = skill_warnings()?;
+            return match store::find(&cwd, &home) {
+                Ok(Some(p)) => {
+                    let out = hooks::claude_session_start(Some(&p), &home, &input, &warnings);
+                    count_duration(&p, stats::Hook::SessionStart, &input, start);
+                    out
+                }
+                _ => hooks::claude_session_start(None, &home, &input, &warnings),
             };
-            return session_start_skill_warning(out, &home);
         }
         let Ok(Some(p)) = store::find(&cwd, &home) else {
             return Ok(None);
         };
-        match (harness, event) {
-            (Harness::Claude, HookEvent::PreToolUse) => hooks::claude_pre_tool_use(&p, &input),
-            (Harness::Claude, HookEvent::PostToolUse) => hooks::claude_post_tool_use(&p, &input),
-            (Harness::Claude, HookEvent::SessionStart) => hooks::claude_session_start(&p, &home, &input),
-            (Harness::Claude, HookEvent::Stop) => hooks::claude_stop(&p, &home, &input),
-            (Harness::Claude, HookEvent::LeaseBind) => hooks::claude_lease_bind(&p, &input),
-            (Harness::Claude, HookEvent::LeaseEnd) => hooks::claude_lease_end(&p, &input),
-            (Harness::Claude, HookEvent::View) => view::view(&p, &home, &cwd),
-            (Harness::Claude, HookEvent::Status) => Ok(hooks::status_line(&p, &home, &cwd)?.map(|s| serde_json::json!({ "status": s }))),
+        let (counted, out) = match (harness, event) {
+            (Harness::Claude, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
+            (Harness::Claude, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
+            (Harness::Claude, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
+            (Harness::Claude, HookEvent::Stop) => {
+                let out = hooks::claude_stop(&p, &home, &input);
+                if matches!(out, Ok(None)) && input.get("agent_id").is_none() {
+                    start_reprove(&p, &home, &cwd);
+                }
+                (Some(stats::Hook::Stop), out)
+            }
+            (Harness::Claude, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
+            (Harness::Claude, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
+            (Harness::Claude, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
+            (Harness::Claude, HookEvent::Status) => {
+                (None, hooks::status_line(&p, &home, &cwd).map(|s| s.map(|s| serde_json::json!({ "status": s }))))
+            }
+        };
+        if let Some(hook) = counted {
+            count_duration(&p, hook, &input, start);
         }
+        out
     };
     match run() {
         Ok(Some(out)) => println!("{out}"),
@@ -93,24 +112,54 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn session_start_skill_warning(mut out: Option<serde_json::Value>, rvow_home: &Path) -> Result<Option<serde_json::Value>> {
-    let Some(home) = env_dir("HOME") else {
-        return Ok(out);
+/// Starts `rvow reprove` detached when a finished change has stale tasks, so
+/// it runs while the person reads the answer. A failure here only costs the
+/// head start: `rvow archive` proves the stale tasks itself.
+fn start_reprove(p: &store::Project, home: &Path, cwd: &Path) {
+    if rvow_core::reprove::running(p) || !rvow_core::reprove::ready(p, home, cwd).is_ok_and(|r| !r.is_empty()) {
+        return;
+    }
+    let (Ok(exe), Ok(top)) = (std::env::current_exe(), git::toplevel(cwd)) else {
+        return;
+    };
+    let path = rvow_core::reprove::log_path(p);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let Ok(log) = std::fs::File::create(&path) else {
+        return;
+    };
+    let Ok(err) = log.try_clone() else {
+        return;
+    };
+    let mut c = std::process::Command::new(exe);
+    c.arg("reprove").current_dir(top).stdin(std::process::Stdio::null()).stdout(log).stderr(err);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
+    let _ = c.spawn();
+}
+
+/// Counts one hook call with its duration, the session id and nothing else.
+fn count_duration(p: &store::Project, hook: stats::Hook, input: &serde_json::Value, start: std::time::Instant) {
+    let ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    stats::record_duration(p, hook, input.get("session_id").and_then(|v| v.as_str()), ms);
+}
+
+/// One warning per stale or edited file that `rvow install` manages.
+fn skill_warnings() -> Result<Vec<String>> {
+    let (Some(home), Some(mod_dir)) = (env_dir("HOME"), install::mod_dir()) else {
+        return Ok(Vec::new());
     };
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let rendered = crate::skill::render()?;
     let pi = install::pi_dir(Some(&home));
-    for path in install::stale_managed_files(&claude, rvow_home, pi.as_deref(), &rendered) {
-        let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
-        let warning =
-            format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display());
-        let value = out
-            .get_or_insert_with(|| serde_json::json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ""}}));
-        let context = &mut value["hookSpecificOutput"]["additionalContext"];
-        let previous = context.as_str().unwrap_or("");
-        *context = rvow_core::brief::with_warning(previous, &warning).into();
-    }
-    Ok(out)
+    Ok(install::stale_managed_files(&claude, &mod_dir, pi.as_deref(), &rendered)
+        .into_iter()
+        .map(|path| {
+            let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
+            format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display())
+        })
+        .collect())
 }
 
 fn report(r: &mut Reply, what: &str, o: install::Outcome) {
@@ -158,7 +207,7 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
 }
 
 fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
-    let dir = store::home_dir()?.join(install::MARKETPLACE_DIR);
+    let dir = install::mod_dir().ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
     report(r, "Claude Code mod", install::claude_mod(&dir, rvow, &crate::skill::render()?)?);
     report(r, "old settings hooks", install::remove_claude_settings(settings)?);
     match which("claude") {
@@ -178,6 +227,9 @@ fn install_mod(r: &mut Reply, settings: &Path, rvow: &Path) -> Result<()> {
             r.line(format!("  claude plugin marketplace add {}", dir.display()));
             r.line("  claude plugin install rvow@rvow");
         }
+    }
+    if let Some(old) = install::remove_old_mod(&store::home_dir()?.join(install::MARKETPLACE_DIR), &dir)? {
+        r.line(format!("old Claude Code mod: removed {}", old.display()));
     }
     Ok(())
 }

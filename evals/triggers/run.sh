@@ -39,11 +39,11 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 rvow_home=$tmp/home/.local/share/rvow
 # Throwaway home for the install: the mod lands at
-# $RVOW_HOME/claude-plugin/plugins/rvow, and the Claude registration stays
+# $XDG_DATA_HOME/rvow/claude-plugin/plugins/rvow, and the Claude registration stays
 # under the temp dir too, so the user's store and Claude folder are untouched.
 # The cd keeps the pre-push gate out of the real repository.
 (cd "$tmp" && HOME=$tmp/home XDG_DATA_HOME=$tmp/home/.local/share XDG_CONFIG_HOME=$tmp/home/.config CLAUDE_CONFIG_DIR=$tmp/claude RVOW_HOME=$rvow_home "$rvow" install >/dev/null)
-plugin=$rvow_home/claude-plugin/plugins/rvow
+plugin=$tmp/home/.local/share/rvow/claude-plugin/plugins/rvow
 
 if [ -n "$build_only" ]; then
   build_plugin "$build_only"

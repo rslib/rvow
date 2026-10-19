@@ -7,7 +7,7 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 - Title: one line that says what the task delivers.
 - `covers:` the requirement ids the task delivers, ids only; a small change needs none.
 - `verify:` the command that proves the task. Required.
-- `files:` the paths the task may touch. Required. Avoid `**`: a proof goes stale when any file in scope changes, and `rvow check` warns past 40 files.
+- `files:` the paths the task may touch. Required. Avoid `**`: a proof goes stale when a scope file changes (`rvow archive` re-proves it); `rvow check` warns past 40 files.
 - `baseline: pass` only when the command is expected to pass before the work starts.
 - `mutants:` an extra check after `verify:` passes, such as `cargo mutants --in-diff "$RVOW_DIFF"`. Set it when the tests could pass without proving anything. `RVOW_DIFF` holds the task's diff against the base commit. A failing run fails the task.
 - `timeout:` such as `90s`, `20m` or `1h`, only when the config default is too short.
@@ -17,7 +17,7 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 
 ## The verify command
 
-- It must fail before the work and pass after. Run it before you write the code and see it fail for the reason the task fixes. The one exception is `baseline: pass`, a guard that stays green.
+- It must fail before the work and pass after. Write the test, then run `rvow prove <task>` before the code to record the failure. The one exception is `baseline: pass`, a guard that stays green.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists. Write the test first if it does not.
 - Do not use `true`, `echo` or a build alone. `rvow check` warns with `weak-verify` about a stub command, and about `baseline: pass` with no counted test runner.
 - `verify: @<runner> key=value` runs a project runner with the keys filled; see `docs/settings.md`.

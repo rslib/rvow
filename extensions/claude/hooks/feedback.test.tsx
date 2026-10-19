@@ -1,16 +1,33 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { expect, mock } from 'claude-code/testing'
-import { cmd, procResult, test } from './testkit'
+import { cmd, procResult, spawnHook, test } from './testkit'
 
 let clock: { advance: (ms: number) => Promise<void> }
 
-function fake(on: On, exitCode: number, stdout: string) {
+const PROVED = JSON.stringify({
+  changes: [{ id: 'CHG-1', tasks: [{ id: 'TSK-1', state: 'proved' }], pending: [] }],
+})
+
+/** `withView` answers the view /rvow-archive reads first, and the archive dialog with a yes. */
+function fake(on: On, exitCode: number, stdout: string, withView = false) {
   clock = mock.clock(on)
   const prompts: string[] = []
   on('session.cwd', async () => ({ value: '/tmp' }))
   on('ui.status', async () => ({ value: undefined }))
-  on('process.run', async () => ({ value: procResult(exitCode, stdout) }))
+  on('process.run', async (_$, e) => {
+    const line = [...e.argv].slice(1).join(' ')
+    if (withView && line === 'hook claude view') return { value: procResult(0, PROVED) }
+    return { value: procResult(exitCode, stdout) }
+  })
+  on(
+    'process.spawn',
+    spawnHook(() => [exitCode, stdout]),
+  )
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+    const question = e.questions[0]?.question ?? ''
+    return { result: { questions: e.questions, answers: { [question]: 'Archive' } } }
+  })
   on('prompt.submit', async (_$, e) => {
     prompts.push(e.text)
     return { text: e.text }
@@ -41,7 +58,7 @@ test('confirm accept and reject name the amendments', async ($, on) => {
 })
 
 test('archive queues the closed change', async ($, on) => {
-  const prompts = fake(on, 0, 'archived\n')
+  const prompts = fake(on, 0, 'archived\n', true)
   await run($, 'rvow-archive', 'CHG-1')
   expect(prompts).toHaveLength(1)
   expect(prompts[0]).toContain('CHG-1')
@@ -54,7 +71,7 @@ test('a plain listing queues nothing', async ($, on) => {
 })
 
 test('a failed run tells the agent what failed and why', async ($, on) => {
-  const prompts = fake(on, 1, 'error: refused\ncode: not-ready\n')
+  const prompts = fake(on, 1, 'error: refused\ncode: not-ready\n', true)
   on('ui.toast', async () => ({ value: undefined }))
   await run($, 'rvow-accept', 'CHG-1')
   await run($, 'rvow-confirm', 'accept AMD-a')

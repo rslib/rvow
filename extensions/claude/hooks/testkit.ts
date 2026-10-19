@@ -65,3 +65,12 @@ export const band = (): MountTarget<'terminal', 'AbovePrompt'> => ({
     view: {},
   },
 })
+
+/** Fakes `process.spawn`: `reply` maps a command line (without the binary) to an exit code, stdout and stderr. */
+export const spawnHook = (reply: (line: string) => [number, string, string?]) =>
+  async function* (_$: unknown, e: { argv: readonly string[] }) {
+    const [code, out, err] = reply([...e.argv].slice(1).join(' '))
+    if (out) yield { stream: 'stdout' as const, text: out }
+    if (err) yield { stream: 'stderr' as const, text: err }
+    return { value: { code, signal: null } }
+  }

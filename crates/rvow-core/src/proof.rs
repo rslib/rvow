@@ -41,12 +41,60 @@ impl Active {
         self.vow()?.data.get("base_commit")?.as_str()
     }
 
+    /// The newest baseline run that a prove recorded for `task` while its
+    /// `verify:` text was `verify`. A title edit keeps it, a new check does not.
+    pub fn baseline_run(&self, task: &str, verify: &str) -> Option<&Event> {
+        self.events.iter().rev().find(|e| {
+            e.kind == Kind::Prove
+                && e.data.get("baseline").and_then(Value::as_bool) == Some(true)
+                && str_of(e, "task") == task
+                && str_of(e, "task_verify") == verify
+        })
+    }
+
+    /// Whether a baseline of `task` is on record: from a prove of the task with
+    /// its current `verify:` text, or else from the vow or an amendment run,
+    /// unless a later amendment made it pending. A task without one is
+    /// baseline pending. A vow with no baseline map predates the record, so
+    /// its tasks count as known.
+    pub fn baseline_known(&self, task: &str, verify: &str) -> bool {
+        let mut known = match self.vow().map(|e| e.data.get("baseline").and_then(Value::as_object)) {
+            Some(Some(m)) => m.contains_key(task),
+            Some(None) => true,
+            None => false,
+        };
+        let names = |e: &Event, key: &str, field: Option<&str>| {
+            e.data.get(key).and_then(Value::as_array).is_some_and(|items| {
+                items.iter().any(|v| match field {
+                    Some(f) => v.get(f).and_then(Value::as_str) == Some(task),
+                    None => v.as_str() == Some(task),
+                })
+            })
+        };
+        let rejected = |e: &Event| {
+            let id = e.data.get("amendment");
+            self.events.iter().any(|c| {
+                c.kind == Kind::Confirm && c.data.get("amendment") == id && c.data.get("decision").and_then(Value::as_str) == Some("reject")
+            })
+        };
+        for e in self.events.iter().filter(|e| e.kind == Kind::Amend && !rejected(e)) {
+            if names(e, "baseline_pending", None) {
+                known = false;
+            } else if names(e, "baseline", Some("task")) {
+                known = true;
+            }
+        }
+        known || self.baseline_run(task, verify).is_some()
+    }
+
     /// The snapshot that drift is measured against: the snapshot of the
     /// accepted amendment recorded last, else the vow. The order of the confirm
-    /// events does not count, since one confirm can accept several at once.
+    /// events does not count, since one confirm can accept several at once. An
+    /// unlock is skipped: its snapshot is a copy from when it was recorded and
+    /// would undo a plan edit accepted in the same round.
     pub fn baseline(&self) -> Option<&Map<String, Value>> {
         let mut base = self.vow().map(|e| &e.data);
-        for a in self.events.iter().filter(|e| e.kind == Kind::Amend) {
+        for a in self.events.iter().filter(|e| e.kind == Kind::Amend && !e.data.contains_key("unlock")) {
             let id = a.data.get("amendment");
             let accepted = self.events.iter().any(|e| {
                 e.kind == Kind::Confirm && e.data.get("amendment") == id && e.data.get("decision").and_then(Value::as_str) == Some("accept")
@@ -216,6 +264,11 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     if last.kind == Kind::Block {
         // A confirmed amendment that changed the task ends the block.
         return Ok(if str_of(last, "task_hash") == task_hash(task) { State::Blocked } else { State::Missing });
+    }
+    // A red baseline is no proof attempt: the task stays missing while the
+    // work goes on, so the stop hook keeps holding it.
+    if !is_proved(last) && last.data.get("red").and_then(Value::as_bool) == Some(true) {
+        return Ok(State::Missing);
     }
     if !is_proved(last) {
         let recorded = str_of(last, "inputs");
@@ -392,13 +445,36 @@ pub struct Proved {
     pub looping: bool,
     pub lfs_pointers: Vec<String>,
     pub next: Option<String>,
+    /// The run was the task's baseline and failed, as a check must before the
+    /// work: it is recorded as the baseline, not as a proof.
+    pub baseline_recorded: bool,
+    /// The hint for a slow baseline run on the base commit, when the project
+    /// has no rerun setting.
+    pub hint: Option<String>,
 }
 
-/// The failed test names the accepted baseline recorded for `task`, which a
-/// JUnit report must show passed for a proof. An amendment snapshot from
+/// The failed test names the baseline recorded for `task`, which a JUnit
+/// report must show passed for a proof: the names of its baseline run at
+/// prove, else those of the accepted baseline. An amendment snapshot from
 /// before the names were carried forward holds none, so it falls back to the
 /// vow event that recorded them.
 pub fn junit_recorded(change: &Active, task: &str) -> Vec<String> {
+    let run = change
+        .loaded
+        .tasks
+        .iter()
+        .find(|t| t.id.to_string() == task)
+        .and_then(|t| change.baseline_run(task, t.verify.as_deref().unwrap_or("")));
+    if let Some(run) = run {
+        return run
+            .data
+            .get("junit_baseline")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+    }
     let names = |data: &Map<String, Value>| {
         data.get("junit")
             .and_then(Value::as_object)
@@ -540,23 +616,75 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         ));
     }
     let cmd = plan.command.clone();
+    let id = task.id.to_string();
+    let thash = task_hash(task);
+    let verify_text = task.verify.as_deref().unwrap_or("");
+    let pending = !change.baseline_known(&id, verify_text);
+    // The files in scope that hold work, and whether more changed files hide in
+    // the scope of a proved task, whose work may be this task's too.
+    let (work, hidden) = match (pending, change.base_commit()) {
+        (true, Some(base)) => {
+            let done = done_scope(project, home, &changes, change, task, &now)?;
+            let work = crate::baseline::work_files(&top, &config, base, task, &done)?;
+            let hidden = work.is_empty() && !done.is_empty() && !crate::baseline::work_files(&top, &config, base, task, &[])?.is_empty();
+            (Some(work), hidden)
+        }
+        _ => (None, false),
+    };
+    // A pending task whose scope holds no work yet: this run is its baseline.
+    let mut first = work.is_some_and(|w| w.is_empty());
+    // The work came first, or the vow has no base commit to compare with:
+    // the baseline runs on the base commit, which names a missing commit.
+    let mut hint = None;
+    let mut from_base = None;
+    if pending && !first {
+        let (out, slow) = base_baseline(project, home, &top, &config, change, task)?;
+        from_base = Some(out);
+        hint = slow;
+    }
     let started = ledger::now_ms();
     let mut watch = Watch { inner: echo, reconfigured: false };
     let outcome = runner::run(&cmd, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut watch)?;
+    // The run may have read files that changed under it, so its result
+    // stands for neither the old content nor the new one.
+    if now.inputs(task)?.hash != inputs.hash {
+        return Err(Error::new(
+            "inputs-changed",
+            format!("the files of {id} changed while its check ran, so no proof was recorded"),
+            format!("run rvow prove {id} again when the edits are done"),
+        ));
+    }
     let note = watch.note(&plan);
-    // A `baseline: pass` task holds the same rule as at accept: the report
-    // must name a passed case and no failed one. Any other task needs its
-    // recorded names to pass.
-    let junit = plan.junit.as_ref().map(|report| {
-        if task.baseline_pass {
-            crate::junit::check_baseline_pass(report)
-        } else {
-            crate::junit::check(report, &junit_recorded(change, &task.id.to_string()))
+    let verdict = if first { baseline_verdict(task, &plan, &outcome, &cmd) } else { Ok(None) };
+    let junit_baseline = match verdict {
+        // A check that passes with work hidden in a proved task's scope may
+        // pass because of that work: the base commit decides instead.
+        Err(e) if hidden && e.code == "baseline" && !task.baseline_pass => {
+            let (out, slow) = base_baseline(project, home, &top, &config, change, task)?;
+            from_base = Some(out);
+            hint = slow;
+            first = false;
+            None
         }
-    });
+        other => other?,
+    };
+    let recorded = match &from_base {
+        Some(base) => base.junit.get(&id).cloned().unwrap_or_default(),
+        None => junit_recorded(change, &id),
+    };
+    // A failed baseline run is the red the task needs; it proves nothing.
+    let red = first && !task.baseline_pass;
+    // A `baseline: pass` task holds the same rule as at the baseline: the
+    // report must name a passed case and no failed one. Any other task needs
+    // its recorded names to pass.
+    let junit =
+        plan.junit.as_ref().filter(|_| !red).map(|report| {
+            if task.baseline_pass { crate::junit::check_baseline_pass(report) } else { crate::junit::check(report, &recorded) }
+        });
     let mutants = task
         .mutants
         .as_deref()
+        .filter(|_| !red)
         .map(|command| {
             // The mutants command sees only the task's own changed lines:
             // RVOW_DIFF names a temp file with the diff of the task's files
@@ -575,15 +703,16 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
             outcome
         })
         .transpose()?;
-    let private_check = crate::hardening::run_private(project, home, &top, task, task.timeout.unwrap_or(config.timeout()))?;
+    let private_check =
+        if red { None } else { crate::hardening::run_private(project, home, &top, task, task.timeout.unwrap_or(config.timeout()))? };
     let private_policy = private_check.as_ref().map(|c| c.digest.clone());
-    let proved = outcome.passed()
+    let proved = !red
+        && outcome.passed()
         && outcome.tests_run != Some(0)
         && mutants.as_ref().is_none_or(Outcome::passed)
         && private_check.as_ref().is_none_or(|c| c.passed)
         && junit.as_ref().is_none_or(|c| *c == crate::junit::Check::Passed);
 
-    let thash = task_hash(task);
     let reqs = covered(task, &change.loaded, &living);
     let env_key = now.env.key();
     let stamp = runner_stamp(&runners, task);
@@ -595,6 +724,23 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("verify".into(), cmd.clone().into());
     data.insert("runner".into(), json!(stamp));
     data.insert("proved".into(), proved.into());
+    if first || from_base.is_some() {
+        data.insert("task_verify".into(), verify_text.into());
+    }
+    if first {
+        data.insert("baseline".into(), true.into());
+    }
+    if red {
+        data.insert("red".into(), true.into());
+    }
+    if let Some(base) = &from_base {
+        data.insert("baseline".into(), true.into());
+        data.insert("baseline_from".into(), "base_commit".into());
+        data.insert("baseline_run".into(), json!(base.runs.first()));
+    }
+    if let Some(names) = junit_baseline.as_ref().or(from_base.as_ref().map(|_| &recorded)) {
+        data.insert("junit_baseline".into(), json!(names));
+    }
     if let Some(check) = &mutants {
         let mut value = json!(check);
         value["passed"] = check.passed().into();
@@ -616,10 +762,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
             crate::junit::Check::Passed => (true, None),
             crate::junit::Check::Failed(why) => (false, Some(why.clone())),
         };
-        data.insert(
-            "junit".into(),
-            json!({ "recorded": junit_recorded(change, &task.id.to_string()), "passed": passed, "reason": reason }),
-        );
+        data.insert("junit".into(), json!({ "recorded": recorded, "passed": passed, "reason": reason }));
     }
     data.insert("started".into(), started.into());
     data.insert("duration_ms".into(), outcome.duration_ms.into());
@@ -658,7 +801,6 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     }
 
     let (events, _) = ledger::read(&ledger_path)?;
-    let id = task.id.to_string();
     let runs: Vec<&Event> = events.iter().filter(|e| e.kind == Kind::Prove && str_of(e, "task") == id).collect();
     let looping = runs.len() >= LOOP_RUNS
         && runs[runs.len() - LOOP_RUNS..].iter().all(|e| !is_proved(e) && e.data.get("tail") == runs[runs.len() - 1].data.get("tail"));
@@ -681,7 +823,81 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         looping,
         lfs_pointers: inputs.lfs_pointers,
         next,
+        baseline_recorded: red,
+        hint,
     })
+}
+
+/// Runs `task`'s baseline on the vow's base commit, with the hint for a slow
+/// run when the project has no rerun setting.
+fn base_baseline(
+    project: &Project,
+    home: &Path,
+    top: &Path,
+    config: &Config,
+    change: &Active,
+    task: &Task,
+) -> Result<(crate::amend::BaselineOut, Option<String>)> {
+    let clock = std::time::Instant::now();
+    let out = crate::amend::baseline(project, home, top, config, change, &[task])?;
+    let hint =
+        crate::amend::baseline_hint(clock.elapsed(), crate::amend::SLOW_BASELINE, &config.rerun_env, &config::rerun_links(project, home)?);
+    Ok((out, hint))
+}
+
+/// The scope of the proved tasks other than `task`, of its change and of every
+/// other active change on its branch: work there was done for those tasks, not
+/// for this one.
+fn done_scope(project: &Project, home: &Path, changes: &[Active], change: &Active, task: &Task, now: &Now) -> Result<Vec<String>> {
+    let others = match change.branch() {
+        Some(branch) => on_branch(changes, branch).into_iter().filter(|c| c.dir.id != change.dir.id).collect(),
+        None => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for c in std::iter::once(change).chain(others) {
+        for t in c.loaded.tasks.iter().filter(|t| t.id != task.id) {
+            if state_for(project, home, c, t, now)? == State::Proved {
+                out.extend(t.files.iter().cloned());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Applies the baseline rules to a task's baseline run: a guard must pass, any
+/// other check must fail, and a JUnit runner must name a failed test, whose
+/// names it returns. A refused run records nothing.
+fn baseline_verdict(task: &Task, plan: &crate::template::Plan, outcome: &Outcome, cmd: &str) -> Result<Option<Vec<String>>> {
+    let passed = outcome.passed() && outcome.tests_run != Some(0);
+    let refuse = |why: String, fix: &str| Err(Error::new("baseline", format!("{}: {why}: {cmd}", task.id), fix));
+    if task.baseline_pass {
+        let report = plan.junit.as_ref().map(|r| crate::junit::check_baseline_pass(r));
+        if !passed || matches!(report, Some(crate::junit::Check::Failed(_))) {
+            return refuse(
+                "it says baseline: pass but fails before the work".into(),
+                "fix the check so it passes before the work, or drop the baseline: pass flag",
+            );
+        }
+        return Ok(None);
+    }
+    if let Some(report) = &plan.junit {
+        let failed: Vec<String> = crate::junit::read(report)?.into_iter().filter(|c| c.failed).map(|c| c.name).collect();
+        if failed.is_empty() {
+            return refuse(
+                "its JUnit report names no failed test, so no test is the proof target".into(),
+                "make a test fail before the work, or mark a check that must stay green with baseline: pass",
+            );
+        }
+        return Ok(Some(failed));
+    }
+    if passed {
+        let tests = outcome.tests_run.map_or("unknown".into(), |n| n.to_string());
+        return refuse(
+            format!("it passes before the work ({tests} tests run)"),
+            "add the failing test first, or mark a check that must stay green with baseline: pass",
+        );
+    }
+    Ok(None)
 }
 
 /// Streams a verify run to `inner` and watches the output for a CMake
@@ -736,6 +952,8 @@ pub struct TaskLine {
     pub task: Ref,
     pub title: String,
     pub state: State,
+    /// No baseline run of the task is on record yet.
+    pub baseline_pending: bool,
 }
 
 pub struct ChangeStatus {
@@ -769,7 +987,12 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
         }
         let mut tasks = Vec::new();
         for t in &c.loaded.tasks {
-            tasks.push(TaskLine { task: t.id.clone(), title: t.title.clone(), state: state_for(project, home, c, t, &now)? });
+            tasks.push(TaskLine {
+                task: t.id.clone(),
+                title: t.title.clone(),
+                state: state_for(project, home, c, t, &now)?,
+                baseline_pending: !c.baseline_known(&t.id.to_string(), t.verify.as_deref().unwrap_or("")),
+            });
         }
         out.push(ChangeStatus {
             id: c.dir.id.clone(),
@@ -846,6 +1069,9 @@ pub(crate) mod tests {
         let home = tmp.0.join("home");
         assert_eq!(state_of(&p, &home, &repo), "missing");
 
+        // The first run, before the work, is the red baseline: still missing.
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
+        assert_eq!(state_of(&p, &home, &repo), "missing");
         let r = prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
         assert!(!r.proved);
         assert_eq!(state_of(&p, &home, &repo), "failed");
@@ -942,6 +1168,7 @@ pub(crate) mod tests {
     fn run_order_fail_with_changed_inputs_is_stale() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
         assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         std::fs::write(repo.join("out.txt"), "ok").unwrap();
         assert_eq!(state_of(&p, &home, &repo), "stale");
@@ -954,19 +1181,29 @@ pub(crate) mod tests {
     fn run_order_fail_with_same_inputs_stays_failed() {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
         assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "failed");
         assert!(stale_tasks(&p, &home, &repo).unwrap().is_empty());
     }
 
     fn prove_with_summary(summary: &str) -> Proved {
+        prove_with_verify_line(&format!("  verify: echo '{summary}'"))
+    }
+
+    /// The same, for a `baseline: pass` guard, whose first prove may pass.
+    fn prove_guard_with_summary(summary: &str) -> Proved {
+        prove_with_verify_line(&format!("  verify: echo '{summary}'\n  baseline: pass"))
+    }
+
+    fn prove_with_verify_line(line: &str) -> Proved {
         let (tmp, p, repo, task) = accepted();
         let home = tmp.0.join("home");
         let active_dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
         let tasks = active_dir.join("tasks.md");
         let text = std::fs::read_to_string(&tasks).unwrap();
         let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
-        std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: echo '{summary}'"))).unwrap();
+        std::fs::write(&tasks, text.replace(&verify_line, line)).unwrap();
         prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap()
     }
 
@@ -988,7 +1225,7 @@ pub(crate) mod tests {
 
     #[test]
     fn node_zero_three_tests_still_prove() {
-        let r = prove_with_summary("# tests 3");
+        let r = prove_guard_with_summary("# tests 3");
         assert_eq!(r.outcome.tests_run, Some(3));
         assert!(r.proved, "{:?}", r.outcome);
     }

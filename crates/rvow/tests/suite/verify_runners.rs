@@ -127,10 +127,10 @@ fn runners_fill_template_default_env_and_review() {
     let f = fx("fill", RUNNER_CPP);
     let c = backlog(&f, "@cpp test=Seek", "");
     let mut echo = Vec::new();
-    // The baseline fails as it must: out.txt holds nothing yet.
+    // Accept runs nothing, and names the filled command it left pending.
     let prepared = vow::prepare(&f.project, &f.home, c, &f.repo, &mut echo).unwrap();
-    assert!(!prepared.baseline[0].outcome.passed());
-    // The baseline ran the filled command: the default preset and the task's test.
+    assert!(prepared.baseline.is_empty());
+    // The echo names the filled command: the default preset and the task's test.
     let echoed = String::from_utf8(echo).unwrap();
     assert!(echoed.contains("baseline TSK-new1: grep -q 'tests Seek' out.txt"), "{echoed}");
 
@@ -346,19 +346,14 @@ fn fx_junit(name: &str, cfg: &str) -> Fx {
     f
 }
 
-/// The vow data of the one active change.
-fn vow_data(f: &Fx) -> serde_json::Map<String, Value> {
-    let (events, _) = ledger::read(&task_dir(f).join("ledger.jsonl")).unwrap();
-    events.iter().find(|e| e.kind == ledger::Kind::Vow).unwrap().data.clone()
-}
-
 #[test]
 fn runners_junit_accept_records_the_failed_names() {
+    // The first prove, before the work, is the baseline: it records the
+    // names of the failed test cases.
     let f = fx_junit("record", RUNNER_JUNIT);
     let task = accept(&f, backlog(&f, "@t", ""));
-    let data = vow_data(&f);
-    let junit = data.get("junit").unwrap();
-    assert_eq!(junit[&task], serde_json::json!(["c.Seek"]), "{junit}");
+    assert!(prove(&f, &task).baseline_recorded);
+    assert_eq!(proof::junit_recorded(&active(&f), &task), ["c.Seek"]);
 
     // The work makes the recorded test pass, and the proof needs it.
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
@@ -376,16 +371,16 @@ fn runners_junit_accept_records_the_failed_names() {
 #[test]
 fn runners_junit_accept_refuses_when_nothing_failed() {
     // The report the baseline writes names no failed test, so no test is the
-    // proof target: the accept refuses and names the task.
+    // proof target: the first prove refuses and names the task.
     let f = fx_junit("nofail", RUNNER_JUNIT);
     std::fs::write(f.repo.join("fail.xml"), XML_PASS).unwrap();
-    let c = backlog(&f, "@t", "");
-    let err = match vow::prepare(&f.project, &f.home, c, &f.repo, &mut std::io::sink()) {
+    let task = accept(&f, backlog(&f, "@t", ""));
+    let err = match proof::prove(&f.project, &f.home, &f.repo, &task, &mut std::io::sink()) {
         Err(e) => e,
-        Ok(_) => panic!("an accept with no failed test must refuse"),
+        Ok(_) => panic!("a baseline with no failed test must refuse"),
     };
     assert_eq!(err.code, "baseline", "{err}");
-    assert!(err.message.contains("TSK-new1") && err.message.contains("no failed test"), "{err}");
+    assert!(err.message.contains(&task) && err.message.contains("no failed test"), "{err}");
 }
 
 #[test]
@@ -406,6 +401,7 @@ fn runners_junit_prove_fails_when_the_report_is_missing() {
     // {junit} but writes no report: the proof fails and says so.
     let f = fx_junit("noreport", RUNNER_JUNIT);
     let task = accept(&f, backlog(&f, "@t", ""));
+    assert!(prove(&f, &task).baseline_recorded);
     edit_config(
         &f,
         "run = 'if grep -q pass out.txt; then cp pass.xml {junit}; else cp fail.xml {junit}; exit 1; fi'",
@@ -585,21 +581,23 @@ fn runners_fix_amend_junit_holds_after_amendment() {
 
 #[test]
 fn runners_fix_amend_baseline_fills_runner() {
-    // The amend baseline runs the filled command: amending to an
-    // always-passing runner refuses, while the raw "@always" text would fail
-    // as a shell command and wrongly allow the amendment.
+    // The baseline runs the filled command: the first prove of a task amended
+    // to an always-passing runner refuses, while the raw "@always" text would
+    // fail as a shell command and wrongly count as a red.
     let cfg = "[runners.always]\nrun = \"echo 'test result: ok. 1 passed; 0 failed;'\"\n";
     let f = fx("amend-fill", cfg);
     let plain = "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
     let c = backlog(&f, plain, "");
     accept(&f, c);
     edit_tasks(&f, &format!("verify: {plain}"), "verify: @always");
-    let err = match amend::amend(&f.project, &f.home, &f.repo, None, "use runner", None) {
+    amend_accept(&f, "use runner");
+    let task = active(&f).loaded.tasks[0].id.to_string();
+    let err = match proof::prove(&f.project, &f.home, &f.repo, &task, &mut std::io::sink()) {
         Err(e) => e,
-        Ok(_) => panic!("an amendment to an always-passing runner must refuse at the baseline"),
+        Ok(_) => panic!("an always-passing runner must refuse at the baseline"),
     };
     assert_eq!(err.code, "baseline", "{err}");
-    assert!(err.message.contains("passes on the base commit"), "{err}");
+    assert!(err.message.contains("passes before the work"), "{err}");
 }
 
 #[test]
@@ -625,6 +623,7 @@ fn runners_fix_gate_junit_failure_caches_nothing() {
     // gate runs the task again instead of answering from the cache.
     let f = fx_junit("gate-cache", &format!("rerun_proven = true\n{RUNNER_JUNIT}"));
     let task = accept(&f, backlog(&f, "@t", ""));
+    assert!(prove(&f, &task).baseline_recorded);
     std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     git_cmd(&f.repo, &["add", "out.txt", "pass.xml"]);
@@ -821,9 +820,8 @@ fn runners_fix_safe_baseline_pass_with_junit() {
     git_cmd(&f.repo, &["add", "out.txt"]);
     git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
     let task = accept(&f, backlog(&f, "@t", "  baseline: pass\n"));
-    let data = vow_data(&f);
-    assert_eq!(data["junit"][&task], serde_json::json!([]), "{:?}", data["junit"]);
     assert!(prove(&f, &task).proved);
+    assert!(proof::junit_recorded(&active(&f), &task).is_empty());
 
     std::fs::write(f.repo.join("pass.xml"), XML_FAIL).unwrap();
     let proved = prove(&f, &task);
@@ -874,9 +872,8 @@ fn runners_fix_amend_baseline_pass_junit_task_is_recorded() {
     let text = std::fs::read_to_string(&tasks).unwrap();
     let added = text.lines().find(|l| l.starts_with("- ") && !l.contains(&task)).unwrap();
     let added_id = added.split_whitespace().nth(1).unwrap().to_string();
-    let a = active(&f);
-    let junit = a.baseline().and_then(|b| b.get("junit")).and_then(|v| v.as_object()).unwrap();
-    assert_eq!(junit.get(&added_id), Some(&Value::Array(vec![])), "{junit:?}");
+    assert!(prove(&f, &added_id).proved, "the guard passes at its first prove");
+    assert!(proof::junit_recorded(&active(&f), &added_id).is_empty());
 }
 
 #[test]
@@ -979,6 +976,7 @@ fn runners_fix_show_prove_verdict_exit_beats_junit() {
             .unwrap();
         String::from_utf8(out.stdout).unwrap()
     };
+    assert!(run_prove(&f).contains("baseline recorded"));
     let stdout = run_prove(&f);
     assert!(stdout.contains("failed: exit 1"), "{stdout}");
     assert!(!stdout.contains("junit report"), "{stdout}");

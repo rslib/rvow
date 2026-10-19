@@ -6,31 +6,32 @@ description: Load before you plan, propose, spec, accept or prove an accepted ch
 # rvow
 
 The user and you agreed on a plan, and rvow holds you to it with checks outside the model.
-Words: the plan is the files; the change is the folder; the vow is the accepted plan with its hashes.
+Words: the plan is the files; the change is the folder; the vow is the accepted plan with its hashes. The parts of a plan are `proposal`, `tasks`, a `spec:<name>` per capability and an optional `design`.
 The brief at session start names the next task. {{cmd:brief}} prints it again.
 
 ## Work
 
-- Do the next task, then run {{cmd:prove <task>}}; rvow runs the stored verify command, and a pass with 0 tests run is not a proof, so make the test exist and run. Never run the check yourself and claim it passed.
-- {{cmd:status}} shows each task and any drift. {{cmd:prove --stale}} re-proves stale tasks.
+- Write the test, run {{cmd:prove <task>}} once to record that the check fails, then do the work and prove again; rvow runs the stored verify command, and a pass with 0 tests run is not a proof. Never run the check yourself and claim it passed.
+- {{cmd:status}} shows each task and any drift. {{cmd:prove --stale}} re-proves stale tasks, but a stale proof needs no re-prove after each edit: {{cmd:archive}} re-proves stale tasks.
 - Stay inside each task's `files:` scope. The gate fails on files outside it.
-- The store is read and written only through rvow: the hooks deny a direct path into it. {{cmd:show <change>}} prints the outline; {{cmd:show <change> proposal}} prints one part in full (`proposal`, `tasks` or `spec:<name>`); pipe a part to {{cmd:put <change> proposal}}, or one task or requirement block to {{cmd:put <task or requirement id>}}, and rvow prints `ok` or the check findings.
+- The store is read and written only through rvow: the hooks deny a direct path into it. {{cmd:show <change>}} prints the outline; {{cmd:show <change> proposal}} prints one part in full (`proposal`, `tasks`, `design` or `spec:<name>`); pipe a part to {{cmd:put <change> proposal}}, or one task or requirement block to {{cmd:put <task or requirement id>}}, and rvow prints `ok` or the check findings.
 
 ## Before accept
 
-- While a plan waits for accept, code edits are denied. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}. The `rvow_ask` tool takes an optional `change` for the questions of another change.
+- A new plan starts with {{cmd:new "<title>"}}, and {{cmd:new --spec "<title>"}} when the change alters behavior. {{cmd:guide design}} allows a `design` only for the changes it lists; put a technical decision there only then, otherwise the reason goes in the task.
+- While a plan waits for accept, code edits are denied. Before accept, {{cmd:put}} alone changes the plan; {{cmd:amend}} is only for an accepted plan. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}. The `rvow_ask` tool takes an optional `change` for the questions of another change.
 - Then run {{cmd:check}} and call the `rvow_accept` tool: the user answers in a dialog, and a failure comes back to you. Without the tool, ask the user to run `/rvow-accept <id>`.
 
 ## When the plan must change
 
-- Change the plan with {{cmd:put <change> <part>}} or one block with {{cmd:put <task or requirement id>}}, then run {{cmd:amend --reason "..."}} and call the `rvow_confirm` tool, with its optional `id` to ask about one amendment (or ask the user to run `/rvow-confirm`).
-- To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user.
+- Change the plan with {{cmd:put <change> <part>}} or one block with {{cmd:put <task or requirement id>}}, record it with {{cmd:amend --reason "..."}} and keep working. The user confirms all pending amendments once, in the archive dialog.
+- To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user. Call the `rvow_confirm` tool only after an unlock, with its optional `id`.
 - You never run {{cmd:accept}} or {{cmd:confirm}} in a shell. The hooks deny them; use the tools.
-- When every task is proved, call the `rvow_archive` tool: the user answers in a dialog, and a push trusts an archived change.
+- When every task is proved or stale, call the `rvow_archive` tool: the user answers in a dialog, and a push trusts an archived change.
 
 ## Stop and report
 
-When a task cannot pass as written, run {{cmd:block <task> --reason "..."}} and tell the user why. Do not work around the check: the gate fails a changed verify command or an edited test until the user confirms it, and the hooks deny edits to rvow's own files.
+When a task cannot pass as written, run {{cmd:block <task> --reason "..."}} and tell the user why. Do not work around the check: the gate fails a changed verify command or an edited test until the user confirms it, and the hooks close the store and the enforcement files (the installed copies of the hooks, the mod and the pre-push gate, not their source in a repository) to direct writes.
 
 ## Notes
 

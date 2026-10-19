@@ -241,7 +241,12 @@ impl Fx {
         if let Some(a) = agent {
             payload["agent_id"] = a.into();
         }
-        self.hook(dir, "pre-tool-use", payload).map(|v| v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_owned())
+        let mut answer = self.hook(dir, "pre-tool-use", payload.clone());
+        // The first source edit is denied once for the baseline, and an agent retries it.
+        if answer.as_ref().is_some_and(|v| v.to_string().contains("has no baseline yet")) {
+            answer = self.hook(dir, "pre-tool-use", payload);
+        }
+        answer.map(|v| v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_owned())
     }
 }
 

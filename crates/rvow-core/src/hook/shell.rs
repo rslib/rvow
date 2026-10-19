@@ -574,7 +574,15 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
     if writes_to(&invs, cmd, |x| x.to_lowercase().contains(".git/hooks")) || (writes && in_git_dir) {
         return denial(Rule::GitHooks, ".git/hooks holds the pre-push gate; only rvow install writes it. Run rvow install instead".into());
     }
-    let names_stats = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == STATS_FILE);
+    let rotated = std::path::Path::new(crate::stats::ROTATED_FILE).file_name().and_then(|n| n.to_str()).unwrap_or(STATS_FILE);
+    let names_stats = w.iter().any(|x| !x.contains(char::is_whitespace) && (base_name(x) == STATS_FILE || base_name(x) == rotated));
+    let names_index = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == crate::store::INDEX_FILE);
+    if names_index && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+        return denial(
+            Rule::CacheFile,
+            format!("{} is written and read only by rvow; delete it to make rvow look the project up again", crate::store::INDEX_FILE),
+        );
+    }
     if names_stats && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
         return denial(
             Rule::StatsFile,

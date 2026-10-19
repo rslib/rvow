@@ -1,6 +1,7 @@
 pub mod amend;
 pub mod archive;
 pub mod attest;
+pub mod baseline;
 pub mod brief;
 pub mod bundle;
 pub mod change;
@@ -32,6 +33,7 @@ pub mod provenance;
 pub mod put;
 pub mod record;
 pub mod registry;
+pub mod reprove;
 pub mod review;
 pub mod runner;
 pub mod seal;

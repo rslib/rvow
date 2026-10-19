@@ -13,6 +13,10 @@ pub const PROJECT_FILE: &str = "project.toml";
 pub const CONFIG_FILE: &str = "config.toml";
 pub const IDS_FILE: &str = "ids.jsonl";
 pub const LOCK_FILE: &str = ".lock";
+/// The local index in the rvow home from a repository to its project.
+pub const INDEX_FILE: &str = "project-index.json";
+/// The folder in the rvow home that holds one warm worktree per project.
+pub const WORKTREES_DIR: &str = "worktrees";
 pub const REPO_DIR: &str = "rvow";
 const DIRS: [&str; 7] = ["specs", "backlog", "active", "archive/done", "archive/dropped", "archive/superseded", "objects"];
 const MAX_DEPTH: usize = 6;
@@ -159,7 +163,7 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         Mode::Home => {
             let key = format!("{}/{}", crate::seal::KEY_FOLDER, crate::seal::KEY_FILE);
             let mut lines = local_files().to_vec();
-            lines.extend([format!("{}/", crate::install::MARKETPLACE_DIR), key]);
+            lines.extend([format!("{}/", crate::install::MARKETPLACE_DIR), key, INDEX_FILE.to_string(), format!("{WORKTREES_DIR}/")]);
             add_lines(&home.join(".gitignore"), &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
     }
@@ -327,11 +331,18 @@ fn add_lines(path: &Path, lines: &[&str]) -> Result<()> {
 /// Finds the rvow tree of the repository that contains `dir`: repo mode when
 /// `rvow/config.toml` exists, else the home project whose roots match.
 pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
-    let top = git::toplevel(dir)?;
+    // One git call for both, since every hook runs this lookup.
+    let out = git::run(dir, &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"])?;
+    let mut lines = out.lines();
+    let top = PathBuf::from(lines.next().unwrap_or_default());
+    let common = lines.next().filter(|c| !c.is_empty()).map(String::from);
     let repo_root = top.join(REPO_DIR);
     if repo_root.join(CONFIG_FILE).exists() {
         let meta = read_meta(&repo_root)?;
         return Ok(Some(Project { root: repo_root, meta }));
+    }
+    if let Some(project) = common.as_deref().and_then(|c| index_hit(&top, home, c)) {
+        return Ok(Some(project));
     }
     let roots = identity(&top)?;
     let remote = git::origin_url(&top).and_then(|u| git::remote_path(&u));
@@ -348,7 +359,13 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
     }
     match hits.len() {
         0 => Ok(None),
-        1 => Ok(hits.pop()),
+        1 => {
+            let project = hits.pop();
+            if let (Some(c), Some(p)) = (common.as_deref(), project.as_ref()) {
+                index_store(home, c, p, &roots);
+            }
+            Ok(project)
+        }
         _ => Err(Error::new(
             "ambiguous-project",
             format!(
@@ -357,6 +374,67 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
             ),
             "give each clone a distinct origin remote",
         )),
+    }
+}
+
+/// The warm worktree of `project`: one folder per project under the rvow
+/// home, kept between runs so build output stays. It is local to one machine,
+/// so an older home gets its ignore line here.
+pub fn warm_tree(home: &Path, project: &Project) -> PathBuf {
+    let ignore = home.join(".gitignore");
+    if ignore.is_file() {
+        let _ = add_lines(&ignore, &[&format!("{WORKTREES_DIR}/")]);
+    }
+    let key = crate::vow::sha256_hex(project.root.to_string_lossy().as_bytes());
+    home.join(WORKTREES_DIR).join(&key[..16])
+}
+
+/// What the index remembers about one repository: its project folder and the
+/// root commits that project named when the entry was written.
+#[derive(Debug, Serialize, Deserialize)]
+struct IndexEntry {
+    project: PathBuf,
+    roots: Vec<String>,
+}
+
+/// The index, keyed by git common dir so every worktree shares an entry. A
+/// missing, unreadable or corrupt file is an empty index.
+fn read_index(home: &Path) -> BTreeMap<String, IndexEntry> {
+    std::fs::read_to_string(home.join(INDEX_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// The project the index maps `common` to, when its folder is inside `home`
+/// and still exists, its recorded roots still share a root commit with the
+/// entry, and the repository at `top` still holds that commit, so a repository
+/// cloned again at the same path never inherits the old project.
+fn index_hit(top: &Path, home: &Path, common: &str) -> Option<Project> {
+    let entry = read_index(home).remove(common)?;
+    if !entry.project.starts_with(home) {
+        return None;
+    }
+    let meta = read_meta(&entry.project).ok()?;
+    let shared = meta.roots.iter().find(|r| entry.roots.contains(r))?;
+    git::run(top, &["cat-file", "-e", &format!("{shared}^{{commit}}")]).ok()?;
+    Some(Project { root: entry.project, meta })
+}
+
+/// Records the project of `common`. The index is a cache, so a failed write is
+/// ignored and the next lookup walks again. The file is renamed into place, so
+/// a concurrent reader never sees half of it.
+fn index_store(home: &Path, common: &str, project: &Project, roots: &[String]) {
+    let mut index = read_index(home);
+    index.insert(common.to_string(), IndexEntry { project: project.root.clone(), roots: roots.to_vec() });
+    let Ok(text) = serde_json::to_string(&index) else {
+        return;
+    };
+    let tmp = home.join(format!("{INDEX_FILE}.{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, home.join(INDEX_FILE))).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    // A home made before the index existed lacks the ignore line `init` writes.
+    let ignore = home.join(".gitignore");
+    if ignore.is_file() {
+        let _ = add_lines(&ignore, &[INDEX_FILE]);
     }
 }
 
@@ -418,6 +496,8 @@ mod tests {
             "yolo.json",
             "rerun-cache.jsonl",
             ".lock",
+            "hook-state/reprove.pid",
+            "hook-state/reprove.log",
         ];
         let shared = ["ids.jsonl", "config.toml", "project.toml", "spec-record.json", "backlog/x/proposal.md"];
 
@@ -431,6 +511,7 @@ mod tests {
         for f in shared {
             assert!(!ignored(&home, &format!("{rel}/{f}")), "home mode must track {f}");
         }
+        assert!(ignored(&home, INDEX_FILE), "the project index is local to one machine");
         let key = crate::seal::key_path(&home);
         assert!(ignored(&home, key.strip_prefix(&home).unwrap().to_str().unwrap()), "the seal key is a secret");
 
@@ -455,7 +536,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\n"
+                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\nproject-index.json\nworktrees/\n"
             )
         );
 

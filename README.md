@@ -82,7 +82,7 @@ It keeps a file that you edited and says so.
 - `rvow yolo <audit|auto|bypass|off>` (or `/rvow-yolo` in the Claude mod and pi) relaxes the hooks for a while. Only you can run it, and the gate still checks at push.
 - `/rvow-judge [CHG-id] [model]` (in the Claude mod and pi) runs the optional spec-conformance judge in a clean read-only session and records its findings. The gate shows them as warnings, and `rvow archive` names the command when they are missing.
 - `rvow guide proposal` prints the short guide for writing a plan artifact. The other artifacts are `spec`, `tasks` and `design`.
-- `rvow show <change> [<part>]` prints a change as an outline, or the full text of one part (`proposal`, `tasks` or `spec:<name>`). `rvow put` replaces one part, or one task or requirement block, from stdin; the hooks deny direct reads and writes of the store.
+- `rvow show <change> [<part>]` prints a change as an outline, or the full text of one part (`proposal`, `tasks`, `design` or `spec:<name>`). `rvow put` replaces one part, or one task or requirement block, from stdin, and creates `design.md` when it is new; the hooks deny direct reads and writes of the store.
 - `rvow --help` and `rvow <command> --help` are the command reference.
 - [docs/settings.md](docs/settings.md) lists every setting and the global-only keys.
 - [docs/authoring-context.md](docs/authoring-context.md) explains the project context and per-artifact rules that `rvow guide` appends.

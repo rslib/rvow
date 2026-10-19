@@ -74,14 +74,18 @@ It can tell that a test file or a verify command changed, and that is where it a
 The plan must be able to change, because plans are wrong.
 The agent replaces the changed part with `rvow put` and runs `rvow amend` with a reason.
 That records the edit as an amendment.
-Before it records, `rvow amend` runs each added task's verify command and each changed verify command on the vow's base commit, in a clean worktree set up the same way as the gate rerun.
-The base commit always comes from the vow, also after a confirmed amendment, so a second amend and the mutants diff keep working.
-When the vow has no base commit, the amend error names a step for an active change such as `rvow block`.
+`rvow amend` runs no verify command.
+It marks each added task and each changed verify command as baseline pending, so the task's next prove records a new baseline, as the section on the baseline says.
+A title edit keeps the recorded baseline.
 `rvow amend` mints placeholder ids before it takes the snapshot, as accept does, so a new task keeps its real id after confirm and a later `rvow ids` mints nothing.
-A check that passes there with tests run is refused with the code `baseline`, unless the task says `baseline: pass`, and a `baseline: pass` check that fails there is refused too.
-Nothing is recorded when the baseline refuses.
-Each run's task id, exit code and test count go into the amendment, and `rvow confirm` lists weaken items first with each baseline result, so the user sees which checks failed before the work.
-The user reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
+`rvow confirm` lists weaken items first and names each baseline-pending task.
+The agent records each plan edit with `rvow amend --reason` and keeps working.
+The Stop hook and the brief name only that step.
+The user confirms every pending amendment of the change once, in the archive dialog: the archive tool of the Claude mod and pi lists them, amendments with weaken items first, and a yes accepts them by id and then archives.
+A no leaves them pending and the change active, and an amendment recorded while the dialog is open makes it ask again, so no unseen amendment is accepted.
+The push gate keeps failing while any amendment is pending, so nothing unreviewed leaves the machine.
+`rvow amend --unlock` keeps its own confirm, since a protected test opens only after the user says yes.
+A user who wants to decide earlier reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
 With `require_signature` set, the decision also needs an ssh signature bound to the content.
 In the Claude mod, `/rvow-confirm` with no argument or with `all` lists the pending edits and asks once whether to accept all, reject all or decide later.
 With one amendment pending the dialog is a yes or no question that shows its id, reason and items.
@@ -113,6 +117,9 @@ It is held for a task with no proof when it changed a file that the `files:` of 
 It is not held for that task while the task has a live lease that another worker holds, or that no worker took yet: the session handed the task off with `rvow delegate`.
 When the lease ends, the hold comes back, and the session that holds the lease is held as before.
 Around each checked call that may write, the hooks snapshot the work tree with a private git index and object store, and record each changed path with its new git blob id, or deleted, for the session or the subagent of the call.
+rvow sorts a tool once by its name, with the tool names of Claude Code, pi, OpenCode, Codex and Gemini CLI in one table: an editor, a shell, a read-only tool or any other tool.
+An editor or a shell write takes a snapshot before and after the call, any other tool that may write, such as an MCP tool or codemode, takes one snapshot after it and compares it with the session's last recorded tree, and a read-only tool takes none.
+A change that no call recorded, such as one from a background job, counts for the session at its next shell or editor call, which `rvow prove` is, and at the Stop hook.
 The private store lists the repository's own objects as an alternate and lives under the project folder, so nothing is written into the user's `.git`.
 The private objects are transient: the records keep only blob ids, and when the private store passes 64 MiB and no call is in flight, it is deleted and rebuilt from the repository's own objects.
 Records are dropped after 7 days, and a call that never reports back (cancelled or killed) stops counting as in flight after 6 hours.
@@ -127,12 +134,50 @@ A pending amendment releases the stop.
 While a change has any pending amendment, the Stop hook holds nothing for that change, since only the user can decide it.
 Stale proofs never hold a stop: they are left to the push gate, and `rvow gate --strict` still fails on them.
 
+## The baseline: the check fails before the work
+
+A check proves something only when it fails before the work, as the FAIL_TO_PASS tests of SWE-bench do.
+`rvow accept` runs no verify command, so a slow build never stands between the accept and the first task.
+Accept prints each task's filled command and says whether its baseline is pending.
+`rvow status` shows `(baseline pending)` after each task whose baseline is not known yet, and lists those tasks under `baseline_pending` in TOON.
+rvow learns each baseline in one of three ways, cheapest first.
+
+- From the source, at accept.
+  When the whole verify is one `cargo test` or `cargo nextest run` with one test filter and only known flags, and no tracked Rust file at the base commit holds the last part of that filter, the test does not exist yet, so the check must fail.
+  A name in a comment, a chained command, an unknown flag or anything after `--` keeps the task pending.
+- From the first prove, before the work.
+  While no file in the task's scope differs from the base commit, other than test files (the `test_globs`) and files of the proved tasks of every active change on the branch, `rvow prove` records its run as the baseline.
+  A failure is the red the task needs: prove records it, with the failed JUnit names when the runner writes `{junit}`, and says `baseline: recorded`.
+  A pass with tests run is refused with the code `baseline` and records nothing, unless the task says `baseline: pass`, whose first pass is both its baseline and its proof.
+  The agent pays nothing extra, since it runs the test first anyway.
+- From the base commit, when the work came first.
+  Then prove runs the verify command once in the project's warm worktree at the vow's base commit, set up the same way as the gate rerun, and applies the same rules before the proof.
+  The warm worktree keeps its git-ignored build output between runs, so only the changed files build again, and a busy one falls back to a clean temporary worktree.
+  The base commit always comes from the vow, also after a confirmed amendment.
+  When the vow has no base commit, the error names a step for an active change such as `rvow block`.
+  It is still the slow path: only the changed files build again, but a first run in a project builds everything.
+  Prove prints a hint when it takes more than 60 seconds and neither `rerun_env` nor `rerun_links` is set.
+
+A baseline belongs to the task's `verify:` text, so a title edit keeps it and a new check needs a new one.
+
+The cheap path needs the first prove before the work, so rvow holds the agent to that order.
+The first time a session edits a source file of a baseline-pending task, the rule `baseline-first` denies it once, with a line that names `rvow prove <task>`.
+A source file is a file in the task's `files:` that no `test_globs` entry matches, and a shell command that writes one counts as an edit.
+A second try of the edit in the same session goes through, so a task whose check cannot fail yet never blocks the work.
+Any yolo tier turns the rule off.
+A test file, a file outside the task and a task with a recorded baseline are never denied.
+A notice after the edit would come too late: the edit already makes the scope differ from the base commit, so the next prove builds the base commit.
+
 ## The proof and what stale means
 
 A proof ties a passing run to what the run saw: the task, the requirements it covers, the content of the files in scope and the recorded environment.
 A proof is stale when one of those has changed since the run.
 The reasons are task changed, requirement changed, inputs changed, private policy changed and environment changed.
 A stale task needs a new proof, and `rvow prove --stale` runs them all.
+`rvow archive` re-proves the stale tasks of the change before its gate, outside the project lock, and a failed re-proof stops the archive with the code `gate`.
+When the agent's turn ends and every task of a change on the branch is proved or stale, the Stop hook starts `rvow reprove` in the background, so the archive usually finds the proofs current.
+Its output is in `hook-state/reprove.log` in the project folder, and `rvow archive` waits for a run that is still going.
+A proof whose task files changed while its check ran is not recorded.
 
 A task is flaky only when a pass and a failure share the same run key and the same worktree fingerprint.
 Each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, so a fix outside the task's files changes the fingerprint and clears the failure instead of marking it flaky.
@@ -162,7 +207,7 @@ Work written before the plan is accepted fails too: while a backlog plan names t
 It runs every verify command again in a clean worktree of HEAD, so a proof that depended on an uncommitted file or a local state fails.
 The rerun skips a task whose proof is current and whose files are all committed: it was proved on this very content, so the state "proved" is what the push trusts.
 It runs the tasks that are not proved, or whose files changed since the proof.
-A task of an archived change is never rerun, because archiving needs every task proved and is a decision of the user.
+A task of an archived change is never rerun, because archiving needs every task proved, after it re-proves the stale ones, and is a decision of the user.
 Set `rerun_proven = true` to rerun proven tasks as well.
 `rvow gate --out` writes the rerun results to a file, and `rvow ingest` adds them to the ledger of a home store.
 
@@ -234,7 +279,7 @@ The hook sees files and not what a shell command writes, so a lease scopes the e
 
 A rule has a mode.
 Tampering is enforced: the ledger, the enforcement files, the hidden checks, the git hooks, the cache, lease and stats files, `rvow accept` and `rvow confirm`, and edits of archived changes and living specs.
-A lease that you chose with `rvow delegate` and an edit before the plan is accepted are enforced too.
+A lease that you chose with `rvow delegate`, an edit before the plan is accepted and the first source edit before the first prove (`baseline-first`) are enforced too.
 An edit outside the files of every task and an edit of a protected test are audited.
 The call goes through, `rvow stats` counts it, and the gate still blocks the branch: the first as a file outside every task scope and the second as weak drift that you must confirm.
 
@@ -252,7 +297,7 @@ Only you can switch it: an agent cannot run `rvow yolo` in a shell or write its 
 
 | Tier | What changes |
 |------|--------------|
-| `audit` | An edit before the plan is accepted, and a subagent edit outside its lease, are audited and not denied. Tampering stays denied. |
+| `audit` | An edit before the plan is accepted and a subagent edit outside its lease are audited and not denied, and the first source edit before the first prove is allowed. Tampering stays denied. |
 | `auto` | Also lets the agent run `rvow accept` and `rvow confirm`. `rvow ingest` and a faked dialog answer stay denied. |
 | `bypass` | Every hook only audits, and a stop is never held back. |
 
@@ -267,7 +312,7 @@ Both the Claude mod and the pi extension give the agent these tools:
 
 - `rvow_accept` asks you to accept a ready plan. You read the review and the checklist in a dialog, and nothing is accepted unless you say yes.
 - `rvow_confirm` lists the pending plan edits, or asks you to accept or reject all of them in a dialog.
-- `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved and no plan edit is pending, and it names what is missing otherwise. An archived change is trusted, and a push never reruns its tasks.
+- `rvow_archive` asks you whether a finished change may be archived. It only asks when every task is proved or stale and no plan edit is pending, and it names what is missing otherwise, such as a missing, failed, flaky or blocked task. `rvow archive` then re-proves the stale tasks. An archived change is trusted, and a push never reruns its tasks.
 - `rvow_yolo` shows or changes the yolo tier. You answer a dialog before any tier is switched on. `off` needs no dialog.
 - `rvow_judge` runs the spec conformance judge for a change in a clean read-only session with no rvow extension, and records its findings with the model it ran on.
   In pi the judge session also starts with `--no-skills` and `--no-context-files`, so it loads no skill and no AGENTS.md or CLAUDE.md. Type `/rvow-judge [CHG-id] [model]` yourself instead.
@@ -284,7 +329,10 @@ An agent that never met rvow still finds it.
 `rvow install` writes the rendered skill to `skills/rvow/SKILL.md` in the pi agent folder, the same text as the Claude skill.
 A user edit of that file is kept like any other managed file, and the install check reports a stale copy.
 The skill description starts with `Load before you` and names the trigger: an accepted change, a denied hook, a failed gate, a stale proof or a `CHG-` or `TSK-` id.
-When the brief names a next task, one `loop:` line says to run `rvow prove <task>` after the work, to change the plan with `rvow amend` and the `rvow_confirm` tool, and to read the plan with `rvow show <change>`.
+When the brief names a next task, one `loop:` line says to run `rvow prove <task>` before the work and after it, to change the plan with `rvow amend --reason`, and to read the plan with `rvow show <change>`.
+rvow sends the same brief once per session: it keeps the last brief it sent in `hook-state/brief-<session>`, sends nothing when the brief is the same, and sends only the `tasks:` line when only the counts changed.
+After a `compact` or a `clear`, and when the next task changes, it sends the full brief again.
+A hook call with no session id gets the full brief each time, so an older mod keeps working.
 A branch with no active change and no backlog plan gets one line naming `rvow new` and `rvow guide proposal` instead.
 `rvow next` prints the next task of the branch with its id, title, state, verify command and files, or says that no task is next.
 
@@ -297,6 +345,12 @@ A stop block also holds a `reason`, `drift` or `no-proof`.
 It never holds a command or a path.
 `rvow stats` prints the counts of the last 7 days, or of `--days N`, with the stop blocks per 100 stops and a `stop_reasons` list that counts the blocks of each reason.
 A block line written before reasons existed counts as `unknown`.
+Each hook call that has a project also adds one duration line with the time, the hook, the session id and `duration_ms`, and nothing else.
+`rvow stats` lists the median and the 95th percentile duration of each hook in a `hooks` list.
+The percentile is the nearest rank of the sorted durations, so 20 calls of 10 ms and one of 200 ms give a median and a 95th percentile of 10 ms.
+Duration lines are not events.
+When the file is larger than 1 MiB, the next duration append moves it whole to `hook-state/hook-stats.old.jsonl`, replacing the copy before, and `rvow stats` reads both files.
+A move never rewrites a line, so a line that another hook writes at the same time still counts.
 Use it to find the rule that fires most before you change any rule.
 Agents cannot read or write the stats file.
 

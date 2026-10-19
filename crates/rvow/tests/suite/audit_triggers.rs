@@ -204,5 +204,5 @@ fn installed_skill(dir: &Path) -> String {
     }
     let out = cmd.output().unwrap();
     assert!(out.status.success(), "rvow install failed: {}", String::from_utf8_lossy(&out.stdout));
-    std::fs::read_to_string(home.join("store").join("claude-plugin/plugins/rvow/skills/rvow/SKILL.md")).unwrap()
+    std::fs::read_to_string(home.join("data/rvow/claude-plugin/plugins/rvow/skills/rvow/SKILL.md")).unwrap()
 }

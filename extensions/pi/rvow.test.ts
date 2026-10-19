@@ -29,16 +29,18 @@ case "$1 $2 $3" in
   "hook claude view") [ -f "$RVOW_FAKE/fail-view" ] && exit 1; [ -f "$RVOW_FAKE/slow-view" ] && sleep 0.5; cat "$RVOW_FAKE/view.json" 2>/dev/null; true ;;
   "hook claude status") cat "$RVOW_FAKE/status.json" 2>/dev/null ;;
   "hook claude pre-tool-use") cat > "$RVOW_FAKE/pre.in"; cat "$RVOW_FAKE/pre.json" 2>/dev/null ;;
+  "hook claude post-tool-use") cat "$RVOW_FAKE/post.json" 2>/dev/null ;;
   "hook claude stop") cat > "$RVOW_FAKE/stop.in"; cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
   "hook claude lease-bind") cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" 2>/dev/null ;;
   "hook claude lease-end") cat > "$RVOW_FAKE/end.in" ;;
+  "hook claude session-start") (cat; echo) >> "$RVOW_FAKE/start.in"; cat "$RVOW_FAKE/start.json" 2>/dev/null ;;
   "hook claude "*) ;;
   *)
     case "$1" in
       review) cat "$RVOW_FAKE/review.txt" ;;
       show) [ -f "$RVOW_FAKE/slow" ] && sleep 0.4; if [ -f "$RVOW_FAKE/show-$2.txt" ]; then cat "$RVOW_FAKE/show-$2.txt"; else echo "$2"; echo "shown $2"; fi ;;
       clarify) cat "$RVOW_FAKE/clarify.json" ;;
-      confirm) if [ $# -eq 1 ]; then cat "$RVOW_FAKE/confirm.txt"; else echo "ran $*"; fi ;;
+      confirm) if [ $# -eq 1 ] || [ "$2" = "--full" ]; then cat "$RVOW_FAKE/confirm.txt"; else echo "ran $*"; fi ;;
       accept) if [ -f "$RVOW_FAKE/fail-accept" ]; then echo "error: CHG-a has no passing check"; echo "code: not-ready"; exit 1; fi; echo "accepted"; echo "next: TSK-1 first"; ;;
       *) echo "ran $*" ;;
     esac ;;
@@ -124,11 +126,13 @@ type Files = Partial<
     | "view.json"
     | "status.json"
     | "pre.json"
+    | "post.json"
     | "stop.json"
     | "review.txt"
     | "slow"
     | "slow-view"
     | "bind.json"
+    | "start.json"
     | "fail-view"
     | "fail-accept"
     | "clarify.json"
@@ -551,28 +555,14 @@ test("a on a ready plan asks to confirm, then runs rvow accept and tells the age
   assert.equal(modDecision(["accept", "CHG-a"], "accepted\nnext: TSK-1 first\n"), t.users()[0]);
 });
 
-test("a on a ready plan shows the baseline-check notice before accept runs", async () => {
+test("a on a ready plan accepts with no baseline-check notice", async () => {
   const t = setup({
-    "view.json": json({
-      ...WAITING(),
-      backlog: [
-        plan("CHG-a", "A", {
-          tasks: 3,
-          task_timeouts_secs: [600, 600, 600],
-          default_timeout_secs: 600,
-        }),
-      ],
-    }),
+    "view.json": json({ ...WAITING(), backlog: [plan("CHG-a", "A", { tasks: 3 })] }),
     "review.txt": "the checklist",
   });
   await t.status((p) => press(p, "a"));
   assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
-  const notes = t.notes();
-  assert.match(notes[0] ?? "", /3 baseline checks/);
-  assert.ok(
-    notes.indexOf("rvow accept: 3 baseline checks; this can take a while") < notes.length - 1,
-    "the notice comes before the result",
-  );
+  assert.ok(!t.notes().some((n) => n.includes("baseline checks")), t.notes().join("\n"));
 });
 
 test("an accept that fails tells the agent what failed and why", async () => {
@@ -1053,6 +1043,22 @@ test("tool_call blocks when the hook denies and passes otherwise", async () => {
   assert.equal(await setup({}).fire("tool_call", event), undefined);
 });
 
+test("the notice from post-tool-use is added to that call's result", async () => {
+  const notice = "rvow: TSK-x is baseline pending. Run `rvow prove TSK-x` now.";
+  const t = setup({
+    "post.json": json({
+      hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: notice },
+    }),
+  });
+  const call = { toolName: "edit", toolCallId: "c1", input: { path: "src/a.rs" } };
+  const content = [{ type: "text", text: "edited" }];
+  assert.deepEqual(await t.fire("tool_result", { ...call, content }), {
+    content: [...content, { type: "text", text: notice }],
+  });
+  const plain = setup({});
+  assert.equal(await plain.fire("tool_result", { ...call, content }), undefined);
+});
+
 test("tool_call asks the user when the hook asks, and a no keeps the call blocked", async () => {
   const ask = json({
     hookSpecificOutput: { permissionDecision: "ask", permissionDecisionReason: "rvow: allow it?" },
@@ -1312,15 +1318,17 @@ test("render and key handling stay fast on a long backlog", async () => {
   const ps = Array.from({ length: 200 }, (_, i) => ({ id: `CHG-p${i}`, title: `Plan ${i}` }));
   const t = setup({ "view.json": json(WAITING(...ps)) });
   await t.status((p) => {
-    const start = performance.now();
-    for (let i = 0; i < 50; i++) {
-      press(p, "j");
-      p.render(100);
+    // The fastest of 5 batches: a load spike slows one batch, a slow render slows them all.
+    let fastest = Number.POSITIVE_INFINITY;
+    for (let batch = 0; batch < 5; batch++) {
+      const start = performance.now();
+      for (let i = 0; i < 10; i++) {
+        press(p, "j");
+        p.render(100);
+      }
+      fastest = Math.min(fastest, (performance.now() - start) / 10);
     }
-    assert.ok(
-      (performance.now() - start) / 50 < 80,
-      "under 80 ms per key and render (200 plans, loaded machine)",
-    );
+    assert.ok(fastest < 80, "under 80 ms per key and render (200 plans, loaded machine)");
   });
 });
 
@@ -2419,4 +2427,29 @@ test("no mouse handler is needed in regular mode: keys still do everything", asy
   const t = await pane(WAITING({ id: "CHG-a", title: "A" }), { "review.txt": "x" });
   await t.status((p) => press(p, "a"));
   assert.deepEqual(decided(t.argv()), ["accept CHG-a"]);
+});
+
+test("the brief request carries the session id and the start source", async () => {
+  const brief = "rvow CHG-1: next TSK-1";
+  const t = setup({
+    "view.json": json(EMPTY),
+    "start.json": json({ hookSpecificOutput: { additionalContext: brief } }),
+  });
+  const sent = () =>
+    existsSync(join(process.env.RVOW_FAKE ?? "", "start.in"))
+      ? readFileSync(join(process.env.RVOW_FAKE ?? "", "start.in"), "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l))
+      : [];
+  await t.fire("session_start");
+  await waitFor(() => sent().length === 1);
+  assert.equal(sent()[0].session_id, "pi-sess");
+  assert.equal(sent()[0].source, "startup");
+  await t.fire("session_compact", {});
+  const out = (await t.fire("context", { messages: [] })) as { messages: { content: string }[] };
+  assert.equal(out.messages[0]?.content, brief);
+  assert.equal(sent().length, 2);
+  assert.equal(sent()[1].session_id, "pi-sess");
+  assert.equal(sent()[1].source, "compact");
 });
