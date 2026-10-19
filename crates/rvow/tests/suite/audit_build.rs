@@ -119,3 +119,12 @@ fn audit_build_linux_environment_helpers_compile() {
         .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
+
+#[test]
+fn audit_build_dev_profile_optimizes_every_dependency() {
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml")).unwrap();
+    assert!(manifest.contains("[profile.dev.package.\"*\"]\nopt-level = 2\n"), "a dev build optimizes every dependency:\n{manifest}");
+    let others: Vec<&str> =
+        manifest.lines().filter(|l| l.starts_with("[profile.dev.package.") && !l.starts_with("[profile.dev.package.\"*\"]")).collect();
+    assert!(others.is_empty(), "the \"*\" entry covers {others:?}");
+}

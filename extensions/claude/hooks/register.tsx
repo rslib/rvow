@@ -1067,6 +1067,8 @@ export const register: Register = (on) => {
       const answer = await $.ui.ask(reason, ['Allow', 'Deny']).catch(() => 'Deny')
       if (answer !== 'Allow') return { deny: reason }
     }
+    // A read changes no blob, so its outcome is not reported: that skips one rvow start per read.
+    if (READS.test(String(tool))) return next(e)
     // After the call runs or fails, report its outcome so rvow records the
     // blobs the call changed. A denied call never ran, so it is not reported.
     let result: Awaited<ReturnType<typeof next>>

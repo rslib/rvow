@@ -87,6 +87,7 @@ It keeps a file that you edited and says so.
 - [docs/settings.md](docs/settings.md) lists every setting and the global-only keys.
 - [docs/authoring-context.md](docs/authoring-context.md) explains the project context and per-artifact rules that `rvow guide` appends.
 - [docs/how-it-works.md](docs/how-it-works.md) explains the vow, drift, the proof and the gate.
+- [docs/harnesses.md](docs/harnesses.md) gives the hook formats and how to wire a harness other than Claude Code or pi.
 - [docs/ci.md](docs/ci.md) covers portable verification in GitHub Actions and other CI with `rvow bundle --out`, `rvow gate --bundle` and `rvow ingest`.
 - [AGENTS.md](AGENTS.md) has the build and test commands for contributors.
 

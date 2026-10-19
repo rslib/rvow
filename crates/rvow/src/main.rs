@@ -184,7 +184,7 @@ enum Cmd {
     },
     /// Answer a harness hook: reads the hook JSON on stdin, prints the response.
     Hook {
-        /// The neutral event, or claude followed by its event for older callers.
+        /// The event, or the harness (claude, codex or json) followed by its event.
         #[arg(value_enum)]
         target: HookTarget,
         #[arg(value_enum)]
@@ -474,16 +474,19 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Brief => read::brief(),
         Cmd::Next => read::next(),
         Cmd::Hook { target, event } => {
-            let event = match (target, event) {
-                (HookTarget::Claude, Some(event)) => Some(event),
-                (target, None) => target.event(),
+            let call = match (target, event) {
+                (HookTarget::Claude, Some(event)) => Some((Harness::Claude, event)),
+                (HookTarget::Codex, Some(event)) => Some((Harness::Codex, event)),
+                (HookTarget::Json, Some(event)) => Some((Harness::Json, event)),
+                (target, None) => target.event().map(|event| (Harness::Claude, event)),
                 _ => None,
             };
-            return match event {
-                Some(event) => setup::hook(Harness::Claude, event),
-                None => {
-                    usage_error(clap::Error::raw(clap::error::ErrorKind::InvalidValue, "use rvow hook <event> or rvow hook claude <event>"))
-                }
+            return match call {
+                Some((harness, event)) => setup::hook(harness, event),
+                None => usage_error(clap::Error::raw(
+                    clap::error::ErrorKind::InvalidValue,
+                    "use rvow hook <event>, or rvow hook claude|codex|json <event>",
+                )),
             };
         }
         Cmd::Install { claude, scope } => setup::install(claude, scope),
@@ -641,7 +644,12 @@ enum NoteArg {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Harness {
+    /// Claude Code's hook JSON.
     Claude,
+    /// Codex: Claude's shape, with an ask turned into a deny.
+    Codex,
+    /// The neutral format of docs/harnesses.md.
+    Json,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -659,6 +667,8 @@ enum YoloTier {
 #[derive(Clone, Copy, ValueEnum)]
 enum HookTarget {
     Claude,
+    Codex,
+    Json,
     PreToolUse,
     PostToolUse,
     SessionStart,
@@ -672,7 +682,7 @@ enum HookTarget {
 impl HookTarget {
     fn event(self) -> Option<HookEvent> {
         match self {
-            Self::Claude => None,
+            Self::Claude | Self::Codex | Self::Json => None,
             Self::PreToolUse => Some(HookEvent::PreToolUse),
             Self::PostToolUse => Some(HookEvent::PostToolUse),
             Self::SessionStart => Some(HookEvent::SessionStart),

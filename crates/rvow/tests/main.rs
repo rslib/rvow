@@ -106,6 +106,10 @@ mod gate_unseen;
 mod gate_writes;
 #[path = "suite/git_bin.rs"]
 mod git_bin;
+#[path = "suite/hook_calls.rs"]
+mod hook_calls;
+#[path = "suite/hook_json.rs"]
+mod hook_json;
 #[path = "suite/hook_stats.rs"]
 mod hook_stats;
 #[path = "suite/judge.rs"]
@@ -134,6 +138,8 @@ mod rerun_scope;
 mod script_finder;
 #[path = "suite/sealed_proofs.rs"]
 mod sealed_proofs;
+#[path = "suite/stacked_gate.rs"]
+mod stacked_gate;
 #[path = "suite/stop_scope.rs"]
 mod stop_scope;
 #[path = "suite/syntax_canonical.rs"]

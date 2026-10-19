@@ -336,6 +336,7 @@ pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
     let mut lines = out.lines();
     let top = PathBuf::from(lines.next().unwrap_or_default());
     let common = lines.next().filter(|c| !c.is_empty()).map(String::from);
+    git::known_toplevel(dir, &top);
     let repo_root = top.join(REPO_DIR);
     if repo_root.join(CONFIG_FILE).exists() {
         let meta = read_meta(&repo_root)?;
