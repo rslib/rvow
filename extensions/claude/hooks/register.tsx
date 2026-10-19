@@ -78,7 +78,9 @@ const detailsAtom = atom({ plugin: 'rvow', key: 'details' } as const, [])
 const INSTALLED_BIN = '__RVOW_BIN__'
 const BIN = INSTALLED_BIN.startsWith('__') ? 'rvow' : INSTALLED_BIN
 const MAX_BLOCKS = 8
-const CHECKED = /^(Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*)$/
+const CHECKED = /^(Bash|Monitor|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*)$/
+// The checked tools that only read: they go on when the hook fails.
+const READS = /^(Read|Grep|Glob)$/
 
 type Event =
   | 'pre-tool-use'
@@ -92,6 +94,18 @@ type Event =
 
 let blocks = 0
 let warned = false
+// What the user made in this session, sent with each pre-tool-use call as `user_made`: the hook
+// counts an accept, confirm or yolo switch made since `since` only when it is in this record.
+const user = {
+  since: Date.now(),
+  changes: [] as string[],
+  yolo: [] as { tier: string; at: number; until: number }[],
+  runs: [] as { at: number; until: number }[],
+}
+// The reason a subagent's lease did not bind, by the tool use id of its Agent call.
+const unbound = new Map<string, string>()
+// True while the last pre-tool-use hook failed, so the status line shows it.
+let failing = false
 const STDERR_LINES = 20
 const FOLD_LINES = 8
 /** Why the next brief request follows a break in the session; rvow sends the full brief for it. */
@@ -115,6 +129,8 @@ function later($: EngineInterface, work: () => Promise<unknown>) {
 type HookOutput = {
   status?: unknown
   reason?: unknown
+  bound?: unknown
+  task?: unknown
   hookSpecificOutput?: {
     permissionDecision?: unknown
     permissionDecisionReason?: unknown
@@ -137,12 +153,15 @@ function isDetail(v: unknown): v is RvowDetail {
   )
 }
 
-/** Runs `rvow hook claude <event>`. Any failure allows, so a broken rvow never locks the session. */
-async function hook(
+/**
+ * Runs `rvow hook claude <event>`: its output, or the error when it could not
+ * start, exited non-zero, printed text that is not JSON or timed out.
+ */
+async function runHook(
   $: EngineInterface,
   event: Event,
   input: object,
-): Promise<HookOutput | undefined> {
+): Promise<{ out?: HookOutput; error?: string }> {
   const cwd = await $.session.cwd()
   try {
     const r = await $.process.run([BIN, 'hook', 'claude', event], {
@@ -150,18 +169,31 @@ async function hook(
       stdin: JSON.stringify({ cwd, ...input }),
       timeoutMs: event === 'pre-tool-use' ? 10_000 : 60_000,
     })
+    if (r.exitCode !== 0) return { error: `exit ${r.exitCode}: ${cut(r.stderr.trim(), 80)}` }
     const out = r.stdout.trim()
     const parsed: unknown = out ? JSON.parse(out) : undefined
-    return isRecord(parsed) ? parsed : undefined
+    return isRecord(parsed) ? { out: parsed } : {}
   } catch (err) {
-    if (!warned) {
-      warned = true
-      $.ui.toast(
-        `rvow could not run, so its checks are off: ${cut(String((err as Error)?.message ?? err), 80)}`,
-      )
-    }
-    return undefined
+    return { error: String((err as Error)?.message ?? err) }
   }
+}
+
+/** Warns once per session that rvow could not run. */
+function warnBroken($: EngineInterface, error: string) {
+  if (warned) return
+  warned = true
+  $.ui.toast(`rvow could not run, so tools that write are denied: ${cut(error, 80)}`)
+}
+
+/** Runs `rvow hook claude <event>`. A failure allows, except before a tool that writes (see `tool.call`). */
+async function hook(
+  $: EngineInterface,
+  event: Event,
+  input: object,
+): Promise<HookOutput | undefined> {
+  const r = await runHook($, event, input)
+  if (r.error !== undefined) warnBroken($, r.error)
+  return r.out
 }
 
 async function refreshStatus($: EngineInterface) {
@@ -195,12 +227,36 @@ async function refresh($: EngineInterface) {
 }
 
 /** Runs `rvow <argv>` with one bounded wait. */
+/** The milliseconds of a yolo length such as `30m`, `2h` or `90s`; 2 hours when it is missing. */
+function lengthMs(length: string | undefined): number {
+  const m = /^(\d+)(s|m|h)$/.exec(length ?? '2h')
+  if (!m) return 2 * 3_600_000
+  return Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[m[2] as 's' | 'm' | 'h']
+}
+
+/**
+ * Records a run of `rvow <argv>` that started at `at` and ended with `ok` in the user record. The mod
+ * runs accept, confirm and yolo only after the user's dialog answer or the user's own command. An
+ * accept records its id, also when it fails, since the user asked for it; a confirm records only the
+ * span of a run that accepted, since the mod does not know which change it touched.
+ */
+function noteUser(argv: string[], at: number, ok: boolean) {
+  const [verb, arg] = argv
+  if (verb === 'accept' && arg && !user.changes.includes(arg)) user.changes.push(arg)
+  if (verb === 'confirm' && ok && argv.includes('--accept'))
+    user.runs.push({ at, until: Date.now() })
+  if (verb === 'yolo' && ok && arg && arg !== 'off')
+    user.yolo.push({ tier: arg, at, until: at + lengthMs(argv[3]) })
+}
+
 async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
+  const at = Date.now()
   try {
     const r = await $.process.run([BIN, ...argv], {
       cwd: await $.session.cwd(),
       timeoutMs: ACCEPT_MS,
     })
+    noteUser(argv, at, r.exitCode === 0)
     // stderr holds the live output of check runs; it shows only when there is no result.
     const text = r.stdout.trim() || r.stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
     return { tone: r.exitCode === 0 ? 'ok' : 'fail', text: text || 'no output' }
@@ -211,9 +267,11 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
 
 /** Runs `rvow <argv>` for a tool and returns its words, so a failure reaches the agent in the tool result. */
 async function tellOut($: EngineInterface, argv: string[]) {
+  const at = Date.now()
   try {
     const cwd = await $.session.cwd()
     const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
+    noteUser(argv, at, ran.exitCode === 0)
     const out = ran.stdout.trim() || ran.stderr.trim()
     await refresh($)
     return { ok: ran.exitCode === 0, out }
@@ -224,6 +282,7 @@ async function tellOut($: EngineInterface, argv: string[]) {
 
 /** Like tellOut for a run that may outlast the ten minutes `process.run` allows, such as `rvow archive`. */
 async function tellLong($: EngineInterface, argv: string[]) {
+  const at = Date.now()
   try {
     const cwd = await $.session.cwd()
     const child = $.process.spawn({ argv: [BIN, ...argv], cwd })
@@ -235,6 +294,7 @@ async function tellLong($: EngineInterface, argv: string[]) {
       else stderr += next.value.text
       next = await child.next()
     }
+    noteUser(argv, at, next.value.code === 0)
     await refresh($)
     return { ok: next.value.code === 0, out: stdout.trim() || stderr.trim() }
   } catch (err) {
@@ -731,6 +791,10 @@ export const register: Register = (on) => {
     sessionStarted = true
     warned = false
     blocks = 0
+    user.since = Date.now()
+    user.changes = []
+    user.yolo = []
+    user.runs = []
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
@@ -815,7 +879,9 @@ export const register: Register = (on) => {
       if (answer !== 'Allow') return { result: 'The user declined, so yolo stays as it was.' }
     }
     const cwd = await $.session.cwd()
+    const at = Date.now()
     const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
+    noteUser(argv, at, ran.exitCode === 0)
     await refresh($)
     return { result: ran.stdout || ran.stderr }
   })
@@ -955,15 +1021,42 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // A subagent whose lease did not bind runs unleased; the agent that started it is told why.
+    if (e.tool === 'Agent') {
+      const id = String((e as Record<string, unknown>).tool_use_id ?? '')
+      const reason = unbound.get(id)
+      if (reason === undefined) return next(e)
+      unbound.delete(id)
+      const result = await next(e)
+      if (result.deny !== undefined) return result
+      const note = `rvow: the subagent is not bound to its lease: ${reason}`
+      return { ...result, context: [...(result.context ?? []), note] }
+    }
     if (!CHECKED.test(e.tool)) return next(e)
     const { tool, tool_use_id, agentId, consent, ...args } = e as Record<string, unknown>
-    const out = await hook($, 'pre-tool-use', {
+    const pre = await runHook($, 'pre-tool-use', {
       tool_name: tool,
       tool_input: args,
       session_id: sessionId,
       agent_id: typeof agentId === 'string' ? agentId : undefined,
       tool_use_id,
+      user_made: user,
     })
+    // A broken rvow must not turn the checks off: a tool that writes waits until it works.
+    if (pre.error !== undefined) {
+      warnBroken($, pre.error)
+      failing = true
+      $.ui.status('rvow: the hook fails, so tools that write are denied')
+      if (READS.test(String(tool))) return next(e)
+      return {
+        deny: `rvow: the hook failed, so tools that write stay denied until it works: ${cut(pre.error, 120)}. If rvow itself is broken, run \`rvow install\` again`,
+      }
+    }
+    if (failing) {
+      failing = false
+      await refreshStatus($)
+    }
+    const out = pre.out
     const decision = out?.hookSpecificOutput
     if (decision?.permissionDecision === 'deny') {
       return { deny: String(decision.permissionDecisionReason) }
@@ -999,7 +1092,21 @@ export const register: Register = (on) => {
   on('agent.spawn', async ($, e, next) => {
     const started = await next(e)
     if (started.agentId && /^\s*lease:\s*TSK-/m.test(e.prompt)) {
-      await hook($, 'lease-bind', { agent_id: started.agentId, prompt: e.prompt })
+      const r = await runHook($, 'lease-bind', { agent_id: started.agentId, prompt: e.prompt })
+      const task = String(r.out?.task ?? 'its task')
+      const reason =
+        r.error !== undefined
+          ? `rvow could not run: ${cut(r.error, 80)}`
+          : r.out?.bound === false
+            ? String(
+                r.out.reason ??
+                  `no open lease for ${task}; run rvow delegate ${task}, then start the subagent again`,
+              )
+            : undefined
+      if (reason !== undefined) {
+        $.ui.toast(`rvow: the subagent is not bound to its lease: ${reason}`)
+        unbound.set(e.tool_use_id, reason)
+      }
     }
     return started
   })

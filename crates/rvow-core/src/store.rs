@@ -468,6 +468,23 @@ impl Project {
         file.lock().map_err(|e| Error::io(&path, e))?;
         Ok(Lock { _file: file })
     }
+
+    /// The project lock, or `None` when another process still holds it after `wait`.
+    pub fn lock_within(&self, wait: std::time::Duration) -> Result<Option<Lock>> {
+        let path = self.root.join(LOCK_FILE);
+        let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| Error::io(&path, e))?;
+        let end = std::time::Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(Lock { _file: file })),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < end => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(std::fs::TryLockError::Error(e)) => return Err(Error::io(&path, e)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

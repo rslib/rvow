@@ -1,13 +1,21 @@
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import {
   ACCEPT_MS,
+  amendmentChanges,
   createAcceptMemory,
   declinedAcceptReason,
   GATE_MS,
+  recordChanges,
+  recordYolo,
   repeatAcceptResult,
   run,
   SLOW_MS,
   shortReview,
+  type UserMade,
 } from "./tools.ts";
 import type { ToolOutput, View } from "./types.ts";
 
@@ -318,7 +326,13 @@ const outputSchema = {
   additionalProperties: false,
 };
 
-export function registerTypedTools(pi: ExtensionAPI, execute = run) {
+/** What the extension lends the tools: the user's record, and the hook's verdict on a shell command (the deny reason, or undefined to allow). */
+export type Gate = {
+  made: UserMade;
+  guard: (ctx: ExtensionContext, command: string) => Promise<string | undefined>;
+};
+
+export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate) {
   const queue = serialQueue();
   const acceptMemory = createAcceptMemory();
   const result = async (
@@ -373,6 +387,14 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     } as ToolDefinition["parameters"],
     execute: async (_id, params, signal, _update, ctx) => {
       const args = proofArgs(params);
+      // The hook judges `rvow prove` by the agent's lease, so ask it first; a denied prove never runs.
+      const denied = await gate?.guard(ctx, `rvow prove ${args[1]}`);
+      if (denied)
+        return {
+          content: [{ type: "text" as const, text: denied }],
+          details: { kind: "failure" as const, code: 1, error: denied, stdout: "" },
+          isError: true as const,
+        };
       return queue(() => result(args, ctx.cwd, signal, 30 * 60_000));
     },
   });
@@ -431,6 +453,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         result(["accept", change, "--yes"], ctx.cwd, signal, ACCEPT_MS),
       );
       if (done.details.kind === "decision") {
+        if (gate) recordChanges(gate.made, [change]);
         acceptMemory.forget(change);
         return done;
       }
@@ -514,6 +537,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
           result(["confirm", ...accept, "--accept"], ctx.cwd, signal, SLOW_MS),
         );
         if (done.details.kind !== "decision") return done;
+        if (gate) recordChanges(gate.made, [change]);
       }
       return queue(() => result(["archive", change], ctx.cwd, signal, GATE_MS));
     },
@@ -552,7 +576,12 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
           return declined(
             `The user did not decide ${named}, so it is still pending. The user can run /rvow-confirm to decide it.`,
           );
-        return queue(() => result(["confirm", named, `--${decision}`], ctx.cwd, signal, SLOW_MS));
+        const done = await queue(() =>
+          result(["confirm", named, `--${decision}`], ctx.cwd, signal, SLOW_MS),
+        );
+        if (gate && decision === "accept" && done.details.kind === "decision")
+          recordChanges(gate.made, amendmentChanges(text(list), [named]));
+        return done;
       }
       const digest = /^digest (\S+)$/m.exec(text(list))?.[1];
       if (list.details.kind !== "decision" || !digest) return list;
@@ -565,9 +594,12 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
         return declined(
           "The user did not decide, so the plan edits are still pending. The user can run /rvow-confirm to decide them.",
         );
-      return queue(() =>
+      const done = await queue(() =>
         result(["confirm", `--${decision}`, "--all", digest], ctx.cwd, signal, SLOW_MS),
       );
+      if (gate && decision === "accept" && done.details.kind === "decision")
+        recordChanges(gate.made, amendmentChanges(text(list)));
+      return done;
     },
   });
   // Only the user's answer in the dialog switches a tier on. The tool runs the CLI itself, since the
@@ -588,7 +620,8 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
     execute: async (_id, params, signal, _update, ctx) => {
       const args = yoloArgs(params);
       const tier = args[1];
-      if (tier && tier !== "off" && !tier.startsWith("--")) {
+      const on = tier !== undefined && tier !== "off" && !tier.startsWith("--");
+      if (on) {
         const length = args[2] === "--for" ? args[3] : "2h";
         if (!ctx.hasUI)
           throw new Error("rvow: only the user can switch yolo on, and no one is here to ask");
@@ -604,7 +637,11 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run) {
             details: { kind: "failure" as const, code: 1, error: "declined", stdout: "" },
           };
       }
-      return queue(() => result(args, ctx.cwd, signal, SLOW_MS));
+      const at = Date.now();
+      const done = await queue(() => result(args, ctx.cwd, signal, SLOW_MS));
+      if (gate && on && tier && done.details.kind === "yolo")
+        recordYolo(gate.made, tier, at, args[2] === "--for" ? args[3] : undefined);
+      return done;
     },
   });
   return acceptMemory;

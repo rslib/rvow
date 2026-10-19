@@ -53,9 +53,9 @@ pub fn rebind(commit_map: Option<&Path>) -> Result<Reply> {
     Ok(r)
 }
 
-/// Hooks never fail the harness: outside an rvow project they print nothing,
-/// and an internal error allows the call and goes to stderr, so a bug in rvow
-/// cannot lock the agent out of every repository.
+/// Hooks never fail the harness: outside an rvow project they print nothing.
+/// An internal error goes to stderr; before a tool call it also denies a tool
+/// that writes, so a broken store cannot turn the checks off. Reads go on.
 pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     let mut text = String::new();
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).is_err() {
@@ -65,8 +65,9 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     let run = || -> Result<Option<serde_json::Value>> {
         // Timed from here, so a hook's duration includes finding the project.
         let start = std::time::Instant::now();
-        let home = store::home_dir()?;
-        let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok)?;
+        // Without a home or a working folder there is no store to find, so no project to check.
+        let Ok(home) = store::home_dir() else { return Ok(None) };
+        let Ok(cwd) = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok) else { return Ok(None) };
         if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
             let warnings = skill_warnings()?;
             return match store::find(&cwd, &home) {
@@ -78,8 +79,12 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
                 _ => hooks::claude_session_start(None, &home, &input, &warnings),
             };
         }
-        let Ok(Some(p)) = store::find(&cwd, &home) else {
-            return Ok(None);
+        let p = match store::find(&cwd, &home) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(None),
+            // Outside a git repository, or before its first commit, there is no project to check.
+            Err(e) if e.code == "no-commit" || git::toplevel(&cwd).is_err() => return Ok(None),
+            Err(e) => return Err(e),
         };
         let (counted, out) = match (harness, event) {
             (Harness::Claude, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
@@ -107,7 +112,14 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     match run() {
         Ok(Some(out)) => println!("{out}"),
         Ok(None) => {}
-        Err(e) => eprintln!("rvow hook: {}: {}", e.code, e.message),
+        Err(e) => {
+            eprintln!("rvow hook: {}: {}", e.code, e.message);
+            if matches!((harness, event), (Harness::Claude, HookEvent::PreToolUse))
+                && let Some(out) = hooks::claude_pre_tool_use_failure(&input, &e)
+            {
+                println!("{out}");
+            }
+        }
     }
     ExitCode::SUCCESS
 }

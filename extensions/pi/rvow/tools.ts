@@ -60,6 +60,45 @@ export function run(
   });
 }
 
+/** What the user did in this session, sent with every pre-tool-use call so the hook can tell the
+ *  user's decisions from the agent's. Only user-driven commands and dialog answers add to it. */
+export type UserMade = {
+  since: number;
+  changes: string[];
+  yolo: { tier: string; at: number; until: number }[];
+};
+
+export function createUserMade(): UserMade {
+  return { since: Date.now(), changes: [], yolo: [] };
+}
+
+/** The length of a yolo run in ms: `30m`, `2h` or `45s`, and 2 hours when there is none. */
+export function yoloMs(length: string | undefined): number {
+  const m = /^(\d+)([smh])$/.exec(length ?? "");
+  if (!m) return 2 * 3_600_000;
+  return Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[m[2] as "s" | "m" | "h"];
+}
+
+/** Record that the user switched a yolo tier on at `at`. */
+export function recordYolo(made: UserMade, tier: string, at: number, length?: string): void {
+  made.yolo.push({ tier, at, until: at + yoloMs(length) });
+}
+
+/** The changes that the amendments `ids` of a `rvow confirm` listing belong to, or every listed one without `ids`. */
+export function amendmentChanges(listing: string, ids?: string[]): string[] {
+  const found = new Set<string>();
+  for (const line of listing.split("\n")) {
+    const head = /^(AMD-[\w-]+) for (\S+)/.exec(line);
+    if (head && (!ids || ids.includes(head[1] ?? ""))) found.add(head[2] ?? "");
+  }
+  return [...found];
+}
+
+/** Add `ids` to the changes the user approved. */
+export function recordChanges(made: UserMade, ids: string[]): void {
+  for (const id of ids) if (!made.changes.includes(id)) made.changes.push(id);
+}
+
 /** The wait for `rvow accept`, which runs no verify command. */
 /** Cut text bound for the model at `max` chars, ending in `...`. */
 export function cut(text: string, max: number): string {

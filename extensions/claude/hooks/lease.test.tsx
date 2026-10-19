@@ -90,3 +90,47 @@ test('a subagent that stops ends its lease', async ($, on) => {
   })
   expect(calls.find((c) => c.event === 'lease-end')?.input).toMatchObject({ agent_id: 'a1' })
 })
+
+test('a lease that does not bind is shown to the user and returned to the agent', async ($, on) => {
+  const toasts: string[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', async (_$, e) => {
+    const out =
+      e.argv[3] === 'lease-bind' ? JSON.stringify({ bound: false, task: 'TSK-abc123' }) : ''
+    return { value: procResult(0, out) }
+  })
+  on('agent.spawn', async () => ({ model: 'm', agentId: 'a1' }))
+  on('tool.call', { tool: 'Agent' }, async () => ({ result: 'done' }))
+  await $.agent.spawn(spawn('lease: TSK-abc123\nYou hold one task.'))
+  expect(toasts.join('\n')).toContain('rvow delegate TSK-abc123')
+  const r = await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 't1',
+    prompt: 'p',
+    description: 'd',
+  } as never)
+  expect((r.context ?? []).join('\n')).toContain('rvow delegate TSK-abc123')
+})
+
+test('a lease that binds shows nothing', async ($, on) => {
+  const toasts: string[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', async (_$, e) => {
+    const out =
+      e.argv[3] === 'lease-bind' ? JSON.stringify({ bound: true, task: 'TSK-abc123' }) : ''
+    return { value: procResult(0, out) }
+  })
+  on('agent.spawn', async () => ({ model: 'm', agentId: 'a1' }))
+  await $.agent.spawn(spawn('lease: TSK-abc123\nYou hold one task.'))
+  expect(toasts).toHaveLength(0)
+})

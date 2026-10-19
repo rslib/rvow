@@ -288,9 +288,31 @@ A tampering denial is never an ask, whatever the streak: it stays a denial and k
 Any call that goes through ends the streak.
 Without a session id or without a person to ask, the call stays denied.
 
+A shell command is judged like an edit for each repository file it names as a target, such as `echo x > src/a.rs` or `sed -i ... src/b.rs`: before the plan is accepted it is denied as `unaccepted-plan`, and from a leased subagent outside its task as `lease-scope`.
+The Monitor tool runs a shell command, so its command is judged as a Bash command.
+An MCP tool call whose arguments set `no_verify` to true or name `core.hooksPath` is denied as `git-hooks`.
+
+### When the hook fails
+
+A hook that cannot run must not turn the checks off.
+When the hook cannot start, exits with an error, prints text that is not JSON or runs past its 10 s limit, the Claude mod and the pi extension deny each tool that writes, with the error, and let the reading tools run: Read, Grep and Glob in the Claude mod, and read, grep, find and ls in pi.
+The status line says so until a later call works.
+A repository with no rvow store, and a folder outside git, are not projects, so nothing there is denied.
+The hook waits at most 5 s for the project lock; when another rvow process holds it longer, a writing call is denied as busy and a read goes on.
+
+### What the user made
+
+The hooks read the command text, so a copy of the rvow binary under another name can run `accept` or `yolo` unseen.
+So the Claude mod and the pi extension keep a record of what you did in the session and send it with each call as `user_made`: each change you accepted, each yolo tier you switched on, and the time span of each confirm that the mod ran for you and that accepted.
+An accept or a confirm made since the session started that is not in the record keeps every writing call denied as `unseen-accept`, until you check the change and type `/rvow-accept <id>`.
+A yolo tier switched on since the session started counts only when you switched it on with `/rvow-yolo` or the yolo dialog.
+An accept under a yolo `auto` tier that you switched on counts, so a run with no dialog still works.
+An accept or a yolo tier from before the session started counts, and a harness that sends no `user_made` field keeps the old rules.
+
 ## Yolo: relax the hooks for a while
 
 `! rvow yolo <tier> [--for 2h]` relaxes the hooks for a while. In the Claude mod and in pi, type `/rvow-yolo <tier> [30m]` instead, and the agent is told once.
+There, a tier that `! rvow yolo` switches on during the session does not count, since the mod cannot tell it from a copied binary (see [What the user made](#what-the-user-made)).
 The default length is 2 hours and the longest is 24.
 It ends by itself, and `! rvow yolo off` ends it at once.
 Only you can switch it: an agent cannot run `rvow yolo` in a shell or write its file, in any tier.
@@ -458,8 +480,9 @@ These are accepted for now.
 Each one is caught later by the gate, or needs a person.
 
 - **The accept and confirm deny reads text.**
-  It follows `sh -c`, `eval`, wrappers, variables and scripts on disk.
-  It does not follow a name built at run time, a git alias or a script written in the same command.
+  It follows `sh -c` in every common shell, `fish -c`, `eval`, wrappers, variables, awk programs, `git -c alias` and scripts on disk.
+  It does not follow a name built at run time or a script written in the same command.
+  The user record catches an accept or yolo that gets past it in the Claude mod and pi, but a record forged in an earlier session is not caught.
   A committed test file with no change against HEAD is not read, so its text as data does not count.
   `require_signature` is the real boundary, and it is off by default.
 - **Hardware signing keys are untested.**
@@ -476,7 +499,7 @@ Each one is caught later by the gate, or needs a person.
 - **A lease needs the rvow hooks in the subagent.**
   A Claude subagent is bound by the mod, and a pi subagent binds itself when its session loads the rvow extension, which is the default of `pi-subagents`.
   A subagent that opts out (`extensions: false` or `isolated: true` in pi, or no mod in Claude Code) meets no rvow hook at all, so the lease does not apply and only the gate checks its work.
-  The hook also judges only the edit tools and `rvow prove`, since it sees files and not what a shell command writes.
+  The hook judges the edit tools, `rvow prove` and the files a shell command names as targets; a file that a program writes without naming it, such as a build output, is not seen.
 - **Session events are recorded from the docs and this session.**
   Claude Code names five `SessionStart` sources: `startup`, `resume`, `clear`, `compact` and `fork` (a fork reported `resume` before v2.1.214).
   The mod resets its brief state on `session.start`, which covers startup, resume, clear and fork, and on a `session.compact` that stands, so the next prompt carries the brief again after the summary replaced it.

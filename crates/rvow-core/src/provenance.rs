@@ -264,17 +264,32 @@ fn is_call(s: &Start, session: &str, agent_id: Option<&str>, tool_use_id: &str) 
     s.session == session && s.agent_id.as_deref() == agent_id && s.tool_use_id == tool_use_id
 }
 
+/// How long a hook waits for the project lock: below the 10 s limit the mod
+/// gives a pre-tool-use hook.
+pub(crate) const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a hook got the project lock in time. Any other failure counts as
+/// `Taken`, since the record fails silently, like every hook.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Locked {
+    Taken,
+    Busy,
+}
+
 /// The pre-tool-use handler: snapshots the work tree and stores the before
-/// tree and start time of the call. Fails silently, like every hook.
-pub(crate) fn before_call(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) {
+/// tree and start time of the call. Fails silently, like every hook, except
+/// that it reports a project lock that stayed busy for `LOCK_WAIT`.
+pub(crate) fn before_call(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) -> Locked {
     let Ok(store) = locate(project, top) else {
-        return;
+        return Locked::Taken;
     };
-    let Ok(_lock) = project.lock() else {
-        return;
+    let _lock = match project.lock_within(LOCK_WAIT) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Locked::Busy,
+        Err(_) => return Locked::Taken,
     };
     let Ok(before) = tree(top, &store) else {
-        return;
+        return Locked::Taken;
     };
     let _ = catch_up(top, &store, session, agent_id, &before);
     let start = Start {
@@ -285,6 +300,7 @@ pub(crate) fn before_call(project: &Project, top: &Path, session: &str, agent_id
         start: now_ms(),
     };
     let _ = append(&store.dir, &[Record::Start(start)]);
+    Locked::Taken
 }
 
 /// Records each path that differs between the session's last recorded tree and
@@ -345,7 +361,7 @@ pub(crate) fn catch_up_at_stop(project: &Project, top: &Path, session: &str, age
     let Ok(store) = locate(project, top) else {
         return;
     };
-    let Ok(_lock) = project.lock() else {
+    let Ok(Some(_lock)) = project.lock_within(LOCK_WAIT) else {
         return;
     };
     if let Ok(now) = tree(top, &store) {
@@ -357,12 +373,14 @@ pub(crate) fn catch_up_at_stop(project: &Project, top: &Path, session: &str, age
 /// tool nor a shell: it records the call with no snapshot, so post-tool-use
 /// compares one snapshot with the session's last recorded tree. With no last
 /// tree yet, it snapshots like an editor call, so the first call is seen too.
-pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) {
+pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) -> Locked {
     let Ok(store) = locate(project, top) else {
-        return;
+        return Locked::Taken;
     };
-    let Ok(_lock) = project.lock() else {
-        return;
+    let _lock = match project.lock_within(LOCK_WAIT) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Locked::Busy,
+        Err(_) => return Locked::Taken,
     };
     let has_last =
         load(&store.dir).iter().any(|r| matches!(r, Record::Last(l) if l.session == session && l.agent_id.as_deref() == agent_id));
@@ -370,7 +388,7 @@ pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, ag
         LIGHT.to_string()
     } else {
         let Ok(tree) = tree(top, &store) else {
-            return;
+            return Locked::Taken;
         };
         tree
     };
@@ -382,6 +400,7 @@ pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, ag
         start: now_ms(),
     };
     let _ = append(&store.dir, &[Record::Start(start)]);
+    Locked::Taken
 }
 
 /// The post-tool-use handler: with a before record for the call, snapshots the
@@ -391,7 +410,7 @@ pub(crate) fn after_call(project: &Project, top: &Path, session: &str, agent_id:
     let Ok(store) = locate(project, top) else {
         return;
     };
-    let Ok(_lock) = project.lock() else {
+    let Ok(Some(_lock)) = project.lock_within(LOCK_WAIT) else {
         return;
     };
     let mut records = load(&store.dir);

@@ -37,6 +37,8 @@ use shell::{bash_changes, bash_enforcement_rule, bash_secret_rule, only_accept_o
 pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
 use store_guard::{bash_store_denial, store_denial};
 
+use crate::provenance::Locked;
+
 use rule::denial;
 
 /// The absolute, symlink-free form of `path`, also when the file does not
@@ -101,8 +103,8 @@ pub enum ToolKind {
 /// read from its words.
 const EDITOR_TOOLS: &[&str] =
     &["edit", "write", "multiedit", "multi_edit", "notebookedit", "patch", "apply_patch", "write_file", "replace", "create_file"];
-const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "shell_command", "local_shell", "exec_command", "run_shell_command"];
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+const SHELL_TOOLS: &[&str] =
+    &["bash", "monitor", "powershell", "shell", "shell_command", "local_shell", "exec_command", "run_shell_command"];
 const READ_TOOLS: &[&str] = &[
     "read",
     "grep",
@@ -148,7 +150,7 @@ fn shell_command(args: &Value) -> Option<String> {
         Value::String(c) => Some(c.clone()),
         Value::Array(words) => {
             let words: Vec<&str> = words.iter().filter_map(Value::as_str).collect();
-            let is_shell = |w: &str| SHELLS.contains(&w.rsplit('/').next().unwrap_or(w));
+            let is_shell = |w: &str| shell::SHELLS.contains(&w.rsplit('/').next().unwrap_or(w));
             match words.as_slice() {
                 [sh, flag, cmd] if is_shell(sh) && matches!(*flag, "-c" | "-lc") => Some((*cmd).to_string()),
                 _ => Some(words.join(" ")),
@@ -197,6 +199,32 @@ fn writes_files(tool: &str) -> bool {
         "read", "get", "list", "search", "find", "view", "show", "stat", "fetch", "query", "ls", "cat", "grep", "glob", "info", "describe",
         "open",
     ])
+}
+
+/// Why an MCP tool call must not run: an argument skips the git hooks, such as
+/// `no_verify: true`, or names `core.hooksPath`. Nested arguments count too.
+fn mcp_git_hooks_denial(args: &Value) -> Option<Denial> {
+    fn walk(v: &Value) -> Option<&'static str> {
+        match v {
+            Value::Object(o) => o.iter().find_map(|(k, v)| {
+                let key = k.to_ascii_lowercase().replace(['_', '-'], "");
+                if key == "noverify" && v.as_bool() == Some(true) {
+                    return Some("no_verify");
+                }
+                walk(v)
+            }),
+            Value::Array(a) => a.iter().find_map(walk),
+            Value::String(s) if s.trim().to_ascii_lowercase().starts_with("core.hookspath") => Some("core.hooksPath"),
+            _ => None,
+        }
+    }
+    let what = walk(args)?;
+    denial(
+        Rule::GitHooks,
+        format!(
+            "{what} in this call skips the hooks that check the plan; call the tool without it, or run rvow block <task> --reason \"...\" if the plan needs it"
+        ),
+    )
 }
 
 /// The directory that holds the hidden checks, which the implementing agent
@@ -327,12 +355,7 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
     if !target.starts_with(&format!("{root}/"))
         && let Some(id) = unaccepted_plan(project, top)?
     {
-        return Ok(denial(
-            Rule::UnacceptedPlan,
-            format!(
-                "the plan {id} is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept {id} (or ! rvow accept {id}) before you edit code"
-            ),
-        ));
+        return Ok(unaccepted_denial(&id));
     }
     if ENFORCEMENT.iter().any(|e| key(Path::new(e)) == rel) {
         return Ok(denial(
@@ -424,6 +447,44 @@ fn unlocked(project: &Project, top: &Path, rel: &str) -> Result<bool> {
         }
     }
     Ok(open)
+}
+
+fn unaccepted_denial(id: &crate::id::Id) -> Option<Denial> {
+    denial(
+        Rule::UnacceptedPlan,
+        format!(
+            "the plan {id} is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept {id} (or ! rvow accept {id}) before you edit code"
+        ),
+    )
+}
+
+/// Why a shell command must not write the repository files it names as
+/// targets: the plan on the branch is not accepted, or a leased subagent
+/// writes outside its task. A file that a program writes without naming it,
+/// or that only script text names, is not seen here.
+fn shell_write_denial(project: &Project, cmd: &str, cwd: &Path, agent: Option<&str>) -> Result<Option<Denial>> {
+    let Ok(top) = git::toplevel(cwd) else { return Ok(None) };
+    let root = key(&real_path(&project.root, cwd));
+    let files: Vec<PathBuf> = shell::written_paths(cmd)
+        .iter()
+        .filter_map(|f| repo_rel(f, cwd, &top))
+        .filter(|rel| !rel.starts_with(".git/"))
+        .map(|rel| top.join(rel))
+        .filter(|f| !key(&real_path(f, cwd)).starts_with(&format!("{root}/")))
+        .collect();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    if let Some(id) = unaccepted_plan(project, &top)? {
+        return Ok(unaccepted_denial(&id));
+    }
+    let Some(agent) = agent else { return Ok(None) };
+    for f in &files {
+        if let Some(found) = lease_denial(project, cwd, agent, &f.to_string_lossy())? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
 }
 
 /// The backlog change whose plan blocks code edits: the branch has one and no
@@ -669,10 +730,22 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
             .or_else(|| bash_store_denial(project, &cwd, c))
             .or_else(|| bash_secret_rule(c, &secret_paths()))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
-        return match (found, input.get("agent_id").and_then(Value::as_str)) {
-            (None, Some(agent)) => lease_prove_denial(project, &cwd, agent, c),
-            (found, _) => Ok(found),
+        let agent = input.get("agent_id").and_then(Value::as_str);
+        if found.is_some() {
+            return Ok(found);
+        }
+        if let Some(found) = shell_write_denial(project, c, &cwd, agent)? {
+            return Ok(Some(found));
+        }
+        return match agent {
+            Some(agent) => lease_prove_denial(project, &cwd, agent, c),
+            None => Ok(None),
         };
+    }
+    if tool.starts_with("mcp__")
+        && let Some(found) = mcp_git_hooks_denial(&args)
+    {
+        return Ok(Some(found));
     }
     let files = file_args(&args);
     // The hidden checks are closed to every tool. The plan files of the store are closed to direct
@@ -706,13 +779,118 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
     Ok(None)
 }
 
+/// What the harness saw the user do in this session, from the `user_made`
+/// field that an adapter such as the Claude mod or the pi extension sends with
+/// each call: since when it watched, the changes the user accepted, the
+/// yolo tiers the user switched on, and the time spans in which the harness
+/// itself ran an accept, confirm or archive for the user. A harness that sends no
+/// such field has nothing to tell, and the checks that need it stay off.
+struct UserMade {
+    since: u64,
+    changes: Vec<String>,
+    yolo: Vec<UserYolo>,
+    runs: Vec<(u64, u64)>,
+}
+
+struct UserYolo {
+    tier: Tier,
+    at: u64,
+    until: u64,
+}
+
+/// How long after the user's command a yolo file may say it was switched on.
+const YOLO_SKEW_MS: u64 = 60_000;
+
+impl UserMade {
+    fn from(input: &Value) -> Option<UserMade> {
+        let seen = input.get("user_made")?;
+        let since = seen.get("since").and_then(Value::as_u64)?;
+        let changes =
+            seen.get("changes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+        let yolo = seen
+            .get("yolo")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|y| {
+                let tier = serde_json::from_value(y.get("tier")?.clone()).ok()?;
+                Some(UserYolo { tier, at: y.get("at")?.as_u64()?, until: y.get("until")?.as_u64()? })
+            })
+            .collect();
+        let runs = seen
+            .get("runs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((r.get("at")?.as_u64()?, r.get("until")?.as_u64()?)))
+            .collect();
+        Some(UserMade { since, changes, yolo, runs })
+    }
+
+    /// The tier `on` when the user switched it on, or when it was on before the session began.
+    /// A file from before the switch time was recorded has 0, so it counts as before.
+    fn yolo(&self, on: yolo::On) -> Option<yolo::On> {
+        let theirs =
+            |y: &UserYolo| y.tier == on.tier && on.at + 1_000 >= y.at && on.at <= y.at + YOLO_SKEW_MS && on.until <= y.until + YOLO_SKEW_MS;
+        (on.at < self.since || self.yolo.iter().any(theirs)).then_some(on)
+    }
+
+    /// Whether the user stands behind an accept or confirm of `change` at `time`.
+    fn made(&self, change: &str, time: u64) -> bool {
+        time < self.since
+            || self.changes.iter().any(|c| c == change)
+            || self.runs.iter().any(|(at, until)| *at <= time && time <= *until)
+            || self.yolo.iter().any(|y| y.tier >= Tier::Auto && y.at <= time && time <= y.until)
+    }
+}
+
+/// Why work on the branch must wait: an active change was accepted, or an
+/// amendment of it confirmed, in this session without the user, as with a
+/// copy of the rvow binary under another name.
+fn unseen_denial(project: &Project, input: &Value, seen: &UserMade) -> Result<Option<Denial>> {
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let writes = match tool_kind(tool) {
+        ToolKind::ReadOnly => false,
+        ToolKind::Shell => shell_command(&input.get("tool_input").cloned().unwrap_or(Value::Null)).is_some_and(|c| !reads_only(&c)),
+        _ => writes_files(tool),
+    };
+    if !writes {
+        return Ok(None);
+    }
+    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Ok(top) = git::toplevel(&cwd) else { return Ok(None) };
+    let Some(branch) = git::branch(&top)? else { return Ok(None) };
+    let (living, _) = change::load_living(project)?;
+    let active = proof::active(project, &living)?;
+    for c in proof::on_branch(&active, &branch) {
+        let id = c.dir.id.to_string();
+        let accepted = |e: &&crate::ledger::Event| {
+            e.kind == Kind::Vow || (e.kind == Kind::Confirm && e.data.get("decision").and_then(Value::as_str) == Some("accept"))
+        };
+        if c.events.iter().filter(accepted).any(|e| !seen.made(&id, e.time)) {
+            return Ok(denial(
+                Rule::UnseenAccept,
+                format!(
+                    "{id} was accepted or confirmed in this session, but not by the user in a dialog; ask the user to check it and type /rvow-accept {id}"
+                ),
+            ));
+        }
+    }
+    Ok(None)
+}
+
 /// Claude Code `PreToolUse`: a deny or ask response, or `None` to allow.
 /// A rule in audit mode lets the call through and is only counted. After
 /// `BACKSTOP` denials in a row the next one is a question for the user.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let session = input.get("session_id").and_then(Value::as_str);
-    let tier = yolo::active(project).map(|on| on.tier);
-    let found = match pre_tool_use_denial(project, input)? {
+    let seen = UserMade::from(input);
+    let tier = yolo::active(project).and_then(|on| seen.as_ref().map_or(Some(on), |s| s.yolo(on))).map(|on| on.tier);
+    let unseen = match &seen {
+        Some(s) => unseen_denial(project, input, s)?,
+        None => None,
+    };
+    let found = match unseen.map_or_else(|| pre_tool_use_denial(project, input), |d| Ok(Some(d)))? {
         Some(d) => Some(d),
         // Under yolo the rule is off: an audit would use up the session's one denial unseen.
         None if Rule::BaselineFirst.mode_in(tier) == Mode::Enforce => session.and_then(|s| baseline_first(project, s, input)),
@@ -734,7 +912,16 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         if let Some(s) = session {
             streak::reset(project, s);
             record_changes(project, s, input);
-            record_before_snapshot(project, s, input);
+            if record_before_snapshot(project, s, input) == Locked::Busy {
+                return Ok(Some(json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": format!(
+                        "rvow: the project is busy: another rvow process held its lock for {} s; try the call again in a moment",
+                        crate::provenance::LOCK_WAIT.as_secs()
+                    ),
+                }})));
+            }
         }
         return Ok(None);
     };
@@ -763,6 +950,25 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         "permissionDecision": decision,
         "permissionDecisionReason": reason,
     }})))
+}
+
+/// Claude Code `PreToolUse` when the hook itself failed: a deny for a tool
+/// that writes, so a broken store does not turn the checks off, and `None`
+/// for a reading tool.
+pub fn claude_pre_tool_use_failure(input: &Value, error: &crate::error::Error) -> Option<Value> {
+    let tool = input.get("tool_name").and_then(Value::as_str)?;
+    if tool_kind(tool) == ToolKind::ReadOnly {
+        return None;
+    }
+    let reason = format!(
+        "rvow: the hook failed, so tools that write stay denied until it works: {}: {}. Fix: {}. If rvow itself is broken, run `rvow install` again",
+        error.code, error.message, error.fix
+    );
+    Some(json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }}))
 }
 
 /// The path of `file` relative to the repository top in its real case, or `None` outside it.
@@ -899,24 +1105,24 @@ fn may_write(tool: &str, args: &Value) -> bool {
 
 /// The pre-tool-use provenance: snapshots the work tree before an allowed
 /// write call and stores the before tree per (session, agent, tool_use_id).
-fn record_before_snapshot(project: &Project, session: &str, input: &Value) {
+fn record_before_snapshot(project: &Project, session: &str, input: &Value) -> Locked {
     let Some(id) = input.get("tool_use_id").and_then(Value::as_str) else {
-        return;
+        return Locked::Taken;
     };
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
     if !may_write(tool, &args) {
-        return;
+        return Locked::Taken;
     }
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let Ok(top) = git::toplevel(&cwd) else { return };
+    let Ok(top) = git::toplevel(&cwd) else { return Locked::Taken };
     let agent = input.get("agent_id").and_then(Value::as_str);
     // The editors and the shell keep a before snapshot, since overlapping calls of
     // other sessions are judged by it; any other writer takes one snapshot after.
     if matches!(tool_kind(tool), ToolKind::Editor | ToolKind::Shell) {
-        crate::provenance::before_call(project, &top, session, agent, id);
+        crate::provenance::before_call(project, &top, session, agent, id)
     } else {
-        crate::provenance::before_call_light(project, &top, session, agent, id);
+        crate::provenance::before_call_light(project, &top, session, agent, id)
     }
 }
 

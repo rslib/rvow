@@ -40,6 +40,14 @@ impl Tier {
 struct Body {
     tier: Tier,
     until: u64,
+    /// When the tier was switched on. A file from before this field has 0,
+    /// and its seal still checks, since a 0 is not written.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    at: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The yolo file: the state plus the seal that ties it to the rerun cache key.
@@ -56,6 +64,8 @@ struct File {
 pub struct On {
     pub tier: Tier,
     pub until: u64,
+    /// When the tier was switched on, or 0 when the file does not say.
+    pub at: u64,
 }
 
 fn path(project: &Project) -> std::path::PathBuf {
@@ -71,15 +81,16 @@ pub fn set(project: &Project, tier: Tier, length: Duration) -> Result<On> {
             "pass --for with 24h or less, such as --for 2h",
         ));
     }
-    let until = now_ms() + length.as_millis() as u64;
-    let body = Body { tier, until };
+    let at = now_ms();
+    let until = at + length.as_millis() as u64;
+    let body = Body { tier, until, at };
     let text = serde_json::to_string(&body).map_err(|e| Error::internal(format!("cannot write the yolo state: {e}")))?;
     let key = crate::seal::key(&crate::hardening::project_home(project)?)?;
     let seal = crate::seal::mac(&key, &text)?;
     let file = serde_json::to_string(&File { body, seal: Some(seal) })
         .map_err(|e| Error::internal(format!("cannot write the yolo state: {e}")))?;
     std::fs::write(path(project), file).map_err(|e| Error::io(&path(project), e))?;
-    Ok(On { tier, until })
+    Ok(On { tier, until, at })
 }
 
 /// Switches the tiers off.
@@ -100,7 +111,7 @@ pub fn active_at(project: &Project, now: u64) -> Option<On> {
     if !crate::seal::verify(&key, &body, file.seal.as_deref().unwrap_or("")) {
         return None;
     }
-    (file.body.until > now).then_some(On { tier: file.body.tier, until: file.body.until })
+    (file.body.until > now).then_some(On { tier: file.body.tier, until: file.body.until, at: file.body.at })
 }
 
 impl On {
