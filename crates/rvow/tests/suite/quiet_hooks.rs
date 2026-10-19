@@ -80,6 +80,7 @@ impl Fx {
         c.current_dir(self.repo())
             .env("HOME", self.root.join("home"))
             .env("RVOW_HOME", self.root.join("rh"))
+            .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
