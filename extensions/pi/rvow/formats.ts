@@ -111,7 +111,27 @@ export const isKind = (v: unknown): v is Kind => KINDS.some((k) => k === v);
 export const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-export const fit = (s: string, n: number) => truncateToWidth(s, n, "...", true);
+// Every render fits the same rows again while only the cursor moves, and pi-tui's truncateToWidth
+// is slow on Node 22 (about 100 ms per key on 200 plans), so fit keeps the rows it has cut.
+export const FIT_CACHE_MAX = 4000;
+const fitted = new Map<string, string>();
+let misses = 0;
+
+export function fit(s: string, n: number): string {
+  const key = `${n}\u0000${s}`;
+  const hit = fitted.get(key);
+  if (hit !== undefined) return hit;
+  misses++;
+  const out = truncateToWidth(s, n, "...", true);
+  if (fitted.size >= FIT_CACHE_MAX) fitted.clear();
+  fitted.set(key, out);
+  return out;
+}
+
+/** How many rows fit has cut, for tests. */
+export const fitMisses = () => misses;
+/** How many cut rows fit keeps, for tests. */
+export const fitCacheSize = () => fitted.size;
 export const spread = (left: string, right: string, n: number) =>
   `${truncateToWidth(left, Math.max(0, n - visibleWidth(right) - 1), "...", true)} ${right}`;
 
