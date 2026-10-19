@@ -273,19 +273,25 @@ export function judgeRecordArgv(id: string, model: string): string[] {
   return ['review', id, '--record', '-', '--judge', '--harness', JUDGE_HARNESS, '--model', model]
 }
 
-/** The findings as shown after the record: one line per finding. */
-export function formatJudgeFindings(id: string, model: string, findings: JudgeFinding[]): string {
+/** The findings as shown after the record: one line per finding, each message cut at `width` characters when given. */
+export function formatJudgeFindings(
+  id: string,
+  model: string,
+  findings: JudgeFinding[],
+  width?: number,
+): string {
   const head = `judged ${id} with ${model}: ${findings.length} finding${findings.length === 1 ? '' : 's'}`
   if (findings.length === 0) return `${head}\nthe judge found no problems`
   return [
     head,
-    ...findings.map((f) =>
-      f.path !== undefined && f.line !== undefined
-        ? `${f.path}:${f.line}: ${f.message}`
+    ...findings.map((f) => {
+      const message = width === undefined ? f.message : cut(f.message, width)
+      return f.path !== undefined && f.line !== undefined
+        ? `${f.path}:${f.line}: ${message}`
         : f.path !== undefined
-          ? `${f.path}: ${f.message}`
-          : f.message,
-    ),
+          ? `${f.path}: ${message}`
+          : message
+    }),
   ].join('\n')
 }
 

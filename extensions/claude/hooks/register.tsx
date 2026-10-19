@@ -590,18 +590,26 @@ async function judgeChanges($: EngineInterface): Promise<{ id: string; title: st
  * agent, and records its findings with the model the subagent ran on. The mod
  * records, never the agent: the hook denies an agent's own `--judge` call.
  */
-async function judgeRun($: EngineInterface, argsText: string): Promise<{ text: string }> {
+async function judgeRun(
+  $: EngineInterface,
+  argsText: string,
+  forModel = false,
+): Promise<{ text: string }> {
   // Counted from the start, not from the spawn: an answer can arrive before
   // the spawn returns, and it is kept only while a run is pending.
   judgePending.begin()
   try {
-    return await judgeOnce($, argsText)
+    return await judgeOnce($, argsText, forModel)
   } finally {
     judgePending.end()
   }
 }
 
-async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: string }> {
+async function judgeOnce(
+  $: EngineInterface,
+  argsText: string,
+  forModel: boolean,
+): Promise<{ text: string }> {
   // The type is registered at session start; this covers a session that
   // started before the registration landed, and is a no-op replace after.
   await registerJudgeAgent($)
@@ -622,7 +630,9 @@ async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: 
     id = only.id
   }
   const packet = await rvow($, ['review', id, '--packet', '--human'])
-  if (packet.tone !== 'ok') return { text: packet.text }
+  if (packet.tone !== 'ok') {
+    return { text: failedText(['review', id, '--packet', '--human'], packet.text) }
+  }
   const identity = /^identity: (\S+)/m.exec(packet.text)?.[1]
   if (!identity) return { text: `cannot read the packet of ${id}` }
   const body = packet.text.split('\n').slice(1).join('\n')
@@ -659,14 +669,17 @@ async function judgeOnce($: EngineInterface, argsText: string): Promise<{ text: 
     return { text: `cannot record the judge: ${String(err)}` }
   }
   if (recorded.exitCode !== 0) {
-    return { text: recorded.stdout.trim() || recorded.stderr.trim() || 'cannot record the judge' }
+    const out = recorded.stdout.trim() || recorded.stderr.trim() || 'cannot record the judge'
+    return { text: failedText(judgeRecordArgv(id, started.model), out) }
   }
   await refresh($)
-  return { text: formatJudgeFindings(id, started.model, parsed.findings) }
+  return {
+    text: formatJudgeFindings(id, started.model, parsed.findings, forModel ? 300 : undefined),
+  }
 }
 
 /** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
-async function ask($: EngineInterface, change?: string): Promise<string> {
+async function ask($: EngineInterface, change?: string, forModel = false): Promise<string> {
   const cwd = await $.session.cwd()
   const run = (argv: string[]) => $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
   let round: { questions?: Asked[]; remaining?: number }
@@ -694,7 +707,11 @@ async function ask($: EngineInterface, change?: string): Promise<string> {
     }
     const r = await run(['answer', q.ref, choice, '--via', 'dialog']).catch(() => undefined)
     if (r?.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
-    done.push(`${q.ref} ${q.question} -> ${choice}`)
+    done.push(
+      forModel
+        ? `${q.ref} ${cut(q.question, 200)} -> ${cut(choice, 200)}`
+        : `${q.ref} ${q.question} -> ${choice}`,
+    )
   }
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join('\n')
 }
@@ -834,7 +851,7 @@ export const register: Register = (on) => {
         delete next[change]
         return next
       })
-      return { result: done.text }
+      return { result: capLines(done.text) }
     }
     const reason = failedText(['accept', change], done.text)
     await update($, acceptMemoryAtom, (m) => ({
@@ -921,7 +938,7 @@ export const register: Register = (on) => {
     if (change !== undefined && (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change))) {
       return { result: 'rvow: change must be a CHG- id' }
     }
-    const result = await ask($, change)
+    const result = await ask($, change, true)
     await refresh($)
     return { result }
   })
@@ -933,7 +950,7 @@ export const register: Register = (on) => {
     const input = e as Record<string, unknown>
     const change = typeof input.change === 'string' ? input.change : ''
     const model = typeof input.model === 'string' ? input.model : ''
-    const { text } = await judgeRun($, [change, model].filter(Boolean).join(' '))
+    const { text } = await judgeRun($, [change, model].filter(Boolean).join(' '), true)
     return { result: text }
   })
 

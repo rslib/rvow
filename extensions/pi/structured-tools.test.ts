@@ -601,3 +601,14 @@ test("a changed plan after a failure asks again", async () => {
   await yoloCall(value, { change: "CHG-m4" }, { hasUI: true, answer: true, asked });
   assert.equal(asked.length, 2);
 });
+
+test("rvow_accept caps a long accept result for the model", async () => {
+  const value = tool("rvow_accept", async (args) => ({
+    code: 0,
+    out: args[0] === "review" ? "the checklist\n" : "x".repeat(10_000),
+  }));
+  const done = await yoloCall(value, { change: "CHG-a1" }, { hasUI: true, answer: true });
+  const [first] = done.content;
+  assert.ok(first && first.type === "text" && first.text.length < 4_500);
+  assert.match(JSON.stringify(done.content), /output truncated/);
+});

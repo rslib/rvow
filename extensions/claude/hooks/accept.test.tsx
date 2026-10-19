@@ -41,6 +41,17 @@ test('rvow_accept runs accept once as a plain run', async ($, on) => {
   expect(out).toContain('next: TSK-1 go')
 })
 
+test('a long accept output reaches the agent cut to 40 lines with the next line kept', async ($, on) => {
+  const body = Array.from({ length: 80 }, (_, i) => `detail line ${i + 1}`).join('\n')
+  fake(on, 'Accept', (line) =>
+    line.startsWith('review') ? [0, 'the checklist\n'] : [0, `${body}\nnext: TSK-1 go\n`],
+  )
+  const out = JSON.stringify(await $.tool.call(call(ACCEPT, { change: 'CHG-a1' })))
+  expect(out).toContain('earlier lines cut')
+  expect(out).not.toContain('detail line 1\\n')
+  expect(out).toContain('next: TSK-1 go')
+})
+
 test('a failed accept still tells the agent why', async ($, on) => {
   fake(on, 'Accept', (line) => {
     return line.startsWith('review')

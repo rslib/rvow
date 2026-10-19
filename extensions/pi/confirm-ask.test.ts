@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,7 +18,7 @@ writeFileSync(
 echo "$*" >> "$RVOW_FAKE/argv.log"
 case "$1" in
   confirm) if [ "$#" -eq 1 ] || [ "$2" = "--full" ]; then cat "$RVOW_FAKE/list.txt"; else echo "$2: decided"; fi ;;
-  clarify) echo '{"questions":[],"remaining":0}' ;;
+  clarify) if [ -f "$RVOW_FAKE/clarify.json" ]; then cat "$RVOW_FAKE/clarify.json"; else echo '{"questions":[],"remaining":0}'; fi ;;
   *) ;;
 esac
 `,
@@ -132,6 +132,43 @@ test("ask without a change runs clarify as before", async () => {
   clear();
   await call("rvow_ask", {});
   assert.deepEqual(argv(), ["clarify --json"]);
+});
+
+test("ask cuts long questions and options for the model, not for the dialog", async () => {
+  const long = "q".repeat(500);
+  const option = "o".repeat(500);
+  writeFileSync(
+    join(dir, "clarify.json"),
+    JSON.stringify({
+      questions: [{ ref: "Q1", question: long, options: [{ label: "yes", description: option }] }],
+      remaining: 0,
+    }),
+  );
+  const titles: string[] = [];
+  const value = tools.get("rvow_ask");
+  assert.ok(value);
+  const ctx = (hasUI: boolean) =>
+    ({
+      cwd: dir,
+      hasUI,
+      ui: {
+        select: async (title: string, keys: string[]) => {
+          titles.push(title);
+          return keys[0];
+        },
+      },
+    }) as unknown as Parameters<typeof value.execute>[4];
+  const run = (hasUI: boolean) =>
+    value.execute("call", {}, new AbortController().signal, undefined, ctx(hasUI));
+  const dialog = JSON.stringify((await run(true)).content);
+  const chat = JSON.stringify((await run(false)).content);
+  rmSync(join(dir, "clarify.json"));
+  assert.equal(titles[0], long);
+  assert.ok(dialog.includes(`${"q".repeat(200)}...`));
+  assert.ok(!dialog.includes("q".repeat(201)));
+  assert.ok(chat.includes(`${"q".repeat(200)}...`));
+  assert.ok(chat.includes(`${"o".repeat(200)}...`));
+  assert.ok(!chat.includes("o".repeat(201)));
 });
 
 test("confirm with no input runs the plain short listing", async () => {

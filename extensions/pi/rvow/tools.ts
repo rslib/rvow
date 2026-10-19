@@ -61,6 +61,11 @@ export function run(
 }
 
 /** The wait for `rvow accept`, which runs no verify command. */
+/** Cut text bound for the model at `max` chars, ending in `...`. */
+export function cut(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}...`;
+}
+
 export const ACCEPT_MS = 600_000;
 
 /** The most checklist lines the accept dialog shows before it cuts the rest. */

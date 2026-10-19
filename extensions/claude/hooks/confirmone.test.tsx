@@ -79,3 +79,21 @@ test('ask without a change runs clarify as before', async ($, on) => {
   await $.tool.call(call(ASK, {}))
   expect(ran).toContain('clarify --json')
 })
+
+test('ask cuts long question and answer text for the model, not in the dialog', async ($, on) => {
+  const question = `Q${'q'.repeat(300)}`
+  const label = `L${'l'.repeat(300)}`
+  const round = {
+    questions: [
+      { ref: 'CHG-b:p.md:1', question, header: 'h', options: [{ label, description: '' }] },
+    ],
+    remaining: 0,
+  }
+  const { asked } = fake(on, [label], () => [0, JSON.stringify(round)])
+  const out = JSON.stringify(await $.tool.call(call(ASK, {})))
+  expect(asked[0]).toContain(question)
+  expect(out).toContain(`${question.slice(0, 197)}...`)
+  expect(out).not.toContain(question.slice(0, 198))
+  expect(out).toContain(`${label.slice(0, 197)}...`)
+  expect(out).not.toContain(label.slice(0, 198))
+})

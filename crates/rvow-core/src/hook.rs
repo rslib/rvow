@@ -612,9 +612,21 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
         format!(
             "{rel} is outside the files of {task}, the task leased to this agent; edit only {files}, or run rvow block {task} --reason \"...\" if the task needs it",
             task = lease.task,
-            files = lease.files.join(", ")
+            files = lease_files_text(&lease.files)
         ),
     ))
+}
+
+const MAX_LEASE_FILES: usize = 5;
+
+/// The leased globs for a deny text: at most `MAX_LEASE_FILES`, then a count.
+fn lease_files_text(files: &[String]) -> String {
+    let more = files.len().saturating_sub(MAX_LEASE_FILES);
+    let mut shown = files[..files.len() - more].join(", ");
+    if more > 0 {
+        shown.push_str(&format!(" and {more} more"));
+    }
+    shown
 }
 
 /// Why a subagent that holds a lease must not run this `rvow prove`: it proves
@@ -1272,6 +1284,13 @@ mod tests {
 
     fn items(n: usize) -> Vec<String> {
         (1..=n).map(|i| format!("f{i}")).collect()
+    }
+
+    #[test]
+    fn lease_deny_lists_five_files_and_counts_the_rest() {
+        let files: Vec<String> = (0..8).map(|i| format!("f{i}.rs")).collect();
+        assert_eq!(lease_files_text(&files), "f0.rs, f1.rs, f2.rs, f3.rs, f4.rs and 3 more");
+        assert_eq!(lease_files_text(&files[..2]), "f0.rs, f1.rs");
     }
 
     #[test]

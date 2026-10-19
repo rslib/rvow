@@ -187,3 +187,36 @@ test("outside the judge session the judge command and tool are registered", asyn
   };
   assert.match(out.content[0]?.text ?? "", /returns 42 for the tested input/);
 });
+
+test("a long finding message is cut for the model but recorded in full", async () => {
+  const message = "m".repeat(500);
+  const fake = setup(
+    judgeEvents(JSON.stringify({ packet: PACKET, findings: [{ message, severity: "error" }] })),
+  );
+  const { text } = await judgeRun(home, { forModel: true });
+  assert.ok(text.includes(`${"m".repeat(300)}...`));
+  assert.ok(!text.includes("m".repeat(301)));
+  assert.match(readFileSync(join(fake, "record.in"), "utf8"), /m{500}/);
+});
+
+test("the person reads a long finding message in full", async () => {
+  const message = "m".repeat(500);
+  setup(
+    judgeEvents(JSON.stringify({ packet: PACKET, findings: [{ message, severity: "error" }] })),
+  );
+  const { text } = await judgeRun(home, {});
+  assert.ok(text.includes("m".repeat(500)));
+});
+
+test("a judge failure is cut to 12 lines for the model", async () => {
+  const errorMessage = Array.from({ length: 30 }, (_, i) => `failure line ${i + 1}`).join("\n");
+  setup([
+    {
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage },
+    },
+  ]);
+  const { text } = await judgeRun(home, {});
+  assert.equal(text.split("\n").length, 12);
+  assert.match(text, /failure line 12$/);
+});

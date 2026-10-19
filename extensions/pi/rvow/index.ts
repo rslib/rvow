@@ -50,6 +50,7 @@ import {
   type AcceptMemoryStore,
   BIN,
   createAcceptMemory,
+  cut,
   FAST_MS,
   GATE_MS,
   run,
@@ -141,9 +142,15 @@ type Ask = { ref: string; question: string; header?: string; options: Option[] }
 const OTHER = "Other (type your own answer)";
 const EDIT_HINT = "Edit the text each answer changes.";
 
+const ASK_CAP = 200;
+
 function asked(a: Ask): string {
-  const opts = a.options.map((o) => `  - ${o.label}${o.description ? `: ${o.description}` : ""}`);
-  return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${a.question}`, ...opts].join("\n");
+  const opts = a.options.map(
+    (o) => `  - ${cut(o.label, ASK_CAP)}${o.description ? `: ${cut(o.description, ASK_CAP)}` : ""}`,
+  );
+  return [`${a.ref} ${a.header ? `[${a.header}] ` : ""}${cut(a.question, ASK_CAP)}`, ...opts].join(
+    "\n",
+  );
 }
 
 async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
@@ -182,7 +189,7 @@ async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
     const a = await run(["answer", q.ref, choice, "--via", "dialog"], ctx.cwd, "", SLOW_MS);
     if (a?.code !== 0)
       return [...done, `cannot record ${q.ref}; still open: ${open(i).join(", ")}`].join("\n");
-    done.push(`${q.ref} ${q.question} -> ${choice}`);
+    done.push(`${q.ref} ${cut(q.question, ASK_CAP)} -> ${choice}`);
   }
   return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join("\n");
 }
@@ -1408,6 +1415,7 @@ export default function (pi: ExtensionAPI) {
       const { text } = await judgeRun(ctx.cwd, {
         ...(change ? { change } : {}),
         ...(model ? { model } : {}),
+        forModel: true,
       });
       await refresh(ctx);
       return { content: [{ type: "text", text }], details: {} };

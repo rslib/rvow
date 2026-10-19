@@ -1,10 +1,16 @@
-const FAILED_LINES = 12;
+export const FAILED_LINES = 12;
+
+export function failedLines(out: string): string[] {
+  return out
+    .split("\n")
+    .filter((l) => l.trim())
+    .slice(0, FAILED_LINES);
+}
 
 export function failedPrompt(argv: string[], out: string): string {
-  const lines = out.split("\n").filter((l) => l.trim());
   return [
     `I tried \`rvow ${argv.join(" ")}\` and it failed:`,
-    ...lines.slice(0, FAILED_LINES),
+    ...failedLines(out),
     "Fix what it names first. If nothing changed, do not ask me to run it again.",
   ].join("\n");
 }
