@@ -18,8 +18,12 @@ use super::rule::{Denial, Rule, denial};
 use crate::store::IDS_FILE;
 
 const SEPARATORS: &[char] = &[';', '&', '|', '(', ')', '`', '\n'];
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 const INTERPRETERS: &[&str] = &["python", "python3", "node", "perl", "ruby", "php", "deno", "bun"];
+/// Programs whose first argument is a program text, such as awk's `BEGIN{system(...)}`.
+const AWKS: &[&str] = &["awk", "gawk", "mawk", "nawk"];
+/// The names of git: `rgit` takes git's commands and flags.
+const GITS: &[&str] = &["git", "rgit"];
 const WRAPPERS: &[&str] = &[
     "env",
     "xargs",
@@ -331,7 +335,10 @@ fn inline_code(inv: &[String]) -> Option<String> {
     if !is_shell(name) {
         return None;
     }
-    let at = inv.iter().position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))?;
+    if let Some(code) = inv.iter().find_map(|w| w.strip_prefix("--command=")) {
+        return Some(code.to_string());
+    }
+    let at = inv.iter().position(|w| (w.starts_with('-') && !w.starts_with("--") && w.contains('c')) || w == "--command")?;
     inv.get(at + 1).cloned()
 }
 
@@ -403,7 +410,7 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
             .iter()
             .any(|w| matches!(w.as_str(), "accept" | "confirm"))
             .then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") });
-    } else if is_interpreter(name) {
+    } else if is_interpreter(name) || AWKS.contains(&name) {
         return inv[1..].iter().any(|w| mentions_accept(w)).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") });
     } else {
         return None;
@@ -470,13 +477,36 @@ fn git_subcommand(args: &[String]) -> Option<(&str, &[String])> {
     None
 }
 
+/// A `-c alias.<name>=<value>` whose value runs a shell (`!...`) or skips the hooks.
+fn alias_skips_hooks(args: &[String]) -> bool {
+    args.windows(2).filter(|p| p[0] == "-c").any(|p| {
+        let Some((key, value)) = p[1].split_once('=') else {
+            return false;
+        };
+        if !key.to_lowercase().starts_with("alias.") {
+            return false;
+        }
+        let value = value.trim();
+        let words: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+        value.starts_with('!')
+            || words.iter().any(|w| w.starts_with("--no-v") && "--no-verify".starts_with(w.as_str()))
+            || git_subcommand(&words).is_some_and(|(sub, rest)| sub == "commit" && commit_skips_hooks(rest))
+    })
+}
+
 fn git_denial(inv: &[String]) -> Option<Denial> {
-    if base_name(&inv[0]) != "git" {
+    if !GITS.contains(&base_name(&inv[0])) {
         return None;
     }
     let args = &inv[1..];
     if args.iter().any(|w| w.starts_with("--no-v") && "--no-verify".starts_with(w.as_str())) {
         return denial(Rule::GitHooks, "--no-verify skips the hooks that check the plan; run git commit and git push without it".into());
+    }
+    if alias_skips_hooks(args) {
+        return denial(
+            Rule::GitHooks,
+            "a `-c alias` that runs a shell or skips the hooks hides what git runs; write the git command out in full".into(),
+        );
     }
     let (sub, rest) = git_subcommand(args)?;
     (sub == "commit" && commit_skips_hooks(rest)).then(|| Denial {
@@ -1102,6 +1132,22 @@ fn is_writer(inv: &[String]) -> bool {
         && (name != "sed" || inv[1..].iter().any(|w| w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && w.contains('i'))))
 }
 
+/// The files that `cmd` names as write targets: its redirect targets and the
+/// file arguments of a writer such as `cp`, `tee` or `sed -i`. An interpreter
+/// is a writer only through a redirect, since its arguments name the script it
+/// reads; a word in a commit message or a flag value is no target.
+pub(super) fn written_paths(cmd: &str) -> Vec<String> {
+    let sh = parse(cmd, 0, &HashMap::new());
+    let mut out = redirect_targets(cmd);
+    for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
+        let name = base_name(&inv[0]);
+        if (is_writer(inv) && !is_interpreter(name)) || name == "touch" {
+            out.extend(inv[1..].iter().filter(|w| !w.starts_with('-') && !w.contains('=')).cloned());
+        }
+    }
+    out
+}
+
 /// A command that changes files: a writer such as `rm` or `sed -i`, or a redirect to a file.
 fn writes_files(invs: &[&[String]], cmd: &str) -> bool {
     !redirect_targets(cmd).is_empty() || invs.iter().any(|inv| is_writer(inv))
@@ -1114,7 +1160,7 @@ fn writes_to(invs: &[&[String]], cmd: &str, hit: impl Fn(&str) -> bool) -> bool 
 
 /// A `git` call that sets or removes `core.hooksPath`; reading it is fine.
 fn sets_hooks_path(inv: &[String]) -> bool {
-    if base_name(&inv[0]) != "git" {
+    if !GITS.contains(&base_name(&inv[0])) {
         return false;
     }
     let args = &inv[1..];

@@ -35,6 +35,8 @@ pub enum Rule {
     Store,
     /// The first source edit of a task whose baseline the first prove has not recorded yet.
     BaselineFirst,
+    /// Work on a change whose accept or confirm in this session the harness did not see the user make.
+    UnseenAccept,
 }
 
 /// What a rule does when it fires.
@@ -80,7 +82,7 @@ impl Rule {
         )
     }
 
-    pub const ALL: [Rule; 16] = [
+    pub const ALL: [Rule; 17] = [
         Rule::OwnerCommand,
         Rule::GitHooks,
         Rule::Ledger,
@@ -97,6 +99,7 @@ impl Rule {
         Rule::History,
         Rule::Store,
         Rule::BaselineFirst,
+        Rule::UnseenAccept,
     ];
 
     pub fn name(self) -> &'static str {
@@ -117,6 +120,7 @@ impl Rule {
             Rule::History => "history",
             Rule::Store => "store",
             Rule::BaselineFirst => "baseline-first",
+            Rule::UnseenAccept => "unseen-accept",
         }
     }
 }

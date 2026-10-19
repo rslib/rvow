@@ -48,11 +48,15 @@ import { refreshLoop } from "./refresh.ts";
 import {
   ACCEPT_MS,
   type AcceptMemoryStore,
+  amendmentChanges,
   BIN,
   createAcceptMemory,
+  createUserMade,
   cut,
   FAST_MS,
   GATE_MS,
+  recordChanges,
+  recordYolo,
   run,
   SLOW_MS,
   shortReview,
@@ -121,6 +125,8 @@ function normalize(out: HookOutput | undefined): View | undefined {
 }
 
 const CLAUDE_NAMES: Record<string, string> = { bash: "Bash", edit: "Edit", write: "Write" };
+// Tools that cannot write: a failed pre-tool-use hook still lets these through.
+const READ_ONLY = new Set(["read", "grep", "find", "ls", "rvow_view"]);
 
 async function brief(
   cwd: string,
@@ -262,6 +268,10 @@ export default function (pi: ExtensionAPI) {
   let resend = false;
   let continues = 0;
   let offShown = false;
+  // Why the last pre-tool-use call failed, until a later call works.
+  let hookFailed: string | undefined;
+  // What the user did in this session; the agent's own tool calls never add to it.
+  const userMade = createUserMade();
   // Fail-open stays: a broken rvow never locks the agent out, but the user is told once per session.
   const enforcementOff = (ctx: ExtensionContext) => (why: string) => {
     if (offShown) return;
@@ -311,7 +321,14 @@ export default function (pi: ExtensionAPI) {
     );
     if (!ctx.hasUI || generation !== epoch) return;
     dockRedraw();
-    ctx.ui.setStatus("rvow", typeof status?.status === "string" ? status.status : undefined);
+    ctx.ui.setStatus(
+      "rvow",
+      hookFailed
+        ? `rvow hook failed: ${hookFailed}`
+        : typeof status?.status === "string"
+          ? status.status
+          : undefined,
+    );
     const line = v && band(v);
     ctx.ui.setWidget(
       "rvow",
@@ -974,46 +991,80 @@ export default function (pi: ExtensionAPI) {
     else if (typeof out?.reason === "string" && ctx.hasUI) ctx.ui.notify(out.reason, "warning");
   });
 
-  pi.on("tool_call", async (event, ctx) => {
-    const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
-    if (typeof input.path === "string" && input.file_path === undefined)
-      input.file_path = input.path;
-    const name = CLAUDE_NAMES[event.toolName] ?? event.toolName;
+  // The hook's verdict on one call: the reason to block it, or undefined to allow it. A hook that fails
+  // blocks a tool that can write, and lets a read-only one through, until a later call works.
+  async function gate(
+    ctx: ExtensionContext,
+    toolName: string,
+    input: Record<string, unknown>,
+    toolUseId?: string,
+  ): Promise<string | undefined> {
+    let failed: string | undefined;
     const out = (
       await hook(
         "pre-tool-use",
         ctx.cwd,
         {
-          tool_name: name,
+          tool_name: CLAUDE_NAMES[toolName] ?? toolName,
           tool_input: input,
           session_id: ctx.sessionManager?.getSessionId?.(),
           agent_id: leaseAgent,
-          tool_use_id: event.toolCallId,
+          tool_use_id: toolUseId,
+          user_made: userMade,
         },
         FAST_MS,
         false,
         undefined,
-        enforcementOff(ctx),
+        (why) => {
+          failed = why;
+        },
       )
     )?.hookSpecificOutput;
+    if (failed !== undefined) {
+      const first = hookFailed === undefined;
+      hookFailed = failed;
+      if (ctx.hasUI) {
+        ctx.ui.setStatus("rvow", `rvow hook failed: ${failed}`);
+        if (first) ctx.ui.notify(`rvow hook failed: ${failed}`, "warning");
+      }
+      if (READ_ONLY.has(toolName)) return undefined;
+      return `rvow: the hook failed, so tools that write stay denied until it works: ${failed}. If rvow itself is broken, run \`rvow install\` again`;
+    }
+    if (hookFailed !== undefined) {
+      hookFailed = undefined;
+      if (ctx.hasUI) ctx.ui.setStatus("rvow", undefined);
+    }
     const reason = String(out?.permissionDecisionReason ?? "rvow: denied");
-    if (out?.permissionDecision === "deny") return { block: true, reason };
+    if (out?.permissionDecision === "deny") return reason;
     // After repeated denials rvow asks the user once; without a person to ask, the call stays denied.
     if (out?.permissionDecision === "ask") {
       const allowed = ctx.hasUI && (await ctx.ui.confirm("rvow", reason).catch(() => false));
-      if (!allowed) return { block: true, reason };
+      if (!allowed) return reason;
     }
+    return undefined;
+  }
+
+  pi.on("tool_call", async (event, ctx) => {
+    const input: Record<string, unknown> = { ...(event.input as Record<string, unknown>) };
+    if (typeof input.path === "string" && input.file_path === undefined)
+      input.file_path = input.path;
+    const reason = await gate(ctx, event.toolName, input, event.toolCallId);
+    if (reason !== undefined) return { block: true, reason };
   });
 
   // These handlers only update the status line, so pi never waits for a slow rvow.
   pi.on("session_start", (_event, ctx) => {
     if (!toolsRegistered) {
-      acceptMemory = registerTypedTools(pi);
+      acceptMemory = registerTypedTools(pi, run, {
+        made: userMade,
+        guard: (ctx, command) => gate(ctx, "bash", { command }),
+      });
       toolsRegistered = true;
     }
     epoch++;
     continues = 0;
     offShown = false;
+    hookFailed = undefined;
     if (ctx.hasUI && dockKey().invalid) ctx.ui.notify(dockKey().invalid ?? "", "warning");
     background.abort();
     background = new AbortController();
@@ -1207,8 +1258,10 @@ export default function (pi: ExtensionAPI) {
       const accept = await ctx.ui.confirm(`rvow ${id}`, `${list.out.trim()}\n\nAccept ${id}?`);
       const verb = accept ? "accept" : "reject";
       const r = await run(["confirm", id, `--${verb}`], ctx.cwd, "", SLOW_MS);
-      if (r?.code === 0) decided[verb].push(id);
-      else if (r)
+      if (r?.code === 0) {
+        decided[verb].push(id);
+        if (accept) recordChanges(userMade, amendmentChanges(list.out, [id]));
+      } else if (r)
         pi.sendUserMessage(failedPrompt(["confirm", id, `--${verb}`], r.out), {
           deliverAs: "followUp",
         });
@@ -1304,6 +1357,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function acceptPlan(ctx: ExtensionContext, id: string) {
+    // The user typed the accept of a change that is already accepted: it is the approval of an accept
+    // the hook did not see, so record it and ask nothing.
+    await refresh(ctx);
+    if (S.view?.changes.some((c) => c.id === id)) {
+      recordChanges(userMade, [id]);
+      ctx.ui.notify(`${id} is already accepted; your approval is recorded.`, "info");
+      return;
+    }
     const r = await rvow(ctx, ["review", id]);
     if (!r) return;
     if (r.code !== 0) {
@@ -1316,7 +1377,9 @@ export default function (pi: ExtensionAPI) {
     const repeat = acceptMemory.remembered(id, r.out) !== null;
     if (!(await ctx.ui.confirm(`rvow ${id}`, `${shortReview(r.out, id).trim()}\n\nAccept ${id}?`)))
       return;
-    return decide(ctx, ["accept", id], ACCEPT_MS, !repeat);
+    const done = await decide(ctx, ["accept", id], ACCEPT_MS, !repeat);
+    if (done?.code === 0) recordChanges(userMade, [id]);
+    return done;
   }
 
   userCommand(
@@ -1349,7 +1412,9 @@ export default function (pi: ExtensionAPI) {
       } catch (error) {
         return ctx.ui.notify(`${(error as Error).message}; try /rvow-yolo auto 30m`, "info");
       }
-      await decide(ctx, argv);
+      const at = Date.now();
+      const done = await decide(ctx, argv);
+      if (done?.code === 0 && tier && tier !== "off") recordYolo(userMade, tier, at, length);
     },
   );
 
@@ -1376,6 +1441,7 @@ export default function (pi: ExtensionAPI) {
         if (done) ctx.ui.notify(done.out.trim(), "error");
         return;
       }
+      recordChanges(userMade, [arg]);
     }
     await decide(ctx, ["archive", arg], GATE_MS);
   });

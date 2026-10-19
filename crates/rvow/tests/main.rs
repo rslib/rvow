@@ -90,8 +90,20 @@ mod fix_strings;
 mod fix_text;
 #[path = "suite/flaky_tree.rs"]
 mod flaky_tree;
+#[path = "suite/gate_failure.rs"]
+mod gate_failure;
+#[path = "suite/gate_lock.rs"]
+mod gate_lock;
+#[path = "suite/gate_shells.rs"]
+mod gate_shells;
 #[path = "suite/gate_speed.rs"]
 mod gate_speed;
+#[path = "suite/gate_tools.rs"]
+mod gate_tools;
+#[path = "suite/gate_unseen.rs"]
+mod gate_unseen;
+#[path = "suite/gate_writes.rs"]
+mod gate_writes;
 #[path = "suite/git_bin.rs"]
 mod git_bin;
 #[path = "suite/hook_stats.rs"]

@@ -32,6 +32,7 @@ function setup(mode: string) {
   const handlers = new Map<string, Handler>();
   const shortcuts: string[] = [];
   const notes: { text: string; level: unknown }[] = [];
+  const status: (string | undefined)[] = [];
   extension({
     on: (name: string, h: Handler) => handlers.set(name, h),
     registerCommand: () => {},
@@ -48,12 +49,12 @@ function setup(mode: string) {
     sessionManager: { getEntries: () => [] },
     ui: {
       notify: (text: string, level: unknown) => void notes.push({ text, level }),
-      setStatus: () => {},
+      setStatus: (_key: string, text?: string) => void status.push(text),
       setWidget: () => {},
     },
   };
   const fire = (name: string, event: unknown) => handlers.get(name)?.(event, ctx);
-  return { fire, shortcuts, notes };
+  return { fire, shortcuts, notes, status };
 }
 
 const edit = { toolName: "edit", input: { path: "a.ts" } };
@@ -71,19 +72,49 @@ test("an invalid RVOW_FOCUS_SHORTCUT falls back to alt+r with a notice and the e
   assert.equal(await t.fire("tool_call", edit), undefined);
 });
 
+const read = { toolName: "read", input: { path: "a.ts" } };
+const failed = (notes: { text: string; level: unknown }[]) =>
+  notes.filter((n) => n.text.startsWith("rvow hook failed"));
+const closedReason =
+  /^rvow: the hook failed, so tools that write stay denied until it works: .+\. If rvow itself is broken, run `rvow install` again$/;
+
 for (const mode of ["crash", "badjson"]) {
-  test(`tool_call allows and says once per session that rvow is off (${mode})`, async () => {
+  test(`tool_call blocks a writing tool, allows a read and warns once (${mode})`, async () => {
     const t = setup(mode);
     await t.fire("session_start", {});
-    assert.equal(await t.fire("tool_call", edit), undefined);
-    assert.equal(await t.fire("tool_call", edit), undefined);
-    assert.equal(off(t.notes).length, 1);
-    assert.equal(off(t.notes)[0]?.level, "warning");
+    for (const _ of [1, 2]) {
+      const blocked = (await t.fire("tool_call", edit)) as { block: boolean; reason: string };
+      assert.equal(blocked.block, true);
+      assert.match(blocked.reason, closedReason);
+    }
+    assert.equal(await t.fire("tool_call", read), undefined);
+    assert.equal(failed(t.notes).length, 1);
+    assert.equal(failed(t.notes)[0]?.level, "warning");
+    assert.equal(off(t.notes).length, 0);
+    assert.match(t.status.at(-1) ?? "", /^rvow hook failed: /);
     await t.fire("session_start", {});
     await t.fire("tool_call", edit);
-    assert.equal(off(t.notes).length, 2);
+    assert.equal(failed(t.notes).length, 2);
   });
 }
+
+test("a hook that works again lifts the block and the warning", async () => {
+  const t = setup("crash");
+  await t.fire("session_start", {});
+  assert.ok(await t.fire("tool_call", edit));
+  writeFileSync(join(dir, "mode"), "ok");
+  assert.equal(await t.fire("tool_call", edit), undefined);
+  assert.equal(t.status.at(-1), undefined);
+});
+
+test("a hook that passes its time limit blocks a writing tool and allows a read", async () => {
+  const t = setup("hang");
+  await t.fire("session_start", {});
+  const blocked = (await t.fire("tool_call", edit)) as { block: boolean; reason: string };
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, closedReason);
+  assert.equal(await t.fire("tool_call", read), undefined);
+});
 
 test("a healthy rvow that prints nothing allows without a notice", async () => {
   const t = setup("ok");
