@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock } from 'claude-code/testing'
 import { ARCHIVE, archiveAmendments } from './format'
-import { cmd, procResult, test } from './testkit'
+import { cmd, procResult, spawnHook, test } from './testkit'
 
 const amd = (id: string, change: string, cls: string) =>
   `${id} for ${change}\n  ${cls}: edit of ${id}\n  reason (from the agent): why\n`
@@ -36,6 +36,10 @@ function fake(on: On, answer: string, pending: number, lists: string[]) {
     }
     if (line.startsWith('confirm ')) return { value: procResult(0, 'accepted\n') }
     return { value: procResult(0, 'archived CHG-a1\n') }
+  })
+  on('process.spawn', async function* (_$, e) {
+    ran.push([...e.argv].slice(1).join(' '))
+    return yield* spawnHook(() => [0, 'archived CHG-a1\n'])(_$, e)
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
     const question = e.questions[0]?.question ?? ''

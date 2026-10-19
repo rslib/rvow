@@ -200,6 +200,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the archive tool and `/rvow-archive` of the Claude mod failing with "no tool.call hook answered this call" when `rvow archive` runs longer than 10 minutes.
+  The mod now waits for the archive with no time limit and returns its last 40 lines to the agent.
 - Fix a proof that could run base commit code: the base commit baseline in the warm worktree now builds into its own cargo build folder, so it no longer overwrites the test binaries of your checkout when every cargo run shares one build folder.
 - Fix the first `rvow prove` of a task refusing a good red when another active change on the branch had proved its work in a shared file: that work no longer counts as the task's own.
 - Fix a chained verify such as `cargo test a && cargo test b` passing when the filter of one cargo run matched no test: a cargo run that ran 0 tests now makes the whole run count 0 tests.

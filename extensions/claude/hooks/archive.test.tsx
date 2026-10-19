@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { expect } from 'claude-code/testing'
-import { cmd, PLACED, pane, procResult, test } from './testkit'
+import { cmd, PLACED, pane, procResult, spawnHook, test } from './testkit'
 
 const PANE = pane()
 const NONE = { amendments: 0, questions: 0, blocked: 0, plans: 0 }
@@ -35,6 +35,10 @@ async function seed($: Engine, on: On, state: string): Promise<string[]> {
     calls.push(rest)
     const stdout = rest === 'hook claude view' ? JSON.stringify(view(state)) : ''
     return { value: procResult(0, stdout) }
+  })
+  on('process.spawn', async function* (_$, e) {
+    calls.push([...e.argv].slice(1).join(' '))
+    return yield* spawnHook(() => [0, ''])(_$, e)
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
     const question = e.questions[0]?.question ?? ''

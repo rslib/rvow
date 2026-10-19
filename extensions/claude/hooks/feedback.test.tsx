@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { expect, mock } from 'claude-code/testing'
-import { cmd, procResult, test } from './testkit'
+import { cmd, procResult, spawnHook, test } from './testkit'
 
 let clock: { advance: (ms: number) => Promise<void> }
 
@@ -20,6 +20,10 @@ function fake(on: On, exitCode: number, stdout: string, withView = false) {
     if (withView && line === 'hook claude view') return { value: procResult(0, PROVED) }
     return { value: procResult(exitCode, stdout) }
   })
+  on(
+    'process.spawn',
+    spawnHook(() => [exitCode, stdout]),
+  )
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
     const question = e.questions[0]?.question ?? ''
     return { result: { questions: e.questions, answers: { [question]: 'Archive' } } }

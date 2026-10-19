@@ -1,7 +1,15 @@
 import type { On } from 'claude-code'
 import { expect } from 'claude-code/testing'
-import { ACCEPT, ARCHIVE, archiveBlockers, CONFIRM, failedText, joinDecisions } from './format'
-import { procResult, test } from './testkit'
+import {
+  ACCEPT,
+  ARCHIVE,
+  archiveBlockers,
+  CONFIRM,
+  capLines,
+  failedText,
+  joinDecisions,
+} from './format'
+import { procResult, spawnHook, test } from './testkit'
 
 const LIST = 'AMD-a1 weaken T1 verify changed\ndigest abc123\n'
 
@@ -17,6 +25,11 @@ function fake(on: On, answer: string, reply: (line: string) => [number, string])
     ran.push(line)
     const [code, out] = reply(line)
     return { value: procResult(code, out) }
+  })
+  on('process.spawn', async function* (_$, e) {
+    const line = [...e.argv].slice(1).join(' ')
+    ran.push(line)
+    return yield* spawnHook(reply)(_$, e)
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
     const question = e.questions[0]?.question ?? ''
@@ -140,6 +153,33 @@ test('rvow_archive asks only when every task is proved, and archives on a yes', 
   expect(asked[0]).toContain('Every task of CHG-a1 is proved')
   expect(ran.filter((l) => l.startsWith('archive'))).toEqual(['archive CHG-a1'])
   expect(out).toContain('archived CHG-a1')
+})
+
+test('archive output that arrives through spawn reaches the tool result, capped', async ($, on) => {
+  const long = Array.from({ length: 45 }, (_, i) => `line ${i}`).join('\n')
+  const { ran } = fake(on, 'Archive', (line) =>
+    line === 'archive CHG-a1' ? [0, long] : lines(line, ['proved']),
+  )
+  const out = JSON.stringify(await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' })))
+  expect(ran).toContain('archive CHG-a1')
+  expect(out).toContain('(5 earlier lines cut)')
+  expect(out).toContain('line 44')
+  expect(out).not.toContain('line 4\\n')
+})
+
+test('a process.run that rejects gives a failure result, not a dropped hook', async ($, on) => {
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('process.run', async () => {
+    throw new Error('still running after 600000 ms')
+  })
+  const out = JSON.stringify(await $.tool.call(call(CONFIRM, {})))
+  expect(out).toContain('cannot run')
+})
+
+test('capLines keeps the last lines and counts the cut ones', () => {
+  expect(capLines('a\nb', 3)).toBe('a\nb')
+  expect(capLines('a\nb\nc\nd\ne', 3)).toBe('(2 earlier lines cut)\nc\nd\ne')
 })
 
 test('rvow_archive asks the user when a task is stale and archives on a yes', async ($, on) => {

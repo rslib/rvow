@@ -21,6 +21,7 @@ import {
   CONFIRM,
   CONFIRM_DESCRIPTION,
   CONFIRM_SCHEMA,
+  capLines,
   cut,
   DRIFT,
   decisionPrompt,
@@ -210,11 +211,35 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
 
 /** Runs `rvow <argv>` for a tool and returns its words, so a failure reaches the agent in the tool result. */
 async function tellOut($: EngineInterface, argv: string[]) {
-  const cwd = await $.session.cwd()
-  const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
-  const out = ran.stdout.trim() || ran.stderr.trim()
-  await refresh($)
-  return { ok: ran.exitCode === 0, out }
+  try {
+    const cwd = await $.session.cwd()
+    const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
+    const out = ran.stdout.trim() || ran.stderr.trim()
+    await refresh($)
+    return { ok: ran.exitCode === 0, out }
+  } catch (err) {
+    return { ok: false, out: `cannot run ${BIN}: ${String(err)}` }
+  }
+}
+
+/** Like tellOut for a run that may outlast the ten minutes `process.run` allows, such as `rvow archive`. */
+async function tellLong($: EngineInterface, argv: string[]) {
+  try {
+    const cwd = await $.session.cwd()
+    const child = $.process.spawn({ argv: [BIN, ...argv], cwd })
+    let stdout = ''
+    let stderr = ''
+    let next = await child.next()
+    while (!next.done) {
+      if (next.value.stream === 'stdout') stdout += next.value.text
+      else stderr += next.value.text
+      next = await child.next()
+    }
+    await refresh($)
+    return { ok: next.value.code === 0, out: stdout.trim() || stderr.trim() }
+  } catch (err) {
+    return { ok: false, out: `cannot run ${BIN}: ${String(err)}` }
+  }
 }
 
 async function waiting($: EngineInterface) {
@@ -231,9 +256,14 @@ function list(ps: { id: string; title: string }[]) {
 /** A pane press: runs rvow, keeps the outcome's short form as the notice, then refreshes. */
 async function act($: EngineInterface, argv: string[]) {
   await update($, noticeAtom, () => ({ tone: 'busy', text: `running rvow ${argv.join(' ')}` }))
-  const r = await rvow($, argv)
+  const r = argv[0] === 'archive' ? await longNotice($, argv) : await rvow($, argv)
   await settle($, r)
   tellAgentOfFailure($, argv, r)
+}
+
+async function longNotice($: EngineInterface, argv: string[]): Promise<RvowNotice> {
+  const r = await tellLong($, argv)
+  return { tone: r.ok ? 'ok' : 'fail', text: r.out || 'no output' }
 }
 
 /** A decision that failed is not silent for the agent: it is told what failed and why. */
@@ -489,9 +519,9 @@ async function archiveFlow(
       if (!accepted.ok) return { text: failedText(argv, accepted.out) }
     }
   }
-  const done = await tellOut($, ['archive', change])
+  const done = await tellLong($, ['archive', change])
   if (!done.ok) return { text: failedText(['archive', change], done.out), failed: true }
-  return { text: done.out, archived: true }
+  return { text: capLines(done.out), archived: true }
 }
 
 async function userOnly(

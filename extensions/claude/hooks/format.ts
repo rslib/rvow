@@ -382,6 +382,13 @@ export function failedText(argv: string[], out: string): string {
     .join('\n')}`
 }
 
+/** The last `max` lines of a long output, led by a line that counts the lines cut. */
+export function capLines(out: string, max = 40): string {
+  const lines = out.split('\n')
+  if (lines.length <= max) return out
+  return [`(${lines.length - max} earlier lines cut)`, ...lines.slice(-max)].join('\n')
+}
+
 /** What each yolo tier changes, as the user reads it in the dialog and the model reads it in the tool text. */
 export const YOLO_TIERS = {
   audit: 'edits go through before the plan is accepted or outside a task, and are only counted',
