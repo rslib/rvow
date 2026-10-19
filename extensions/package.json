@@ -22,5 +22,8 @@
     "@types/node": "26.6.4",
     "typescript": "7.0.2"
   },
-  "claudeCodeTypes": "2.1.291"
+  "claudeCodeTypes": "2.1.291",
+  "engines": {
+    "node": ">=22.19.0"
+  }
 }

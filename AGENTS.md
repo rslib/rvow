@@ -25,14 +25,14 @@ npm --prefix extensions run check        # all of the below, in this order
 npm --prefix extensions run drift        # installed pi and claude versions match the pinned types
 npm --prefix extensions run lint         # biome
 npm --prefix extensions run typecheck:pi
-npm --prefix extensions run test:pi      # node --test, needs Node 22.18 or newer
+npm --prefix extensions run test:pi      # node --test, needs Node 22.19.0 or newer
 npm --prefix extensions run typecheck:claude
 npm --prefix extensions run validate:claude
 npm --prefix extensions run test:claude  # the whole suite, there is no filter
 
 ```
 
-The claude steps skip with exit 0 when the `claude` CLI is missing, so a skip proves nothing.
+The claude steps skip with exit 0 when the `claude` CLI is missing, except in CI, which installs the pinned CLI and fails without it. The type check also needs the types that only a logged-in load writes, so in CI it runs only when the `ANTHROPIC_API_KEY` secret is set.
 `.github/scripts/quickstart.sh` runs the README quickstart and `.github/scripts/install.sh` runs `rvow install`, each against the `rvow` on `PATH`, in a throwaway repository and home.
 `.github/scripts/build-musl.sh <target> <out-dir>` builds the static Linux binary in docker, as CI and the release do; set `RUSTFLAGS="-D warnings"` to match CI.
 A release is `cargo release <level> --execute`, run by the owner only: it dates `## [Unreleased]` in `CHANGELOG.md` and pushes the `v*` tag, and `.github/workflows/release.yml` publishes the binaries with that version block as the notes.

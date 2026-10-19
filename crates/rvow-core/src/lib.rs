@@ -1,3 +1,8 @@
+// The file locks, process groups and permission checks are written for Unix, and
+// CI tests only these two, so a build elsewhere would skip checks without a word.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("rvow supports only macOS and Linux; Windows and the other platforms are not supported");
+
 pub mod amend;
 pub mod archive;
 pub mod attest;

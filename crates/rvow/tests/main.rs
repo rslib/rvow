@@ -18,6 +18,8 @@ mod attest;
 mod audit_build;
 #[path = "suite/audit_ci.rs"]
 mod audit_ci;
+#[path = "suite/audit_claude_ci.rs"]
+mod audit_claude_ci;
 #[path = "suite/audit_context.rs"]
 mod audit_context;
 #[path = "suite/audit_docs.rs"]
@@ -28,6 +30,8 @@ mod audit_evals;
 mod audit_gate;
 #[path = "suite/audit_hardening.rs"]
 mod audit_hardening;
+#[path = "suite/audit_hook_ci.rs"]
+mod audit_hook_ci;
 #[path = "suite/audit_import.rs"]
 mod audit_import;
 #[path = "suite/audit_integration.rs"]
@@ -38,6 +42,8 @@ mod audit_integrity;
 mod audit_modules;
 #[path = "suite/audit_nextest.rs"]
 mod audit_nextest;
+#[path = "suite/audit_paths.rs"]
+mod audit_paths;
 #[path = "suite/audit_pi_dock.rs"]
 mod audit_pi_dock;
 #[path = "suite/audit_pi_tools.rs"]

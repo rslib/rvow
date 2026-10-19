@@ -385,7 +385,7 @@ The evals check that an agent with the mod follows the loop, instead of trusting
 Each case under `evals/agent/cases/` holds a prompt, a setup script and graders.
 `evals/agent/run.sh` runs every case with the mod and with no mod on haiku by default.
 The runner installs the mod with the built binary into a throwaway home, so your store and your Claude folder stay untouched, and writes the report to `evals/agent/results/`.
-The offline test in `crates/rvow/tests/audit_evals.rs` runs each setup with no model and checks the scaffold it leaves behind.
+The offline test in `crates/rvow/tests/suite/audit_evals.rs` runs each setup with no model and checks the scaffold it leaves behind.
 Run one case live with `evals/agent/run.sh haiku --case <name> --runs 1` before you trust a new grader.
 
 ## Trigger evals
@@ -394,7 +394,7 @@ The trigger evals check that the skill loads when it must and stays quiet when i
 Each case under `evals/triggers/cases/` holds a prompt and a `fires.md` grader on the Skill tool.
 `evals/triggers/run.sh` renders the skill with the built binary, builds a plugin that holds that skill and no hooks, and runs the cases on haiku by default with no baseline arm, capped at $3.
 Results stay local under `evals/triggers/results/`.
-The offline test in `crates/rvow/tests/audit_triggers.rs` builds the plugin with no model and checks its shape.
+The offline test in `crates/rvow/tests/suite/audit_triggers.rs` builds the plugin with no model and checks its shape.
 Run one case live with `evals/triggers/run.sh haiku --case <name> --runs 1` before you trust a new grader.
 Change the skill description only from train failures, then check it on val.
 
