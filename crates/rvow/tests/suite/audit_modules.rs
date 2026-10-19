@@ -1,24 +1,19 @@
 use std::path::Path;
-use std::process::Command;
 
 use rvow_core::diag::Rule;
 use rvow_core::{hook, lint, spec};
 
+/// The archive regressions run in the rvow-core suite; this keeps them from
+/// being deleted or turned off.
 #[test]
 fn audit_modules_archive_runs_merge_and_lifecycle_regressions() {
-    let output = Command::new(env!("CARGO"))
-        .args(["test", "--locked", "-p", "rvow-core", "--lib", "archive::tests::"])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow-core/src/archive.rs")).unwrap();
     for test in [
         "archive_merges_every_op_in_place",
         "a_second_change_on_a_requirement_conflicts_until_rebased",
         "a_merge_that_would_not_validate_writes_nothing",
     ] {
-        assert!(stdout.contains(&format!("archive::tests::{test} ... ok")), "{stdout}");
+        assert!(source.contains(&format!("    #[test]\n    fn {test}() {{")), "archive.rs lost the test {test}");
     }
 }
 
@@ -66,4 +61,17 @@ fn audit_modules_shell_keeps_quotes_heredocs_and_denials() {
         hook::bash_denial("git push --no-verify").as_deref(),
         Some("--no-verify skips the hooks that check the plan; run git commit and git push without it")
     );
+}
+
+/// A nested cargo waits for the build lock of the run that started it, so
+/// one such test took 144 s in a full run.
+#[test]
+fn audit_modules_no_suite_test_starts_cargo() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/suite");
+    let nested = ["Command::new(env!(", "\"CARGO\"))"].concat();
+    for entry in std::fs::read_dir(&suite).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(!source.contains(&nested), "{} starts cargo", path.display());
+    }
 }

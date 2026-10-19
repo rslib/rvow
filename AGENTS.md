@@ -9,11 +9,14 @@ Rust, from the repository root (the toolchain is pinned in `rust-toolchain.toml`
 ```sh
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
-cargo test --locked <name>          # one test, by name substring; the integration tests are one binary, so there is no --test <file>
+cargo nextest run --locked                         # the suite; each test runs in its own process
+cargo nextest run --locked -E 'test(/^cli::/)'     # one integration test file: its module name is the file name
+cargo nextest run --locked <name>                  # tests whose name has <name> in it
 ```
 
-The pi audit tests call `npm --prefix extensions run typecheck:pi` and `test:pi:*`; they are `#[ignore]`, so a plain `cargo test --locked` skips them and CI runs `cargo test --all-targets --locked -- --include-ignored`. To run them, run `npm --prefix extensions ci` first and add `-- --include-ignored`.
+The runner is nextest (`cargo install cargo-nextest --locked`), set up in `.config/nextest.toml`: a test that sets an env var goes in its `serial` group, and `--profile fast` fails a test that runs past 15 s.
+`cargo test --locked` still passes; there every test that sets an env var holds `crate::env_lock::lock()`.
+The pi audit tests call `npm --prefix extensions run typecheck:pi` and `test:pi:*`; they are `#[ignore]`, so a plain run skips them and CI adds `--run-ignored all`. To run them, run `npm --prefix extensions ci` first and add `--run-ignored all`.
 
 Extensions, from the repository root (run `npm --prefix extensions ci` once):
 
@@ -33,7 +36,7 @@ The claude steps skip with exit 0 when the `claude` CLI is missing, so a skip pr
 `.github/scripts/quickstart.sh` runs the README quickstart and `.github/scripts/install.sh` runs `rvow install`, each against the `rvow` on `PATH`, in a throwaway repository and home.
 `.github/scripts/build-musl.sh <target> <out-dir>` builds the static Linux binary in docker, as CI and the release do; set `RUSTFLAGS="-D warnings"` to match CI.
 A release is `cargo release <level> --execute`, run by the owner only: it dates `## [Unreleased]` in `CHANGELOG.md` and pushes the `v*` tag, and `.github/workflows/release.yml` publishes the binaries with that version block as the notes.
-`prek run` runs the commit checks on staged files only; `prek run --hook-stage pre-push --all-files` runs the push checks (clippy, `cargo test`, `test:pi`, `test:claude`).
+`prek run` runs the commit checks on staged files only; `prek run --hook-stage pre-push --all-files` runs the push checks (clippy, `cargo nextest run`, `test:pi`, `test:claude`).
 CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 
 Agent evals (needs the `claude` CLI and a built binary):
@@ -92,7 +95,7 @@ Update this section in the change that moves an area.
 ## Tests and proof
 
 - A bug fix adds a test that fails without the fix.
-- The integration tests build as one binary, `crates/rvow/tests/main.rs`, with one `#[path]` module per file in `crates/rvow/tests/suite/`. A new test file needs a `mod` entry there. Tests in the binary share one process, so a test that sets an env var holds a lock.
+- The integration tests build as one binary, `crates/rvow/tests/main.rs`, with one `#[path]` module per file in `crates/rvow/tests/suite/`. A new test file needs a `mod` entry there. A test that sets an env var holds `crate::env_lock::lock()` and its module joins the `serial` group in `.config/nextest.toml`; `audit_nextest` fails when either is missing.
 - CLI behavior tests live in `crates/rvow/tests/suite/cli.rs`. They run in temporary git repositories, so the git hook must not leak `GIT_*` variables into them (see `.pre-commit-config.yaml`).
 - The native pi codemode proof is skipped unless `RVOW_NATIVE_SDK` is set. From `extensions/`, with a built binary: `RVOW_NATIVE_SDK=$PWD/node_modules/@earendil-works/pi-coding-agent RVOW_NATIVE_BIN=<repo>/target/debug/rvow node --test pi/native-codemode.test.ts`.
 - A change under `extensions/claude` is proven by `npm --prefix extensions run typecheck:claude` and `npm --prefix extensions run test:claude` together.

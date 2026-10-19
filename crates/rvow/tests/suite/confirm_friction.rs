@@ -114,8 +114,6 @@ fn decided_rejected_names_the_rejection() {
     assert!(out.contains(&format!("{amd} is already rejected")), "{out}");
 }
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn hook_project(name: &str) -> (Repo, rvow_core::store::Project) {
     let r = Repo::new(name);
     let home = r.0.join("home");
@@ -141,7 +139,7 @@ fn ledger_store(r: &Repo) -> PathBuf {
 
 #[test]
 fn glob_read_grep_through_ledger_glob_is_allowed() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-allow");
     let store = ledger_store(&r);
     let cmd = format!("grep -c prove {}/active/CHG-a*/ledger.jsonl", store.display());
@@ -150,7 +148,7 @@ fn glob_read_grep_through_ledger_glob_is_allowed() {
 
 #[test]
 fn glob_read_write_through_ledger_glob_stays_denied() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-write");
     let store = ledger_store(&r);
     let cmd = format!("echo x >> {}/active/CHG-a*/ledger.jsonl", store.display());
@@ -160,7 +158,7 @@ fn glob_read_write_through_ledger_glob_stays_denied() {
 
 #[test]
 fn glob_read_hidden_checks_glob_stays_denied() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-secret");
     let home = r.0.join("rvowhome");
     std::fs::create_dir_all(home.join("hidden-checks")).unwrap();
@@ -178,7 +176,7 @@ fn glob_read_hidden_checks_glob_stays_denied() {
 
 #[test]
 fn glob_read_sort_output_through_glob_is_denied() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-sort");
     let store = ledger_store(&r);
     let cmd = format!("sort -o {}/active/CHG-a*/ledger.jsonl /dev/null", store.display());
@@ -188,7 +186,7 @@ fn glob_read_sort_output_through_glob_is_denied() {
 
 #[test]
 fn glob_read_uniq_output_through_glob_is_denied() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-uniq");
     let store = ledger_store(&r);
     let cmd = format!("uniq /dev/null {}/active/CHG-a*/ledger.jsonl", store.display());
@@ -198,7 +196,7 @@ fn glob_read_uniq_output_through_glob_is_denied() {
 
 #[test]
 fn glob_read_sort_output_literal_path_is_denied() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-sort-literal");
     let store = ledger_store(&r);
     let cmd = format!("sort -o {}/active/CHG-abcdef/ledger.jsonl /dev/null", store.display());
@@ -208,7 +206,7 @@ fn glob_read_sort_output_literal_path_is_denied() {
 
 #[test]
 fn glob_read_sort_abbrev_output_through_glob_is_denied() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-sort-abbrev");
     let store = ledger_store(&r);
     let cmd = format!("sort --out={}/active/CHG-a*/ledger.jsonl /dev/null", store.display());
@@ -218,7 +216,7 @@ fn glob_read_sort_abbrev_output_through_glob_is_denied() {
 
 #[test]
 fn glob_read_plain_sort_through_glob_stays_allowed() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::env_lock::lock();
     let (r, p) = hook_project("glob-read-sort-plain");
     let store = ledger_store(&r);
     let cmd = format!("sort {}/active/CHG-a*/ledger.jsonl", store.display());

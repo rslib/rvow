@@ -87,7 +87,10 @@ jobs:
           cache-dependency-path: extensions/package-lock.json
       - name: The pi audit tests shell out to tsc and node
         run: npm --prefix extensions ci
-      - run: cargo test --all-targets --locked -- --include-ignored
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo nextest run --locked --no-fail-fast --run-ignored all
 
   musl:
     name: Static build (${{ matrix.target }})
