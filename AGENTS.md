@@ -25,7 +25,7 @@ npm --prefix extensions run check        # all of the below, in this order
 npm --prefix extensions run drift        # installed pi and claude versions match the pinned types
 npm --prefix extensions run lint         # biome
 npm --prefix extensions run typecheck:pi
-npm --prefix extensions run test:pi      # node --test, needs Node 22.18 or newer
+npm --prefix extensions run test:pi      # node --test, needs Node 22.19.0 or newer
 npm --prefix extensions run typecheck:claude
 npm --prefix extensions run validate:claude
 npm --prefix extensions run test:claude  # the whole suite, there is no filter

@@ -42,6 +42,8 @@ mod audit_integrity;
 mod audit_modules;
 #[path = "suite/audit_nextest.rs"]
 mod audit_nextest;
+#[path = "suite/audit_paths.rs"]
+mod audit_paths;
 #[path = "suite/audit_pi_dock.rs"]
 mod audit_pi_dock;
 #[path = "suite/audit_pi_tools.rs"]
