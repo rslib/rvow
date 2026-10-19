@@ -14,6 +14,8 @@ cargo nextest run --locked -E 'test(/^cli::/)'     # one integration test file: 
 cargo nextest run --locked <name>                  # tests whose name has <name> in it
 ```
 
+After a change to the CLI flags or help text, run `cargo run -q -p rvow -- docs --out docs/reference`; the `docs_reference` test fails while `docs/reference` is stale.
+
 The runner is nextest (`cargo install cargo-nextest --locked`), set up in `.config/nextest.toml`: a test that sets an env var goes in its `serial` group, and `--profile fast` fails a test that runs past 15 s.
 `cargo test --locked` still passes; there every test that sets an env var holds `crate::env_lock::lock()`.
 The pi audit tests call `npm --prefix extensions run typecheck:pi` and `test:pi:*`; they are `#[ignore]`, so a plain run skips them and CI adds `--run-ignored all`. To run them, run `npm --prefix extensions ci` first and add `--run-ignored all`.
@@ -33,6 +35,15 @@ npm --prefix extensions run test:claude  # the whole suite, there is no filter
 ```
 
 The claude steps skip with exit 0 when the `claude` CLI is missing, except in CI, which installs the pinned CLI and fails without it. The type check also needs the types that only a logged-in load writes, so in CI it runs only when the `ANTHROPIC_API_KEY` secret is set.
+
+Docs site, from the repository root (run `npm --prefix site run setup` once; it fetches the theme at a pinned commit and runs `npm install`):
+
+```sh
+npm --prefix site run dev                      # sync the docs, then serve the site
+npm --prefix site run build                    # sync the docs, then build site/dist
+node site/scripts/check.mjs guides             # also: reference, workflow, theme
+```
+
 `.github/scripts/quickstart.sh` runs the README quickstart and `.github/scripts/install.sh` runs `rvow install`, each against the `rvow` on `PATH`, in a throwaway repository and home.
 `.github/scripts/build-musl.sh <target> <out-dir>` builds the static Linux binary in docker, as CI and the release do; set `RUSTFLAGS="-D warnings"` to match CI.
 A release is `cargo release <level> --execute`, run by the owner only: it dates `## [Unreleased]` in `CHANGELOG.md` and pushes the `v*` tag, and `.github/workflows/release.yml` publishes the binaries with that version block as the notes.
@@ -63,6 +74,7 @@ evals/triggers/run.sh                                  # the full suite, capped 
 | Agent skill | `skills/rvow/SKILL.md.tmpl` | Rendered by `crates/rvow/src/skill.rs` at install. Write each command as `{{cmd:<args>}}`; a command or flag the CLI lacks fails the render and `cargo test`. |
 | Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-core/src/install.rs`. |
 | pi extension | `extensions/pi/rvow/*.ts` (`extensions/pi/rvow.ts` only re-exports it) | `extensions/pi/rvow/index.ts` is `PI_EXTENSION`; every other file is in `PI_MODULES` of `crates/rvow-core/src/install.rs`. |
+| Docs site | `site/` | Built from `docs/*.md`, the README and `docs/reference`; never edit the generated folders. |
 | Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. Each case keeps its eval store inside its scaffold at `.git/rvow-eval/home`, where the agent can write it. |
 | Trigger evals | `evals/triggers/` | `evals/triggers/run.sh` renders the skill into a skill-only plugin in a throwaway home; each case holds `prompt.md` and `graders/fires.md`; results stay local. |
 

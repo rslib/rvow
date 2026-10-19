@@ -193,6 +193,13 @@ enum Cmd {
     /// Prove the stale tasks of each finished change again; the Stop hook starts it in the background.
     #[command(hide = true)]
     Reprove,
+    /// Write the command reference as Markdown pages, for the docs site.
+    #[command(hide = true)]
+    Docs {
+        /// The folder to write `commands/` into, such as docs/reference.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Show how often the hooks denied or blocked in the last days.
     Stats {
         /// How many days back to count.
@@ -471,6 +478,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Guide { artifact } => read::guide(artifact),
         Cmd::Ids { change } => plan::ids(change.as_deref()),
         Cmd::View => read::dashboard(),
+        Cmd::Docs { out } => cmd::docs::reference(Cli::command(), &out),
         Cmd::Brief => read::brief(),
         Cmd::Next => read::next(),
         Cmd::Hook { target, event } => {

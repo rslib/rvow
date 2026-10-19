@@ -90,6 +90,7 @@ It keeps a file that you edited and says so.
 - [docs/harnesses.md](docs/harnesses.md) gives the hook formats and how to wire a harness other than Claude Code or pi.
 - [docs/ci.md](docs/ci.md) covers portable verification in GitHub Actions and other CI with `rvow bundle --out`, `rvow gate --bundle` and `rvow ingest`.
 - [AGENTS.md](AGENTS.md) has the build and test commands for contributors.
+- The docs site at https://rslib.github.io/rvow has the guides and the command reference.
 
 ## License
 

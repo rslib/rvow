@@ -76,6 +76,8 @@ mod committed_tests;
 mod confirm_friction;
 #[path = "suite/diff_mutants.rs"]
 mod diff_mutants;
+#[path = "suite/docs_reference.rs"]
+mod docs_reference;
 #[path = "suite/done_scope.rs"]
 mod done_scope;
 #[path = "suite/drift_fixes.rs"]
