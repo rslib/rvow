@@ -50,6 +50,8 @@ mod audit_pi_dock;
 mod audit_pi_tools;
 #[path = "suite/audit_proof.rs"]
 mod audit_proof;
+#[path = "suite/audit_readable.rs"]
+mod audit_readable;
 #[path = "suite/audit_settings.rs"]
 mod audit_settings;
 #[path = "suite/audit_signing.rs"]
@@ -76,6 +78,8 @@ mod committed_tests;
 mod confirm_friction;
 #[path = "suite/diff_mutants.rs"]
 mod diff_mutants;
+#[path = "suite/docs_reference.rs"]
+mod docs_reference;
 #[path = "suite/done_scope.rs"]
 mod done_scope;
 #[path = "suite/drift_fixes.rs"]

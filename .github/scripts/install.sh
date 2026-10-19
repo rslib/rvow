@@ -24,5 +24,8 @@ test -x "$(git rev-parse --git-path hooks/pre-push)"
 rvow install --claude settings --human | grep -q 'up to date'
 
 rvow install --claude mod --human
-test -f "$RVOW_HOME/claude-plugin/.claude-plugin/marketplace.json"
-test -f "$RVOW_HOME/claude-plugin/plugins/rvow/skills/rvow/SKILL.md"
+# The mod goes to the data folder, not the rvow home, so a synced store holds no mod code.
+mod=$HOME/.local/share/rvow/claude-plugin
+test -f "$mod/.claude-plugin/marketplace.json"
+test -f "$mod/plugins/rvow/skills/rvow/SKILL.md"
+test ! -e "$RVOW_HOME/claude-plugin"

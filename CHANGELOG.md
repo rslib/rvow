@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- **Breaking:** Count an accept, confirm or yolo tier made during a Claude or pi session only when the mod or pi saw the user make it.
+  An accept the user did not make, such as one from a copy of the rvow binary, keeps every writing call denied until the user types `/rvow-accept <id>`, and a tier switched on with `! rvow yolo` during the session stays off, so type `/rvow-yolo <tier>` instead.
+- Make the Claude mod and pi deny the tools that write, with the error, when the hook cannot start, fails, prints text that is not JSON or times out, and let the reading tools run.
+  A repository with no rvow store and a folder outside git still allow every call.
+- Make a hook wait at most 5 s for the project lock, then deny a writing call as busy instead of waiting without limit.
+- Make a hook start fewer processes: it asks git for the top folder and the branch once per call, and the Claude mod and pi run no post-tool-use hook after a read.
+- Count the done or active changes of a parent branch in the gate of a stacked branch, so the parent's files are not outside every task.
+- Stop the build on a platform other than macOS and Linux with a message.
+
 - Re-prove the stale tasks of a finished change in the background when the agent's turn ends, so `rvow archive` usually finds them current.
   The Stop hook starts `rvow reprove` when every task of a change on the branch is proved or stale, writes its output to `hook-state/reprove.log` in the project folder, and `rvow archive` waits for a run that is still going.
 - Record no proof when the files of a task change while its check runs, and say to run `rvow prove` again.
@@ -104,6 +113,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow hook json <event>`, a neutral hook format for a harness other than Claude Code or pi, and `rvow hook codex <event>`, which answers Codex and turns an ask into a deny.
+  `docs/harnesses.md` gives both formats and how to wire a harness.
+- Add `rvow docs --out <dir>`, which writes the command reference from the CLI, and a docs site at https://rslib.github.io/rvow built from `docs/`, the README and that reference.
 - Warn with `shared-scope` in `rvow check` when two tasks of one change share a tracked file, naming both tasks and at most 3 files.
 - Add the hook rule `baseline-first`, which denies the first source edit of a baseline pending task once per session with a line that names `rvow prove <task>`, so the first prove records the red on the warm tree instead of a base commit build.
   A second try goes through, and any yolo tier turns the rule off.
@@ -206,6 +218,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix the hooks letting through `fish -c` and `ash -c` text, `rgit push --no-verify`, `rgit commit -n`, `git -c alias` and `-c core.hooksPath` tricks, awk programs that run an owner command, MCP calls with `no_verify` or `core.hooksPath` and the Monitor tool.
+- Fix shell writes such as `echo x > src/a.rs` and `sed -i` skipping the unaccepted-plan and lease rules that an Edit of the same file meets.
+- Fix pi's `rvow_prove` tool proving a task outside a subagent's lease.
+- Fix a failed lease bind in the Claude mod going unseen; the user and the agent now see why.
 - Fix the archive tool and `/rvow-archive` of the Claude mod failing with "no tool.call hook answered this call" when `rvow archive` runs longer than 10 minutes.
   The mod now waits for the archive with no time limit and returns its last 40 lines to the agent.
 - Fix a proof that could run base commit code: the base commit baseline in the warm worktree now builds into its own cargo build folder, so it no longer overwrites the test binaries of your checkout when every cargo run shares one build folder.

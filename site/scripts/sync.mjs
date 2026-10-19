@@ -1,0 +1,169 @@
+// Copies the single-source docs into the generated folders that Astro reads.
+// Run from `npm run build` and `npm run dev`. Generated folders are git-ignored.
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const site = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = join(site, '..');
+const base = '/rvow';
+const repoBlob = 'https://github.com/rslib/rvow/blob/trunk';
+
+const guidesOut = join(site, 'src/content/docs/guides');
+const generatedOut = join(site, 'src/generated');
+
+for (const dir of [guidesOut, generatedOut]) {
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+}
+
+// An extra docs folder lets the checks add a guide without touching docs/.
+const docsDirs = [join(root, 'docs')];
+if (process.env.RVOW_SITE_EXTRA_DOCS) docsDirs.push(process.env.RVOW_SITE_EXTRA_DOCS);
+
+function rewriteLinks(text) {
+  return text.replace(/\]\(([^)\s]+)\)/g, (match, target) => {
+    if (/^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) return match;
+    const [path, hash = ''] = target.split('#');
+    const suffix = hash ? `#${hash}` : '';
+    const guide = path.match(/^(?:\.\/)?([^/]+)\.md$/);
+    if (guide) return `](${base}/guides/${guide[1]}/${suffix})`;
+    const reference = path.match(/^(?:\.\/)?reference\/(.+?)(?:\/index)?\.md$/);
+    if (reference) return `](${base}/reference/${reference[1]}/${suffix})`;
+    if (path.startsWith('../')) return `](${repoBlob}/${path.slice(3)}${suffix})`;
+    return match;
+  });
+}
+
+// GitHub alert kinds and the Starlight callout each becomes, with a title where the kind has none.
+const ALERTS = {
+  NOTE: ':::note',
+  TIP: ':::tip',
+  IMPORTANT: ':::note[Important]',
+  WARNING: ':::caution',
+  CAUTION: ':::danger',
+};
+
+// Writes `<word>` outside inline code as text: the site reads a bare `<held>` as an HTML tag and drops it.
+function escapePlaceholders(line) {
+  return line
+    .split('`')
+    .map((part, i) => (i % 2 ? part : part.replace(/<([A-Za-z][^<>]*)>/g, '&lt;$1&gt;')))
+    .join('`');
+}
+
+// Turns each GitHub alert (`> [!NOTE]` and its `>` lines) into a Starlight callout and escapes the
+// placeholders, leaving code blocks as they are. The docs keep the alert form, since GitHub renders it too.
+function prose(text) {
+  const out = [];
+  let code = false;
+  let inAlert = false;
+  for (const line of text.split('\n')) {
+    if (line.trimStart().startsWith('```')) code = !code;
+    if (code || line.trimStart().startsWith('```')) {
+      out.push(line);
+      continue;
+    }
+    const alert = line.match(/^> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/);
+    if (alert) {
+      if (inAlert) out.push(':::', '');
+      out.push(ALERTS[alert[1]]);
+      inAlert = true;
+      continue;
+    }
+    if (inAlert && line.startsWith('>')) {
+      out.push(escapePlaceholders(line.replace(/^> ?/, '')));
+      continue;
+    }
+    if (inAlert) {
+      out.push(':::');
+      inAlert = false;
+    }
+    out.push(escapePlaceholders(line));
+  }
+  if (inAlert) out.push(':::');
+  return out.join('\n');
+}
+
+function quote(value) {
+  return JSON.stringify(value);
+}
+
+// Splits the first `# ` heading off a Markdown file.
+function splitTitle(text, file) {
+  const lines = text.split('\n');
+  const index = lines.findIndex((line) => line.startsWith('# '));
+  if (index < 0) throw new Error(`${file} has no "# " heading`);
+  const title = lines[index].slice(2).trim();
+  lines.splice(index, 1);
+  return { title, body: lines.join('\n').replace(/^\n+/, '') };
+}
+
+// How it works comes first, then the rest by name.
+const guideFirst = ['how-it-works.md'];
+const guides = [];
+for (const dir of docsDirs) {
+  for (const name of readdirSync(dir).filter((f) => f.endsWith('.md'))) guides.push({ dir, name });
+}
+guides.sort((a, b) => {
+  const rank = (g) => (guideFirst.includes(g.name) ? guideFirst.indexOf(g.name) : guideFirst.length);
+  return rank(a) - rank(b) || a.name.localeCompare(b.name);
+});
+guides.forEach(({ dir, name }, order) => {
+  const { title, body } = splitTitle(readFileSync(join(dir, name), 'utf8'), join(dir, name));
+  writeFileSync(
+    join(guidesOut, name),
+    `---\ntitle: ${quote(title)}\nsidebar:\n  order: ${order}\n---\n\n${prose(rewriteLinks(body))}`,
+  );
+});
+
+// Install and quickstart come from README sections so they cannot drift.
+const readme = readFileSync(join(root, 'README.md'), 'utf8');
+function section(name) {
+  const match = readme.match(new RegExp(`^## ${name}\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm'));
+  if (!match) throw new Error(`README.md has no "## ${name}" section`);
+  return match[1].trim() + '\n';
+}
+writeFileSync(join(generatedOut, 'install.md'), section('Install'));
+writeFileSync(join(generatedOut, 'quickstart.md'), section('Quickstart'));
+
+// The command reference is generated by `rvow docs --out docs/reference`.
+const referenceOut = join(site, 'src/content/docs/reference');
+rmSync(referenceOut, { recursive: true, force: true });
+mkdirSync(referenceOut, { recursive: true });
+
+// Links between generated pages are relative `.md` files; they become page slugs.
+function rewriteReferenceLinks(text, fromDir) {
+  return text.replace(/\]\(([^)\s]+)\)/g, (match, target) => {
+    if (/^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) return match;
+    const [path, hash = ''] = target.split('#');
+    if (!path.endsWith('.md')) return match;
+    const slug = posix.join(fromDir, path.slice(0, -3)).replace(/\/index$/, '');
+    return `](${base}/reference/${slug}/${hash ? `#${hash}` : ''})`;
+  });
+}
+
+function copyReference(dir, relDir = '') {
+  for (const entry of readdirSync(join(dir, relDir), { withFileTypes: true })) {
+    const rel = posix.join(relDir, entry.name);
+    if (entry.isDirectory()) {
+      mkdirSync(join(referenceOut, rel), { recursive: true });
+      copyReference(dir, rel);
+    } else if (entry.name.endsWith('.md')) {
+      const { title, body } = splitTitle(readFileSync(join(dir, rel), 'utf8'), join(dir, rel));
+      const inCommands = relDir === 'commands';
+      // The overview has its own sidebar entry, so the group skips it.
+      const label = !inCommands
+        ? ''
+        : entry.name === 'index.md'
+          ? 'sidebar:\n  hidden: true\n'
+          : `sidebar:\n  label: ${quote(entry.name.slice(0, -3))}\n`;
+      writeFileSync(
+        join(referenceOut, rel),
+        `---\ntitle: ${quote(title)}\n${label}---\n\n${rewriteReferenceLinks(body, relDir)}`,
+      );
+    }
+  }
+}
+// A missing docs/reference leaves an empty reference, so the guides check still builds.
+if (existsSync(join(root, 'docs/reference'))) copyReference(join(root, 'docs/reference'));

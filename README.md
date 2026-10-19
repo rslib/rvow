@@ -6,7 +6,8 @@ Status: early development, with no release yet.
 
 You and the agent agree on a plan, and `rvow accept` records it as the vow.
 The vow is the accepted plan with its hashes.
-The plan is the files; the change is the folder that holds them.
+The plan is the files, and the change is the folder that holds them.
+
 Checks that run outside the model then hold the agent to it.
 Each task stores its own verify command, and `rvow prove` runs exactly that command.
 Edits to the plan after accept show up as drift that the gate refuses until you confirm them.
@@ -14,7 +15,8 @@ Edits to the plan after accept show up as drift that the gate refuses until you 
 ## Install
 
 Install the binary from a clone of this repository.
-It needs Rust 1.98 or later and builds for macOS and Linux. Windows is not supported: the build stops with a message.
+It needs Rust 1.98 or later and builds for macOS and Linux.
+Windows is not supported, and the build stops with a message.
 
 ```sh
 cargo install --path crates/rvow --locked
@@ -90,6 +92,7 @@ It keeps a file that you edited and says so.
 - [docs/harnesses.md](docs/harnesses.md) gives the hook formats and how to wire a harness other than Claude Code or pi.
 - [docs/ci.md](docs/ci.md) covers portable verification in GitHub Actions and other CI with `rvow bundle --out`, `rvow gate --bundle` and `rvow ingest`.
 - [AGENTS.md](AGENTS.md) has the build and test commands for contributors.
+- The docs site at https://rslib.github.io/rvow has the guides and the command reference.
 
 ## License
 

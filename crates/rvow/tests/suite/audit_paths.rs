@@ -29,6 +29,26 @@ fn named_paths(text: &str) -> Vec<String> {
     out
 }
 
+fn path_ok(path: &str) -> bool {
+    path_ok_in(&root(), path)
+}
+
+/// Whether a path the docs name is real in the repository at `repo`: it exists, or git ignores
+/// it, as for a results folder that a local run makes and a clean checkout does not have. The
+/// path is also asked about as a folder, since a rule such as `results/` matches only a folder
+/// and git knows a missing path is one only from its trailing slash.
+fn path_ok_in(repo: &Path, path: &str) -> bool {
+    let ignored = |p: &str| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["check-ignore", "-q", "--no-index", "--", p])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    repo.join(path).exists() || ignored(path) || ignored(&format!("{path}/"))
+}
+
 #[test]
 fn docs_name_only_paths_that_exist() {
     let mut pages: Vec<String> = vec!["README.md".into(), "AGENTS.md".into()];
@@ -42,7 +62,7 @@ fn docs_name_only_paths_that_exist() {
     for page in &pages {
         for path in named_paths(&read(page)) {
             checked += 1;
-            if !root().join(&path).exists() {
+            if !path_ok(&path) {
                 missing.push(format!("{page}: {path}"));
             }
         }
@@ -90,4 +110,25 @@ fn platform_build_stops_outside_macos_and_linux() {
     );
     let readme = read("README.md");
     assert!(readme.contains("Windows is not supported"), "the README names the unsupported platform");
+}
+
+#[test]
+fn docs_paths_accept_an_ignored_path_and_refuse_a_missing_tracked_one() {
+    assert!(path_ok("evals/agent/results/never-made"), "a git-ignored path counts, also when a clean checkout lacks it");
+    assert!(!path_ok("crates/rvow/src/never_made.rs"), "a missing path that git would track fails");
+    assert!(path_ok("crates/rvow/src/main.rs"));
+}
+
+#[test]
+fn docs_paths_accept_a_folder_only_rule_when_the_folder_is_missing() {
+    let repo = std::env::temp_dir().join(format!("rvow-audit-paths-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).status().unwrap().success());
+    std::fs::write(repo.join(".gitignore"), "results/\n").unwrap();
+    let missing_folder = path_ok_in(&repo, "evals/results");
+    let missing_file = path_ok_in(&repo, "evals/kept.rs");
+    let _ = std::fs::remove_dir_all(&repo);
+    assert!(missing_folder, "a folder-only rule counts on a clean checkout, where the folder does not exist");
+    assert!(!missing_file, "a missing path that no rule ignores still fails");
 }
