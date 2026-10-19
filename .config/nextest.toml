@@ -1,0 +1,28 @@
+# The test runner: `cargo nextest run --locked`.
+#
+# nextest runs each test in its own process, so a test that sets an env var
+# or holds a file lock cannot reach another test. Docs: https://nexte.st/docs/configuration/
+
+[profile.default]
+slow-timeout = { period = "30s" }
+
+# For a task verify that must also prove the test is fast: a test that runs
+# past 15 s fails.
+[profile.fast]
+slow-timeout = { period = "15s", terminate-after = 1 }
+
+[test-groups]
+serial = { max-threads = 1 }
+
+# The modules that set a process env var. Under `cargo test` they share one
+# process and hold crate::env_lock; under nextest this group keeps them apart
+# from each other too.
+[[profile.default.overrides]]
+filter = """
+binary_id(rvow::main) and (
+    test(/^confirm_friction::/)
+  | test(/^syntax_drift::/)
+  | test(/^syntax_units::/)
+)
+"""
+test-group = "serial"

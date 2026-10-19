@@ -106,6 +106,20 @@ mod tests {
     use super::*;
     use crate::proof::tests::accepted;
 
+    /// Whether `ok` holds within 2 s. A child that another test thread forks
+    /// before its exec holds a copy of each open lock fd, so a lock frees only
+    /// after that child execs.
+    fn soon(mut ok: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !ok() {
+            if std::time::Instant::now() > end {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+
     #[test]
     fn one_slot_at_a_time_and_free_once_dropped() {
         let (_tmp, p, _repo, _task) = accepted();
@@ -114,10 +128,10 @@ mod tests {
         assert!(running(&p));
         assert!(claim(&p).unwrap().is_none(), "a second claim waits");
         drop(slot);
-        assert!(!running(&p));
+        assert!(soon(|| !running(&p)));
         let mut quiet = Vec::new();
         wait(&p, &mut quiet);
         assert!(quiet.is_empty(), "no run, no wait");
-        assert!(claim(&p).unwrap().is_some());
+        assert!(soon(|| claim(&p).unwrap().is_some()));
     }
 }
