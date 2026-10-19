@@ -68,7 +68,10 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Result<Session> {
-        Ok(Session { engine: wasmtime::Engine::default(), store: None, langs: BTreeMap::new(), parses: 0 })
+        let mut config = wasmtime::Config::new();
+        config.cranelift_opt_level(wasmtime::OptLevel::None);
+        let engine = wasmtime::Engine::new(&config).map_err(|e| Error::internal(format!("the grammar engine did not start: {e}")))?;
+        Ok(Session { engine, store: None, langs: BTreeMap::new(), parses: 0 })
     }
 
     /// How many texts this session parsed. Tests use it to prove a saved
