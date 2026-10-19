@@ -18,6 +18,8 @@ mod attest;
 mod audit_build;
 #[path = "suite/audit_ci.rs"]
 mod audit_ci;
+#[path = "suite/audit_claude_ci.rs"]
+mod audit_claude_ci;
 #[path = "suite/audit_context.rs"]
 mod audit_context;
 #[path = "suite/audit_docs.rs"]

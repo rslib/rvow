@@ -159,8 +159,13 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck:pi
       - run: npm run test:pi
-      # The Claude Code steps skip themselves when the claude CLI is missing, as it is here.
+      # The mod checks fail in CI without the claude CLI, so install the version the types are pinned to.
+      - name: Install the pinned Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@$(node -p "require('./package.json').claudeCodeTypes")"
       - run: npm run drift
+      # Only a logged-in load writes the mod's types; without the secret the type check says so and skips.
       - run: npm run typecheck:claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - run: npm run validate:claude
       - run: npm run test:claude

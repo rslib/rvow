@@ -1,5 +1,6 @@
-// Runs a Claude Code check on the mod, or skips with a message when the claude CLI is missing.
-// Claude Code writes the 'claude-code' types into .claude-plugin/types when it loads the mod.
+// Runs a Claude Code check on the mod. Without the claude CLI it skips with a message, and in CI
+// it fails, since CI installs the pinned CLI. Claude Code writes the 'claude-code' types into
+// .claude-plugin/types only when a logged-in session loads the mod.
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
@@ -10,6 +11,10 @@ const run = (cmd, args, opts = {}) =>
 try {
   execFileSync("claude", ["--version"], { stdio: "ignore" });
 } catch {
+  if (process.env.CI) {
+    console.error("claude CLI not found; CI installs it, so the Claude Code check fails");
+    process.exit(1);
+  }
   console.log("claude CLI not found, skipping the Claude Code check");
   process.exit(0);
 }
@@ -24,7 +29,10 @@ if (mode === "tsc") {
     run("claude", ["-p", "ok", "--model", "haiku", "--plugin-dir", mod], { stdio: "ignore" });
   }
   if (!existsSync(types)) {
-    console.log("Claude Code types unavailable, skipping the type check");
+    const why = process.env.ANTHROPIC_API_KEY
+      ? "the mod did not load"
+      : "loading the mod needs a login or ANTHROPIC_API_KEY";
+    console.log(`Claude Code types unavailable (${why}), skipping the type check`);
     process.exit(0);
   }
   process.exit(run("npx", ["tsc", "--noEmit", "-p", mod]));
