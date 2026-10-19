@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -154,6 +155,22 @@ fn done_counts(top: &Path, events: &[ledger::Event], mb: &str) -> bool {
     git::run(top, &["merge-base", "--is-ancestor", point, mb]).is_err()
 }
 
+/// Whether the work of a change of another branch is part of this stacked
+/// branch: the tip of that branch is an ancestor of HEAD and not an ancestor
+/// of the merge base `mb`. A branch with no tip does not count. `seen` holds
+/// the answer per branch, so each branch is resolved once.
+fn stacked_counts(top: &Path, other: &str, mb: &str, seen: &mut HashMap<String, bool>) -> bool {
+    if let Some(&known) = seen.get(other) {
+        return known;
+    }
+    let counts = git::branch_tip(top, other).is_some_and(|tip| {
+        git::run(top, &["merge-base", "--is-ancestor", &tip, "HEAD"]).is_ok()
+            && git::run(top, &["merge-base", "--is-ancestor", &tip, mb]).is_err()
+    });
+    seen.insert(other.to_string(), counts);
+    counts
+}
+
 pub(super) fn check_scope(
     project: &Project,
     top: &Path,
@@ -179,13 +196,16 @@ pub(super) fn check_scope(
     }
     let mut globs: Vec<String> = queue.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())).collect();
     let (all, _) = change::list(project)?;
-    for d in all.iter().filter(|d| d.stage == Stage::Done) {
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    for d in all.iter().filter(|d| matches!(d.stage, Stage::Done | Stage::Active)) {
         let loaded = change::load(&d.path, living)?;
-        if loaded.proposal.branch != branch {
-            continue;
-        }
-        let (events, _) = ledger::read(&d.path.join(LEDGER))?;
-        if done_counts(top, &events, &mb) {
+        let counts = if loaded.proposal.branch == branch {
+            // Active changes of this branch are the queue.
+            d.stage == Stage::Done && done_counts(top, &ledger::read(&d.path.join(LEDGER))?.0, &mb)
+        } else {
+            stacked_counts(top, &loaded.proposal.branch, &mb, &mut seen)
+        };
+        if counts {
             globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
         }
     }
@@ -218,9 +238,13 @@ pub(super) fn check_backlog_scope(
     let (all, _) = change::list(project)?;
     let mut waiting: Vec<String> = Vec::new();
     let mut done: Vec<&change::ChangeDir> = Vec::new();
+    let mut other: Vec<(&change::ChangeDir, String)> = Vec::new();
     for d in &all {
         let loaded = change::load(&d.path, living)?;
         if loaded.proposal.branch != branch {
+            if matches!(d.stage, Stage::Done | Stage::Active) {
+                other.push((d, loaded.proposal.branch));
+            }
             continue;
         }
         match d.stage {
@@ -244,6 +268,13 @@ pub(super) fn check_backlog_scope(
         let loaded = change::load(&d.path, living)?;
         let (events, _) = ledger::read(&d.path.join(LEDGER))?;
         if done_counts(top, &events, &mb) {
+            done_globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
+        }
+    }
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    for (d, other_branch) in other {
+        if stacked_counts(top, &other_branch, &mb, &mut seen) {
+            let loaded = change::load(&d.path, living)?;
             done_globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
         }
     }

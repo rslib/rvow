@@ -134,6 +134,8 @@ mod rerun_scope;
 mod script_finder;
 #[path = "suite/sealed_proofs.rs"]
 mod sealed_proofs;
+#[path = "suite/stacked_gate.rs"]
+mod stacked_gate;
 #[path = "suite/stop_scope.rs"]
 mod stop_scope;
 #[path = "suite/syntax_canonical.rs"]
