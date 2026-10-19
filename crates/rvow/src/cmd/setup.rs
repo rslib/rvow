@@ -56,20 +56,26 @@ pub fn rebind(commit_map: Option<&Path>) -> Result<Reply> {
 /// Hooks never fail the harness: outside an rvow project they print nothing.
 /// An internal error goes to stderr; before a tool call it also denies a tool
 /// that writes, so a broken store cannot turn the checks off. Reads go on.
+/// Every harness runs the Claude Code handlers: its call is read into
+/// Claude's names first, and the answer is put into its own shape last.
 pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     let mut text = String::new();
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).is_err() {
         return ExitCode::SUCCESS;
     }
-    let input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let mut input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    if matches!(harness, Harness::Json) {
+        neutral_input(&mut input);
+    }
     let run = || -> Result<Option<serde_json::Value>> {
         // Timed from here, so a hook's duration includes finding the project.
         let start = std::time::Instant::now();
         // Without a home or a working folder there is no store to find, so no project to check.
         let Ok(home) = store::home_dir() else { return Ok(None) };
         let Ok(cwd) = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).map_or_else(cwd, Ok) else { return Ok(None) };
-        if matches!((harness, event), (Harness::Claude, HookEvent::SessionStart)) {
-            let warnings = skill_warnings()?;
+        if matches!(event, HookEvent::SessionStart) {
+            // The skill and mod warnings are about Claude Code's and pi's files.
+            let warnings = if matches!(harness, Harness::Claude) { skill_warnings()? } else { Vec::new() };
             return match store::find(&cwd, &home) {
                 Ok(Some(p)) => {
                     let out = hooks::claude_session_start(Some(&p), &home, &input, &warnings);
@@ -87,41 +93,83 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
             Err(e) => return Err(e),
         };
         let (counted, out) = match (harness, event) {
-            (Harness::Claude, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
-            (Harness::Claude, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
-            (Harness::Claude, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
-            (Harness::Claude, HookEvent::Stop) => {
+            (_, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
+            (_, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
+            (_, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
+            (_, HookEvent::Stop) => {
                 let out = hooks::claude_stop(&p, &home, &input);
                 if matches!(out, Ok(None)) && input.get("agent_id").is_none() {
                     start_reprove(&p, &home, &cwd);
                 }
                 (Some(stats::Hook::Stop), out)
             }
-            (Harness::Claude, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
-            (Harness::Claude, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
-            (Harness::Claude, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
-            (Harness::Claude, HookEvent::Status) => {
-                (None, hooks::status_line(&p, &home, &cwd).map(|s| s.map(|s| serde_json::json!({ "status": s }))))
-            }
+            (_, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
+            (_, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
+            (_, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
+            (_, HookEvent::Status) => (None, hooks::status_line(&p, &home, &cwd).map(|s| s.map(|s| serde_json::json!({ "status": s })))),
         };
         if let Some(hook) = counted {
             count_duration(&p, hook, &input, start);
         }
         out
     };
-    match run() {
-        Ok(Some(out)) => println!("{out}"),
-        Ok(None) => {}
+    let out = match run() {
+        Ok(out) => out,
         Err(e) => {
             eprintln!("rvow hook: {}: {}", e.code, e.message);
-            if matches!((harness, event), (Harness::Claude, HookEvent::PreToolUse))
-                && let Some(out) = hooks::claude_pre_tool_use_failure(&input, &e)
-            {
-                println!("{out}");
-            }
+            if matches!(event, HookEvent::PreToolUse) { hooks::claude_pre_tool_use_failure(&input, &e) } else { None }
         }
+    };
+    if let Some(out) = answer(harness, event, out) {
+        println!("{out}");
     }
     ExitCode::SUCCESS
+}
+
+/// Reads a neutral call (`tool`, `input`) into the names the handlers read
+/// (`tool_name`, `tool_input`). A call that already has those names stays.
+fn neutral_input(input: &mut serde_json::Value) {
+    let Some(call) = input.as_object_mut() else { return };
+    for (from, to) in [("tool", "tool_name"), ("input", "tool_input")] {
+        if !call.contains_key(to)
+            && let Some(v) = call.get(from).cloned()
+        {
+            call.insert(to.to_string(), v);
+        }
+    }
+}
+
+/// The answer of a Claude Code handler in the shape `harness` reads.
+fn answer(harness: Harness, event: HookEvent, out: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let at = |v: &Option<serde_json::Value>, path: &str| v.as_ref().and_then(|v| v.pointer(path)).cloned();
+    match harness {
+        Harness::Claude => out,
+        // Codex cannot ask, so a question for the user is a denial with its reason.
+        Harness::Codex => out.map(|mut v| {
+            if let Some(d) = v.pointer_mut("/hookSpecificOutput/permissionDecision")
+                && d == "ask"
+            {
+                *d = json!("deny");
+            }
+            v
+        }),
+        Harness::Json => Some(match event {
+            HookEvent::PreToolUse => match at(&out, "/hookSpecificOutput/permissionDecision") {
+                Some(d) => json!({"decision": d, "reason": at(&out, "/hookSpecificOutput/permissionDecisionReason")}),
+                None => json!({"decision": "allow"}),
+            },
+            HookEvent::PostToolUse | HookEvent::SessionStart => match at(&out, "/hookSpecificOutput/additionalContext") {
+                Some(text) => json!({"context": text}),
+                None => json!({}),
+            },
+            HookEvent::Stop => match at(&out, "/decision") {
+                Some(d) => json!({"decision": d, "reason": at(&out, "/reason")}),
+                None => json!({}),
+            },
+            HookEvent::Status | HookEvent::View | HookEvent::LeaseBind | HookEvent::LeaseEnd => out.unwrap_or_else(|| json!({})),
+        }),
+    }
 }
 
 /// Starts `rvow reprove` detached when a finished change has stale tasks, so

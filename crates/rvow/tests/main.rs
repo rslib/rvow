@@ -106,6 +106,8 @@ mod gate_unseen;
 mod gate_writes;
 #[path = "suite/git_bin.rs"]
 mod git_bin;
+#[path = "suite/hook_json.rs"]
+mod hook_json;
 #[path = "suite/hook_stats.rs"]
 mod hook_stats;
 #[path = "suite/judge.rs"]
