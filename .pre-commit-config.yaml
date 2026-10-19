@@ -1,4 +1,7 @@
-# Run with prek (https://github.com/j178/prek); install the git hook once with `prek install`.
+# Run with prek (https://github.com/j178/prek); install the git hooks once with `prek install`, then
+# `rvow install`, so the rvow pre-push gate runs prek's pre-push hook first.
+# The slow checks run at push, not at each commit.
+default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: local
     hooks:
@@ -13,6 +16,7 @@ repos:
         entry: cargo clippy --all-targets -- -D warnings
         language: system
         pass_filenames: false
+        stages: [pre-push]
         always_run: true
       - id: cargo-test
         name: cargo test
@@ -21,6 +25,7 @@ repos:
         entry: env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE -u GIT_PREFIX -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES cargo test --quiet
         language: system
         pass_filenames: false
+        stages: [pre-push]
         always_run: true
       - id: ascii
         name: ASCII-only Rust source
@@ -56,6 +61,7 @@ repos:
         language: system
         files: ^extensions/
         pass_filenames: false
+        stages: [pre-push]
       - id: ext-tsc-claude
         name: tsc claude mod
         # Installs the npm deps once; the claude hooks skip (exit 0) when the claude CLI is missing.
@@ -77,3 +83,4 @@ repos:
         language: system
         files: ^extensions/
         pass_filenames: false
+        stages: [pre-push]
