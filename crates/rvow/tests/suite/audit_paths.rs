@@ -80,3 +80,14 @@ fn node_floor_agrees_with_the_docs_ci_and_the_lock_file() {
     }
     assert!(needs.is_empty(), "a dependency needs a newer Node than {declared}:\n{}", needs.join("\n"));
 }
+
+#[test]
+fn platform_build_stops_outside_macos_and_linux() {
+    let lib = read("crates/rvow-core/src/lib.rs");
+    assert!(
+        lib.contains("#[cfg(not(any(target_os = \"macos\", target_os = \"linux\")))]\ncompile_error!("),
+        "rvow-core stops the build on another platform"
+    );
+    let readme = read("README.md");
+    assert!(readme.contains("Windows is not supported"), "the README names the unsupported platform");
+}

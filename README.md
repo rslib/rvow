@@ -14,7 +14,7 @@ Edits to the plan after accept show up as drift that the gate refuses until you 
 ## Install
 
 Install the binary from a clone of this repository.
-It needs Rust 1.98 or later and builds for macOS and Linux.
+It needs Rust 1.98 or later and builds for macOS and Linux. Windows is not supported: the build stops with a message.
 
 ```sh
 cargo install --path crates/rvow --locked
