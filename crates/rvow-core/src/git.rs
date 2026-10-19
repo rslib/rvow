@@ -59,6 +59,14 @@ pub fn base_ref(top: &Path, base: &str) -> Option<String> {
     }
 }
 
+/// The tip commit of `branch`: the local branch, else `origin/<branch>`.
+/// `None` when neither exists.
+pub fn branch_tip(top: &Path, branch: &str) -> Option<String> {
+    [format!("refs/heads/{branch}"), format!("refs/remotes/origin/{branch}")]
+        .iter()
+        .find_map(|r| run(top, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).ok())
+}
+
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     run(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
