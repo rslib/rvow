@@ -63,6 +63,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).is_err() {
         return ExitCode::SUCCESS;
     }
+    git::remember_answers();
     let mut input: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
     if matches!(harness, Harness::Json) {
         neutral_input(&mut input);

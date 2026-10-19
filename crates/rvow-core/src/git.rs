@@ -67,8 +67,46 @@ pub fn branch_tip(top: &Path, branch: &str) -> Option<String> {
         .find_map(|r| run(top, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).ok())
 }
 
+/// A question to git whose answer `remember_answers` keeps.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Question {
+    Toplevel,
+    Branch,
+}
+
+type Answers = std::sync::Mutex<std::collections::HashMap<(PathBuf, Question), String>>;
+
+static ANSWERS: std::sync::OnceLock<Answers> = std::sync::OnceLock::new();
+
+/// Keeps the answers of `toplevel` and `branch` for the rest of the process.
+/// Only a hook turns it on: it runs for one tool call, and nothing moves HEAD
+/// meanwhile. A longer process could see a branch switch, so it never does.
+pub fn remember_answers() {
+    ANSWERS.get_or_init(Default::default);
+}
+
+fn answer(dir: &Path, question: Question, ask: impl FnOnce() -> Result<String>) -> Result<String> {
+    let Some(answers) = ANSWERS.get() else { return ask() };
+    let key = (dir.to_path_buf(), question);
+    if let Some(known) = answers.lock().ok().and_then(|a| a.get(&key).cloned()) {
+        return Ok(known);
+    }
+    let found = ask()?;
+    if let Ok(mut a) = answers.lock() {
+        a.insert(key, found.clone());
+    }
+    Ok(found)
+}
+
+/// Records the top folder of `dir` that another git call already printed.
+pub(crate) fn known_toplevel(dir: &Path, top: &Path) {
+    if let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) {
+        a.entry((dir.to_path_buf(), Question::Toplevel)).or_insert_with(|| top.display().to_string());
+    }
+}
+
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
-    run(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    answer(dir, Question::Toplevel, || run(dir, &["rev-parse", "--show-toplevel"])).map(PathBuf::from)
 }
 
 pub fn is_shallow(dir: &Path) -> Result<bool> {
@@ -94,7 +132,7 @@ pub fn origin_url(dir: &Path) -> Option<String> {
 
 /// The current branch, or `None` on a detached HEAD.
 pub fn branch(dir: &Path) -> Result<Option<String>> {
-    let name = run(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let name = answer(dir, Question::Branch, || run(dir, &["rev-parse", "--abbrev-ref", "HEAD"]))?;
     Ok((name != "HEAD").then_some(name))
 }
 

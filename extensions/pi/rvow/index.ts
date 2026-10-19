@@ -1135,6 +1135,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    // A read changes no blob, so its outcome is not reported: that skips one rvow start per read.
+    if (READ_ONLY.has(event.toolName)) return;
     // After the call returns, report its outcome so rvow records the blobs the
     // call changed, with the same call id that pre-tool-use carried.
     const out = await hook(

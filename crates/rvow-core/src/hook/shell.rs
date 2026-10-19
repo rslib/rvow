@@ -1135,16 +1135,29 @@ fn is_writer(inv: &[String]) -> bool {
 /// The files that `cmd` names as write targets: its redirect targets and the
 /// file arguments of a writer such as `cp`, `tee` or `sed -i`. An interpreter
 /// is a writer only through a redirect, since its arguments name the script it
-/// reads; a word in a commit message or a flag value is no target.
+/// reads; a word in a commit message or a flag value is no target. Heredoc
+/// text is data, and a target counts only once its variables are known: the
+/// ones the command sets and the ones in the process environment.
 pub(super) fn written_paths(cmd: &str) -> Vec<String> {
-    let sh = parse(cmd, 0, &HashMap::new());
-    let mut out = redirect_targets(cmd);
+    let text = without_heredocs(cmd);
+    let mut vars: HashMap<String, String> =
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    for seg in &tokenize(&text).commands {
+        for w in seg.iter().take_while(|w| is_assignment(w)) {
+            if let Some((name, value)) = w.split_once('=') {
+                vars.insert(name.to_string(), value.to_string());
+            }
+        }
+    }
+    let sh = parse(&text, 0, &vars);
+    let mut out: Vec<String> = redirect_targets(&text).iter().map(|t| expand_vars(t, &vars)).collect();
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
         if (is_writer(inv) && !is_interpreter(name)) || name == "touch" {
             out.extend(inv[1..].iter().filter(|w| !w.starts_with('-') && !w.contains('=')).cloned());
         }
     }
+    out.retain(|t| !t.contains('$'));
     out
 }
 
