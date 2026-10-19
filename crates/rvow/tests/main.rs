@@ -30,6 +30,8 @@ mod audit_evals;
 mod audit_gate;
 #[path = "suite/audit_hardening.rs"]
 mod audit_hardening;
+#[path = "suite/audit_hook_ci.rs"]
+mod audit_hook_ci;
 #[path = "suite/audit_import.rs"]
 mod audit_import;
 #[path = "suite/audit_integration.rs"]
