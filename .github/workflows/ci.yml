@@ -90,7 +90,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      - run: mkdir -p "$RUNNER_TEMP/tests"
       - run: cargo nextest run --locked --no-fail-fast --run-ignored all
+        env:
+          TMPDIR: ${{ runner.temp }}/tests/
+      - name: The tests left no temp files
+        run: sh .github/scripts/temp-left.sh "$RUNNER_TEMP/tests"
 
   musl:
     name: Static build (${{ matrix.target }})
@@ -163,7 +168,12 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck:pi
+      - run: mkdir -p "$RUNNER_TEMP/tests"
       - run: npm run test:pi
+        env:
+          TMPDIR: ${{ runner.temp }}/tests/
+      - name: The pi tests left no temp files
+        run: sh ../.github/scripts/temp-left.sh "$RUNNER_TEMP/tests"
       # The mod checks fail in CI without the claude CLI, so install the version the types are pinned to.
       - name: Install the pinned Claude Code
         run: npm install -g "@anthropic-ai/claude-code@$(node -p "require('./package.json').claudeCodeTypes")"

@@ -92,10 +92,9 @@ fn syntax_cli_unknown_language_is_refused() {
 
 #[test]
 fn syntax_cli_missing_download_is_refused_without_cache() {
-    let empty = std::env::temp_dir().join(format!("rvow-syntax-cli-empty-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&empty);
+    let empty = crate::temp::TempDir::new("syntax-cli-empty");
     let h = Home::new("offline");
-    let (out, code) = h.rvow(&["grammar", "fetch", "json", "--toon"], empty.to_str().unwrap());
+    let (out, code) = h.rvow(&["grammar", "fetch", "json", "--toon"], empty.path().to_str().unwrap());
     assert_eq!(code, 1);
     assert!(out.contains("grammar is missing"), "{out}");
     assert!(!h.cache("json").is_file());

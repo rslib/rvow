@@ -4,15 +4,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use rvow_core::{amend, change, config, drift, git, ledger, proof, registry, store, vow};
 use serde_json::{Map, Value, json};
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: store::Project,
@@ -39,11 +36,8 @@ const SPEC: &str = "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n
 
 /// An accepted change with one task, after `config` is written as the project config.
 fn setup(name: &str, config: &str) -> Setup {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("rvow-driftfix-{}-{n}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("driftfix-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -62,7 +56,7 @@ fn setup(name: &str, config: &str) -> Setup {
     std::fs::write(c.path.join("specs/out.md"), SPEC).unwrap();
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     vow::commit(&project, prepared).unwrap();
-    Setup { _tmp: tmp, home, repo, project }
+    Setup { _tmp: guard, home, repo, project }
 }
 
 fn active(s: &Setup) -> proof::Active {

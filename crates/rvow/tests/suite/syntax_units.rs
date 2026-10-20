@@ -19,7 +19,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: Project,
@@ -63,10 +63,8 @@ fn setup_with(name: &str, files: &[(&str, &str)]) -> Setup {
 /// Like `setup_with`, and `config` is written into the project config before
 /// the vow, so a test that names query files is not itself config drift.
 fn setup_cfg(name: &str, files: &[(&str, &str)], config: &str) -> Setup {
-    let tmp = std::env::temp_dir().join(format!("rvow-syntax-units-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("syntax-units-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -99,7 +97,7 @@ fn setup_cfg(name: &str, files: &[(&str, &str)], config: &str) -> Setup {
     .unwrap();
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     vow::commit(&project, prepared).unwrap();
-    Setup { _tmp: tmp, home, repo, project }
+    Setup { _tmp: guard, home, repo, project }
 }
 
 fn items(s: &Setup) -> Vec<(drift::Class, String)> {

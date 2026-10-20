@@ -1110,8 +1110,7 @@ pub(crate) mod tests {
         assert!(!r.proved, "0 tests run is not a proof");
         std::fs::write(&tasks, text).unwrap();
 
-        let flag = std::env::temp_dir().join(format!("rvow-flaky-{}-{}", std::process::id(), tmp.0.display().to_string().len()));
-        let _ = std::fs::remove_file(&flag);
+        let flag = tmp.0.join("flaky-flag");
         let flaky = format!("test -f {} && echo 'test result: ok. 1 passed; 0 failed;'", flag.display());
         let text = std::fs::read_to_string(&tasks).unwrap();
         let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
@@ -1120,7 +1119,6 @@ pub(crate) mod tests {
         std::fs::write(&flag, "go\n").unwrap();
         assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "flaky");
-        let _ = std::fs::remove_file(&flag);
     }
 
     /// The state of the only task when its change holds `events` instead of the ledger.

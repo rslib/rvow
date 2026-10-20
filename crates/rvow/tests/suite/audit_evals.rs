@@ -498,7 +498,7 @@ fn audit_evals_store_inside_scaffold() {
     // (`outside == true`, as run.sh sets it) or unset. Returns the scaffold
     // and the outside folder (missing when unset, so the leak check below
     // skips itself).
-    fn run_case_setup_with_rvow_home(setup: &Path, name: &str, outside: bool) -> (TempDir, PathBuf) {
+    fn run_case_setup_with_rvow_home(setup: &Path, name: &str, outside: bool) -> (TempDir, TempDir) {
         let stem = format!("rvow-audit-store-{}-{name}-{}", std::process::id(), if outside { "outside" } else { "nohome" });
         let dir = std::env::temp_dir().join(&stem);
         let _ = std::fs::remove_dir_all(&dir);
@@ -531,7 +531,7 @@ fn audit_evals_store_inside_scaffold() {
         }
         let status = cmd.status().unwrap();
         assert!(status.success(), "setup {} failed in {}", setup.display(), dir.display());
-        (TempDir(dir), outside_dir)
+        (TempDir(dir), TempDir(outside_dir))
     }
     // Runs rvow the way an agent session does: HOME inside the scaffold and
     // no RVOW_HOME, so the recorded pointer decides the home. The caller
@@ -594,7 +594,8 @@ fn audit_evals_store_inside_scaffold() {
             if !setup.is_file() {
                 continue;
             }
-            let (scaffold, outside_dir) = run_case_setup_with_rvow_home(&setup, &name, outside);
+            let (scaffold, outside) = run_case_setup_with_rvow_home(&setup, &name, outside);
+            let outside_dir = outside.0.clone();
             let dir = scaffold.0.clone();
             // The recorded rvow home is the pointer the setup leaves for an
             // agent session, which carries no RVOW_HOME of its own.

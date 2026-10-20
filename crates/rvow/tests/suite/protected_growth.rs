@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The item text a protected-file change gets when its grammar is not in
 /// the grammar cache: an empty temporary home keeps it deterministic.
@@ -15,10 +14,8 @@ fn grammar_hint(lang: &str) -> String {
 
 use rvow_core::{change, config, drift, git, proof, store, vow};
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: store::Project,
@@ -47,11 +44,8 @@ const RUST_ONE: &str = "#[test]\nfn one() {\n    assert!(true);\n}\n";
 /// An accepted change whose baseline snapshot holds a Rust test file, a shell
 /// test file and an infra file as protected files.
 fn setup(name: &str) -> Setup {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("rvow-growth-{n}-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("growth-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -72,7 +66,7 @@ fn setup(name: &str) -> Setup {
     std::fs::write(c.path.join("specs/out.md"), SPEC).unwrap();
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     vow::commit(&project, prepared).unwrap();
-    Setup { _tmp: tmp, home, repo, project }
+    Setup { _tmp: guard, home, repo, project }
 }
 
 fn drift_items(s: &Setup) -> Vec<(drift::Class, String)> {

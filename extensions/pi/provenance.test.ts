@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const dir = mkdtempSync(join(tmpdir(), "rvow-provenance-"));
+after(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "rvow");
 writeFileSync(
   bin,

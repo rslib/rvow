@@ -23,7 +23,7 @@ fn env_lock() -> MutexGuard<'static, ()> {
 }
 
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: Project,
@@ -48,10 +48,8 @@ fn git_cmd(repo: &Path, args: &[&str]) {
 /// An accepted change in a fresh repository. `.cargo/config.toml` is a
 /// protected infra file whose language has a pinned grammar.
 fn setup(name: &str) -> Setup {
-    let tmp = std::env::temp_dir().join(format!("rvow-syntax-drift-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("syntax-drift-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -77,7 +75,7 @@ fn setup(name: &str) -> Setup {
     .unwrap();
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     vow::commit(&project, prepared).unwrap();
-    Setup { _tmp: tmp, home, repo, project }
+    Setup { _tmp: guard, home, repo, project }
 }
 
 fn items(s: &Setup, _env: &MutexGuard<'static, ()>) -> Vec<(drift::Class, String)> {
@@ -106,16 +104,14 @@ fn prime_toml(home: &Path) {
     grammar::acquire(home, entry, Some(&fixtures())).unwrap();
 }
 
-fn saved_home(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rvow-saved-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+fn saved_home(name: &str) -> crate::temp::TempDir {
+    crate::temp::TempDir::new(&format!("saved-{name}"))
 }
 
 #[test]
 fn syntax_drift_saved_second_compare_does_not_parse() {
-    let home = saved_home("hit");
+    let saved = saved_home("hit");
+    let home = saved.path().to_path_buf();
     let entry = grammar::by_name("toml").unwrap();
     grammar::acquire(&home, entry, Some(&fixtures())).unwrap();
     let (before, after) = ("[t]\nk = 1\n", "[t]\nk = 2\n");
@@ -132,7 +128,8 @@ fn syntax_drift_saved_second_compare_does_not_parse() {
 
 #[test]
 fn syntax_drift_saved_corrupt_result_compares_again() {
-    let home = saved_home("corrupt-result");
+    let saved = saved_home("corrupt-result");
+    let home = saved.path().to_path_buf();
     let entry = grammar::by_name("toml").unwrap();
     grammar::acquire(&home, entry, Some(&fixtures())).unwrap();
     let (before, after) = ("[t]\nk = 1\n\n", "[t]\nk = 1\n");

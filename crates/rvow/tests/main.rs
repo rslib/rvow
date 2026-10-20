@@ -166,6 +166,8 @@ mod syntax_queries;
 mod syntax_units;
 #[path = "suite/tamper_holes.rs"]
 mod tamper_holes;
+#[path = "suite/temp.rs"]
+mod temp;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
 #[path = "suite/warm_target.rs"]

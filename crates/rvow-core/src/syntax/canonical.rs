@@ -317,11 +317,10 @@ mod tests {
         Entry { name: "json".to_string(), ext: vec![], url: "https://example.test/json.wasm".to_string(), sha256: "0".repeat(64) }
     }
 
-    fn home(name: &str) -> PathBuf {
-        let home = std::env::temp_dir().join(format!("rvow-canonical-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join("grammars")).unwrap();
-        home
+    fn home() -> crate::git::testrepo::TempDir {
+        let tmp = crate::git::testrepo::TempDir::new();
+        std::fs::create_dir_all(tmp.0.join("grammars")).unwrap();
+        tmp
     }
 
     fn aged(path: &Path, days: u64) {
@@ -332,7 +331,8 @@ mod tests {
 
     #[test]
     fn prune_removes_a_result_31_days_old_and_keeps_the_new_one() {
-        let home = home("prune-old");
+        let tmp = home();
+        let home = tmp.0.clone();
         let old = home.join("grammars/syntax-old");
         aged(&old, 31);
         write_result(&home, &entry(), "a", "b", Compare::Different);
@@ -342,7 +342,8 @@ mod tests {
 
     #[test]
     fn prune_keeps_a_result_29_days_old() {
-        let home = home("prune-recent");
+        let tmp = home();
+        let home = tmp.0.clone();
         let recent = home.join("grammars/syntax-recent");
         aged(&recent, 29);
         write_result(&home, &entry(), "a", "b", Compare::Different);
@@ -352,7 +353,8 @@ mod tests {
 
     #[test]
     fn prune_leaves_files_rvow_did_not_write() {
-        let home = home("prune-other");
+        let tmp = home();
+        let home = tmp.0.clone();
         let wasm = home.join("grammars/tree-sitter-json.wasm");
         let failures = home.join("grammars/fetch-failures.json");
         aged(&wasm, 90);
@@ -363,7 +365,8 @@ mod tests {
 
     #[test]
     fn prune_skips_a_folder_named_like_a_result() {
-        let home = home("prune-dir");
+        let tmp = home();
+        let home = tmp.0.clone();
         let dir = home.join("grammars/syntax-dir");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("keep"), "x").unwrap();

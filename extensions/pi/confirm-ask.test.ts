@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 const dir = mkdtempSync(join(tmpdir(), "rvow-confirm-ask-"));
+after(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "rvow");
 const LIST =
   "AMD-a1 for CHG-a\n  weaken: TSK-1 verify changed\n  reason (from the agent): one\n" +

@@ -15,7 +15,7 @@ fn fixtures() -> String {
 }
 
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: Project,
@@ -49,10 +49,8 @@ fn setup(name: &str, file: &str, body: &str, config: &str) -> Setup {
 /// Like `setup`, and `extra` files are written and committed before the
 /// vow, so a project query file in it is protected at accept.
 fn setup_with(name: &str, file: &str, body: &str, config: &str, extra: &[(&str, &str)]) -> Setup {
-    let tmp = std::env::temp_dir().join(format!("rvow-syntax-queries-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("syntax-queries-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -83,7 +81,7 @@ fn setup_with(name: &str, file: &str, body: &str, config: &str, extra: &[(&str, 
     }
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     vow::commit(&project, prepared).unwrap();
-    Setup { _tmp: tmp, home, repo, project }
+    Setup { _tmp: guard, home, repo, project }
 }
 
 fn items(s: &Setup) -> Vec<(drift::Class, String)> {

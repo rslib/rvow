@@ -3,12 +3,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use rvow_core::{amend, change, config, drift, gate, ledger, plan, proof, review, store, vow};
 use serde_json::Value;
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 const SPEC: &str = "## ADD REQ-new1 Out\nrvow SHALL run the runner command.\n### Scenario: s\n- WHEN a task names a runner\n- THEN rvow runs the filled command\n";
 
@@ -22,7 +19,7 @@ default = { preset = \"tests\" }
 ";
 
 struct Fx {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: store::Project,
@@ -46,11 +43,8 @@ fn git_cmd(repo: &Path, args: &[&str]) {
 
 /// A project with one commit, and the given project config.toml.
 fn fx(name: &str, config_text: &str) -> Fx {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("rvow-runners-{}-{n}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("runners-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -62,7 +56,7 @@ fn fx(name: &str, config_text: &str) -> Fx {
     if !config_text.is_empty() {
         std::fs::write(project.root.join("config.toml"), config_text).unwrap();
     }
-    Fx { _tmp: tmp, home, repo, project }
+    Fx { _tmp: guard, home, repo, project }
 }
 
 /// A backlog change with one task that uses `verify` and covers REQ-new1.
@@ -668,7 +662,7 @@ fn runners_fix_gate_rerun_run_records_filled_verify_and_junit() {
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     git_cmd(&f.repo, &["add", "out.txt", "pass.xml"]);
     git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
-    let out = f._tmp.join("runs.jsonl");
+    let out = f._tmp.path().join("runs.jsonl");
     let opts = gate::Options { strict: true, rerun: true, out: Some(out) };
     let r = gate::gate(&f.project, &f.home, &f.repo, opts, &mut std::io::sink()).unwrap();
     assert!(r.failures.iter().any(|x| x.contains("junit") && x.contains("c.Seek")), "{r:?}");
@@ -750,7 +744,7 @@ fn runners_fix_show_prove_verdict_names_junit() {
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_rvow"))
         .current_dir(&f.repo)
-        .env("HOME", &f._tmp)
+        .env("HOME", f._tmp.path())
         .env("RVOW_HOME", &f.home)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -785,13 +779,13 @@ fn runners_fix_safe_tmpdir_with_space_and_report_removed() {
     // shell. After accept, prove and the gate have read the report, no report
     // file of this task is left behind. The spaced dir reaches the runner
     // through its `env`, with no process env var set.
-    let spaced = std::env::temp_dir().join(format!("rvow space dir-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
-    std::fs::create_dir_all(&spaced).unwrap();
+    let spaced_dir = crate::temp::TempDir::new("space dir");
+    let spaced = spaced_dir.path();
     let cfg = format!("{RUNNER_JUNIT}env = {{ RVOW_JUNIT_DIR = \"{}\" }}\n", spaced.display());
     let f = fx_junit("safe-space", &cfg);
     let task = accept(&f, backlog(&f, "@t", ""));
     let reports = || {
-        std::fs::read_dir(&spaced)
+        std::fs::read_dir(spaced)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("rvow-junit-{task}")))
@@ -807,7 +801,6 @@ fn runners_fix_safe_tmpdir_with_space_and_report_removed() {
     let r = gate::gate(&f.project, &f.home, &f.repo, gate::Options { strict: true, rerun: true, out: None }, &mut std::io::sink()).unwrap();
     assert!(r.passed(), "{r:?}");
     assert!(reports().is_empty(), "{:?}", reports());
-    let _ = std::fs::remove_dir_all(&spaced);
 }
 
 #[test]
@@ -885,7 +878,7 @@ fn runners_fix_gate_ingested_rerun_is_proved() {
     std::fs::write(f.repo.join("out.txt"), "tests Seek\n").unwrap();
     git_cmd(&f.repo, &["add", "out.txt"]);
     git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
-    let out = f._tmp.join("runs.jsonl");
+    let out = f._tmp.path().join("runs.jsonl");
     let opts = gate::Options { strict: true, rerun: true, out: Some(out) };
     let r = gate::gate(&f.project, &f.home, &f.repo, opts, &mut std::io::sink()).unwrap();
     let run = r.runs.iter().find(|run| run.data.get("task").and_then(Value::as_str) == Some(&task)).unwrap().clone();
@@ -967,7 +960,7 @@ fn runners_fix_show_prove_verdict_exit_beats_junit() {
     let run_prove = |fx: &Fx| {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_rvow"))
             .current_dir(&fx.repo)
-            .env("HOME", &fx._tmp)
+            .env("HOME", fx._tmp.path())
             .env("RVOW_HOME", &fx.home)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")

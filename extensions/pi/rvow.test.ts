@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -20,6 +20,7 @@ import {
 } from "../claude/hooks/format.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "rvow-pi-"));
+after(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "rvow");
 writeFileSync(
   bin,

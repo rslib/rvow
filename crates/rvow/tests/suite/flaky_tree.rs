@@ -1,10 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use rvow_core::{change, proof, store, vow};
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn git_cmd(repo: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -23,7 +20,7 @@ fn git_cmd(repo: &Path, args: &[&str]) {
 }
 
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: store::Project,
@@ -35,11 +32,8 @@ fn setup(name: &str, tasks: &str) -> Setup {
 }
 
 fn setup_in(name: &str, tasks: &str, mode: store::Mode) -> Setup {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("rvow-flaky-{n}-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("flaky-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -59,7 +53,7 @@ fn setup_in(name: &str, tasks: &str, mode: store::Mode) -> Setup {
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     let vowed = vow::commit(&project, prepared).unwrap();
     let task = vowed.minted.iter().find(|(from, _)| from == "TSK-new1").unwrap().1.to_string();
-    Setup { _tmp: tmp, home, repo, project, task }
+    Setup { _tmp: guard, home, repo, project, task }
 }
 
 fn state_name(s: &Setup) -> String {
@@ -83,9 +77,8 @@ fn flaky_fix_outside_files_clears_failure() {
 
 #[test]
 fn flaky_same_tree_still_shows_flaky() {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let flag = std::env::temp_dir().join(format!("rvow-flaky-flag-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_file(&flag);
+    let flag_dir = crate::temp::TempDir::new("flaky-flag");
+    let flag = flag_dir.path().join("flag");
     let tasks = format!(
         "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: test -f {} && grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
         flag.display()
@@ -98,14 +91,12 @@ fn flaky_same_tree_still_shows_flaky() {
     let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
     assert!(r.proved, "{:?}", r.outcome);
     assert_eq!(state_name(&s), "flaky", "same worktree pass and fail is flaky");
-    let _ = std::fs::remove_file(&flag);
 }
 
 #[test]
 fn flaky_old_failure_without_fingerprint_does_not_count() {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let flag = std::env::temp_dir().join(format!("rvow-flaky-old-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_file(&flag);
+    let flag_dir = crate::temp::TempDir::new("flaky-old");
+    let flag = flag_dir.path().join("flag");
     let tasks = format!(
         "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: test -f {} && grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
         flag.display()
@@ -134,14 +125,12 @@ fn flaky_old_failure_without_fingerprint_does_not_count() {
     let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
     assert!(r.proved, "{:?}", r.outcome);
     assert_eq!(state_name(&s), "proved", "an old failure without a fingerprint does not count");
-    let _ = std::fs::remove_file(&flag);
 }
 
 #[test]
 fn flaky_repo_mode_same_tree_is_flaky() {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let flag = std::env::temp_dir().join(format!("rvow-flaky-repo-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_file(&flag);
+    let flag_dir = crate::temp::TempDir::new("flaky-repo");
+    let flag = flag_dir.path().join("flag");
     let tasks = format!(
         "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: test -f {} && grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
         flag.display()
@@ -155,5 +144,4 @@ fn flaky_repo_mode_same_tree_is_flaky() {
     let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
     assert!(r.proved, "{:?}", r.outcome);
     assert_eq!(state_name(&s), "flaky", "a repo-mode fail then pass on the same tree is flaky");
-    let _ = std::fs::remove_file(&flag);
 }

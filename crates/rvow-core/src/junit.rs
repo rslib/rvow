@@ -118,7 +118,8 @@ mod tests {
 
     #[test]
     fn check_passes_only_when_each_recorded_name_passed() {
-        let dir = std::env::temp_dir();
+        let tmp = crate::git::testrepo::TempDir::new();
+        let dir = tmp.0.clone();
         let report = dir.join("rvow-junit-unit.xml");
         let passing = "<testsuite><testcase classname=\"c\" name=\"Seek\"/></testsuite>";
         std::fs::write(&report, passing).unwrap();
@@ -136,7 +137,6 @@ mod tests {
             "a failing case the vow did not record still fails the proof"
         );
         let missing = dir.join("rvow-junit-unit-gone.xml");
-        let _ = std::fs::remove_file(&missing);
         assert!(matches!(check(&missing, &[]), Check::Failed(m) if m.contains("cannot be read")));
     }
 }

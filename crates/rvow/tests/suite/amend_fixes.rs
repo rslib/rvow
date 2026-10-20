@@ -1,13 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use rvow_core::{amend, change, config, drift, git, proof, store, vow};
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
 struct Setup {
-    _tmp: PathBuf,
+    _tmp: crate::temp::TempDir,
     home: PathBuf,
     repo: PathBuf,
     project: store::Project,
@@ -31,11 +28,8 @@ fn git_cmd(repo: &Path, args: &[&str]) {
 }
 
 fn setup(name: &str, tasks: &str) -> Setup {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("rvow-amendfixes-{}-{n}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let tmp = tmp.canonicalize().unwrap();
+    let guard = crate::temp::TempDir::new(&format!("amendfixes-{name}"));
+    let tmp = guard.path().to_path_buf();
     let home = tmp.join("home");
     let repo = tmp.join("r");
     std::fs::create_dir_all(&repo).unwrap();
@@ -54,7 +48,7 @@ fn setup(name: &str, tasks: &str) -> Setup {
     .unwrap();
     let prepared = vow::prepare(&project, &home, c, &repo, &mut std::io::sink()).unwrap();
     let vowed = vow::commit(&project, prepared).unwrap();
-    Setup { _tmp: tmp, home, repo, project, minted: vowed.minted }
+    Setup { _tmp: guard, home, repo, project, minted: vowed.minted }
 }
 
 fn failing_task() -> String {
