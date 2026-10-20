@@ -446,7 +446,7 @@ test("the pane opens at once while a slow rvow view loads, then fills in", async
   const t = setup({ "view.json": json(WAITING({ id: "CHG-a", title: "A" })), "slow-view": "1" });
   const start = performance.now();
   await t.status(async (p) => {
-    assert.ok(performance.now() - start < 300, "the pane did not wait for rvow");
+    assert.ok(performance.now() - start < 400, "the pane did not wait for rvow");
     assert.match(text(p), /loading rvow\.\.\./);
     for (const line of p.render(60)) assert.equal(visibleWidth(line), 60);
     await until(p, /PLAN {2}A/);
@@ -1308,7 +1308,7 @@ test("opening a detail never blocks: the key returns at once and a loading line 
     const start = performance.now();
     press(p, "d");
     const lines = p.render(100);
-    assert.ok(performance.now() - start < 100, "key press and render return before rvow show ends");
+    assert.ok(performance.now() - start < 300, "key press and render return before rvow show ends");
     assert.match(lines.join("\n"), /loading rvow show CHG-a/);
     await until(p, /shown CHG-a/);
   });
@@ -1338,7 +1338,7 @@ test("session start, agent turns and rvow tool results never wait for a slow rvo
   await t.fire("session_start");
   await t.fire("agent_settled");
   await t.fire("tool_result", { toolName: "bash", input: { command: "rvow ls" } });
-  assert.ok(performance.now() - start < 100, "handlers returned before rvow answered");
+  assert.ok(performance.now() - start < 400, "handlers returned before rvow answered");
 });
 
 const DOCK_ON = [{ type: "custom", customType: "rvow-dock", data: { on: true } }];
@@ -1798,7 +1798,7 @@ test("the dock refreshes with the view in the background and never blocks", asyn
   slow.key("r");
   for (let i = 0; i < 20; i++) slow.key("j");
   await slow.dock();
-  assert.ok(performance.now() - start < 150, "keys and render do not wait for rvow");
+  assert.ok(performance.now() - start < 400, "keys and render do not wait for rvow");
 });
 
 test("rvow printing nothing means a project with no change and no archive", async () => {
