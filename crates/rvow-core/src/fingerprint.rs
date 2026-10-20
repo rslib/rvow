@@ -1,7 +1,7 @@
 //! What a proof depends on: the input files, the tool versions and the
 //! declared environment variables. Together they form the staleness key.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -91,13 +91,15 @@ pub fn inputs(top: &Path, globs: &[String]) -> Result<Inputs> {
 }
 
 /// Hashes every tracked file plus every untracked file that git does not
-/// ignore, by path and content. Two runs on the same worktree share it,
-/// while any fix anywhere changes it. In repo mode the in-repo rvow tree
+/// ignore, by path, content and whether git tracks it, so a check that reads
+/// the index sees a `git add` as a new tree. Two runs on the same worktree
+/// share it, while any fix anywhere changes it. In repo mode the in-repo rvow tree
 /// (`rvow/`) is skipped: each prove appends to its ledger, so keeping it
 /// would make every fingerprint differ.
 pub fn worktree(top: &Path, project: &Project) -> Result<String> {
     let skip_repo = project.meta.mode == Mode::Repo;
     let prefix = format!("{REPO_DIR}/");
+    let untracked: BTreeSet<String> = git::run(top, &["ls-files", "-o", "--exclude-standard"])?.lines().map(String::from).collect();
     let mut list = String::new();
     for rel in candidate_files(top)? {
         if skip_repo && (rel == REPO_DIR || rel.starts_with(&prefix)) {
@@ -107,6 +109,9 @@ pub fn worktree(top: &Path, project: &Project) -> Result<String> {
         list.push_str(&rel);
         list.push('\0');
         list.push_str(&hash);
+        if untracked.contains(&rel) {
+            list.push_str("\0untracked");
+        }
         list.push('\n');
     }
     Ok(sha256_hex(list.as_bytes()))
@@ -347,6 +352,20 @@ mod tests {
 
         std::fs::write(repo.join("src/b.rs"), "new").unwrap();
         assert_eq!(inputs(&repo, &globs).unwrap().files, 2, "untracked files count");
+    }
+
+    #[test]
+    fn worktree_changes_when_a_new_file_is_staged() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &tmp.0.join("home"), crate::store::Mode::Home).unwrap();
+        std::fs::write(repo.join("new.rs"), "new").unwrap();
+        let untracked = worktree(&repo, &p).unwrap();
+        git(&repo, &["add", "new.rs"]);
+        let staged = worktree(&repo, &p).unwrap();
+        assert_ne!(untracked, staged, "a check that reads the index can pass only after the add");
+        git(&repo, &["commit", "-q", "-m", "c"]);
+        assert_eq!(worktree(&repo, &p).unwrap(), staged, "a commit changes nothing");
     }
 
     #[test]
