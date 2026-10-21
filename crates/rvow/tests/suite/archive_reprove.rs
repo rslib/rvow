@@ -94,9 +94,6 @@ impl Repo {
         )
         .unwrap();
         let ids: Vec<String> = tasks.lines().filter_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).collect();
-        for task in &ids {
-            self.ok(&["prove", task]);
-        }
         std::fs::write(self.repo.join("a.txt"), "ok\n").unwrap();
         self.git(&["commit", "-q", "-am", "work"]);
         for task in &ids {

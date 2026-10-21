@@ -122,10 +122,6 @@ fn events_stop_and_session_start_use_the_neutral_format() {
     let fx = Fx::new("events");
     assert_eq!(fx.hook("json", "stop", json!({"session_id": "s1"})), json!({}), "nothing to hold");
     fx.accept();
-    // The first prove records the failing baseline, so the edit is not held by `baseline-first`.
-    let task = fx.run(RVOW, &["status"]);
-    let task = task.split(|c: char| !(c.is_alphanumeric() || c == '-')).find(|w| w.starts_with("TSK-")).unwrap().to_string();
-    let _ = fx.cmd(RVOW).args(["prove", &task]).output();
     let write = json!({"tool": "Write", "input": {"file_path": fx.repo().join("out.txt")}, "session_id": "s1", "tool_use_id": "t1"});
     assert_eq!(fx.hook("json", "pre-tool-use", write)["decision"], "allow");
     std::fs::write(fx.repo().join("out.txt"), "no").unwrap();

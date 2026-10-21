@@ -271,8 +271,6 @@ mod tests {
         let home = tmp.0.join("home");
         let write = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "no"});
         let call = json!({"session_id": "s1", "cwd": repo.to_str().unwrap(), "tool_name": "Write", "tool_input": write});
-        // The first source edit is denied once for the baseline, and an agent retries it.
-        assert!(hook::claude_pre_tool_use(&p, &call).unwrap().is_some());
         assert_eq!(hook::claude_pre_tool_use(&p, &call).unwrap(), None);
         let stop = json!({"session_id": "s1", "cwd": repo.to_str().unwrap()});
         assert!(hook::claude_stop(&p, &home, &stop).unwrap().is_some());

@@ -57,9 +57,8 @@ pub enum Check {
     Failed(String),
 }
 
-/// Checks the report at `path` for a `baseline: pass` task: the report must
-/// exist, hold at least one passed test case, and no failed one. Nothing is
-/// recorded for such a task.
+/// Checks that the report at `path` exists, holds at least one passed test
+/// case and no failed one.
 pub fn check_baseline_pass(path: &Path) -> Check {
     let cases = match read(path) {
         Ok(cases) => cases,
@@ -74,9 +73,13 @@ pub fn check_baseline_pass(path: &Path) -> Check {
     Check::Passed
 }
 
-/// Checks the report at `path` against the failed names the vow recorded.
+/// Checks the report at `path` against the failed names an older vow recorded.
+/// With none recorded the report must hold a passed case and no failed one.
 /// A missing or unreadable report fails, with a message that says so.
 pub fn check(path: &Path, recorded: &[String]) -> Check {
+    if recorded.is_empty() {
+        return check_baseline_pass(path);
+    }
     let cases = match read(path) {
         Ok(cases) => cases,
         Err(e) => return Check::Failed(e.message),

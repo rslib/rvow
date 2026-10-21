@@ -152,23 +152,17 @@ fn docs_name_the_brief_once_rule() {
 }
 
 #[test]
-fn docs_name_the_baseline_first_rule() {
+fn docs_name_the_automatic_baseline() {
     let how = doc("docs/how-it-works.md");
-    assert!(how.contains("`baseline-first`") && how.contains("denies it once"), "how-it-works lacks the baseline-first rule");
-    assert!(how.contains("of every active change on the branch"), "how-it-works lacks the branch-wide proved scope");
-    assert!(!how.contains("gives the agent one line that names"), "how-it-works still names the removed notice");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("`baseline-first`"), "the Unreleased changelog lacks the baseline-first rule");
-}
-
-#[test]
-fn docs_name_the_warm_target() {
+    assert!(how.contains("## The baseline: the code at accept"), "how-it-works lacks the automatic baseline");
+    assert!(!how.contains("baseline-first") && !how.contains("baseline pending"), "how-it-works still names the removed rule");
     let settings = doc("docs/settings.md");
-    assert!(settings.contains("its own cargo build folder"), "settings lacks the warm worktree's own build folder");
-    assert!(!settings.contains("share one build folder between worktrees"), "settings still says to share one build folder");
+    assert!(!settings.contains("warm worktree"), "settings still names the warm worktree");
     let log = doc("CHANGELOG.md");
     let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("its own cargo build folder"), "the Unreleased changelog lacks the warm build folder");
-    assert!(!unreleased.contains("<shared dir>"), "the Unreleased changelog still names a shared build folder");
+    assert!(
+        unreleased.contains("Take the baseline of a task from the code at accept"),
+        "the Unreleased changelog lacks the baseline entry"
+    );
+    assert!(!unreleased.contains("`baseline-first`"), "the Unreleased changelog still names the removed rule");
 }

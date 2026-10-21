@@ -8,7 +8,7 @@ Every rvow command. Each page comes from `rvow docs`, so it matches `rvow <comma
 | [`rebind`](rebind.md) | Repair this repository's rvow tree: record its roots and remote, and move a home tree to its remote path |
 | [`new`](new.md) | Create a change in backlog/ |
 | [`validate`](validate.md) | Check the specs and every open change |
-| [`accept`](accept.md) | Run the baseline and record the vow (user only) |
+| [`accept`](accept.md) | Record the vow of a plan (user only) |
 | [`review`](review.md) | Print a plan and the accept checklist; runs no verify command |
 | [`ls`](ls.md) | List every change with its stage, branch and title |
 | [`path`](path.md) | Print where a change, task or requirement lives |

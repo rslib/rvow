@@ -149,9 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn the_skill_says_to_prove_before_the_work() {
+    fn the_skill_says_to_write_the_test_first() {
         let text = render().unwrap();
-        assert!(text.contains("run `rvow prove <task>` once to record that the check fails"), "{text}");
+        assert!(text.contains("Write the test first, then do the work and run `rvow prove <task>`"), "{text}");
+        assert!(!text.contains("to record that the check fails"), "{text}");
     }
 
     #[test]

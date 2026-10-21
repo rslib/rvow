@@ -6,7 +6,6 @@ compile_error!("rvow supports only macOS and Linux; Windows and the other platfo
 pub mod amend;
 pub mod archive;
 pub mod attest;
-pub mod baseline;
 pub mod brief;
 pub mod bundle;
 pub mod change;

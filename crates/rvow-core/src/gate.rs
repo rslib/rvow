@@ -274,17 +274,11 @@ fn gate_for(
             let _ = writeln!(echo, "rerun {id}: {cmd}");
             let o = runner::run(&cmd, &dir, &env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), echo)?;
             // A runner that names {junit} answers by the same rule as prove:
-            // the recorded names must pass and no case may fail. A junit
-            // failure caches nothing, so the next gate runs it again.
-            // A `baseline: pass` task holds the same rule as at prove: the
-            // report must name a passed case and no failed one.
+            // a passed case, no failed one, and every name an older vow recorded.
+            // A junit failure caches nothing, so the next gate runs it again.
             let junit_error: Option<String> = match &plan.junit {
                 Some(report) => {
-                    let check = if t.baseline_pass {
-                        crate::junit::check_baseline_pass(report)
-                    } else {
-                        crate::junit::check(report, &proof::junit_recorded(c, &id))
-                    };
+                    let check = crate::junit::check(report, &proof::junit_recorded(c, &id));
                     match check {
                         crate::junit::Check::Passed => None,
                         crate::junit::Check::Failed(why) => Some(why),

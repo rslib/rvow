@@ -200,8 +200,7 @@ fn attest_task_statements_failed_task_fails() {
     accept(&r, &id);
     let tasks = std::fs::read_to_string(r.active_dir(&id).join("tasks.md")).unwrap();
     let task = tasks.lines().find_map(|l| l.strip_prefix("- ").and_then(|t| t.split_whitespace().next())).unwrap().to_owned();
-    assert_eq!(prove(&r, &task).1, 0, "the first prove records the red baseline");
-    assert_eq!(prove(&r, &task).1, 1);
+    assert_eq!(prove(&r, &task).1, 1, "a failing first prove is a failed proof");
     let dest = r.repo.join("att.jsonl");
     let (out, code) = attest(&r, &["attest", &id, "--out", &dest.to_string_lossy()]);
     assert_eq!(code, 0, "{out}");

@@ -1,4 +1,4 @@
-//! The first source edit of a baseline-pending task is denied once per session, with a reason that names `rvow prove`.
+//! The first source edit of a task is never denied for a baseline: rvow takes the baseline from the code at accept.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -132,63 +132,21 @@ impl Repo {
     }
 }
 
-/// The deny reason of a pre-tool-use answer, or none when the call is allowed.
-fn denial(out: &Value) -> Option<&str> {
-    let hook = &out["hookSpecificOutput"];
-    if hook["permissionDecision"] == "deny" { hook["permissionDecisionReason"].as_str() } else { None }
-}
-
 #[test]
-fn first_edit_deny_denies_the_first_source_edit_and_names_prove_and_the_task() {
+fn first_edit_allowed_a_source_edit_is_not_denied_for_a_baseline() {
     let r = Repo::new("first");
-    let task = r.accepted();
-    let out = r.pre("s1", "src/a.rs");
-    let text = denial(&out).unwrap_or_else(|| panic!("no denial: {out}"));
-    assert!(text.contains(&format!("rvow prove {task}")), "{text}");
-    assert!(text.contains("has no baseline yet"), "{text}");
-    assert!(r.ok(&["stats"]).contains("baseline-first"), "the denial is counted under its rule");
-}
-
-#[test]
-fn first_edit_deny_second_try_goes_through_and_another_session_is_denied_again() {
-    let r = Repo::new("once");
     r.accepted();
-    assert!(denial(&r.pre("s1", "src/a.rs")).is_some());
-    assert_eq!(r.pre("s1", "src/a.rs"), Value::Null, "the second try of the same session goes through");
-    assert!(denial(&r.pre("s2", "src/a.rs")).is_some(), "another session is denied again");
+    for session in ["s1", "s2"] {
+        let out = r.pre(session, "src/a.rs");
+        assert_eq!(out, Value::Null, "{out}");
+    }
+    assert!(!r.ok(&["stats"]).contains("baseline-first"), "no denial is counted");
 }
 
 #[test]
-fn first_edit_deny_skips_a_test_file() {
-    let r = Repo::new("test-file");
-    r.accepted();
-    assert_eq!(r.pre("s1", "tests/a.rs"), Value::Null);
-    assert!(denial(&r.pre("s1", "src/a.rs")).is_some(), "a test edit does not use up the denial");
-}
-
-#[test]
-fn first_edit_deny_skips_a_task_whose_baseline_is_recorded() {
-    let r = Repo::new("recorded");
-    let task = r.accepted();
-    std::fs::create_dir_all(r.repo.join("tests")).unwrap();
-    std::fs::write(r.repo.join("tests/a.rs"), "// the new test\n").unwrap();
-    let out = r.ok(&["prove", &task]);
-    assert!(out.contains("baseline: recorded"), "{out}");
-    assert_eq!(r.pre("s1", "src/a.rs"), Value::Null);
-}
-
-#[test]
-fn first_edit_deny_skips_a_file_outside_the_task() {
-    let r = Repo::new("outside");
-    r.accepted();
-    std::fs::write(r.repo.join("other.txt"), "x\n").unwrap();
-    assert_eq!(r.pre("s1", "other.txt"), Value::Null);
-}
-
-#[test]
-fn first_edit_deny_covers_a_bash_command_that_writes_a_source_file() {
+fn first_edit_allowed_a_bash_command_that_writes_a_source_file_is_not_denied() {
     let r = Repo::new("bash");
-    let task = r.accepted();
+    r.accepted();
     let input = json!({
         "cwd": r.repo.to_str().unwrap(),
         "session_id": "s1",
@@ -197,43 +155,14 @@ fn first_edit_deny_covers_a_bash_command_that_writes_a_source_file() {
         "tool_use_id": "use-bash",
     });
     let out = r.send("pre-tool-use", &input);
-    let text = denial(&out).unwrap_or_else(|| panic!("no denial: {out}"));
-    assert!(text.contains(&format!("rvow prove {task}")), "{text}");
-    assert_eq!(r.send("pre-tool-use", &input), Value::Null, "the second try goes through");
+    assert_eq!(out, Value::Null, "{out}");
 }
 
 #[test]
-fn first_edit_deny_is_audited_under_any_yolo_tier() {
-    for tier in ["audit", "auto", "bypass"] {
-        let r = Repo::new(&format!("yolo-{tier}"));
-        r.accepted();
-        r.ok(&["yolo", tier, "--for", "30m"]);
-        assert_eq!(r.pre("s1", "src/a.rs"), Value::Null, "yolo {tier} lets the first edit through");
-    }
-}
-
-#[test]
-fn first_edit_deny_survives_a_yolo_period() {
-    let r = Repo::new("yolo-ends");
+fn first_edit_allowed_a_test_file_and_a_file_outside_the_task_are_not_denied() {
+    let r = Repo::new("others");
     r.accepted();
-    r.ok(&["yolo", "audit", "--for", "30m"]);
-    assert_eq!(r.pre("s1", "src/a.rs"), Value::Null, "yolo lets the first edit through");
-    r.ok(&["yolo", "off"]);
-    assert!(denial(&r.hook("pre-tool-use", "s1", "src/a.rs")).is_some(), "the session's one denial was not used up");
-}
-
-#[test]
-fn first_edit_deny_post_tool_use_answers_nothing_for_a_success_or_a_failure() {
-    let r = Repo::new("post");
-    r.accepted();
-    assert!(denial(&r.pre("s1", "src/a.rs")).is_some());
-    assert_eq!(r.pre("s1", "src/a.rs"), Value::Null);
-    assert_eq!(r.hook("post-tool-use", "s1", "src/a.rs"), Value::Null);
-    let input = json!({
-        "cwd": r.repo.to_str().unwrap(),
-        "session_id": "s1",
-        "tool_use_id": "use-src/a.rs",
-        "hook_event_name": "PostToolUseFailure",
-    });
-    assert_eq!(r.send("post-tool-use", &input), Value::Null);
+    std::fs::write(r.repo.join("other.txt"), "x\n").unwrap();
+    assert_eq!(r.pre("s1", "tests/a.rs"), Value::Null);
+    assert_eq!(r.pre("s1", "other.txt"), Value::Null);
 }

@@ -158,9 +158,6 @@ fn brief_once_only_the_counts_changed_sends_the_tasks_line() {
     let fx = Fx::new("counts");
     let first = fx.start(session("s1")).unwrap();
     assert!(first.contains("tasks: 2 missing"), "{first}");
-    // The first failing prove only records the red baseline; the second one is a failed proof.
-    let baseline = fx.command().args(["prove", "TSK-0ne111"]).output().unwrap();
-    assert_eq!(baseline.status.code(), Some(0), "{}", String::from_utf8_lossy(&baseline.stdout));
     let failed = fx.command().args(["prove", "TSK-0ne111"]).output().unwrap();
     assert_eq!(failed.status.code(), Some(1), "{}", String::from_utf8_lossy(&failed.stdout));
     let text = fx.start(session("s1")).expect("the counts changed");

@@ -1,9 +1,7 @@
 //! `rvow amend` proposes the current content of a change as its new baseline,
 //! and `rvow confirm` lets the user accept or reject each proposal.
 
-use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
@@ -11,16 +9,13 @@ use crate::change::{self, LEDGER};
 use crate::config;
 use crate::drift::{self, Item};
 use crate::error::{Error, Result};
-use crate::gate::rerun;
 use crate::git;
 use crate::hook;
 use crate::id::{self, Id, Kind as IdKind};
 use crate::ledger::{self, Kind, short_hash};
 use crate::proof::{self, Active};
 use crate::registry;
-use crate::runner;
 use crate::store::Project;
-use crate::tasks::Task;
 use crate::vow::sha256_hex;
 
 #[derive(Debug, Clone)]
@@ -31,51 +26,9 @@ pub struct Pending {
     pub reason: String,
     pub items: Vec<Value>,
     pub snapshot: String,
-    /// One record per baseline run of the amendment, in run order. An
-    /// amendment from before baselines moved to prove holds them.
-    pub baseline: Vec<BaselineRun>,
-    /// The added or changed tasks whose baseline runs at their next prove.
-    pub baseline_pending: Vec<String>,
     /// The task ids the amendment's items name, or `None` for an amendment
     /// recorded before this key existed. `None` releases the whole change.
     pub tasks: Option<Vec<String>>,
-}
-
-/// One verify command run on the vow's base commit by an older amend.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BaselineRun {
-    pub task: String,
-    pub exit: Option<i32>,
-    pub tests_run: Option<u64>,
-    pub timed_out: bool,
-}
-
-impl BaselineRun {
-    fn of(v: &Value) -> Option<BaselineRun> {
-        Some(BaselineRun {
-            task: v.get("task")?.as_str()?.to_string(),
-            exit: v.get("exit").and_then(Value::as_i64).map(|e| e as i32),
-            tests_run: v.get("tests_run").and_then(Value::as_u64),
-            timed_out: v.get("timed_out").and_then(Value::as_bool).unwrap_or(false),
-        })
-    }
-
-    pub fn passed(&self) -> bool {
-        self.exit == Some(0) && !self.timed_out
-    }
-
-    /// One confirm line for the run, e.g. `TSK-x fails before the work,
-    /// exit 1, 3 tests`.
-    pub fn line(&self) -> String {
-        let verdict = if self.passed() { "passes" } else { "fails" };
-        let exit = self.exit.map(|e| e.to_string()).unwrap_or_else(|| "signal".to_string());
-        let tests = match self.tests_run {
-            Some(1) => "1 test".to_string(),
-            Some(n) => format!("{n} tests"),
-            None => "no test summary line that rvow reads".to_string(),
-        };
-        format!("{} {verdict} before the work, exit {exit}, {tests}", self.task)
-    }
 }
 
 fn class_rank(v: &Value) -> u8 {
@@ -132,12 +85,6 @@ impl Pending {
         }
         if cut {
             lines.push(format!("  cut: long lines are cut; rvow confirm {} --full shows them whole", self.id));
-        }
-        for b in &self.baseline {
-            lines.push(format!("  baseline: {}", b.line()));
-        }
-        for task in &self.baseline_pending {
-            lines.push(format!("  baseline: {task} baseline pending, it runs at the task's next prove"));
         }
         lines.push(format!("  reason (from the agent): {}", self.reason));
         lines
@@ -204,18 +151,6 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
                 reason: e.data.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
                 items: e.data.get("items").and_then(Value::as_array).cloned().unwrap_or_default(),
                 snapshot: sha256_hex(snapshot.to_string().as_bytes()),
-                baseline: e
-                    .data
-                    .get("baseline")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(BaselineRun::of).collect())
-                    .unwrap_or_default(),
-                baseline_pending: e
-                    .data
-                    .get("baseline_pending")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default(),
                 tasks: e
                     .data
                     .get("tasks")
@@ -233,187 +168,6 @@ pub fn pending(changes: &[Active]) -> Vec<Pending> {
 pub fn digest(pending: &[Pending]) -> String {
     let lines: Vec<String> = pending.iter().map(|p| format!("{} {}", p.id, p.snapshot)).collect();
     short_hash(lines.join("\n").as_bytes())[..8].to_string()
-}
-
-/// The tasks whose baseline the amendment makes pending: each added task and
-/// each task whose verify command changed. A title-only edit keeps it.
-fn baseline_candidates<'a>(before: &[Task], after: &'a [Task]) -> Vec<&'a Task> {
-    after
-        .iter()
-        .filter(|t| {
-            t.verify.is_some()
-                && match before.iter().find(|o| o.id == t.id) {
-                    None => true,
-                    Some(o) => o.verify != t.verify,
-                }
-        })
-        .collect()
-}
-
-/// A baseline run longer than this earns the `rerun_env` and `rerun_links` hint.
-pub const SLOW_BASELINE: Duration = Duration::from_secs(60);
-
-/// The one hint line for a slow baseline: set when the slowest run took
-/// longer than `limit` and the project sets neither `rerun_env` nor
-/// `rerun_links`.
-pub fn baseline_hint(slowest: Duration, limit: Duration, rerun_env: &BTreeMap<String, String>, rerun_links: &[String]) -> Option<String> {
-    (slowest > limit && rerun_env.is_empty() && rerun_links.is_empty()).then(|| {
-        format!(
-            "a baseline run took {} s; the warm worktree keeps its own build folder, so the next base commit run builds only what changed; for gate reruns set rerun_env = {{ CARGO_TARGET_DIR = \"<a folder only reruns use>\" }} or rerun_links = [\"target\"] in config.toml (see docs/settings.md)",
-            slowest.as_secs()
-        )
-    })
-}
-
-pub(crate) fn tests_word(tests_run: Option<u64>) -> String {
-    match tests_run {
-        Some(1) => "1 test run".to_string(),
-        Some(n) => format!("{n} tests run"),
-        None => "no test summary line that rvow reads, such as a ctest or libtest summary, so it counted none".to_string(),
-    }
-}
-
-/// The refusal of a task whose check passes at `when`, so it has no failing test to prove.
-pub(crate) fn passing_baseline(id: &str, when: &str, tests_run: Option<u64>, cmd: &str) -> Error {
-    Error::new(
-        "baseline",
-        format!("{id} passes {when} ({}): {cmd}", tests_word(tests_run)),
-        format!(
-            "make the check fail before the work, or, if it must stay green, add `baseline: pass` to the task: pipe the task block with that line to `rvow put {id}`"
-        ),
-    )
-}
-
-/// The amend baseline: one run record per candidate task, with the failed
-/// JUnit names each `{junit}` runner recorded.
-pub(crate) struct BaselineOut {
-    pub(crate) runs: Vec<Value>,
-    pub(crate) junit: BTreeMap<String, Vec<String>>,
-}
-
-/// Runs each candidate verify command on the vow's base commit, in a clean
-/// worktree set up the same way as the gate rerun (setup, rerun_links,
-/// rerun_env), and refuses a check that would pass before any work starts.
-/// A `@runner` verify runs filled from the project config, with the runner
-/// env, timeout and needs check. Returns one record per run, with the failed
-/// JUnit names each `{junit}` runner recorded. Prove calls it when the work
-/// of a baseline-pending task came first.
-pub(crate) fn baseline(
-    project: &Project,
-    home: &Path,
-    top: &Path,
-    config: &config::Config,
-    change: &Active,
-    candidates: &[&Task],
-) -> Result<BaselineOut> {
-    if candidates.is_empty() {
-        return Ok(BaselineOut { runs: Vec::new(), junit: BTreeMap::new() });
-    }
-    let base_commit = change.base_commit().ok_or_else(|| {
-        Error::new(
-            "baseline",
-            format!("{} has no base commit in its vow", change.dir.id),
-            "run rvow block to record why this check cannot run, then re-create the change so a new vow records the base commit",
-        )
-    })?;
-    let links = config::rerun_links(project, home)?;
-    let env: Vec<(String, String)> = config.rerun_env.clone().into_iter().collect();
-    let scope = rerun::Scope::new(top, &config.base, candidates)?;
-    let mut setup = Vec::new();
-    for step in &config.setup {
-        if scope.wants(step)? {
-            setup.push(step.run().to_string());
-        }
-    }
-    let tree = rerun::Worktree::warm(top, base_commit, &links, &crate::store::warm_tree(home, project))?;
-    // Cargo names the artifacts of two checkouts of one repo alike, so a warm
-    // tree that shares the user's build folder overwrites the user's binaries
-    // and cargo then calls them fresh. It always builds in its own folder.
-    let mut env = env;
-    if let Some(target) = tree.cargo_target() {
-        env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
-        env.push(("CARGO_TARGET_DIR".to_string(), target.to_string_lossy().into_owned()));
-    }
-    let mut sink = std::io::sink();
-    for cmd in &setup {
-        if !runner::run(cmd, &tree.path, &env, config.timeout(), &mut sink)?.passed() {
-            return Err(Error::new(
-                "setup",
-                format!("setup command failed on the base commit: {cmd}"),
-                "fix the setup command, then amend again",
-            ));
-        }
-    }
-    let runners = config::runners(project)?;
-    let mut runs = Vec::new();
-    let mut junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for t in candidates {
-        let plan = crate::template::plan(&runners, t)?;
-        if let Some(path) = plan.missing_need(&tree.path) {
-            return Err(Error::new(
-                "needs",
-                format!("{} needs {}, which does not exist", t.id, path),
-                format!("configure {} first (for example with `cmake --preset ...`), then amend again", path),
-            ));
-        }
-        let cmd = plan.command.clone();
-        let mut run_env = env.clone();
-        run_env.extend(plan.env.iter().cloned());
-        let o = runner::run(&cmd, &tree.path, &run_env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut sink)?;
-        let ran_tests = o.tests_run != Some(0);
-        if o.passed() && ran_tests && !t.baseline_pass {
-            return Err(passing_baseline(&t.id.to_string(), "on the base commit", o.tests_run, &cmd));
-        }
-        if t.baseline_pass && !o.passed() {
-            return Err(Error::new(
-                "baseline",
-                format!("{} says baseline: pass but fails on the base commit: {cmd}", t.id),
-                "fix the check so it passes before the work, or drop the baseline: pass flag",
-            ));
-        }
-        if let Some(report) = &plan.junit {
-            // A `baseline: pass` task holds the same rule as at accept: the
-            // report must name a passed case and no failed one, and no names
-            // are recorded for it.
-            if t.baseline_pass {
-                match crate::junit::check_baseline_pass(report) {
-                    crate::junit::Check::Passed => {
-                        junit.insert(t.id.to_string(), Vec::new());
-                    }
-                    crate::junit::Check::Failed(why) => {
-                        return Err(Error::new(
-                            "baseline",
-                            format!("{}: {why}", t.id),
-                            "fix the check so it passes before the work, or drop the baseline: pass flag",
-                        ));
-                    }
-                }
-            } else {
-                match crate::junit::read(report) {
-                    Ok(cases) => {
-                        let failed: Vec<String> = cases.iter().filter(|c| c.failed).map(|c| c.name.clone()).collect();
-                        if failed.is_empty() {
-                            return Err(Error::new(
-                                "baseline",
-                                format!("{}: its JUnit report names no failed test, so no test is the proof target", t.id),
-                                "make the check fail before the work, or mark a check that must stay green with baseline: pass",
-                            ));
-                        }
-                        junit.insert(t.id.to_string(), failed);
-                    }
-                    Err(e) => {
-                        return Err(Error::new(
-                            "baseline",
-                            format!("{}: {}", t.id, e.message),
-                            "check that the runner's run writes its report to the {junit} path",
-                        ));
-                    }
-                }
-            }
-        }
-        runs.push(json!({"task": t.id.to_string(), "exit": o.exit, "tests_run": o.tests_run, "timed_out": o.timed_out}));
-    }
-    Ok(BaselineOut { runs, junit })
 }
 
 #[derive(Debug)]
@@ -480,20 +234,8 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                 if items.is_empty() {
                     continue;
                 }
-                let before = drift::baseline_tasks(project, c)?;
-                let pending: Vec<String> = baseline_candidates(&before, &c.loaded.tasks).iter().map(|t| t.id.to_string()).collect();
-                let mut snapshot = drift::snapshot_now(project, &top, &config, c)?;
-                // The recorded JUnit names of the other tasks hold after the
-                // amendment; a pending task records new ones at its baseline.
-                let mut junit: Map<String, Value> =
-                    c.baseline().and_then(|b| b.get("junit")).and_then(Value::as_object).cloned().unwrap_or_default();
-                for task in &pending {
-                    junit.remove(task);
-                }
-                snapshot.insert("junit".into(), Value::Object(junit));
+                let snapshot = drift::snapshot_now(project, &top, &config, c)?;
                 data.insert("snapshot".into(), Value::Object(snapshot));
-                data.insert("baseline".into(), Value::Array(Vec::new()));
-                data.insert("baseline_pending".into(), json!(pending));
                 items
             }
         };
@@ -675,23 +417,6 @@ pub fn confirm_signed(
 mod tests {
     use super::*;
 
-    #[test]
-    fn baseline_count_message_says_what_was_counted() {
-        assert_eq!(tests_word(Some(40)), "40 tests run");
-        assert_eq!(tests_word(Some(1)), "1 test run");
-        let none = tests_word(None);
-        assert!(none.contains("no test summary line") && none.contains("ctest"), "{none}");
-    }
-
-    #[test]
-    fn baseline_count_message_names_the_step_for_baseline_pass() {
-        let e = passing_baseline("TSK-x7k2q4", "on the base commit", Some(40), "ctest -R a");
-        assert_eq!(e.code, "baseline");
-        assert!(e.message.contains("TSK-x7k2q4") && e.message.contains("40 tests run") && e.message.contains("on the base commit"), "{e}");
-        assert!(e.fix.contains("baseline: pass") && e.fix.contains("rvow put TSK-x7k2q4"), "{e}");
-        let none = passing_baseline("TSK-x7k2q4", "before the work", None, "ctest -R a");
-        assert!(none.message.contains("no test summary line"), "{none}");
-    }
     use crate::proof::tests::accepted;
 
     fn active_dir(p: &Project) -> std::path::PathBuf {
@@ -747,28 +472,5 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let (drift, pend) = state(&p, &home, &repo);
         assert_eq!((drift, pend.len()), (1, 0));
-    }
-
-    #[test]
-    fn baseline_hint_names_the_settings_for_a_slow_run_with_none_set() {
-        let hint = baseline_hint(Duration::from_secs(90), SLOW_BASELINE, &BTreeMap::new(), &[]).unwrap();
-        assert!(hint.contains("rerun_env") && hint.contains("CARGO_TARGET_DIR") && hint.contains("rerun_links"), "{hint}");
-        assert!(hint.contains("docs/settings.md") && !hint.contains('\n'), "{hint}");
-    }
-
-    #[test]
-    fn baseline_hint_is_silent_when_a_rerun_setting_exists() {
-        let slow = Duration::from_secs(90);
-        let env = BTreeMap::from([("CARGO_TARGET_DIR".to_string(), "/tmp/t".to_string())]);
-        assert_eq!(baseline_hint(slow, SLOW_BASELINE, &env, &[]), None);
-        assert_eq!(baseline_hint(slow, SLOW_BASELINE, &BTreeMap::new(), &["target".to_string()]), None);
-    }
-
-    #[test]
-    fn baseline_hint_is_silent_for_a_fast_run() {
-        assert_eq!(baseline_hint(Duration::from_secs(5), SLOW_BASELINE, &BTreeMap::new(), &[]), None);
-        assert_eq!(baseline_hint(SLOW_BASELINE, SLOW_BASELINE, &BTreeMap::new(), &[]), None);
-        let tiny = Duration::from_millis(1);
-        assert!(baseline_hint(Duration::from_millis(5), tiny, &BTreeMap::new(), &[]).is_some(), "the limit is a parameter");
     }
 }

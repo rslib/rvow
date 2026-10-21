@@ -1,6 +1,6 @@
 # rvow accept
 
-Run the baseline and record the vow (user only)
+Record the vow of a plan (user only)
 
 ## Usage
 

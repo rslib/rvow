@@ -23,7 +23,6 @@ use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 use crate::yolo::{self, Tier, YOLO_FILE};
 
 mod brief_state;
-mod notice_state;
 mod rule;
 mod session_files;
 mod shell;
@@ -900,12 +899,7 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         Some(s) => unseen_denial(project, input, s)?,
         None => None,
     };
-    let found = match unseen.map_or_else(|| pre_tool_use_denial(project, input), |d| Ok(Some(d)))? {
-        Some(d) => Some(d),
-        // Under yolo the rule is off: an audit would use up the session's one denial unseen.
-        None if Rule::BaselineFirst.mode_in(tier) == Mode::Enforce => session.and_then(|s| baseline_first(project, s, input)),
-        None => None,
-    };
+    let found = unseen.map_or_else(|| pre_tool_use_denial(project, input), |d| Ok(Some(d)))?;
     // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
     let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
     let mode = |d: &Denial| {
@@ -1057,50 +1051,6 @@ fn changed_rels(input: &Value, cwd: &Path, top: &Path) -> Vec<String> {
     } else {
         Vec::new()
     }
-}
-
-/// The denial of the first source edit of a baseline-pending task in `session`, or `None`. A source
-/// file is a file in the `files:` scope of the task that no `test_globs` entry matches. Each task is
-/// denied once per session, so a second try goes through. Any failure denies nothing.
-fn baseline_first(project: &Project, session: &str, input: &Value) -> Option<Denial> {
-    let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let top = git::toplevel(&cwd).ok()?;
-    let rels: Vec<String> = changed_rels(input, &cwd, &top).into_iter().filter(|r| !r.starts_with(':')).collect();
-    if rels.is_empty() {
-        return None;
-    }
-    let home = crate::store::home_dir().ok()?;
-    let tests = fingerprint::globset(&config::load(project, &home).ok()?.test_globs).ok()?;
-    let sources: Vec<&String> = rels.iter().filter(|r| !tests.is_match(r.as_str())).collect();
-    if sources.is_empty() {
-        return None;
-    }
-    let (living, _) = change::load_living(project).ok()?;
-    let branch = git::branch(&top).ok()?.unwrap_or_default();
-    let active = proof::active(project, &living).ok()?;
-    for change in proof::on_branch(&active, &branch) {
-        for task in &change.loaded.tasks {
-            let id = task.id.to_string();
-            let Some(verify) = task.verify.as_deref() else { continue };
-            if change.baseline_known(&id, verify) {
-                continue;
-            }
-            let Ok(scope) = fingerprint::globset(&task.files) else { continue };
-            if !sources.iter().any(|r| scope.is_match(r.as_str())) {
-                continue;
-            }
-            if !notice_state::told(project, session, &id) {
-                notice_state::mark_told(project, session, &id);
-                return denial(
-                    Rule::BaselineFirst,
-                    format!(
-                        "{id} has no baseline yet. Run `rvow prove {id}` first, then make this edit: before the work the check fails on the warm tree, which is cheap, and after it rvow builds the base commit. This edit is denied once."
-                    ),
-                );
-            }
-        }
-    }
-    None
 }
 
 /// Whether a tool call may write the work tree, so a before snapshot is taken
@@ -1908,7 +1858,7 @@ mod tests {
         let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
         let vowed = crate::vow::commit(&p, prepared).unwrap();
         let task = vowed.minted[0].1.to_string();
-        assert!(proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
+        assert!(!proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
 
         assert!(edit(&p, &repo, "tests/t.sh").is_some());
         let err = amend::amend(&p, &home, &repo, None, "fix", Some("src/x.rs")).unwrap_err();

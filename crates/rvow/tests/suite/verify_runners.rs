@@ -120,13 +120,8 @@ fn runner_findings(f: &Fx, c: &change::ChangeDir) -> Vec<String> {
 fn runners_fill_template_default_env_and_review() {
     let f = fx("fill", RUNNER_CPP);
     let c = backlog(&f, "@cpp test=Seek", "");
-    let mut echo = Vec::new();
-    // Accept runs nothing, and names the filled command it left pending.
-    let prepared = vow::prepare(&f.project, &f.home, c, &f.repo, &mut echo).unwrap();
-    assert!(prepared.baseline.is_empty());
-    // The echo names the filled command: the default preset and the task's test.
-    let echoed = String::from_utf8(echo).unwrap();
-    assert!(echoed.contains("baseline TSK-new1: grep -q 'tests Seek' out.txt"), "{echoed}");
+    // Accept runs nothing.
+    let prepared = vow::prepare(&f.project, &f.home, c, &f.repo, &mut std::io::sink()).unwrap();
 
     let task = accept_prepared(&f, prepared);
     std::fs::write(f.repo.join("out.txt"), "tests Seek\n").unwrap();
@@ -341,52 +336,33 @@ fn fx_junit(name: &str, cfg: &str) -> Fx {
 }
 
 #[test]
-fn runners_junit_accept_records_the_failed_names() {
-    // The first prove, before the work, is the baseline: it records the
-    // names of the failed test cases.
+fn runners_junit_a_failed_case_fails_the_proof_and_a_clean_report_proves() {
     let f = fx_junit("record", RUNNER_JUNIT);
     let task = accept(&f, backlog(&f, "@t", ""));
-    assert!(prove(&f, &task).baseline_recorded);
-    assert_eq!(proof::junit_recorded(&active(&f), &task), ["c.Seek"]);
+    assert!(!prove(&f, &task).proved, "the report names a failed case");
 
-    // The work makes the recorded test pass, and the proof needs it.
+    // The work makes the failed case pass, and the proof holds.
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     let proved = prove(&f, &task);
     assert!(proved.proved, "{:?}", proved.outcome);
     assert_eq!(proved.junit, Some(rvow_core::junit::Check::Passed));
 
-    // A report whose test still fails fails the proof, with its name.
+    // A report whose test fails again fails the proof, with its name.
     std::fs::write(f.repo.join("out.txt"), "no\n").unwrap();
     let proved = prove(&f, &task);
     assert!(!proved.proved);
-    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the recorded test c.Seek failed".into())));
+    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the test c.Seek failed".into())));
 }
 
 #[test]
-fn runners_junit_accept_refuses_when_nothing_failed() {
-    // The report the baseline writes names no failed test, so no test is the
-    // proof target: the first prove refuses and names the task.
-    let f = fx_junit("nofail", RUNNER_JUNIT);
-    std::fs::write(f.repo.join("fail.xml"), XML_PASS).unwrap();
+fn runners_junit_a_report_with_no_case_fails_the_proof() {
+    let f = fx_junit("nocase", RUNNER_JUNIT);
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite></testsuite>\n").unwrap();
     let task = accept(&f, backlog(&f, "@t", ""));
-    let err = match proof::prove(&f.project, &f.home, &f.repo, &task, &mut std::io::sink()) {
-        Err(e) => e,
-        Ok(_) => panic!("a baseline with no failed test must refuse"),
-    };
-    assert_eq!(err.code, "baseline", "{err}");
-    assert!(err.message.contains(&task) && err.message.contains("no failed test"), "{err}");
-}
-
-#[test]
-fn runners_junit_prove_fails_when_a_recorded_test_is_missing() {
-    let f = fx_junit("missing", RUNNER_JUNIT);
-    let task = accept(&f, backlog(&f, "@t", ""));
-    // The passing report no longer holds the recorded test.
-    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     let proved = prove(&f, &task);
     assert!(!proved.proved);
-    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the recorded test c.Seek is missing from the report".into())));
+    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the JUnit report names no test cases".into())));
 }
 
 #[test]
@@ -395,7 +371,6 @@ fn runners_junit_prove_fails_when_the_report_is_missing() {
     // {junit} but writes no report: the proof fails and says so.
     let f = fx_junit("noreport", RUNNER_JUNIT);
     let task = accept(&f, backlog(&f, "@t", ""));
-    assert!(prove(&f, &task).baseline_recorded);
     edit_config(
         &f,
         "run = 'if grep -q pass out.txt; then cp pass.xml {junit}; else cp fail.xml {junit}; exit 1; fi'",
@@ -559,72 +534,19 @@ fn amend_accept(f: &Fx, reason: &str) {
 }
 
 #[test]
-fn runners_fix_amend_junit_holds_after_amendment() {
-    // A title-only amendment carries the recorded names forward: a prove
-    // whose report lacks the recorded test still fails and names it.
-    let f = fx_junit("amend-junit", RUNNER_JUNIT);
-    let task = accept(&f, backlog(&f, "@t", ""));
-    edit_tasks(&f, "Run the runner", "Run the runner now");
-    amend_accept(&f, "clearer title");
-    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
-    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
-    let proved = prove(&f, &task);
-    assert!(!proved.proved, "a missing recorded test must fail after an amendment");
-    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the recorded test c.Seek is missing from the report".into())));
-}
-
-#[test]
-fn runners_fix_amend_baseline_fills_runner() {
-    // The baseline runs the filled command: the first prove of a task amended
-    // to an always-passing runner refuses, while the raw "@always" text would
-    // fail as a shell command and wrongly count as a red.
-    let cfg = "[runners.always]\nrun = \"echo 'test result: ok. 1 passed; 0 failed;'\"\n";
-    let f = fx("amend-fill", cfg);
-    let plain = "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
-    let c = backlog(&f, plain, "");
-    accept(&f, c);
-    edit_tasks(&f, &format!("verify: {plain}"), "verify: @always");
-    amend_accept(&f, "use runner");
-    let task = active(&f).loaded.tasks[0].id.to_string();
-    let err = match proof::prove(&f.project, &f.home, &f.repo, &task, &mut std::io::sink()) {
-        Err(e) => e,
-        Ok(_) => panic!("an always-passing runner must refuse at the baseline"),
-    };
-    assert_eq!(err.code, "baseline", "{err}");
-    assert!(err.message.contains("passes before the work"), "{err}");
-}
-
-#[test]
-fn runners_fix_amend_changed_task_records_junit_names() {
-    // An amendment that moves a task onto a {junit} runner records the failed
-    // names at the amend baseline, by the same rule as accept.
-    let f = fx_junit("amend-chg", RUNNER_JUNIT);
-    let plain = "grep -q pass out.txt && echo 'test result: ok. 1 passed; 0 failed;'";
-    let c = backlog(&f, plain, "");
-    let task = accept(&f, c);
-    edit_tasks(&f, &format!("verify: {plain}"), "verify: @t");
-    amend_accept(&f, "use the junit runner");
-    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
-    std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
-    let proved = prove(&f, &task);
-    assert!(!proved.proved, "the amend baseline must record the failed names");
-    assert_eq!(proved.junit, Some(rvow_core::junit::Check::Failed("the recorded test c.Seek is missing from the report".into())));
-}
-
-#[test]
 fn runners_fix_gate_junit_failure_caches_nothing() {
     // A rerun whose junit check fails records no cache entry, so the next
     // gate runs the task again instead of answering from the cache.
     let f = fx_junit("gate-cache", &format!("rerun_proven = true\n{RUNNER_JUNIT}"));
     let task = accept(&f, backlog(&f, "@t", ""));
-    assert!(prove(&f, &task).baseline_recorded);
-    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"><failure/></testcase></testsuite>\n")
+        .unwrap();
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     git_cmd(&f.repo, &["add", "out.txt", "pass.xml"]);
     git_cmd(&f.repo, &["commit", "-q", "-m", "out"]);
     let opts = gate::Options { strict: true, rerun: true, out: None };
     let r1 = gate::gate(&f.project, &f.home, &f.repo, opts.clone(), &mut std::io::sink()).unwrap();
-    assert!(r1.failures.iter().any(|x| x.contains("junit") && x.contains("c.Seek")), "{r1:?}");
+    assert!(r1.failures.iter().any(|x| x.contains("junit") && x.contains("c.Open")), "{r1:?}");
     assert!(r1.timings.iter().any(|(id, _)| id == &task), "{r1:?}");
     let r2 = gate::gate(&f.project, &f.home, &f.repo, opts, &mut std::io::sink()).unwrap();
     assert!(r2.timings.iter().any(|(id, _)| id == &task), "a junit failure must not be cached: {r2:?}");
@@ -740,7 +662,7 @@ fn runners_fix_show_prove_verdict_names_junit() {
     // report, it does not claim 0 tests ran.
     let f = fx_junit("show-verdict", RUNNER_JUNIT);
     let task = accept(&f, backlog(&f, "@t", ""));
-    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite></testsuite>\n").unwrap();
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_rvow"))
         .current_dir(&f.repo)
@@ -752,7 +674,7 @@ fn runners_fix_show_prove_verdict_names_junit() {
         .output()
         .unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("failed: junit report: the recorded test c.Seek is missing from the report"), "{stdout}");
+    assert!(stdout.contains("failed: junit report: the JUnit report names no test cases"), "{stdout}");
     assert!(!stdout.contains("ran 0 tests"), "{stdout}");
 }
 
@@ -969,13 +891,12 @@ fn runners_fix_show_prove_verdict_exit_beats_junit() {
             .unwrap();
         String::from_utf8(out.stdout).unwrap()
     };
-    assert!(run_prove(&f).contains("baseline recorded"));
     let stdout = run_prove(&f);
     assert!(stdout.contains("failed: exit 1"), "{stdout}");
     assert!(!stdout.contains("junit report"), "{stdout}");
 
-    std::fs::write(f.repo.join("pass.xml"), "<testsuite><testcase classname=\"c\" name=\"Open\"></testcase></testsuite>\n").unwrap();
+    std::fs::write(f.repo.join("pass.xml"), "<testsuite></testsuite>\n").unwrap();
     std::fs::write(f.repo.join("out.txt"), "pass\n").unwrap();
     let stdout = run_prove(&f);
-    assert!(stdout.contains("failed: junit report: the recorded test c.Seek is missing from the report"), "{stdout}");
+    assert!(stdout.contains("failed: junit report: the JUnit report names no test cases"), "{stdout}");
 }

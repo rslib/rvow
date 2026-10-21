@@ -8,7 +8,6 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 - `covers:` the requirement ids the task delivers, ids only; a small change needs none.
 - `verify:` the command that proves the task. Required.
 - `files:` the paths the task changes. Required. Name files or one folder, not a source root with `**`. A proof goes stale when any scope file changes, so a file in 3 or more tasks makes them all stale at once (`hot-file`).
-- `baseline: pass` only when the command is expected to pass before the work starts.
 - `mutants:` an extra check after `verify:` passes, such as `cargo mutants --in-diff "$RVOW_DIFF"`.
 - `timeout:` such as `90s`, `20m` or `1h`, only when the config default is too short.
 - `max_age:` such as `24h`, only when a cached pass should expire sooner.
@@ -17,7 +16,7 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 
 ## The verify command
 
-- It must fail before the work and pass after. Write the test, then run `rvow prove <task>` to record the failure. The one exception is `baseline: pass`.
+- It should fail before the work and pass after: write the test first. rvow takes the baseline from the code at accept. For a speed or size task, measure the old number before the work and write it in the task.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists.
 - Do not use `true`, `echo` or a build alone (`weak-verify`).
 - `verify: @<runner> key=value` runs a project runner; see `rvow guide runners`.

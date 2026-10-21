@@ -443,7 +443,7 @@ mod tests {
         assert!(crate::guide::PROPOSAL.contains(&cap), "proposal guide lacks `{cap}`");
         let round = format!("at most {} questions per round", crate::interview::ROUND);
         assert!(crate::guide::PROPOSAL.contains(&round), "proposal guide lacks `{round}`");
-        assert!(crate::guide::TASKS.contains("The one exception is `baseline: pass`"), "tasks guide lacks the baseline exception");
+        assert!(crate::guide::TASKS.contains("rvow takes the baseline from the code at accept"), "tasks guide lacks the baseline rule");
         assert!(crate::guide::PROPOSAL.contains("- `branch:` names the git branch"), "proposal guide does not explain branch:");
         assert!(crate::guide::SPEC.contains("Name the visible behavior, not files or code"), "spec guide keeps a Do-not bullet");
         assert!(crate::guide::DESIGN.contains("At most 100 lines"), "design guide cap moved from 100");

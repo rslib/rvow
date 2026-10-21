@@ -91,8 +91,6 @@ impl Fx {
 
     fn proved(&self) -> Fx {
         let task = self.task();
-        let out = self.cmd(RVOW).args(["prove", &task]).output().unwrap();
-        assert!(String::from_utf8_lossy(&out.stdout).contains("baseline"), "the first run is the red baseline");
         self.write("out.txt", "ok");
         self.write("src.bin", "A");
         self.run(RVOW, &["prove", &task]);

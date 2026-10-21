@@ -26,7 +26,7 @@ rvow observes it.
 ## What the review shows
 
 `rvow review <change>` prints the plan and the accept checklist, and it runs no verify command.
-Each task appears with its `verify:` command and its `files:`, and with its `baseline:` and `mutants:` when the task sets them, so the person who accepts the plan sees the check and not only the title.
+Each task appears with its `verify:` command and its `files:`, and with its `mutants:` when the task sets them, so the person who accepts the plan sees the check and not only the title.
 
 ### The judge
 
@@ -85,12 +85,11 @@ Drift is any difference between the plan files now and the plan files at accept.
 rvow sorts each difference into one of three classes.
 
 - Free: a change that cannot widen what the agent may do, such as a new task inside an existing scope or an edit to `design.md`.
-  Dropping a `baseline: pass` flag or changing a timeout is free too.
+  Changing a timeout is free too.
   The check only gets stricter or slower.
 - Confirm: a change that alters the plan, such as a new requirement, a changed title or a wider `files:` scope.
 - Weaken: a change that could make a check easier to pass, such as a changed verify command, an edited test that a proof relied on or a changed config.
   A removed task is weaken as well, because the work it demanded goes away with it.
-  So is a task that gains `baseline: pass`, because a check that had to fail first may now pass at once.
 
 ### What is no drift
 
@@ -99,7 +98,6 @@ A new default value that comes with a newer rvow is no drift.
 An older baseline does not record which values your files set, so there an unset value passes only when its old value was a default of an earlier rvow.
 
 A placeholder that `rvow ids` replaced with an id that rvow minted for the same change is no drift either, when the item under the new id holds the same content.
-`rvow amend` then runs no baseline for that task.
 
 - A protected test file that only grew is not drift.
 - Added tests and standalone added checks stay free.
@@ -123,8 +121,6 @@ That records the edit as an amendment.
 ### What `rvow amend` does
 
 - `rvow amend` runs no verify command.
-- It marks each added task and each changed verify command as baseline pending, so the task's next prove records a new baseline, as the section on the baseline says.
-- A title edit keeps the recorded baseline.
 - `rvow amend` mints placeholder ids before it takes the snapshot, as accept does, so a new task keeps its real id after confirm and a later `rvow ids` mints nothing.
 
 The agent records each plan edit with `rvow amend --reason` and keeps working.
@@ -145,7 +141,7 @@ An amendment recorded while the dialog is open makes it ask again, so no unseen 
 ### Deciding earlier
 
 A user who wants to decide earlier reads each amendment with its reason and runs `rvow confirm` to accept or reject it.
-`rvow confirm` lists weaken items first and names each baseline-pending task.
+`rvow confirm` lists weaken items first.
 
 > [!NOTE]
 > With `require_signature` set, the decision also needs an ssh signature bound to the content.
@@ -268,57 +264,22 @@ While a change has any pending amendment, the Stop hook holds nothing for that c
 Stale proofs never hold a stop.
 They are left to the push gate, and `rvow gate --strict` still fails on them.
 
-## The baseline: the check fails before the work
+## The baseline: the code at accept
 
-A check proves something only when it fails before the work, as the FAIL_TO_PASS tests of SWE-bench do.
+The baseline of a task is the code at accept.
+rvow runs nothing for it, records nothing and holds no task back for it.
 `rvow accept` runs no verify command, so a slow build never stands between the accept and the first task.
-Accept prints each task's filled command and says whether its baseline is pending.
-`rvow status` shows `(baseline pending)` after each task whose baseline is not known yet, and lists those tasks under `baseline_pending` in TOON.
 
-### Three ways to learn the baseline
+- The first `rvow prove` is an ordinary proof: a pass proves the task and a fail fails it.
+- A check that fails before the work and passes after it is the best proof, but rvow does not demand the failing run.
+  The agent writes the test first because that is the sound order, not because a hook asks for it.
+- The first source edit of a task is never denied.
+- No prove builds the base commit.
+- A line `baseline: pass` in an older plan is read and ignored.
+- When a task compares with the old state, such as a speed or a size, the agent measures the old number before the work and writes it in the task or in a note.
 
-rvow learns each baseline in one of three ways, cheapest first.
-
-1. From the source, at accept.
-   - When the whole verify is one `cargo test` or `cargo nextest run` with one test filter and only known flags, and no tracked Rust file at the base commit holds the last part of that filter, the test does not exist yet, so the check must fail.
-   - A name in a comment, a chained command, an unknown flag or anything after `--` keeps the task pending.
-2. From the first prove, before the work.
-   - While no file in the task's scope differs from the base commit, other than test files (the `test_globs`) and files of the proved tasks of every active change on the branch, `rvow prove` records its run as the baseline.
-   - A failure is the red the task needs.
-     Prove records it, with the failed JUnit names when the runner writes `{junit}`, and says `baseline: recorded`.
-   - A pass with tests run is refused with the code `baseline` and records nothing, unless the task says `baseline: pass`, whose first pass is both its baseline and its proof.
-   - The agent pays nothing extra, since it runs the test first anyway.
-3. From the base commit, when the work came first.
-   - Then prove runs the verify command once in the project's warm worktree at the vow's base commit, set up the same way as the gate rerun, and applies the same rules before the proof.
-   - The warm worktree keeps its git-ignored build output between runs, so only the changed files build again, and a busy one falls back to a clean temporary worktree.
-   - The base commit always comes from the vow, also after a confirmed amendment.
-   - When the vow has no base commit, the error names a step for an active change such as `rvow block`.
-   - It is still the slow path.
-     Only the changed files build again, but a first run in a project builds everything.
-   - Prove prints a hint when it takes more than 60 seconds and neither `rerun_env` nor `rerun_links` is set.
-
-> [!NOTE]
-> A baseline belongs to the task's `verify:` text, so a title edit keeps it and a new check needs a new one.
-
-### The baseline-first rule
-
-The cheap path needs the first prove before the work, so rvow holds the agent to that order.
-The first time a session edits a source file of a baseline-pending task, the rule `baseline-first` denies it once, with a line that names `rvow prove <task>`.
-A source file is a file in the task's `files:` that no `test_globs` entry matches, and a shell command that writes one counts as an edit.
-A second try of the edit in the same session goes through, so a task whose check cannot fail yet never blocks the work.
-
-The rule never denies these things:
-
-- a test file
-- a file outside the task
-- a task with a recorded baseline
-
-> [!NOTE]
-> Any yolo tier turns the rule off.
-
-> [!NOTE]
-> A notice after the edit would come too late.
-> The edit already makes the scope differ from the base commit, so the next prove builds the base commit.
+A runner that writes a JUnit report holds the proof to it: the report must hold one passed case and no failed one.
+A vow from an older rvow may name failed cases, and the proof then needs those to pass.
 
 ## The proof and what stale means
 
@@ -532,7 +493,6 @@ These are enforced too:
 
 - a lease that you chose with `rvow delegate`
 - an edit before the plan is accepted
-- the first source edit before the first prove (`baseline-first`)
 
 ### Audited rules
 
@@ -626,7 +586,7 @@ There, a tier that `! rvow yolo` switches on during the session does not count, 
 
 | Tier | What changes |
 |------|--------------|
-| `audit` | An edit before the plan is accepted and a subagent edit outside its lease are audited and not denied, and the first source edit before the first prove is allowed. Tampering stays denied. |
+| `audit` | An edit before the plan is accepted and a subagent edit outside its lease are audited and not denied. Tampering stays denied. |
 | `auto` | Also lets the agent run `rvow accept` and `rvow confirm`. `rvow ingest` and a faked dialog answer stay denied. |
 | `bypass` | Every hook only audits, and a stop is never held back. |
 
@@ -809,7 +769,7 @@ When work spans repositories, make one change in each.
 
 In home mode one store serves every worktree of a repository, so a plan made in one worktree shows in all of them.
 `rvow accept`, `rvow amend`, `rvow archive`, `rvow check` and `rvow clarify` run in the worktree where the branch of the change is checked out, even when you start them from another worktree.
-The base commit, the files, the baseline and the fingerprints come from that worktree.
+The base commit, the files and the fingerprints come from that worktree.
 
 ### Check and clarify
 

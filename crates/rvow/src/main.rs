@@ -61,7 +61,7 @@ enum Cmd {
     },
     /// Check the specs and every open change.
     Validate,
-    /// Run the baseline and record the vow (user only).
+    /// Record the vow of a plan (user only).
     Accept {
         /// The change id or a unique prefix of it.
         change: String,

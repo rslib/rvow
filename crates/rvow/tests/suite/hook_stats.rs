@@ -252,15 +252,11 @@ fn stats_record_a_stop_block_and_the_pass_that_follows() {
     std::fs::write(fx.repo().join("src/b.txt"), "touched").unwrap();
     let edit = json!({"file_path": fx.repo().join("src/b.txt")});
     let write = json!({"tool_name": "Write", "tool_input": edit, "session_id": "s1"});
-    // The first source edit is denied once for the baseline, and an agent retries it.
-    assert!(fx.event("pre-tool-use", write.clone()).is_some());
     assert!(fx.event("pre-tool-use", write).is_none());
     let session = json!({"session_id": "s1"});
     assert!(fx.event("stop", session.clone()).is_some(), "the first stop is held back");
     assert!(fx.event("stop", session).is_none(), "the same reason passes the second time");
-    let all = fx.stats();
-    assert_eq!(all[0]["rule"], "baseline-first", "{all:?}");
-    let lines: Vec<_> = all.into_iter().filter(|l| l["hook"] == "stop").collect();
+    let lines: Vec<_> = fx.stats().into_iter().filter(|l| l["hook"] == "stop").collect();
     let outcomes: Vec<&str> = lines.iter().map(|l| l["outcome"].as_str().unwrap()).collect();
     assert_eq!(outcomes, ["block", "pass"], "{lines:?}");
     assert!(lines.iter().all(|l| l["hook"] == "stop" && l["rule"].is_null() && l["session"] == "s1"), "{lines:?}");

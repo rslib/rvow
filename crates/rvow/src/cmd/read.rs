@@ -321,17 +321,12 @@ fn status_change(r: &mut Reply, c: &proof::ChangeStatus) -> (Node, usize) {
             State::Stale(why) => format!("stale ({})", why.join(", ")),
             s => s.name().to_string(),
         };
-        let pending = if t.baseline_pending { "  (baseline pending)" } else { "" };
-        r.line(format!("  {:<10} {:<20} {}{pending}", t.task, state, t.title));
+        r.line(format!("  {:<10} {:<20} {}", t.task, state, t.title));
         rows.push(obj! { "id" => t.task.to_string(), "state" => state, "title" => t.title });
     }
     let tasks = rows.len();
     let mut item = obj! { "id" => c.id.to_string(), "branch" => c.branch };
     item.push(("tasks".to_owned(), Node::from(rows.into_iter().map(Node::Obj).collect::<Vec<_>>())));
-    let pending: Vec<String> = c.tasks.iter().filter(|t| t.baseline_pending).map(|t| t.task.to_string()).collect();
-    if !pending.is_empty() {
-        item.push(("baseline_pending".to_owned(), Node::from(pending)));
-    }
     for problem in &c.problems {
         r.line(format!("  error: {problem}"));
     }

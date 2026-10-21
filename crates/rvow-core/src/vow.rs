@@ -19,7 +19,6 @@ use crate::ledger::{self, Kind};
 use crate::lint::{Finding, clarifications};
 use crate::proof;
 use crate::registry;
-use crate::runner::Outcome;
 use crate::spec::{DeltaOp, Requirement, Spec, StepKind};
 use crate::store::{Lock, Project};
 use crate::tasks::Task;
@@ -104,31 +103,6 @@ pub(crate) fn replace_token(text: &str, from: &str, to: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone)]
-pub struct Baseline {
-    pub task: Ref,
-    pub outcome: Outcome,
-    pub from: BaselineFrom,
-}
-
-/// How rvow learned a task's baseline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BaselineFrom {
-    /// The verify command ran.
-    Run,
-    /// The source at the base commit shows the check must fail, with no run.
-    Source,
-}
-
-impl BaselineFrom {
-    pub fn name(self) -> &'static str {
-        match self {
-            BaselineFrom::Run => "run",
-            BaselineFrom::Source => "source",
-        }
-    }
-}
-
 /// A change that passed validation, ready to vow.
 #[derive(Debug)]
 pub struct Prepared {
@@ -139,9 +113,6 @@ pub struct Prepared {
     pub branch: String,
     pub base_commit: String,
     pub config: Config,
-    pub baseline: Vec<Baseline>,
-    /// The failed test names each task's JUnit report named, by task id.
-    pub junit: BTreeMap<String, Vec<String>>,
 }
 
 fn findings_error(code: &'static str, what: &str, items: &[String], fix: &str) -> Error {
@@ -165,7 +136,7 @@ fn base_commit(top: &Path, base: &str) -> Result<String> {
 
 /// Validates a backlog change. Runs no verify command: each task's baseline
 /// stays pending until its first prove.
-pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, echo: &mut dyn Write) -> Result<Prepared> {
+pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, _echo: &mut dyn Write) -> Result<Prepared> {
     if change.stage != Stage::Backlog {
         return Err(Error::new(
             "stage",
@@ -241,8 +212,6 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
     }
     let config = config::load(project, home)?;
     let base_commit = base_commit(&top, &config.base)?;
-    let mut baseline = Vec::new();
-    let junit: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for task in &loaded.tasks {
         let plan = crate::template::plan(&runners, task)?;
         if let Some(path) = plan.missing_need(&top) {
@@ -252,15 +221,8 @@ pub fn prepare(project: &Project, home: &Path, change: ChangeDir, cwd: &Path, ec
                 format!("configure {} first (for example with `cmake --preset ...`), then run rvow accept again", path),
             ));
         }
-        if plan.junit.is_none() && crate::baseline::known_red(&top, &base_commit, &plan.command)? {
-            let _ = writeln!(echo, "baseline {}: {} (fails: its test is not in the base commit)", task.id, plan.command);
-            let outcome = Outcome { exit: None, timed_out: false, tests_run: Some(0), duration_ms: 0, tail: Vec::new() };
-            baseline.push(Baseline { task: task.id.clone(), outcome, from: BaselineFrom::Source });
-        } else {
-            let _ = writeln!(echo, "baseline {}: {} (pending, runs at the first prove)", task.id, plan.command);
-        }
     }
-    Ok(Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit })
+    Ok(Prepared { change, loaded, living, top, branch, base_commit, config })
 }
 
 /// The result of a vow.
@@ -459,7 +421,7 @@ pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
 
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
-    let Prepared { change, loaded, living, top, branch, base_commit, config, baseline, junit } = prepared;
+    let Prepared { change, loaded, living, top, branch, base_commit, config } = prepared;
     let lock = project.lock()?;
 
     let minted = mint_placeholders(project, &lock, &change, &loaded)?;
@@ -469,30 +431,9 @@ pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
     }
 
     let mut data = snapshot(project, &top, &config, &loaded, &branch)?;
-    let minted_names: HashMap<String, String> = minted.iter().map(|(from, to)| (from.clone(), to.to_string())).collect();
-    let baseline: Map<String, Value> = baseline
-        .into_iter()
-        .map(|b| {
-            let key = b.task.to_string();
-            let key = minted_names.get(&key).cloned().unwrap_or(key);
-            let v =
-                json!({"exit": b.outcome.exit, "tests_run": b.outcome.tests_run, "timed_out": b.outcome.timed_out, "from": b.from.name()});
-            (key, v)
-        })
-        .collect();
-
     data.insert("change".into(), change.id.to_string().into());
     data.insert("base_commit".into(), base_commit.into());
     data.insert("bases".into(), bases(&loaded, &living).into());
-    data.insert("baseline".into(), baseline.into());
-    let junit: Map<String, Value> = junit
-        .into_iter()
-        .map(|(task, names)| {
-            let key = minted_names.get(&task).cloned().unwrap_or(task);
-            (key, Value::Array(names.into_iter().map(Value::String).collect()))
-        })
-        .collect();
-    data.insert("junit".into(), junit.into());
     let event = ledger::append(&change.path.join(LEDGER), &lock, Kind::Vow, data)?;
 
     let dest = project.root.join(Stage::Active.dir()).join(change::file_name(&change.path)?);
@@ -536,7 +477,6 @@ mod tests {
         let (tmp, p, repo, c) =
             setup("- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 0 passed; 0 failed;'\n  files: src/**\n");
         let prepared = prepare(&p, &tmp.0.join("home"), c, &repo, &mut std::io::sink()).unwrap();
-        assert!(prepared.baseline.is_empty(), "accept runs no verify command");
         let vowed = commit(&p, prepared).unwrap();
         assert_eq!(vowed.minted.len(), 2);
         assert!(vowed.path.starts_with(p.root.join("active")));
@@ -552,21 +492,19 @@ mod tests {
     }
 
     #[test]
-    fn accept_leaves_a_passing_check_pending() {
+    fn accept_says_nothing_of_a_baseline() {
         let (tmp, p, repo, c) =
             setup("- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 2 passed; 0 failed;'\n  files: src/**\n");
         let mut echo = Vec::new();
-        let prepared = prepare(&p, &tmp.0.join("home"), c, &repo, &mut echo).unwrap();
-        assert!(prepared.baseline.is_empty());
-        let echo = String::from_utf8(echo).unwrap();
-        assert!(echo.contains("baseline TSK-new1: echo") && echo.contains("pending"), "{echo}");
+        prepare(&p, &tmp.0.join("home"), c, &repo, &mut echo).unwrap();
+        assert!(echo.is_empty(), "{}", String::from_utf8_lossy(&echo));
     }
 
     #[test]
     fn a_failing_guard_is_accepted_and_branch_must_match() {
         let (tmp, p, repo, c) = setup("- TSK-new1 Tail\n  covers: REQ-new1\n  verify: false\n  files: src/**\n  baseline: pass\n");
         let home = tmp.0.join("home");
-        assert!(prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).is_ok(), "a guard is checked at its first prove");
+        assert!(prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).is_ok(), "a guard line is read and ignored");
         git(&repo, &["checkout", "-q", "-b", "other"]);
         let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
         assert_eq!(err.code, "branch");

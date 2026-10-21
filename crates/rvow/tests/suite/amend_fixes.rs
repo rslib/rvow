@@ -100,8 +100,7 @@ fn base_commit_amend_after_confirmed_amend() {
     assert_eq!(out.len(), 1);
     let pend = pending_of(&s);
     assert_eq!(pend.len(), 1);
-    assert_eq!(pend[0].baseline_pending.len(), 1, "the changed check is baseline pending: {pend:?}");
-    // The work came first, so prove runs the baseline on the vow's base commit.
+    // The work may come first: prove is an ordinary proof, with no base commit run.
     std::fs::write(s.repo.join("out.txt"), "work\n").unwrap();
     let task_id = real_id(&s, "TSK-new1");
     proof::prove(&s.project, &s.home, &s.repo, &task_id, &mut std::io::sink())
@@ -125,40 +124,6 @@ fn base_commit_mutants_diff_after_amend() {
     assert!(r.proved, "{:?}", r.outcome);
     let diff = std::fs::read_to_string(s.repo.join("seen.diff")).unwrap();
     assert!(diff.contains("out.txt"), "RVOW_DIFF holds the diff from the vow base: {diff:?}");
-}
-
-#[test]
-fn base_commit_missing_names_workable_step() {
-    let s = setup("missing-base", &failing_task());
-    let dir = active_dir(&s.project);
-    let ledger = dir.join("ledger.jsonl");
-    let text = std::fs::read_to_string(&ledger).unwrap();
-    let mut out_lines = Vec::new();
-    for line in text.lines() {
-        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
-        if v.get("kind").and_then(|k| k.as_str()).is_some_and(|k| k.eq_ignore_ascii_case("vow")) {
-            v.as_object_mut().unwrap().remove("base_commit");
-        }
-        out_lines.push(serde_json::to_string(&v).unwrap());
-    }
-    std::fs::write(&ledger, out_lines.join("\n") + "\n").unwrap();
-
-    let tasks = dir.join("tasks.md");
-    let text = std::fs::read_to_string(&tasks).unwrap();
-    std::fs::write(
-        &tasks,
-        text.replace(
-            "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'",
-            "grep -q ok other.txt && echo 'test result: ok. 1 passed; 0 failed;'",
-        ),
-    )
-    .unwrap();
-    amend::amend(&s.project, &s.home, &s.repo, None, "changed check", None).unwrap();
-    let task_id = real_id(&s, "TSK-new1");
-    let err = proof::prove(&s.project, &s.home, &s.repo, &task_id, &mut std::io::sink()).err().expect("the baseline must refuse");
-    assert_eq!(err.code, "baseline");
-    assert!(!err.fix.to_lowercase().contains("accept"), "help must not say accept: {:?}", err.fix);
-    assert!(err.fix.contains("rvow block"), "help names a step for an active change: {:?}", err.fix);
 }
 
 #[test]

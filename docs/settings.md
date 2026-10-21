@@ -106,26 +106,10 @@ By default a push trusts a task whose proof is current and whose files are all c
 A task of an archived change is never rerun, since archiving needs every task proved.
 Set `rerun_proven = true` when you want a clean-checkout run of proven tasks too.
 
-## A fast baseline
-
-The base commit baseline of `rvow prove` builds in one warm worktree per project, at `worktrees/<project key>/` in the rvow home.
-rvow moves it to the base commit and keeps its git-ignored build output, such as a CMake `build/` folder, so a second run builds only what changed.
-A fixed path under the home folder also lets ccache, with `base_dir` set to the home folder, reuse compile results from other checkouts.
-rvow never removes a warm worktree or its build folder, so delete either at any time, and the next run makes it again.
-
-When another run holds it, or a git step on it fails, the run uses a clean temporary worktree instead.
-
-### Cargo build folders
-
-For cargo the warm worktree has its own cargo build folder, `worktrees/<project key>-target/`.
-It is set through `CARGO_TARGET_DIR` whatever the cargo config or `rerun_env` says.
-The temporary worktree of a busy warm one gets a throwaway folder inside itself.
-Cargo names the artifacts of two checkouts of one repository alike, so a warm worktree that shared the build folder of your checkout would overwrite your test binaries, and cargo would then call them fresh.
-
-### Warm reruns
+## Warm reruns
 
 `rvow gate --rerun` keeps its promise of a clean checkout of HEAD.
-It builds in a new temporary worktree each time, never in the warm one.
+It builds in a new temporary worktree each time.
 For a Rust project, point that build at a directory that only reruns use, or link `target` in, so the reruns start warm.
 
 ```toml
@@ -134,14 +118,12 @@ rerun_links = ["target"]
 ```
 
 Use a directory of your own for `CARGO_TARGET_DIR`.
-`rvow accept` runs no verify command, and the first prove before the work runs in your own checkout, so these keys do not touch either.
+`rvow accept` runs no verify command, and `rvow prove` runs in your own checkout, so these keys do not touch either.
 `rerun_links` turns the rerun cache off, as the section on linked build output says.
 
 > [!WARNING]
 > Do not point two checkouts that both stay on disk, such as two git worktrees of one repository, at one cargo build folder.
 > Each overwrites the other's binaries.
-
-`rvow prove` prints one hint that says this when a base commit baseline takes more than 60 seconds and neither key is set.
 
 ## Scoping setup and checks to files
 
@@ -180,7 +162,6 @@ A pass with 0 tests run is not a proof, so rvow reads the number of tests from t
 
 rvow counts only a summary line at the start of a line, like the other runners, so a line that a test prints itself, indented or with a prefix, does not count.
 A doctest or GoogleTest binary has no fixed name, so rvow reads its output wherever it appears.
-`ctest` is the one C or C++ runner that the `baseline: pass` check knows by name.
 
 rvow removes the color codes from a line before it reads the count, so a runner that prints its summary in color, such as vitest in a terminal, counts the same as one that does not.
 The tail that `rvow show` prints for the run keeps the codes.
@@ -495,20 +476,17 @@ A task's own `timeout:` wins over the runner's `timeout`.
 
 ### The JUnit report
 
-When `run` holds `{junit}`, the baseline run reads the JUnit report, records the failed test names and refuses when the report names no failed test.
+When `run` holds `{junit}`, prove reads the JUnit report.
 A case is failed when it holds a `<failure>` or an `<error>` child.
 Its name is the `name` attribute, or `classname.name` when both are there.
 At prove and at the gate rerun the proof passes only when all of these hold:
 
 - The command exits 0.
 - The report exists.
-- Each recorded name is there and passed.
+- The report holds at least one passed case.
 - No test case failed.
 
-An amendment that adds or changes such a task makes it baseline pending, and its next baseline run records the new names.
-The names of the other tasks hold after the amendment.
-A `baseline: pass` task on such a runner records no names.
-Its report must hold at least one passed case and no failed case, at its baseline and at each prove.
+A vow from an older rvow may name failed cases, and the proof then needs each of those to be there and to pass.
 
 ### Build directories
 

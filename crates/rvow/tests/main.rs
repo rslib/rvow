@@ -174,10 +174,6 @@ mod tamper_holes;
 mod temp;
 #[path = "suite/verify_runners.rs"]
 mod verify_runners;
-#[path = "suite/warm_target.rs"]
-mod warm_target;
-#[path = "suite/warm_worktree.rs"]
-mod warm_worktree;
 #[path = "suite/worktrees.rs"]
 mod worktrees;
 #[path = "suite/yolo.rs"]
