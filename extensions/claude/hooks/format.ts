@@ -333,12 +333,18 @@ export function archiveBlockers(
   return null
 }
 
-/** Drift that blocks the gate and that no pending plan edit records yet. */
+/**
+ * Drift that blocks the gate and that no pending plan edit names. A pending edit of an older rvow
+ * lists no items, so it counts as holding all drift.
+ */
 export function unrecordedDrift(
-  change: { drift?: { class: string; what: string }[]; pending: unknown[] } | undefined,
+  change:
+    | { drift?: { class: string; what: string }[]; pending: { items?: { what: string }[] }[] }
+    | undefined,
 ): { class: string; what: string }[] {
-  if (!change || change.pending.length > 0) return []
-  return (change.drift ?? []).filter((d) => d.class !== 'free')
+  if (!change || change.pending.some((p) => p.items === undefined)) return []
+  const held = new Set(change.pending.flatMap((p) => (p.items ?? []).map((i) => i.what)))
+  return (change.drift ?? []).filter((d) => d.class !== 'free' && !held.has(d.what))
 }
 
 /** The reason of an amendment that the archive tool records for drift. */

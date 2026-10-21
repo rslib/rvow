@@ -61,7 +61,34 @@ test('rvow_archive records drift itself, then asks once and archives', async ($,
   expect(out).not.toContain('failed')
 })
 
+const HELD = { id: 'AMD-n1', items: [WEAKEN] }
+
 test('rvow_archive does not record drift that a pending plan edit already holds', async ($, on) => {
+  const { ran } = fake(on, 'Accept and archive', (line) => {
+    if (line === 'hook claude view') return [0, view([WEAKEN], [HELD])]
+    if (line === 'confirm --full') return [0, LISTING]
+    return [0, 'ok\n']
+  })
+  await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' }))
+  expect(ran.filter((l) => l.startsWith('amend'))).toEqual([])
+})
+
+test('rvow_archive records drift that is newer than a pending plan edit', async ($, on) => {
+  const newer = { class: 'weaken', what: 'test b.test.ts changed t2' }
+  const { ran, asked } = fake(on, 'Accept and archive', (line) => {
+    if (line === 'hook claude view') return [0, view([WEAKEN, newer], [HELD])]
+    if (line.startsWith('amend')) return [0, 'amendments[1]:\n  - id: AMD-n2\n']
+    if (line === 'confirm --full') return [0, LISTING]
+    return [0, 'ok\n']
+  })
+  await $.tool.call(call(ARCHIVE, { change: 'CHG-a1' }))
+  const amend = ran.find((l) => l.startsWith('amend')) ?? ''
+  expect(amend).toContain('test b.test.ts changed t2')
+  expect(amend).not.toContain('test a.test.ts changed t1')
+  expect(asked.length).toBe(1)
+})
+
+test('rvow_archive leaves a pending edit of an older rvow alone', async ($, on) => {
   const { ran } = fake(on, 'Accept and archive', (line) => {
     if (line === 'hook claude view') return [0, view([WEAKEN], [{ id: 'AMD-n1' }])]
     if (line === 'confirm --full') return [0, LISTING]
@@ -95,10 +122,15 @@ test('rvow_archive stops with the failure when the amend fails', async ($, on) =
 
 test('unrecordedDrift keeps blocking items only, and none while an edit is pending', () => {
   const free = { class: 'free', what: 'a comment' }
-  const base = { pending: [] as unknown[] }
+  const base = { pending: [] as { items?: { what: string }[] }[] }
   expect(unrecordedDrift(undefined)).toEqual([])
   expect(unrecordedDrift({ ...base, drift: [free] })).toEqual([])
   expect(unrecordedDrift({ ...base, drift: [WEAKEN, free] })).toEqual([WEAKEN])
+  expect(unrecordedDrift({ pending: [{ items: [WEAKEN] }], drift: [WEAKEN] })).toEqual([])
+  const newer = { class: 'weaken', what: 'test b changed' }
+  expect(unrecordedDrift({ pending: [{ items: [WEAKEN] }], drift: [WEAKEN, newer] })).toEqual([
+    newer,
+  ])
   expect(unrecordedDrift({ pending: [{}], drift: [WEAKEN] })).toEqual([])
   expect(unrecordedDrift({ ...base })).toEqual([])
   expect(driftReason([WEAKEN])).toContain('test a.test.ts changed t1')

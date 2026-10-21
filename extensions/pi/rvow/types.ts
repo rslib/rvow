@@ -4,7 +4,7 @@ export type Change = {
   title: string;
   tasks?: Task[];
   drift?: { class: string; what: string }[];
-  pending?: { id: string; reason: string }[];
+  pending?: { id: string; reason: string; items?: { class: string; what: string }[] }[];
 };
 export type Plan = {
   id: string;

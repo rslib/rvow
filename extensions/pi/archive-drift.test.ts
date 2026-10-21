@@ -88,6 +88,38 @@ test("rvow_archive does not record drift that a pending plan edit already holds"
   const value = tool("rvow_archive", async (args) => {
     seen.push(args);
     if (args[0] === "hook")
+      return { code: 0, out: view([WEAKEN], [{ id: "AMD-n1", reason: "r", items: [WEAKEN] }]) };
+    if (args[0] === "confirm" && args[1] === "--full") return { code: 0, out: LISTING };
+    return { code: 0, out: "ok\n" };
+  });
+  await ask(value, { change: "CHG-a1" }, true, []);
+  assert.equal(seen.filter((a) => a[0] === "amend").length, 0);
+});
+
+test("rvow_archive records drift that is newer than a pending plan edit", async () => {
+  const newer = { class: "weaken", what: "test b.test.ts changed t2" };
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    if (args[0] === "hook")
+      return {
+        code: 0,
+        out: view([WEAKEN, newer], [{ id: "AMD-n1", reason: "r", items: [WEAKEN] }]),
+      };
+    if (args[0] === "confirm" && args[1] === "--full") return { code: 0, out: LISTING };
+    return { code: 0, out: "ok\n" };
+  });
+  await ask(value, { change: "CHG-a1" }, true, []);
+  const amend = (seen.find((a) => a[0] === "amend") ?? []).join(" ");
+  assert.match(amend, /test b\.test\.ts changed t2/);
+  assert.doesNotMatch(amend, /test a\.test\.ts changed t1/);
+});
+
+test("rvow_archive leaves a pending edit of an older rvow alone", async () => {
+  const seen: string[][] = [];
+  const value = tool("rvow_archive", async (args) => {
+    seen.push(args);
+    if (args[0] === "hook")
       return { code: 0, out: view([WEAKEN], [{ id: "AMD-n1", reason: "r" }]) };
     if (args[0] === "confirm" && args[1] === "--full") return { code: 0, out: LISTING };
     return { code: 0, out: "ok\n" };
@@ -128,6 +160,15 @@ test("driftAmendArgs keeps blocking items only, and none while an edit is pendin
   assert.equal(driftAmendArgs(undefined, "CHG-a1"), null);
   assert.equal(driftAmendArgs(one({ drift: [free] }), "CHG-a1"), null);
   assert.equal(driftAmendArgs(one({ drift: [WEAKEN], pending: [{}] }), "CHG-a1"), null);
+  assert.equal(
+    driftAmendArgs(one({ drift: [WEAKEN], pending: [{ items: [WEAKEN] }] }), "CHG-a1"),
+    null,
+  );
+  const newer = { class: "weaken", what: "test b changed" };
+  const held =
+    driftAmendArgs(one({ drift: [WEAKEN, newer], pending: [{ items: [WEAKEN] }] }), "CHG-a1") ?? [];
+  assert.match(held[2] ?? "", /test b changed/);
+  assert.doesNotMatch(held[2] ?? "", /test a\.test\.ts changed t1/);
   assert.equal(driftAmendArgs(one({}), "CHG-a1"), null);
   const args = driftAmendArgs(one({ drift: [WEAKEN, free] }), "CHG-a1") ?? [];
   assert.deepEqual([args[0], args[1]], ["amend", "--reason"]);

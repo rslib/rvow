@@ -5,7 +5,7 @@ export type RvowChange = {
   stage: string
   tasks: RvowTask[]
   drift: { class: string; what: string }[]
-  pending: { id: string; reason: string }[]
+  pending: { id: string; reason: string; items?: { class: string; what: string }[] }[]
 }
 export type RvowPlan = {
   id: string

@@ -7,7 +7,7 @@
 //!   "changes": [ { "id", "title", "stage", "tasks": [ { "id", "title", "state",
 //!                  "reasons": [..] } ],
 //!                  "drift": [ { "class", "what" } ],
-//!                  "pending": [ { "id", "reason" } ] } ],
+//!                  "pending": [ { "id", "reason", "items": [ { "class", "what" } ] } ] } ],
 //!   "elsewhere": [ same shape as "changes" ],  (active changes of other branches whose branch has a worktree)
 //!   "plans": [ { "id", "title", "tasks", "questions", "issues", "ready", "path",
 //!                 "task_timeouts_secs": [..], "default_timeout_secs" } ],
@@ -204,8 +204,13 @@ fn change_json(project: &Project, home: &Path, now: &Now, c: &proof::Active) -> 
         .into_iter()
         .map(|i| json!({"class": i.class.name(), "what": i.what}))
         .collect();
-    let pending: Vec<Value> =
-        amend::pending(std::slice::from_ref(c)).into_iter().map(|p| json!({"id": p.id.to_string(), "reason": p.reason})).collect();
+    let pending: Vec<Value> = amend::pending(std::slice::from_ref(c))
+        .into_iter()
+        .map(|p| {
+            let items: Vec<Value> = p.items.iter().map(|i| json!({"class": i["class"], "what": i["what"]})).collect();
+            json!({"id": p.id.to_string(), "reason": p.reason, "items": items})
+        })
+        .collect();
     let waiting = pending.len();
     let value = json!({
         "id": c.dir.id.to_string(),
@@ -295,6 +300,26 @@ mod tests {
         crate::git::testrepo::git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "main"]);
         let v = dashboard(&p, &home, &repo).unwrap();
         assert!(v["backlog"][0]["worktree"].as_str().unwrap().ends_with("/wt"));
+    }
+
+    #[test]
+    fn view_lists_the_items_of_each_pending_edit() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let tasks = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path().join("tasks.md");
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        std::fs::write(&tasks, text.replace("Write ok", "Write ok clearly")).unwrap();
+        crate::amend::amend(&p, &home, &repo, None, "clearer title", None).unwrap();
+        let v = dashboard(&p, &home, &repo).unwrap();
+        let pending = &v["changes"][0]["pending"][0];
+        assert_eq!(pending["reason"], "clearer title");
+        let items = pending["items"].as_array().unwrap();
+        assert!(!items.is_empty(), "{pending}");
+        assert!(
+            items.iter().all(|i| i["class"].is_string() && i["what"].as_str().is_some_and(|w| w.contains("title changed"))),
+            "{items:?}"
+        );
+        assert!(items.iter().all(|i| i.get("before").is_none()), "the view carries names only: {items:?}");
     }
 
     #[test]

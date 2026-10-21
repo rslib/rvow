@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make the archive tool and `/rvow-archive` record the drift that no pending plan edit names, also when an edit is pending, so a test edit after an earlier amendment needs no step from the agent.
+  The view lists the items of each pending edit for this.
 - Stop `rvow check` from warning about `baseline: pass` on a command with no counted test runner, since the flag does nothing now.
 - Take the baseline of a task from the code at accept, with no run.
   The first `rvow prove` is an ordinary proof, the hook no longer denies the first source edit, `rvow amend` marks no task pending, no prove builds the base commit, and `baseline: pass` is read and ignored.

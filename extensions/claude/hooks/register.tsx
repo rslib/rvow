@@ -524,7 +524,7 @@ async function archiveFlow(
   type Seen = {
     id: string
     tasks: { id: string; state: string }[]
-    pending: unknown[]
+    pending: { items?: { what: string }[] }[]
     drift?: { class: string; what: string }[]
   }
   let view: { changes?: Seen[]; elsewhere?: Seen[] }

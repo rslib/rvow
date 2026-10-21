@@ -36,13 +36,21 @@ export function driftReason(items: { what: string }[]): string {
   return text.length <= 500 ? text : `${text.slice(0, 497)}...`;
 }
 
-/** The `rvow amend` call that records drift the gate would refuse, or `null` when there is none or a pending plan edit holds it. */
+/** The `rvow amend` call that records drift the gate would refuse, or `null` when there is none or a pending plan edit names it. */
 export function driftAmendArgs(
-  found: { drift?: { class: string; what: string }[]; pending?: unknown[] } | undefined,
+  found:
+    | {
+        drift?: { class: string; what: string }[];
+        pending?: { items?: { what: string }[] }[];
+      }
+    | undefined,
   id: string,
 ): string[] | null {
-  if (!found || (found.pending ?? []).length > 0) return null;
-  const items = (found.drift ?? []).filter((d) => d.class !== "free");
+  const pending = found?.pending ?? [];
+  // A pending edit of an older rvow lists no items, so it counts as holding all drift.
+  if (!found || pending.some((p) => p.items === undefined)) return null;
+  const held = new Set(pending.flatMap((p) => (p.items ?? []).map((i) => i.what)));
+  const items = (found.drift ?? []).filter((d) => d.class !== "free" && !held.has(d.what));
   return items.length > 0 ? ["amend", "--reason", driftReason(items), "--change", id] : null;
 }
 
