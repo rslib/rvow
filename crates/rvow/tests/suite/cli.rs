@@ -469,7 +469,7 @@ fn check_warns_weak_verify() {
     )
     .unwrap();
     let checked = r.ok(&["check", &id]);
-    assert!(checked.contains("weak-verify") && checked.contains("TSK-new4"), "{checked}");
+    assert!(!checked.contains("TSK-new4"), "the baseline pass flag draws no warning: {checked}");
     assert!(!checked.contains("TSK-new5"), "{checked}");
     assert!(!checked.contains("TSK-new6"), "{checked}");
 

@@ -256,8 +256,12 @@ pub fn protected_files(top: &Path, config: &Config) -> Result<BTreeMap<String, P
     let patterns: Vec<String> =
         config.test_globs.iter().chain(&config.protect_infra).cloned().chain(ENFORCEMENT.iter().map(|s| s.to_string())).collect();
     let set = fingerprint::globset(&patterns)?;
-    let mut files: BTreeMap<String, PathBuf> =
-        fingerprint::candidate_files(top)?.into_iter().filter(|f| set.is_match(f)).map(|f| (f.clone(), top.join(f))).collect();
+    // A file that git tracks and the disk lacks is not protected now; drift reports it as removed.
+    let mut files: BTreeMap<String, PathBuf> = fingerprint::candidate_files(top)?
+        .into_iter()
+        .filter(|f| set.is_match(f) && top.join(f).symlink_metadata().is_ok())
+        .map(|f| (f.clone(), top.join(f)))
+        .collect();
     for rel in config.test_queries.values() {
         if let Some(key) = query_key(rel)
             && top.join(&key).is_file()
@@ -470,6 +474,39 @@ mod tests {
         )
         .unwrap();
         (tmp, p, repo, c)
+    }
+
+    const TAIL: &str = "- TSK-new1 Tail\n  covers: REQ-new1\n  verify: echo 'test result: ok. 0 passed; 0 failed;'\n  files: src/**\n";
+
+    #[test]
+    fn a_deleted_protected_file_is_not_listed() {
+        let (tmp, p, repo, _c) = setup(TAIL);
+        git(&repo, &["add", "tests/t.sh"]);
+        git(&repo, &["commit", "-q", "-m", "test"]);
+        let cfg = config::load(&p, &tmp.0.join("home")).unwrap();
+        assert!(protected_files(&repo, &cfg).unwrap().contains_key("tests/t.sh"));
+        std::fs::remove_file(repo.join("tests/t.sh")).unwrap();
+        assert!(
+            !protected_files(&repo, &cfg).unwrap().contains_key("tests/t.sh"),
+            "a file git tracks but the disk lacks is not protected now"
+        );
+    }
+
+    #[test]
+    fn a_deleted_protected_file_is_removed_drift() {
+        let (tmp, p, repo, c) = setup(TAIL);
+        git(&repo, &["add", "tests/t.sh"]);
+        git(&repo, &["commit", "-q", "-m", "test"]);
+        let home = tmp.0.join("home");
+        let prepared = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        commit(&p, prepared).unwrap();
+        std::fs::remove_file(repo.join("tests/t.sh")).unwrap();
+        let (living, _) = change::load_living(&p).unwrap();
+        let active = crate::proof::active(&p, &living).unwrap().remove(0);
+        let cfg = config::load(&p, &home).unwrap();
+        let items = crate::drift::drift(&p, &repo, &cfg, &active).unwrap();
+        assert!(items.iter().any(|i| i.class == crate::drift::Class::Weaken && i.what == "protected file tests/t.sh removed"), "{items:?}");
+        crate::proof::status(&p, &home, &repo, false).expect("status reads a change whose protected file is gone");
     }
 
     #[test]

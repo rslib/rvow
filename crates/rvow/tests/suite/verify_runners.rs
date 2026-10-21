@@ -211,15 +211,18 @@ fn runners_fill_plain_verify_still_works() {
 
 #[test]
 fn runners_fill_plan_rules_look_at_the_filled_command() {
-    // A runner that chains three commands and runs no counted test runner:
-    // the slow and weak rules must judge the filled command, not the @text.
-    let cfg = "[runners.slow]\nrun = \"true && true && true\"\n";
+    // A runner that chains three commands, and one that is a stub: the slow
+    // and weak rules must judge the filled command, not the @text.
+    let cfg = "[runners.slow]\nrun = \"true && true && true\"\n[runners.stub]\nrun = \"true\"\n";
     let f = fx("plan", cfg);
-    let c = backlog(&f, "@slow", "  baseline: pass\n");
+    let c = backlog(&f, "@slow", "");
     let r = plan::check(&f.project, &f.repo, Some(&c.id.to_string())).unwrap().remove(0);
     assert!(r.slow.iter().any(|s| s.message.contains("chains 3 commands")), "{:?}", r.slow);
+    let f = fx("plan-stub", cfg);
+    let c = backlog(&f, "@stub", "");
+    let r = plan::check(&f.project, &f.repo, Some(&c.id.to_string())).unwrap().remove(0);
     let weak: Vec<_> = r.findings.iter().filter(|(_, d)| d.rule.code() == "weak-verify").collect();
-    assert!(weak.iter().any(|(_, d)| d.message.contains("true && true && true") && !d.message.contains("@slow")), "{weak:?}");
+    assert!(weak.iter().any(|(_, d)| d.message.contains("trivial verify (true)") && !d.message.contains("@stub")), "{weak:?}");
 }
 
 #[test]

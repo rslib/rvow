@@ -48,7 +48,6 @@ Above the checklist, the review warns about a weak check.
 A check is weak in one of two cases:
 
 - The whole verify command is a stub that proves nothing, such as `true`, `:`, `exit 0`, one `echo` or one `test -f`.
-- A task sets `baseline: pass` on a command that runs no counted test runner.
 
 The warning code is `weak-verify`.
 `rvow check` prints the same warnings.

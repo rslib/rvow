@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Stop `rvow check` from warning about `baseline: pass` on a command with no counted test runner, since the flag does nothing now.
 - Take the baseline of a task from the code at accept, with no run.
   The first `rvow prove` is an ordinary proof, the hook no longer denies the first source edit, `rvow amend` marks no task pending, no prove builds the base commit, and `baseline: pass` is read and ignored.
   `rvow status` no longer lists `baseline_pending`, and a JUnit task passes when the report holds a passed case and no failed one.
@@ -220,6 +221,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow status`, `rvow prove` and the hooks failing with an io error when a protected test file that git tracks is deleted from the disk.
+  The deletion now counts as weaken drift, `protected file <path> removed`.
 - Fix `rvow prove --stale` stopping at the first task that rvow refuses to run. It now proves every stale task, reports each refusal and exits non-zero.
 - Fix a session being denied every writing call as `unseen-accept` after the user accepted a change in another session.
   The hook now keeps what the user made in `witness.json` in the project folder, so every session of the project reads it.

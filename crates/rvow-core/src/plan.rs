@@ -390,24 +390,7 @@ fn trivial_verify(cmd: &str) -> bool {
     }
 }
 
-/// The verify command runs a test runner whose output counts tests, so
-/// `baseline: pass` says more than "the command exited 0".
-fn counted_runner(cmd: &str) -> bool {
-    let words: Vec<&str> = cmd.split_whitespace().collect();
-    let pair = |a: &str, b: &str| words.windows(2).any(|w| w == [a, b]);
-    pair("cargo", "test")
-        || pair("cargo", "nextest")
-        || pair("go", "test")
-        || words.contains(&"pytest")
-        || words.contains(&"jest")
-        || words.contains(&"vitest")
-        || words.contains(&"mocha")
-        || words.contains(&"ctest")
-        || (words.contains(&"node") && words.contains(&"--test"))
-}
-
-/// A warning for each task whose check proves nothing: a stub command, or a
-/// `baseline: pass` on a command with no counted test runner.
+/// A warning for each task whose check proves nothing: a stub command.
 fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding> {
     let mut out = Vec::new();
     for t in tasks {
@@ -415,21 +398,13 @@ fn weak_checks(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding
             continue;
         };
         let cmd = cmd.as_str();
-        let trivial = trivial_verify(cmd);
-        if !trivial && !(t.baseline_pass && !counted_runner(cmd)) {
+        if !trivial_verify(cmd) {
             continue;
         }
-        let message = if trivial {
-            format!(
-                "{} has a trivial verify ({cmd}); replace it with the command that fails today, so the check cannot pass while the work is missing",
-                t.id
-            )
-        } else {
-            format!(
-                "{} sets baseline: pass but its verify ({cmd}) runs no counted test runner; use cargo test, cargo nextest, pytest, jest, vitest, mocha, node --test, go test or ctest",
-                t.id
-            )
-        };
+        let message = format!(
+            "{} has a trivial verify ({cmd}); replace it with the command that fails today, so the check cannot pass while the work is missing",
+            t.id
+        );
         out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::WeakVerify, t.line, message)));
     }
     out
@@ -687,10 +662,12 @@ mod tests {
     }
 
     #[test]
-    fn ctest_is_a_counted_runner_and_a_gtest_binary_is_not() {
-        assert!(counted_runner("ctest --test-dir build -R hex64"));
-        assert!(counted_runner("cmake --build build && ctest --output-on-failure"));
-        assert!(!counted_runner("./build/tests/test_hex64"), "a doctest or gtest binary has no fixed name");
+    fn a_baseline_pass_flag_draws_no_weak_verify_warning() {
+        let tasks = parsed("- TSK-new1 A\n    verify: ./build/tests/test_hex64\n    files: a\n    baseline: pass\n");
+        let filled = BTreeMap::from([("TSK-new1".to_string(), "./build/tests/test_hex64".to_string())]);
+        assert!(weak_checks(&tasks, &filled).is_empty(), "the flag is read and ignored");
+        let stub = BTreeMap::from([("TSK-new1".to_string(), "true".to_string())]);
+        assert_eq!(codes(&weak_checks(&tasks, &stub)), ["weak-verify"], "a stub command still draws the warning");
     }
 
     #[test]
