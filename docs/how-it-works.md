@@ -250,7 +250,8 @@ A session is held only for a task or drift item whose file it changed.
 - It is held for drift when it changed a file that a drift item names or a protected file.
 
 A session that changed no file, one that only read, a subagent and a call with no session id are never held.
-Each reason is given once to a session.
+A session held for more than one item gets one block that lists every open item: at most 3, then `and N more`.
+The same block is given once to a session.
 
 > [!NOTE]
 > A session is not held for a task while the task has a live lease that another worker holds, or that no worker took yet.
@@ -631,8 +632,12 @@ When the brief names a next task, one `loop:` line says to do three things:
 - Read the plan with `rvow show <change>`.
 
 rvow sends the same brief once per session.
-It keeps the last brief it sent in `hook-state/brief-<session>`, sends nothing when the brief is the same, and sends only the `tasks:` line when only the counts changed.
-After a `compact` or a `clear`, and when the next task changes, it sends the full brief again.
+It keeps the last brief it sent in `hook-state/brief-<session>` and sends nothing when the brief is the same.
+It also sends nothing when only the counts changed, so a proof by another agent does not reach this session.
+
+When the next task changes and the rest stays the same, it sends only the brief from the `next:` line to the end.
+After a `compact` or a `clear`, or when a title, a note or a warning changes, it sends the full brief again.
+A session that holds a live lease gets a brief that names its leased task as `next:`, so another agent's work does not move it.
 A hook call with no session id gets the full brief each time, so an older mod keeps working.
 
 A branch with no active change and no backlog plan gets one line naming `rvow new` and `rvow guide proposal` instead.

@@ -140,7 +140,7 @@ async function brief(
   signal?: AbortSignal,
   timeoutMs = SLOW_MS,
   onFail?: (why: string) => void,
-  extra: { session_id?: string; source?: "startup" | "compact" } = {},
+  extra: { session_id?: string; source?: "startup" | "compact"; agent_id?: string } = {},
 ): Promise<string | undefined> {
   const text = (await hook("session-start", cwd, extra, timeoutMs, false, signal, onFail))
     ?.hookSpecificOutput?.additionalContext;
@@ -1106,6 +1106,7 @@ export default function (pi: ExtensionAPI) {
       const text = await brief(ctx.cwd, background.signal, undefined, undefined, {
         session_id: ctx.sessionManager?.getSessionId?.(),
         source: "startup",
+        agent_id: leaseAgent,
       });
       if (text && generation === epoch)
         pi.sendMessage({ customType: "rvow", content: text, display: false });
@@ -1178,6 +1179,7 @@ export default function (pi: ExtensionAPI) {
     const text = await brief(ctx.cwd, undefined, BOUND_MS, enforcementOff(ctx), {
       session_id: ctx.sessionManager?.getSessionId?.(),
       source: "compact",
+      agent_id: leaseAgent,
     });
     if (!text) return;
     const msg = {

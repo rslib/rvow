@@ -1148,8 +1148,9 @@ pub fn claude_lease_end(project: &Project, input: &Value) -> Result<Option<Value
 /// project only the warnings go.
 pub fn claude_session_start(project: Option<&Project>, home: &Path, input: &Value, warnings: &[String]) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let agent = input.get("agent_id").and_then(Value::as_str);
     let mut text = match project {
-        Some(p) => brief::brief(p, home, &cwd)?,
+        Some(p) => brief::brief_for(p, home, &cwd, agent)?,
         None => String::new(),
     };
     if let Some(on) = project.and_then(yolo::active) {
@@ -1183,18 +1184,38 @@ pub fn claude_session_start(project: Option<&Project>, home: &Path, input: &Valu
     }))
 }
 
-/// What a session still needs of `text` after it got `last`: nothing for the same brief, only the
-/// `tasks:` line when only that line differs, else the full brief.
+/// What a session still needs of `text` after it got `last`: nothing when only the counts changed,
+/// the tail from the `next:` line when only that moved, else the full brief.
 fn brief_delta(last: &str, text: &str) -> Option<String> {
     if last == text {
         return None;
     }
-    let (old, new): (Vec<&str>, Vec<&str>) = (last.lines().collect(), text.lines().collect());
-    let mut changed = old.iter().zip(&new).filter(|(a, b)| a != b);
-    match (old.len() == new.len(), changed.next(), changed.next()) {
-        (true, Some((was, line)), None) if was.starts_with("tasks:") && line.starts_with("tasks:") => Some(format!("{line}\n")),
-        _ => Some(text.to_string()),
+    let (Some((old_head, old_tail)), Some((new_head, new_tail))) = (split_next(last), split_next(text)) else {
+        return Some(text.to_string());
+    };
+    if head_without_tasks(old_head) != head_without_tasks(new_head) {
+        return Some(text.to_string());
     }
+    if old_tail == new_tail { None } else { Some(new_tail.to_string()) }
+}
+
+/// The brief before its last `next:` line and the tail from that line on, or `None` without one.
+/// The last one, since a note in the head may hold a line that starts with `next:`.
+fn split_next(text: &str) -> Option<(&str, &str)> {
+    let mut at = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("next:") {
+            at = Some(offset);
+        }
+        offset += line.len();
+    }
+    at.map(|at| text.split_at(at))
+}
+
+/// The lines before the tail without the `tasks:` line, which only holds counts.
+fn head_without_tasks(head: &str) -> String {
+    head.lines().filter(|line| !line.starts_with("tasks:")).collect::<Vec<_>>().join("\n")
 }
 
 const MAX_DRIFT_ITEMS: usize = 3;
@@ -1224,6 +1245,34 @@ fn git_operation_running(top: &Path) -> bool {
 pub struct StopHold {
     pub kind: StopReason,
     pub text: String,
+}
+
+/// One reason of the session's stop block, with the kind that the stats count.
+struct OpenItem {
+    kind: StopReason,
+    text: String,
+}
+
+const MAX_STOP_ITEMS: usize = 3;
+
+/// One block reason for every open item: a single item keeps its own text, and more are listed
+/// up to `MAX_STOP_ITEMS` and then counted.
+fn stop_hold(items: Vec<OpenItem>) -> Option<StopHold> {
+    let mut items = items.into_iter();
+    let first = items.next()?;
+    let rest: Vec<OpenItem> = items.collect();
+    if rest.is_empty() {
+        return Some(StopHold { kind: first.kind, text: first.text });
+    }
+    let total = rest.len() + 1;
+    let more = total.saturating_sub(MAX_STOP_ITEMS);
+    let mut shown = vec![first.text];
+    shown.extend(rest.into_iter().take(MAX_STOP_ITEMS - 1).map(|i| i.text));
+    let mut text = format!("{total} open items: {}", shown.join("; "));
+    if more > 0 {
+        text.push_str(&format!("; and {more} more"));
+    }
+    Some(StopHold { kind: first.kind, text })
 }
 
 /// Why the agent must keep working, or `None` when it may stop. Only the session that changed a
@@ -1260,6 +1309,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         },
         None => BTreeSet::new(),
     };
+    let mut items: Vec<OpenItem> = Vec::new();
     let mut protected_files = None;
     for c in &queue {
         if pending.iter().any(|p| p.change == c.dir.id) {
@@ -1286,8 +1336,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         if !own {
             continue;
         }
-        let text = unamended_text(&blocking);
-        return Ok(Some(StopHold { kind: StopReason::Drift, text }));
+        items.push(OpenItem { kind: StopReason::Drift, text: unamended_text(&blocking) });
     }
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     // Only the newest accepted change is the agent's current plan; older changes on the branch are
@@ -1315,10 +1364,10 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
                 continue;
             }
             let text = format!("{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written");
-            return Ok(Some(StopHold { kind: StopReason::NoProof, text }));
+            items.push(OpenItem { kind: StopReason::NoProof, text });
         }
     }
-    Ok(None)
+    Ok(stop_hold(items))
 }
 
 /// One line for a status bar: proved tasks, drift and pending amendments of

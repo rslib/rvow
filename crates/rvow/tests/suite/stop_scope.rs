@@ -56,9 +56,20 @@ impl Fx {
 
     /// Accepts a change whose one task runs `verify`, and returns the task id.
     fn change(&self, title: &str, verify: &str) -> String {
+        let mut ids = self.change_with(title, &[("One", verify, "**")]);
+        ids.pop().expect("the change has one task")
+    }
+
+    /// Accepts a change with one task per (title, verify) pair, each writing `files`, and returns the ids.
+    fn change_with(&self, title: &str, tasks: &[(&str, &str, &str)]) -> Vec<String> {
         let out = self.rvow(&["new", "--spec", title]);
         let dir = PathBuf::from(out.lines().find_map(|l| l.strip_prefix("path: ")).unwrap());
-        std::fs::write(dir.join("tasks.md"), format!("- TSK-new1 {title}\n  covers: REQ-new1\n  verify: {verify}\n  files: **\n")).unwrap();
+        let body: String = tasks
+            .iter()
+            .enumerate()
+            .map(|(i, (t, verify, files))| format!("- TSK-new{i} {t}\n  covers: REQ-new1\n  verify: {verify}\n  files: {files}\n"))
+            .collect();
+        std::fs::write(dir.join("tasks.md"), body).unwrap();
         std::fs::write(
             dir.join("specs/x.md"),
             format!("## ADD REQ-new1 {title}\nrvow SHALL do it.\n### Scenario: s\n- WHEN it runs\n- THEN it is done\n"),
@@ -70,7 +81,18 @@ impl Fx {
         let tasks =
             std::fs::read_to_string(PathBuf::from(located.lines().find_map(|l| l.strip_prefix("path: ")).unwrap().trim()).join("tasks.md"))
                 .unwrap();
-        tasks.lines().find_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).unwrap()
+        tasks.lines().filter_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(String::from)).collect()
+    }
+
+    /// Commits `rel` with `text`, so the file is in the protected set at accept.
+    fn commit_file(&self, rel: &str, text: &str) {
+        let at = self.root.join("repo").join(rel);
+        if let Some(dir) = at.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(&at, text).unwrap();
+        assert!(self.cmd("git").args(["add", rel]).status().unwrap().success());
+        assert!(self.cmd("git").args(["commit", "-q", "-m", rel]).status().unwrap().success());
     }
 
     /// An allowed Write call of session `s1` on `rel`, which puts the file in the session's record.
@@ -125,4 +147,51 @@ fn stop_the_newest_change_still_holds_the_agent() {
     fx.rvow(&["prove", &new]);
     let reason = fx.stop().expect("the newest change has a failed task");
     assert!(reason.contains(&new) && !reason.contains(&old), "{reason}");
+}
+
+#[test]
+fn stop_scope_three_open_items_come_in_one_block() {
+    let fx = Fx::new("three");
+    fx.commit_file("tests/t.sh", "exit 1\n");
+    let ids = fx.change_with("Both work", &[("Write a", "test -f a.txt", "**"), ("Write b", "test -f b.txt", "**")]);
+    std::fs::write(fx.root.join("repo/tests/t.sh"), "exit 0\n").unwrap();
+    fx.edit("tests/t.sh");
+    fx.edit("a.txt");
+    fx.edit("b.txt");
+    let reason = fx.stop().expect("three open items hold the stop");
+    assert!(reason.starts_with("rvow: 3 open items: "), "{reason}");
+    assert!(reason.contains("protected file tests/t.sh changed"), "{reason}");
+    assert!(reason.contains(&ids[0]) && reason.contains(&ids[1]), "{reason}");
+}
+
+#[test]
+fn stop_scope_five_open_items_name_three_and_count_the_rest() {
+    let fx = Fx::new("five");
+    let files: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|f| format!("{f}.txt")).collect();
+    let tasks: Vec<(&str, &str, &str)> = files.iter().map(|f| ("Write a file", "test -f one.txt", f.as_str())).collect();
+    let ids = fx.change_with("Five tasks", &tasks);
+    for f in &files {
+        fx.edit(f);
+    }
+    let reason = fx.stop().expect("five open items hold the stop");
+    assert!(reason.starts_with("rvow: 5 open items: "), "{reason}");
+    for id in &ids[..3] {
+        assert!(reason.contains(id.as_str()), "{id} is named: {reason}");
+    }
+    for id in &ids[3..] {
+        assert!(!reason.contains(id.as_str()), "{id} is counted: {reason}");
+    }
+    assert!(reason.trim_end().ends_with("and 2 more"), "{reason}");
+}
+
+#[test]
+fn stop_scope_the_same_open_items_again_let_the_stop_pass() {
+    let fx = Fx::new("same");
+    let ids = fx.change_with("Both work", &[("Write a", "test -f a.txt", "**"), ("Write b", "test -f b.txt", "**")]);
+    fx.edit("a.txt");
+    fx.edit("b.txt");
+    let reason = fx.stop().expect("two open items hold the stop");
+    assert!(reason.starts_with("rvow: 2 open items: "), "{reason}");
+    assert!(reason.contains(&ids[0]) && reason.contains(&ids[1]), "{reason}");
+    assert_eq!(fx.stop(), None, "the same items let the stop pass");
 }

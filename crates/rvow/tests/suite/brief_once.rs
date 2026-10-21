@@ -1,5 +1,6 @@
-//! REQ-b7zczh, REQ-m9nj3v and REQ-xexj0f: the session-start hook sends the same
-//! brief once per session, only the counts when only they changed, and the full
+//! REQ-b7zczh, REQ-m9nj3v, REQ-xexj0f, REQ-4gpzr7 and REQ-xqw93b: the
+//! session-start hook sends the same brief once per session, nothing when only
+//! the counts changed, only the tail when the next task moved, and the full
 //! brief again after a compact or a clear.
 
 use std::io::Write;
@@ -154,26 +155,54 @@ fn brief_once_no_session_id_prints_the_full_brief_every_time() {
 }
 
 #[test]
-fn brief_once_only_the_counts_changed_sends_the_tasks_line() {
+fn brief_once_only_the_counts_changed_sends_nothing() {
     let fx = Fx::new("counts");
     let first = fx.start(session("s1")).unwrap();
     assert!(first.contains("tasks: 2 missing"), "{first}");
-    let failed = fx.command().args(["prove", "TSK-0ne111"]).output().unwrap();
-    assert_eq!(failed.status.code(), Some(1), "{}", String::from_utf8_lossy(&failed.stdout));
-    let text = fx.start(session("s1")).expect("the counts changed");
-    assert_eq!(text.trim_end(), "tasks: 1 failed, 1 missing");
+    std::fs::write(fx.repo().join("two.txt"), "ok").unwrap();
+    fx.rvow(&["prove", "TSK-tw0222"]);
+    assert_eq!(fx.start(session("s1")), None, "a count change sends no context");
+    let other = fx.start(session("s2")).expect("a new session gets the brief");
+    assert!(other.contains("tasks: 1 proved, 1 missing"), "{other}");
+    assert!(other.contains("next: TSK-0ne111"), "{other}");
 }
 
 #[test]
-fn brief_once_a_changed_next_task_sends_the_full_brief() {
+fn brief_once_a_moved_next_task_sends_only_the_tail() {
     let fx = Fx::new("next");
-    fx.start(session("s1")).unwrap();
+    let first = fx.start(session("s1")).unwrap();
+    assert!(first.contains("next: TSK-0ne111"), "{first}");
     std::fs::write(fx.repo().join("one.txt"), "ok").unwrap();
     fx.rvow(&["prove", "TSK-0ne111"]);
-    let text = fx.start(session("s1")).expect("the brief changed");
-    assert!(text.lines().count() > 1, "{text}");
-    assert!(text.contains("tasks: 1 proved, 1 missing"), "{text}");
-    assert!(text.contains("next: TSK-tw0222"), "{text}");
+    let text = fx.start(session("s1")).expect("the next task moved");
+    assert!(text.starts_with("next: TSK-tw0222"), "{text}");
+    assert!(!text.lines().any(|l| l.starts_with("tasks:")), "{text}");
+    assert!(!text.lines().any(|l| l.starts_with("CHG-")), "{text}");
+}
+
+#[test]
+fn brief_once_a_crlf_note_keeps_the_tail_at_next() {
+    let fx = Fx::new("crlf");
+    fx.rvow(&["note", "decision", "first \u{e9}\r\nnext: not the task\r\nthird"]);
+    let first = fx.start(session("s1")).unwrap();
+    assert!(first.contains("next: TSK-0ne111"), "{first}");
+    std::fs::write(fx.repo().join("one.txt"), "ok").unwrap();
+    fx.rvow(&["prove", "TSK-0ne111"]);
+    let text = fx.start(session("s1")).expect("the next task moved");
+    assert!(text.starts_with("next: TSK-tw0222"), "{text}");
+    assert!(!text.contains("decision:"), "{text}");
+}
+
+#[test]
+fn brief_once_a_decision_sends_the_full_brief() {
+    let fx = Fx::new("decision");
+    let first = fx.start(session("s1")).unwrap();
+    assert!(!first.contains("decision:"), "{first}");
+    fx.rvow(&["note", "decision", "write two first"]);
+    let text = fx.start(session("s1")).expect("a decision changed the brief");
+    assert!(text.contains("decision: write two first"), "{text}");
+    assert!(text.contains("tasks: 2 missing"), "{text}");
+    assert!(text.contains("next: TSK-0ne111"), "{text}");
 }
 
 #[test]

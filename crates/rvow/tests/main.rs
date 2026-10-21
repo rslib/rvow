@@ -124,6 +124,8 @@ mod hook_json;
 mod hook_stats;
 #[path = "suite/judge.rs"]
 mod judge;
+#[path = "suite/lease_brief.rs"]
+mod lease_brief;
 #[path = "suite/literal_paths.rs"]
 mod literal_paths;
 #[path = "suite/plan_access.rs"]

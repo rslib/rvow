@@ -152,6 +152,19 @@ fn docs_name_the_brief_once_rule() {
 }
 
 #[test]
+fn docs_name_the_quiet_brief() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("sends nothing when only the counts changed"), "how-it-works lacks the count rule");
+    assert!(how.contains("only the brief from the `next:` line"), "how-it-works lacks the next task rule");
+    assert!(how.contains("names its leased task as `next:`"), "how-it-works lacks the leased brief");
+    assert!(how.contains("one block that lists every open item"), "how-it-works lacks the one stop block");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("only the count of tasks changed"), "the Unreleased changelog lacks the quiet brief");
+    assert!(unreleased.contains("one stop block"), "the Unreleased changelog lacks the one stop block");
+}
+
+#[test]
 fn docs_name_the_automatic_baseline() {
     let how = doc("docs/how-it-works.md");
     assert!(how.contains("## The baseline: the code at accept"), "how-it-works lacks the automatic baseline");

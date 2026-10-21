@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -18,6 +18,7 @@ case "$3" in
   lease-bind) cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" ;;
   pre-tool-use) cat > "$RVOW_FAKE/pre.in"; cat "$RVOW_FAKE/pre.out" 2>/dev/null || true ;;
   lease-end) cat > "$RVOW_FAKE/end.in" ;;
+  session-start) cat > "$RVOW_FAKE/brief.in" ;;
   *) cat > /dev/null ;;
 esac
 `,
@@ -74,6 +75,16 @@ function setup() {
       isError?: boolean;
     }>;
   return { fire, notes, answer, sent, prompt, edit, prove };
+}
+
+// The brief runs after the hook returns, so the fake rvow reads its input a moment later.
+async function briefSent() {
+  for (let i = 0; i < 200; i++) {
+    if (existsSync(join(dir, "brief.in")))
+      return JSON.parse(readFileSync(join(dir, "brief.in"), "utf8")) as Record<string, unknown>;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("the session-start brief never reached the fake rvow");
 }
 
 test("a later lease line binds the next lease when the hook says bound", async () => {
@@ -137,4 +148,36 @@ test("rvow_prove asks the hook first with the lease agent and runs only when it 
   const ran = await t.prove("TSK-a");
   assert.match(ran.content[0]?.text ?? "", /result: pass/);
   assert.equal(ran.isError, undefined);
+});
+
+test("a session-start with no lease sends no agent id", async () => {
+  const t = setup();
+  await t.fire("session_start");
+  const asked = await briefSent();
+  assert.equal(asked.session_id, "pi-sess");
+  assert.equal("agent_id" in asked, false, "no lease is bound, so the brief carries no agent id");
+});
+
+test("a session-start after a bind sends the lease agent id", async () => {
+  const t = setup();
+  t.answer({ bound: true, task: "TSK-aaaaaa" });
+  await t.prompt("TSK-aaaaaa");
+  rmSync(join(dir, "brief.in"), { force: true });
+  await t.fire("session_start");
+  const asked = await briefSent();
+  assert.equal(asked.session_id, "pi-sess");
+  assert.equal(asked.agent_id, "pi-sess");
+  assert.equal(asked.source, "startup");
+});
+
+test("a compact brief after a bind sends the lease agent id", async () => {
+  const t = setup();
+  t.answer({ bound: true, task: "TSK-aaaaaa" });
+  await t.prompt("TSK-aaaaaa");
+  rmSync(join(dir, "brief.in"), { force: true });
+  await t.fire("session_compact", {});
+  await t.fire("context", { messages: [] });
+  const asked = await briefSent();
+  assert.equal(asked.agent_id, "pi-sess");
+  assert.equal(asked.source, "compact");
 });

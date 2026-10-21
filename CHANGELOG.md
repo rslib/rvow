@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Send a session no brief update when only the count of tasks changed, and only the part from `next:` when the next task moves, so the proofs of other agents stay out of its context.
+  A session that holds a lease, such as a pi session, sees its leased task as `next:`.
+- Give a session one stop block that lists every open item, at most 3 and then a count, instead of one stop for each item.
 - Make the archive tool and `/rvow-archive` record the drift that no pending plan edit names, also when an edit is pending, so a test edit after an earlier amendment needs no step from the agent.
   The view lists the items of each pending edit for this.
 - Stop `rvow check` from warning about `baseline: pass` on a command with no counted test runner, since the flag does nothing now.

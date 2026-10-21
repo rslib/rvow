@@ -156,9 +156,32 @@ fn planning(project: &Project, cwd: &Path) -> Result<String> {
     Ok(out)
 }
 
+/// The task of `queue` that `agent` holds a live lease of, if any.
+fn leased_task<'a>(
+    project: &Project,
+    home: &Path,
+    cwd: &Path,
+    agent: &str,
+    queue: &[&'a Active],
+) -> Result<Option<(&'a Active, &'a Task)>> {
+    let Some(lease) = crate::lease::holder(project, home, cwd, agent, crate::ledger::now_ms())? else {
+        return Ok(None);
+    };
+    Ok(queue
+        .iter()
+        .find(|c| c.dir.id.to_string() == lease.change)
+        .and_then(|c| c.loaded.tasks.iter().find(|t| t.id.to_string() == lease.task).map(|t| (*c, t))))
+}
+
 /// The brief for the current branch, or an empty string when the branch has no
 /// active change and no plan waiting for accept.
 pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
+    brief_for(project, home, cwd, None)
+}
+
+/// The brief of `agent`'s session: the task it holds a live lease of comes
+/// first in `next:`, since that is the one work it may edit.
+pub fn brief_for(project: &Project, home: &Path, cwd: &Path, agent: Option<&str>) -> Result<String> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -225,8 +248,16 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
         out.push_str(&format!("handoff: {text}\n"));
     }
 
-    match proof::next(&queue, &now)? {
-        Some((c, t, _)) => {
+    let leased = match agent {
+        Some(agent) => leased_task(project, home, cwd, agent, &queue)?,
+        None => None,
+    };
+    let next = match leased {
+        Some(pair) => Some(pair),
+        None => proof::next(&queue, &now)?.map(|(c, t, _)| (c, t)),
+    };
+    match next {
+        Some((c, t)) => {
             let full = format!("next: {}", proof::render_task(t, &c.loaded, &living));
             let all = format!("{out}{full}");
             out = if fits(&all) { all } else { out + &compact(t, c, &living) };
