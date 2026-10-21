@@ -39,6 +39,13 @@ pub struct Runner {
     /// The built files `run` executes, relative to the work tree, with params filled. Needs `build`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<String>,
+    /// Cheap checks that run each time a stale proof is considered for revalidation, with params filled.
+    /// A failed one stops the revalidation. Needs `build`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub always: Vec<String>,
+    /// The runner whose keys this one starts from; resolved when the config loads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
 }
 
 mod opt_duration {
@@ -72,6 +79,69 @@ impl Runner {
         let text = serde_json::to_string(&own).map_err(|e| Error::internal(format!("runner does not serialize: {e}")));
         sha256_hex(text.unwrap_or_default().as_bytes())
     }
+}
+
+/// Appends the entries of `more` that `list` does not hold yet.
+fn append_new(list: &mut Vec<String>, more: &[String]) {
+    for item in more {
+        if !list.contains(item) {
+            list.push(item.clone());
+        }
+    }
+}
+
+/// `child` over `base`: a set `run`, `build` or `timeout` wins, the maps `params`, `default` and `env`
+/// merge with the child's keys winning, and the lists `needs`, `artifacts` and `always` add up.
+fn merge(base: Runner, child: &Runner) -> Runner {
+    let mut out = base;
+    if !child.run.trim().is_empty() {
+        out.run = child.run.clone();
+    }
+    out.params.extend(child.params.clone());
+    out.default.extend(child.default.clone());
+    out.env.extend(child.env.clone());
+    out.timeout = child.timeout.or(out.timeout);
+    out.build = child.build.clone().or(out.build);
+    append_new(&mut out.needs, &child.needs);
+    append_new(&mut out.artifacts, &child.artifacts);
+    append_new(&mut out.always, &child.always);
+    out.extends = None;
+    out
+}
+
+fn resolved(all: &BTreeMap<String, Runner>, name: &str, chain: &mut Vec<String>) -> Result<Runner> {
+    if chain.iter().any(|c| c == name) {
+        return Err(Error::new(
+            "runner",
+            format!("runner {name:?} extends itself through {}, a cycle", chain.join(", ")),
+            "remove one extends from the cycle",
+        ));
+    }
+    let own = all.get(name).ok_or_else(|| {
+        Error::new(
+            "runner",
+            format!(
+                "{} extends the runner {name:?}, which the project config does not hold",
+                chain.last().map_or("a runner", String::as_str)
+            ),
+            format!("add a [runners.{name}] table, or fix the extends"),
+        )
+    })?;
+    let Some(base) = own.extends.as_deref() else { return Ok(own.clone()) };
+    chain.push(name.to_string());
+    let base = resolved(all, base, chain)?;
+    chain.pop();
+    Ok(merge(base, own))
+}
+
+/// Every runner with its `extends` base merged in, so no other code sees the key. A base may extend
+/// another; a cycle or a base the config lacks is an error that names the runner.
+pub fn resolve(runners: BTreeMap<String, Runner>) -> Result<BTreeMap<String, Runner>> {
+    let mut out = BTreeMap::new();
+    for name in runners.keys() {
+        out.insert(name.clone(), resolved(&runners, name, &mut Vec::new())?);
+    }
+    Ok(out)
 }
 
 /// The first char of `value` that is not safe inside a shell command, if any.
@@ -131,6 +201,8 @@ pub struct Plan {
     pub build: Option<String>,
     /// The runner's `artifacts` paths, with every param filled.
     pub artifacts: Vec<String>,
+    /// The runner's `always` checks, with every param filled.
+    pub always: Vec<String>,
 }
 
 impl Drop for Plan {
@@ -161,6 +233,7 @@ impl Plan {
             needs: Vec::new(),
             build: None,
             artifacts: Vec::new(),
+            always: Vec::new(),
         }
     }
 }
@@ -203,6 +276,20 @@ fn plan_inner(runners: &BTreeMap<String, Runner>, task: &Task, display: bool) ->
         ));
     }
 
+    if runner.run.trim().is_empty() {
+        return Err(Error::new(
+            "runner",
+            format!("runner {name:?} has no run command; a runner that only others extend holds shared keys, not a verify"),
+            format!("name a runner with a run command in the verify, or set runners.{name}.run"),
+        ));
+    }
+    if !runner.always.is_empty() && runner.build.is_none() {
+        return Err(Error::new(
+            "runner",
+            format!("runner {name:?} sets always but not build"),
+            format!("set build and artifacts on runners.{name}, or drop always"),
+        ));
+    }
     if runner.build.is_some() != !runner.artifacts.is_empty() {
         let (set, missing) = if runner.build.is_some() { ("build", "artifacts") } else { ("artifacts", "build") };
         return Err(Error::new(
@@ -311,6 +398,8 @@ fn plan_inner(runners: &BTreeMap<String, Runner>, task: &Task, display: bool) ->
     let build = runner.build.as_ref().map(|b| fill(b, &values, &format!("the build of runner {name:?}"))).transpose()?;
     let artifacts =
         runner.artifacts.iter().map(|a| fill(a, &values, &format!("an artifacts path of runner {name:?}"))).collect::<Result<Vec<_>>>()?;
+    let always =
+        runner.always.iter().map(|a| fill(a, &values, &format!("an always check of runner {name:?}"))).collect::<Result<Vec<_>>>()?;
     Ok(Plan {
         command,
         env,
@@ -320,6 +409,7 @@ fn plan_inner(runners: &BTreeMap<String, Runner>, task: &Task, display: bool) ->
         needs,
         build,
         artifacts,
+        always,
     })
 }
 
@@ -468,6 +558,52 @@ mod tests {
         let with = runners(ARTIFACT_RUNNER).remove("cpp").unwrap();
         let without = Runner { build: None, artifacts: Vec::new(), ..with.clone() };
         assert_eq!(with.hash(), without.hash(), "adding build and artifacts must not make old proofs runner-changed");
+    }
+
+    const SHARED: &str = "[runners.base]\nbuild = \"cmake --build build --target {target}\"\nneeds = [\"build\"]\nartifacts = [\"build/lib/*.so\"]\nenv = { ZERO_AR_DATE = \"1\" }\nalways = [\"test ! -e include/old.h\"]\n\n[runners.cpp]\nextends = \"base\"\nrun = \"cmake --build build --target {target} && ctest --test-dir build -R '^{target}$'\"\nartifacts = [\"build/tests/{target}\"]\nenv = { CCACHE_DISABLE = \"1\" }\n";
+
+    #[test]
+    fn runner_share_extends_merges_scalars_maps_and_lists() {
+        let rs = resolve(runners(SHARED)).unwrap();
+        let cpp = &rs["cpp"];
+        assert_eq!(cpp.extends, None);
+        assert_eq!(cpp.build.as_deref(), Some("cmake --build build --target {target}"));
+        assert_eq!(cpp.needs, ["build".to_string()]);
+        assert_eq!(cpp.artifacts, ["build/lib/*.so".to_string(), "build/tests/{target}".to_string()]);
+        assert_eq!(cpp.env.len(), 2, "{:?}", cpp.env);
+        assert_eq!(cpp.always, ["test ! -e include/old.h".to_string()]);
+        let p = plan(&rs, &task("@cpp target=pool_test")).unwrap();
+        assert_eq!(p.artifacts, ["build/lib/*.so".to_string(), "build/tests/pool_test".to_string()]);
+        assert_eq!(p.always, ["test ! -e include/old.h".to_string()]);
+    }
+
+    #[test]
+    fn runner_share_a_child_hashes_as_the_runner_written_in_full() {
+        let rs = resolve(runners(SHARED)).unwrap();
+        let full = Runner { extends: None, ..rs["cpp"].clone() };
+        assert_eq!(rs["cpp"].hash(), full.hash());
+        let changed = Runner { always: Vec::new(), ..full.clone() };
+        assert_ne!(changed.hash(), full.hash(), "an always check is part of what the runner checks");
+    }
+
+    #[test]
+    fn runner_share_refuses_an_unknown_base_a_cycle_and_a_base_with_no_run() {
+        let e = resolve(runners("[runners.a]\nextends = \"nope\"\nrun = \"x\"\n")).unwrap_err();
+        assert_eq!(e.code, "runner");
+        assert!(e.message.contains("nope"), "{e}");
+        let e = resolve(runners("[runners.a]\nextends = \"b\"\n[runners.b]\nextends = \"a\"\n")).unwrap_err();
+        assert!(e.message.contains("cycle") || e.message.contains("itself"), "{e}");
+        let rs = resolve(runners(SHARED)).unwrap();
+        let e = plan(&rs, &task("@base target=x")).unwrap_err();
+        assert!(e.message.contains("run"), "{e}");
+    }
+
+    #[test]
+    fn runner_share_always_needs_a_build() {
+        let rs = runners("[runners.t]\nrun = \"t\"\nalways = [\"test -f a\"]\n");
+        let e = plan(&rs, &task("@t")).unwrap_err();
+        assert_eq!(e.code, "runner");
+        assert!(e.message.contains("always") && e.message.contains("build"), "{e}");
     }
 
     #[test]

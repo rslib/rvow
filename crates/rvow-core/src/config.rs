@@ -351,7 +351,7 @@ pub fn tools(project: &Project, home: &Path) -> Result<Vec<String>> {
 /// is what a vow hashes as the effective config, and a runner edit is its own
 /// runner drift per task, not a `config changed` item.
 pub fn runners(project: &Project) -> Result<BTreeMap<String, crate::template::Runner>> {
-    Ok(read_file(&project.root.join(CONFIG_FILE))?.runners.unwrap_or_default())
+    crate::template::resolve(read_file(&project.root.join(CONFIG_FILE))?.runners.unwrap_or_default())
 }
 
 /// How the gate rerun uses its cache.

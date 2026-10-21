@@ -201,6 +201,16 @@ pub fn check_key(top: &Path, cmd: &str, tools: Option<&BTreeMap<String, String>>
     Ok(Some(sha256_hex(value.to_string().as_bytes())))
 }
 
+/// The key of a check result on a tree with uncommitted changes: the command text, the content of every
+/// file of the work tree and the tool fingerprint. `None` when a listed tool is missing. A retry on the
+/// same content finds it, and any other edit gives another key.
+pub fn dirty_check_key(project: &Project, top: &Path, cmd: &str, tools: Option<&BTreeMap<String, String>>) -> Result<Option<String>> {
+    let Some(tools) = tools else { return Ok(None) };
+    let tree = crate::fingerprint::worktree(top, project)?;
+    let value = serde_json::json!([CHECK_KEY_FORMAT, "dirty", env!("CARGO_PKG_VERSION"), cmd, tree, tools]);
+    Ok(Some(sha256_hex(value.to_string().as_bytes())))
+}
+
 /// The cache key of a task, or `None` when the task must not be cached: an
 /// `env` command failed or a listed tool is missing. The tree comes from HEAD,
 /// which the gate's clean worktree matches, so no file is read.

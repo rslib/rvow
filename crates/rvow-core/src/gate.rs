@@ -349,7 +349,13 @@ fn gate_for(
         }
         let cmd = step.run();
         let clean = clean_in_scope(step, &dirty)?;
-        let key = if clean { cache::check_key(&top, cmd, check_tools.as_ref())? } else { None };
+        let key = if !check_on {
+            None
+        } else if clean {
+            cache::check_key(&top, cmd, check_tools.as_ref())?
+        } else {
+            cache::dirty_check_key(project, &top, cmd, check_tools.as_ref())?
+        };
         if let (Some(cache), Some(key)) = (&check_cache, &key)
             && cache.lookup(cmd, key, crate::ledger::now_ms(), policy.max_age.as_millis() as u64).is_some()
         {
@@ -361,10 +367,7 @@ fn gate_for(
         let _ = writeln!(echo, "check done: {cmd} ({} ms)", o.duration_ms);
         if !o.passed() {
             r.failures.push(format!("check failed: {cmd}"));
-        } else if clean
-            && record
-            && let (Some(cache), Some(key)) = (&mut check_cache, &key)
-        {
+        } else if record && let (Some(cache), Some(key)) = (&mut check_cache, &key) {
             let lock = project.lock()?;
             cache.record_pass(&lock, cmd, key, &o, &proof::machine(&config).to_string())?;
         }
@@ -791,6 +794,26 @@ mod tests {
         std::fs::write(p.root.join("config.toml"), "checks = [\"false\"]\n").unwrap();
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(r.failures.iter().any(|f| f == "check failed: false"), "{r:?}");
+    }
+
+    #[test]
+    fn gate_check_dirty_tree_caches_a_pass_by_content() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let log = tmp.0.join("check.log");
+        std::fs::write(p.root.join("config.toml"), format!("checks = [\"echo run >> {}\"]\n", log.display())).unwrap();
+        let runs = || std::fs::read_to_string(&log).map_or(0, |t| t.lines().count());
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(!r.failures.iter().any(|f| f.starts_with("check")), "{r:?}");
+        assert_eq!(runs(), 1);
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(!r.failures.iter().any(|f| f.starts_with("check")), "{r:?}");
+        assert_eq!(runs(), 1, "the same dirty tree skips a check that passed");
+        std::fs::write(repo.join("out.txt"), "ok, edited").unwrap();
+        let _ = run_gate(&p, &home, &repo, Options::default());
+        assert_eq!(runs(), 2, "another content runs the check again");
     }
 
     #[test]

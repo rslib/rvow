@@ -213,14 +213,23 @@ fn skill_warnings() -> Result<Vec<String>> {
     };
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let rendered = crate::skill::render()?;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rvow"));
     let pi = install::pi_dir(Some(&home));
-    Ok(install::stale_managed_files(&claude, &mod_dir, pi.as_deref(), &rendered)
-        .into_iter()
-        .map(|path| {
-            let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
-            format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display())
-        })
-        .collect())
+    let stale: Vec<String> =
+        install::stale_managed_files(&claude, &mod_dir, pi.as_deref(), &rendered).into_iter().map(|path| stale_message(&path)).collect();
+    Ok(if stale.is_empty() { stale } else { stale.into_iter().chain([stale_hint(&exe)]).collect() })
+}
+
+/// The warning for one managed file that differs from what the running rvow writes. The brief cuts a
+/// line at 240 chars, so a long path leaves no room for more.
+fn stale_message(path: &Path) -> String {
+    let what = if path.ends_with("SKILL.md") { "skill" } else { "file" };
+    format!("rvow: stale or edited managed {what}. Please run rvow install. Your edits are kept. Path: {}", path.display())
+}
+
+/// The one line after the file warnings that names the running binary and the other way out.
+fn stale_hint(exe: &Path) -> String {
+    format!("rvow: this rvow is {}; if a newer rvow wrote those files, run cargo install first.", exe.display())
 }
 
 fn report(r: &mut Reply, what: &str, o: install::Outcome) {
@@ -313,4 +322,20 @@ fn install_pre_push(r: &mut Reply, rvow: &Path) -> Result<()> {
         _ => r.line("pre-push gate: skipped, run rvow install inside a repository with an rvow tree"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_fresh_home_messages_name_the_file_the_binary_and_both_fixes() {
+        let file = stale_message(Path::new("/h/plugins/rvow/skills/rvow/SKILL.md"));
+        assert!(
+            file.contains("/h/plugins/rvow/skills/rvow/SKILL.md") && file.contains("skill") && file.contains("run rvow install"),
+            "{file}"
+        );
+        let hint = stale_hint(Path::new("/bin/rvow"));
+        assert!(hint.contains("/bin/rvow") && hint.contains("cargo install"), "{hint}");
+    }
 }

@@ -57,6 +57,14 @@ mod tests {
     }
 
     #[test]
+    fn runners_guide_says_when_it_does_not_fit_and_names_the_sharing_keys() {
+        assert!(RUNNERS.contains("hashed") && RUNNERS.contains("cargo"), "the guide lacks the Rust no-fit note");
+        for key in ["`always`", "`extends`", "glob"] {
+            assert!(RUNNERS.contains(key), "the guide lacks {key}");
+        }
+    }
+
+    #[test]
     fn runners_guide_is_named_by_the_tasks_guide_and_the_skill() {
         assert!(TASKS.contains("rvow guide runners"));
         let skill = include_str!("../../../skills/rvow/SKILL.md.tmpl");

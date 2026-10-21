@@ -132,6 +132,8 @@ mod plan_access;
 mod project_index;
 #[path = "suite/protected_growth.rs"]
 mod protected_growth;
+#[path = "suite/prove_stale.rs"]
+mod prove_stale;
 #[path = "suite/provenance.rs"]
 mod provenance;
 #[path = "suite/quiet_hooks.rs"]

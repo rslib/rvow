@@ -72,7 +72,7 @@ impl BaselineRun {
         let tests = match self.tests_run {
             Some(1) => "1 test".to_string(),
             Some(n) => format!("{n} tests"),
-            None => "no counted tests".to_string(),
+            None => "no test summary line that rvow reads".to_string(),
         };
         format!("{} {verdict} before the work, exit {exit}, {tests}", self.task)
     }
@@ -265,12 +265,23 @@ pub fn baseline_hint(slowest: Duration, limit: Duration, rerun_env: &BTreeMap<St
     })
 }
 
-fn tests_word(tests_run: Option<u64>) -> String {
+pub(crate) fn tests_word(tests_run: Option<u64>) -> String {
     match tests_run {
         Some(1) => "1 test run".to_string(),
         Some(n) => format!("{n} tests run"),
-        None => "no counted tests".to_string(),
+        None => "no test summary line that rvow reads, such as a ctest or libtest summary, so it counted none".to_string(),
     }
+}
+
+/// The refusal of a task whose check passes at `when`, so it has no failing test to prove.
+pub(crate) fn passing_baseline(id: &str, when: &str, tests_run: Option<u64>, cmd: &str) -> Error {
+    Error::new(
+        "baseline",
+        format!("{id} passes {when} ({}): {cmd}", tests_word(tests_run)),
+        format!(
+            "make the check fail before the work, or, if it must stay green, add `baseline: pass` to the task: pipe the task block with that line to `rvow put {id}`"
+        ),
+    )
 }
 
 /// The amend baseline: one run record per candidate task, with the failed
@@ -351,11 +362,7 @@ pub(crate) fn baseline(
         let o = runner::run(&cmd, &tree.path, &run_env, t.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut sink)?;
         let ran_tests = o.tests_run != Some(0);
         if o.passed() && ran_tests && !t.baseline_pass {
-            return Err(Error::new(
-                "baseline",
-                format!("{} passes on the base commit ({}): {cmd}", t.id, tests_word(o.tests_run)),
-                "make the check fail before the work, or mark a check that must stay green with baseline: pass",
-            ));
+            return Err(passing_baseline(&t.id.to_string(), "on the base commit", o.tests_run, &cmd));
         }
         if t.baseline_pass && !o.passed() {
             return Err(Error::new(
@@ -667,6 +674,24 @@ pub fn confirm_signed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baseline_count_message_says_what_was_counted() {
+        assert_eq!(tests_word(Some(40)), "40 tests run");
+        assert_eq!(tests_word(Some(1)), "1 test run");
+        let none = tests_word(None);
+        assert!(none.contains("no test summary line") && none.contains("ctest"), "{none}");
+    }
+
+    #[test]
+    fn baseline_count_message_names_the_step_for_baseline_pass() {
+        let e = passing_baseline("TSK-x7k2q4", "on the base commit", Some(40), "ctest -R a");
+        assert_eq!(e.code, "baseline");
+        assert!(e.message.contains("TSK-x7k2q4") && e.message.contains("40 tests run") && e.message.contains("on the base commit"), "{e}");
+        assert!(e.fix.contains("baseline: pass") && e.fix.contains("rvow put TSK-x7k2q4"), "{e}");
+        let none = passing_baseline("TSK-x7k2q4", "before the work", None, "ctest -R a");
+        assert!(none.message.contains("no test summary line"), "{none}");
+    }
     use crate::proof::tests::accepted;
 
     fn active_dir(p: &Project) -> std::path::PathBuf {

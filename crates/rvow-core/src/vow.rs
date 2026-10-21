@@ -407,6 +407,7 @@ pub fn snapshot(project: &Project, top: &Path, config: &Config, loaded: &Loaded,
     data.insert("requirements".into(), requirements.into());
     data.insert("protected".into(), put_object(project, Value::Object(protected).to_string().as_bytes())?.into());
     data.insert("runners".into(), runner_record(project, loaded)?);
+    data.insert("runner_specs".into(), runner_specs(project, loaded)?);
     Ok(data)
 }
 
@@ -420,6 +421,20 @@ pub fn runner_record(project: &Project, loaded: &Loaded) -> Result<Value> {
         let Some((name, _)) = crate::template::reference(task.verify.as_deref().unwrap_or("")) else { continue };
         if let Some(runner) = runners.get(name) {
             out.insert(task.id.to_string(), json!({ name: runner.hash() }));
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// The runner of each task that names one, as the config holds it, so a later change to the runner can
+/// be told apart as an addition or a removal.
+pub fn runner_specs(project: &Project, loaded: &Loaded) -> Result<Value> {
+    let runners = config::runners(project)?;
+    let mut out = Map::new();
+    for task in &loaded.tasks {
+        let Some((name, _)) = crate::template::reference(task.verify.as_deref().unwrap_or("")) else { continue };
+        if let Some(runner) = runners.get(name) {
+            out.insert(task.id.to_string(), json!({ name: runner }));
         }
     }
     Ok(Value::Object(out))

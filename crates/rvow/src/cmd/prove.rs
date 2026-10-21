@@ -135,13 +135,23 @@ pub fn prove_stale() -> Result<Reply> {
     let mut rows = Vec::new();
     let mut all_warnings = Vec::new();
     let mut revalidated = 0;
+    let mut refused = Vec::new();
     for task in &stale {
-        if proof::revalidate(&p, &home, &cwd, task, &mut std::io::stderr())?.is_some() {
+        // A revalidation that errors leaves the task to `prove`, which reports the same error as a refusal.
+        if matches!(proof::revalidate(&p, &home, &cwd, task, &mut std::io::stderr()), Ok(Some(_))) {
             r.line(format!("revalidated {task}: its artifacts are unchanged, so its verify did not run"));
             revalidated += 1;
             continue;
         }
-        let proved = proof::prove(&p, &home, &cwd, task, &mut std::io::stderr())?;
+        let proved = match proof::prove(&p, &home, &cwd, task, &mut std::io::stderr()) {
+            Ok(proved) => proved,
+            Err(e) => {
+                r.line(format!("refused {task}: {}: {}", e.code, e.message));
+                refused.push(obj! { "task" => task, "code" => e.code, "message" => e.message, "fix" => e.fix });
+                r.ok = false;
+                continue;
+            }
+        };
         let (row, warnings) = proof_run(&mut r, &proved);
         rows.push(row);
         all_warnings.extend(warnings);
@@ -150,6 +160,9 @@ pub fn prove_stale() -> Result<Reply> {
     let kept = if revalidated > 0 { format!(", {revalidated} revalidated") } else { String::new() };
     r.set("count", format!("{} stale tasks{kept}", rows.len() + revalidated));
     r.table("proofs", rows, "");
+    if !refused.is_empty() {
+        r.table("refused", refused, "");
+    }
     if !all_warnings.is_empty() {
         r.set("warnings", all_warnings);
     }

@@ -254,6 +254,59 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
     }
 }
 
+/// The leading `NAME=value` words of `cmd` and the rest of it.
+fn split_assignments(cmd: &str) -> (Vec<&str>, &str) {
+    let mut rest = cmd.trim_start();
+    let mut words = Vec::new();
+    while let Some(word) = rest.split_whitespace().next() {
+        let assignment = word.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        if !assignment {
+            break;
+        }
+        words.push(word);
+        rest = rest[word.len()..].trim_start();
+    }
+    (words, rest)
+}
+
+/// Whether `new` runs all of `old`: it may add `NAME=value` words in front, keeping each old one, and
+/// `&& more` after it. A suffix is refused when `old` holds `|`, `;` or `&`, where `&&` would change what binds.
+fn command_adds_only(old: &str, new: &str) -> bool {
+    if old == new {
+        return true;
+    }
+    let (old_env, old_cmd) = split_assignments(old);
+    let (new_env, new_cmd) = split_assignments(new);
+    if !old_env.iter().all(|w| new_env.contains(w)) {
+        return false;
+    }
+    let simple = !old_cmd.replace("&&", "").contains(['|', ';', '&']);
+    new_cmd == old_cmd || (simple && new_cmd.strip_prefix(old_cmd).is_some_and(|rest| rest.starts_with(" && ")))
+}
+
+/// Whether `after` only adds to `before`: env keys, an env prefix or a `&&` check on a command, and
+/// entries of `needs`, `artifacts` and `always`. Anything else, such as a removed entry or a changed
+/// value, can run less than the user accepted.
+pub(crate) fn runner_adds_only(before: &crate::template::Runner, after: &crate::template::Runner) -> bool {
+    let subset = |old: &[String], new: &[String]| old.iter().all(|o| new.contains(o));
+    let build = match (&before.build, &after.build) {
+        (None, None) => true,
+        (Some(old), Some(new)) => command_adds_only(old, new),
+        _ => false,
+    };
+    before.params == after.params
+        && before.default == after.default
+        && before.timeout == after.timeout
+        && command_adds_only(&before.run, &after.run)
+        && build
+        && before.env.iter().all(|(k, v)| after.env.get(k) == Some(v))
+        && subset(&before.needs, &after.needs)
+        && subset(&before.artifacts, &after.artifacts)
+        && subset(&before.always, &after.always)
+}
+
 /// A changed runner is weaken drift for each accepted task that uses it: the
 /// task's verify still says `@name`, but the command it runs is now what the
 /// config says, not what the user accepted. Only a runner the baseline
@@ -273,8 +326,19 @@ fn runner_items(project: &Project, base: &Map<String, Value>, tasks: &[Task]) ->
         }
         for (name, hash) in names.as_object().into_iter().flatten() {
             let now = runners.get(name).map(|r| r.hash());
-            if now.as_deref() != hash.as_str() {
-                out.push(item(Class::Weaken, format!("{task} runner {name} changed")));
+            if now.as_deref() == hash.as_str() {
+                continue;
+            }
+            let before: Option<crate::template::Runner> = base
+                .get("runner_specs")
+                .and_then(|m| m.get(task))
+                .and_then(|m| m.get(name))
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            match (before, runners.get(name)) {
+                (Some(before), Some(after)) if runner_adds_only(&before, after) => {
+                    out.push(item(Class::Confirm, format!("{task} runner {name} changed, and only adds env, checks or paths")));
+                }
+                _ => out.push(item(Class::Weaken, format!("{task} runner {name} changed"))),
             }
         }
     }
@@ -545,6 +609,65 @@ mod tests {
     use crate::config;
     use crate::git;
     use crate::proof::{self, tests::accepted};
+    use serde_json::json;
+
+    fn runner(text: &str) -> crate::template::Runner {
+        toml::from_str(text).unwrap()
+    }
+
+    const OLD_RUNNER: &str =
+        "run = \"ctest -R a\"\nbuild = \"cmake --build b\"\nneeds = [\"b\"]\nartifacts = [\"b/a\"]\nenv = { A = \"1\" }\n";
+
+    #[test]
+    fn drift_runner_adds_only_what_adds_checks_or_env() {
+        let old = runner(OLD_RUNNER);
+        let with = |from: &str, to: &str| runner(&OLD_RUNNER.replace(from, to));
+        assert!(runner_adds_only(&old, &old));
+        assert!(runner_adds_only(&old, &with("env = { A = \"1\" }", "env = { A = \"1\", ZERO_AR_DATE = \"1\" }")), "a new env key");
+        assert!(
+            runner_adds_only(&old, &with("build = \"cmake --build b\"", "build = \"ZERO_AR_DATE=1 cmake --build b\"")),
+            "an env prefix"
+        );
+        assert!(runner_adds_only(&old, &with("run = \"ctest -R a\"", "run = \"ctest -R a && ./bench --check\"")), "a suffix check");
+        assert!(runner_adds_only(&old, &with("needs = [\"b\"]", "needs = [\"b\", \"c\"]")), "a needs path");
+        assert!(runner_adds_only(&old, &with("artifacts = [\"b/a\"]", "artifacts = [\"b/a\", \"b/lib/*.so\"]")), "an artifact");
+        assert!(runner_adds_only(&old, &runner(&format!("{OLD_RUNNER}always = [\"test ! -e x\"]\n"))), "an always check");
+        assert!(!runner_adds_only(&old, &with("env = { A = \"1\" }", "env = { A = \"2\" }")), "a changed env value");
+        assert!(!runner_adds_only(&old, &with("env = { A = \"1\" }", "env = {}")), "a removed env key");
+        assert!(!runner_adds_only(&old, &with("run = \"ctest -R a\"", "run = \"ctest -R b\"")), "another run");
+        assert!(!runner_adds_only(&old, &with("run = \"ctest -R a\"", "run = \"ctest -R a ; true\"")), "a suffix that hides a failure");
+        assert!(!runner_adds_only(&old, &with("artifacts = [\"b/a\"]", "artifacts = []")), "a removed artifact");
+        assert!(!runner_adds_only(&old, &with("needs = [\"b\"]", "needs = []")), "a removed needs path");
+        assert!(!runner_adds_only(&old, &runner(&format!("{OLD_RUNNER}timeout = \"1m\"\n"))), "a timeout");
+        let prefixed = with("run = \"ctest -R a\"", "run = \"A=1 ctest -R a\"");
+        assert!(!runner_adds_only(&prefixed, &old), "a removed env prefix");
+    }
+
+    #[test]
+    fn drift_runner_adds_items_are_confirm_and_other_changes_weaken() {
+        let tmp = git::testrepo::TempDir::new();
+        let repo = git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &tmp.0.join("home"), crate::store::Mode::Home).unwrap();
+        let tasks = crate::tasks::parse_tasks("- TSK-x7k2q4 T\n  verify: @t\n  files: a\n").0;
+        let old = runner(OLD_RUNNER);
+        let base = |specs: bool| {
+            let mut m = Map::new();
+            m.insert("runners".into(), json!({ "TSK-x7k2q4": { "t": old.hash() } }));
+            if specs {
+                m.insert("runner_specs".into(), json!({ "TSK-x7k2q4": { "t": old } }));
+            }
+            m
+        };
+        let write = |text: &str| std::fs::write(p.root.join(crate::store::CONFIG_FILE), format!("[runners.t]\n{text}")).unwrap();
+        write(&OLD_RUNNER.replace("env = { A = \"1\" }", "env = { A = \"1\", ZERO_AR_DATE = \"1\" }"));
+        let items = runner_items(&p, &base(true), &tasks);
+        assert_eq!(items.iter().map(|i| i.class).collect::<Vec<_>>(), [Class::Confirm], "{items:?}");
+        let items = runner_items(&p, &base(false), &tasks);
+        assert_eq!(items.iter().map(|i| i.class).collect::<Vec<_>>(), [Class::Weaken], "no recorded spec means weaken");
+        write(&OLD_RUNNER.replace("ctest -R a", "ctest -R b"));
+        let items = runner_items(&p, &base(true), &tasks);
+        assert_eq!(items.iter().map(|i| i.class).collect::<Vec<_>>(), [Class::Weaken], "{items:?}");
+    }
 
     fn home_of(p: &Project) -> &Path {
         p.root.parent().unwrap().parent().unwrap()

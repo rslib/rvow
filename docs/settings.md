@@ -220,6 +220,10 @@ The key is the command text, the id of the HEAD tree and the tool fingerprint, s
 When the key holds a pass and the check's scope has no uncommitted change, the gate skips the check.
 It prints `cached check: <cmd>` on the same stream as `check:` and `check done:`.
 
+A tree with uncommitted changes caches a passed check by the content of every file of the work tree instead of the commit.
+So a retry on the same files skips a check that passed, and any edit runs it again.
+A check that failed is never cached.
+
 The scope of a check is as follows:
 
 - A plain check has the whole tree as its scope, new untracked files included.
@@ -544,11 +548,20 @@ When one differs, or the build fails, rvow runs the verify as before.
 
 A build that is not reproducible, such as one that embeds a timestamp, gives a new hash each time.
 That only costs a verify run.
+
+On macOS a Debug link writes the modification time of each object file into the binary, so a comment-only edit changes every dylib and test binary.
+Set `env = { ZERO_AR_DATE = "1" }` on the runner. The runner `env` applies to `run`, `build` and `always`, so it need not go in each command.
+
+Three more keys keep a runner short and its kept proof honest.
+
+- `always` lists cheap commands, with the same `{param}` fill. They run before each revalidation, and a failed one runs the verify instead. Use it for checks on source text that the artifacts do not cover, such as `test ! -e include/old.h` or `! git grep -q <pattern>`. It needs `build`.
+- `extends = "<runner>"` starts from another runner. A set `run`, `build` or `timeout` wins. The maps `params`, `default` and `env` merge with the child's keys winning. The lists `needs`, `artifacts` and `always` add up. A runner that has no `run` is a base only, and a verify cannot name it.
+- An `artifacts` entry with `*`, `?` or `[` is a glob, such as `build/lib/*.so`. rvow hashes every match and records the file names, so a new or a missing match runs the verify. A glob must match at least one file.
 The gate in a clean worktree does not revalidate, since it builds from nothing.
 
 ### Runners and the vow
 
-The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`; not `build` and `artifacts`).
+The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`, `always`; not `build` and `artifacts`, and an `extends` is merged first).
 A changed runner is weaken drift for each task that uses it, like a changed verify, and a runner that no task uses can change with no drift.
 The runner hash is also part of the proof key and the gate cache key, so a confirmed runner change makes the old proofs stale.
 `rvow review` and `rvow show` print the filled command as a `run:` line under the `verify:` line.

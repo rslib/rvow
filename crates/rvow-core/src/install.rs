@@ -576,6 +576,23 @@ mod tests {
     const TEST_SKILL: &str = "---\nname: rvow\ndescription: test\n---\n# rvow\n";
 
     #[test]
+    fn install_fresh_home_leaves_nothing_stale() {
+        let tmp = TempDir::new();
+        let (claude, mod_dir, pi) = (tmp.0.join(".claude"), tmp.0.join("data/claude-plugin"), tmp.0.join("pi"));
+        std::fs::create_dir_all(&pi).unwrap();
+        skill(&claude, TEST_SKILL).unwrap();
+        claude_mod(&mod_dir, &tmp.0.join("bin/rvow"), TEST_SKILL).unwrap();
+        pi_skill(&pi, TEST_SKILL).unwrap();
+        pi_extension(&pi).unwrap();
+        assert_eq!(stale_managed_files(&claude, &mod_dir, Some(&pi), TEST_SKILL), Vec::<PathBuf>::new());
+        let other = format!("{TEST_SKILL}more\n");
+        assert!(
+            !stale_managed_files(&claude, &mod_dir, Some(&pi), &other).is_empty(),
+            "a binary with another skill sees the files as stale"
+        );
+    }
+
+    #[test]
     fn managed_files_upgrade_unless_edited() {
         let tmp = TempDir::new();
         let path = tmp.0.join("ext/rvow.ts");

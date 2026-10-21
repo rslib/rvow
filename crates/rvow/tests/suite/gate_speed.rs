@@ -204,7 +204,7 @@ fn gate_speed_check_a_new_commit_runs_the_check_again() {
 }
 
 #[test]
-fn gate_speed_check_an_uncommitted_change_runs_the_check_and_records_nothing() {
+fn gate_check_dirty_uncommitted_change_runs_once_then_is_cached_by_content() {
     let fx = Fx::new("dirty", &[]);
     let cmd = counter(&fx);
     fx.set_config(&format!("checks = [{cmd:?}]\n"));
@@ -215,13 +215,16 @@ fn gate_speed_check_an_uncommitted_change_runs_the_check_and_records_nothing() {
     std::fs::write(fx.repo.join("src/a.txt"), "uncommitted").unwrap();
     assert!(fx.gate().contains("check: echo run"), "a dirty tree runs the check");
     assert_eq!(fx.runs(), 2);
-    assert_eq!(fx.entries(), entries, "a dirty tree records no check pass");
-    assert!(fx.gate().contains("check: echo run"), "and it runs again");
+    assert_ne!(fx.entries(), entries, "a dirty tree records its pass under its own content");
+    assert!(fx.gate().contains("cached check: echo run"), "a retry on the same files skips the check");
+    assert_eq!(fx.runs(), 2);
+    std::fs::write(fx.repo.join("src/a.txt"), "another edit").unwrap();
+    assert!(fx.gate().contains("check: echo run"), "another content runs it again");
     assert_eq!(fx.runs(), 3);
 }
 
 #[test]
-fn gate_speed_check_a_new_untracked_file_runs_the_check_and_records_nothing() {
+fn gate_check_dirty_untracked_file_runs_once_then_is_cached_by_content() {
     let fx = Fx::new("untracked", &[]);
     let cmd = counter(&fx);
     fx.set_config(&format!("checks = [{cmd:?}]\n"));
@@ -232,7 +235,9 @@ fn gate_speed_check_a_new_untracked_file_runs_the_check_and_records_nothing() {
     std::fs::write(fx.repo.join("src/new.txt"), "not added yet").unwrap();
     assert!(fx.gate().contains("check: echo run"), "an untracked file runs the check");
     assert_eq!(fx.runs(), 2);
-    assert_eq!(fx.entries(), entries, "an untracked file records no check pass");
+    assert_ne!(fx.entries(), entries, "an untracked file records its pass under its own content");
+    assert!(fx.gate().contains("cached check: echo run"), "a retry on the same files skips the check");
+    assert_eq!(fx.runs(), 2);
 }
 
 #[test]

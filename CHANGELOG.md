@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make a runner change that only adds env keys, an env prefix, a `&&` check, `needs`, `artifacts` or `always` entries a confirm item and not weaken drift.
+  A vow made before this change has no runner record, so its runner changes stay weaken.
+- Make the gate cache a passed check on a tree with uncommitted changes by the content of the work tree, so a retry skips the check.
+- Make a baseline refusal say what rvow counted and the exact `rvow put` step for `baseline: pass`.
+- Make the stale or edited managed file warning name the file, the running binary and both fixes.
 - **Breaking:** Count an accept, confirm or yolo tier made during a Claude or pi session only when the mod or pi saw the user make it.
   An accept the user did not make, such as one from a copy of the rvow binary, keeps every writing call denied until the user types `/rvow-accept <id>`, and a tier switched on with `! rvow yolo` during the session stays off, so type `/rvow-yolo <tier>` instead.
 - Make the Claude mod and pi deny the tools that write, with the error, when the hook cannot start, fails, prints text that is not JSON or times out, and let the reading tools run.
@@ -113,6 +118,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `always`, `extends` and glob entries in `artifacts` to a runner, so a kept proof still runs source-text checks, runners share their keys and a build with many libraries lists them once.
 - Add `rvow guide runners`, a guide for an agent on how to set `build` and `artifacts` on a runner, find the artifact paths and move a plan onto the runner without weakening it.
 - Add `build` and `artifacts` to a runner, so `rvow prove --stale`, the background re-prove and `rvow archive` keep a stale proof without a verify run when the built files are unchanged.
   A passing proof records the hash of each artifact, and a revalidated proof carries the old results.
@@ -223,6 +229,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix `rvow prove --stale` stopping at the first task that rvow refuses to run. It now proves every stale task, reports each refusal and exits non-zero.
 - Fix a session being denied every writing call as `unseen-accept` after the user accepted a change in another session.
   The hook now keeps what the user made in `witness.json` in the project folder, so every session of the project reads it.
 - Fix `unseen-accept` denying a call that writes nothing in the repository, such as `ssh`, a write to `/tmp` or a scratch folder, or a script run from there.

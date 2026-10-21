@@ -833,16 +833,54 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     })
 }
 
-/// The SHA-256 of each artifact under `top`, or `None` when one is missing, is not a file or
-/// leaves the work tree.
-fn artifact_hashes(top: &Path, paths: &[String]) -> Option<BTreeMap<String, String>> {
-    let inside = |p: &Path| p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir));
-    paths
-        .iter()
+/// Every file the artifact `patterns` name under `top`, sorted. A pattern with `*`, `?` or `[` is a glob
+/// and must match at least one file. `None` for a pattern that is absolute, leaves the work tree or matches nothing.
+fn expand_artifacts(top: &Path, patterns: &[String]) -> Option<Vec<String>> {
+    fn walk(dir: &Path, top: &Path, set: &globset::GlobSet, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name() != ".git" {
+                    walk(&path, top, set, out);
+                }
+            } else if let Some(rel) = path.strip_prefix(top).ok().and_then(Path::to_str)
+                && set.is_match(rel)
+            {
+                out.insert(rel.to_string());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for pattern in patterns {
+        let path = Path::new(pattern);
+        if path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return None;
+        }
+        if !pattern.contains(['*', '?', '[']) {
+            out.insert(pattern.clone());
+            continue;
+        }
+        let literal: PathBuf = path.components().take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '['])).collect();
+        let set = fingerprint::globset(std::slice::from_ref(pattern)).ok()?;
+        let before = out.len();
+        walk(&top.join(literal), top, &set, &mut out);
+        if out.len() == before {
+            return None;
+        }
+    }
+    Some(out.into_iter().collect())
+}
+
+/// The SHA-256 of each artifact the `patterns` name under `top`, or `None` when one is missing, is not a
+/// file or leaves the work tree.
+fn artifact_hashes(top: &Path, patterns: &[String]) -> Option<BTreeMap<String, String>> {
+    expand_artifacts(top, patterns)?
+        .into_iter()
         .map(|path| {
-            let file = top.join(path);
-            let bytes = if inside(Path::new(path)) && file.is_file() { std::fs::read(&file).ok()? } else { return None };
-            Some((path.clone(), sha256_hex(&bytes)))
+            let file = top.join(&path);
+            let bytes = if file.is_file() { std::fs::read(&file).ok()? } else { return None };
+            Some((path, sha256_hex(&bytes)))
         })
         .collect()
 }
@@ -879,8 +917,14 @@ pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo:
         Some(map) => map,
         None => return Ok(None),
     };
+    let timeout = task.timeout.or(plan.timeout).unwrap_or(config.timeout());
+    for check in &plan.always {
+        if !runner::run(check, &top, &plan.env, timeout, echo)?.passed() {
+            return Ok(None);
+        }
+    }
     let started = ledger::now_ms();
-    let built = runner::run(build, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), echo)?;
+    let built = runner::run(build, &top, &plan.env, timeout, echo)?;
     if !built.passed() || artifact_hashes(&top, &plan.artifacts).as_ref() != Some(&recorded) {
         return Ok(None);
     }
@@ -979,11 +1023,7 @@ fn baseline_verdict(task: &Task, plan: &crate::template::Plan, outcome: &Outcome
         return Ok(Some(failed));
     }
     if passed {
-        let tests = outcome.tests_run.map_or("unknown".into(), |n| n.to_string());
-        return refuse(
-            format!("it passes before the work ({tests} tests run)"),
-            "add the failing test first, or mark a check that must stay green with baseline: pass",
-        );
+        return Err(crate::amend::passing_baseline(&task.id.to_string(), "before the work", outcome.tests_run, cmd));
     }
     Ok(None)
 }
@@ -1272,6 +1312,43 @@ pub(crate) mod tests {
         let other = ARTIFACT_CONFIG.replace("echo ran", "echo ran twice");
         std::fs::write(p.root.join(crate::store::CONFIG_FILE), other).unwrap();
         assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None, "a changed run command is runner-changed");
+    }
+
+    const GLOB_CONFIG: &str = "[runners.t]\nrun = \"cp src.bin libs/one.so && grep -q ok out.txt && echo ran >> ran.log && echo 'test result: ok. 1 passed; 0 failed;'\"\nbuild = \"cp src.bin libs/one.so\"\nartifacts = [\"libs/*.so\"]\n";
+
+    #[test]
+    fn runner_share_glob_artifacts_hash_every_match() {
+        let (tmp, p, repo, task) = accepted_runner(GLOB_CONFIG, "@t");
+        let home = tmp.0.join("home");
+        std::fs::create_dir_all(repo.join("libs")).unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        std::fs::write(repo.join("src.bin"), "A").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(repo.join("notes.txt"), "a comment").unwrap();
+        assert!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().is_some(), "the same files match and hash the same");
+        assert_eq!(runs(&repo), 1);
+        std::fs::write(repo.join("notes.txt"), "another").unwrap();
+        std::fs::write(repo.join("libs/two.so"), "new library").unwrap();
+        assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None, "a new match changes the set");
+    }
+
+    const ALWAYS_CONFIG: &str = "[runners.t]\nrun = \"cp src.bin built.bin && grep -q ok out.txt && echo ran >> ran.log && echo 'test result: ok. 1 passed; 0 failed;'\"\nbuild = \"cp src.bin built.bin\"\nartifacts = [\"built.bin\"]\nalways = [\"test ! -e forbidden.txt\"]\n";
+
+    #[test]
+    fn runner_share_always_failure_stops_a_revalidation() {
+        let (tmp, p, repo, task) = accepted_runner(ALWAYS_CONFIG, "@t");
+        let home = tmp.0.join("home");
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        std::fs::write(repo.join("src.bin"), "A").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(repo.join("notes.txt"), "a comment").unwrap();
+        assert!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().is_some(), "the always check passes");
+        std::fs::write(repo.join("notes.txt"), "again").unwrap();
+        std::fs::write(repo.join("forbidden.txt"), "x").unwrap();
+        assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None, "a failed always check runs the verify");
+        assert_eq!(state_of(&p, &home, &repo), "stale");
     }
 
     #[test]
