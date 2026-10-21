@@ -1,5 +1,6 @@
 import {
   ACTION_KEYS,
+  acceptable,
   archivable,
   BADGE,
   type Body,
@@ -402,7 +403,7 @@ export default function (pi: ExtensionAPI) {
   function actionKey(data: string, { plan, change, v }: Sel): { exit?: Exit } | undefined {
     const is = (k: KeyId) => matchesKey(data, k);
     if (is("a") && plan) {
-      if (plan.ready && plan.here) return { exit: { act: "accept", id: plan.id } };
+      if (acceptable(plan)) return { exit: { act: "accept", id: plan.id } };
       S.notice = { tone: "fail", text: `Not ready: ${blocker(plan)}.` };
       return {};
     }

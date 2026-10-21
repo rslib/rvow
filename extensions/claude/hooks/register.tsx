@@ -13,6 +13,7 @@ import {
   ASK,
   ASK_SCHEMA,
   type Asked,
+  acceptable,
   archiveAmendments,
   archiveBlockers,
   BADGE,
@@ -28,6 +29,7 @@ import {
   EDIT_HINT,
   failedPrompt,
   failedText,
+  findChange,
   firstTab,
   formatJudgeFindings,
   ID,
@@ -517,25 +519,22 @@ async function archiveFlow(
 ): Promise<{ text: string; archived?: boolean; failed?: boolean }> {
   const seen = await tellOut($, ['hook', 'claude', 'view'])
   if (!seen.ok) return { text: failedText(['hook', 'claude', 'view'], seen.out) }
-  let view: {
-    changes?: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }[]
-  }
+  type Seen = { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }
+  let view: { changes?: Seen[]; elsewhere?: Seen[] }
   try {
     view = JSON.parse(seen.out)
   } catch {
     return { text: 'rvow: cannot read the state of the branch' }
   }
-  const blocked = archiveBlockers(
-    view.changes?.find((c) => c.id === change),
-    change,
-  )
+  const found = findChange(view, change)
+  const blocked = archiveBlockers(found, change)
   if (blocked) return { text: blocked }
   const base = `Every task of ${change} is proved or stale, and archive re-proves the stale ones.`
   const trust = 'The gate trusts an archived change and never reruns its tasks.'
   const declined = {
     text: `The user did not archive ${change}; it stays active and any pending plan edit stays pending. The user can run /rvow-archive ${change} to archive it.`,
   }
-  const pending = view.changes?.find((c) => c.id === change)?.pending.length ?? 0
+  const pending = found?.pending.length ?? 0
   if (pending === 0) {
     const answer = await $.ui
       .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
@@ -1201,7 +1200,9 @@ export const register: Register = (on) => {
       typed = p.id
     }
     await refresh($)
-    const p = (await read($, viewAtom))?.backlog.find((x) => x.here && x.id.startsWith(typed))
+    const p = (await read($, viewAtom))?.backlog.find(
+      (x) => (x.here || x.worktree) && x.id.startsWith(typed),
+    )
     if (!p) return { text: `${typed} is not a backlog plan on this branch; see /rvow-status` }
     await setDetails($, () => [])
     await update($, tabAtom, () => 'backlog')
@@ -1336,7 +1337,7 @@ export const register: Register = (on) => {
 
     /** The plan's actions: on its card, and under its detail view without `d`. */
     const planBody = (p: RvowPlan, inDetail: boolean) => {
-      const why = p.ready && p.here ? null : blocker(p)
+      const why = acceptable(p) ? null : blocker(p)
       const picked = selected.includes(p.id)
       return review[p.id] ? (
         <Box flexDirection="column" marginTop={1}>

@@ -8,9 +8,10 @@
 //!                  "reasons": [..] } ],
 //!                  "drift": [ { "class", "what" } ],
 //!                  "pending": [ { "id", "reason" } ] } ],
+//!   "elsewhere": [ same shape as "changes" ],  (active changes of other branches whose branch has a worktree)
 //!   "plans": [ { "id", "title", "tasks", "questions", "issues", "ready", "path",
 //!                 "task_timeouts_secs": [..], "default_timeout_secs" } ],
-//!   "backlog": [ { ...plan fields, "branch", "here" } ],  (every plan, this branch first)
+//!   "backlog": [ { ...plan fields, "branch", "here", "worktree" } ],  (every plan, this branch first; "worktree" is the folder that has the branch, or null)
 //!   "archive": [ { "id", "title", "outcome", "date" } ],  (newest first, at most 10)
 //!   "questions": [ { "change", "question", "recommended" } ],
 //!   "next": { "change", "task", "title", "verify", "state" } | null,
@@ -94,6 +95,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
             "title": loaded.proposal.title,
             "branch": loaded.proposal.branch,
             "here": here,
+            "worktree": git::top_for_branch(&top, &loaded.proposal.branch).ok().flatten().map(|p| p.display().to_string()),
             "tasks": loaded.tasks.len(),
             "questions": asked.len(),
             "issues": errors + missing,
@@ -140,35 +142,17 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     let mut blocked = 0;
     let mut amendments = 0;
     for c in &queue {
-        let mut tasks = Vec::new();
-        for t in &c.loaded.tasks {
-            let s = proof::state(c, t, &now)?;
-            if s == State::Blocked {
-                blocked += 1;
-            }
-            let (name, reasons) = state_json(&s);
-            tasks.push(json!({
-                "id": t.id.to_string(),
-                "title": t.title,
-                "state": name,
-                "reasons": reasons,
-            }));
-        }
-        let drift: Vec<Value> = drift::drift_with_home(project, Some(home), &top, &config, c)?
-            .into_iter()
-            .map(|i| json!({"class": i.class.name(), "what": i.what}))
-            .collect();
-        let pending: Vec<Value> =
-            amend::pending(std::slice::from_ref(c)).into_iter().map(|p| json!({"id": p.id.to_string(), "reason": p.reason})).collect();
-        amendments += pending.len();
-        changes.push(json!({
-            "id": c.dir.id.to_string(),
-            "title": c.loaded.proposal.title,
-            "stage": c.dir.stage.name(),
-            "tasks": tasks,
-            "drift": drift,
-            "pending": pending,
-        }));
+        let (value, stuck, pending) = change_json(project, home, &now, c)?;
+        blocked += stuck;
+        amendments += pending;
+        changes.push(value);
+    }
+    // A change of another branch is judged in the folder that has its branch, since its proofs hash that tree.
+    let mut elsewhere = Vec::new();
+    for c in active.iter().filter(|a| !queue.iter().any(|q| q.dir.id == a.dir.id)) {
+        let Some(other) = c.branch().and_then(|b| git::top_for_branch(&top, b).ok().flatten()) else { continue };
+        let there = Now { top: &other, config: &config, env: fingerprint::env(&other, &config)?, living: &living };
+        elsewhere.push(change_json(project, home, &there, c)?.0);
     }
     let next = proof::next(&queue, &now)?.map(|(c, t, s)| {
         json!({
@@ -183,6 +167,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
         "branch": branch,
         "specs": specs,
         "changes": changes,
+        "elsewhere": elsewhere,
         "plans": plans,
         "backlog": backlog,
         "archive": archive,
@@ -195,6 +180,42 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
             "plans": plans.len(),
         },
     }))
+}
+
+/// One active change as the view shows it, with how many tasks are blocked and
+/// how many plan edits wait for the user.
+fn change_json(project: &Project, home: &Path, now: &Now, c: &proof::Active) -> Result<(Value, usize, usize)> {
+    let mut tasks = Vec::new();
+    let mut blocked = 0;
+    for t in &c.loaded.tasks {
+        let s = proof::state(c, t, now)?;
+        if s == State::Blocked {
+            blocked += 1;
+        }
+        let (name, reasons) = state_json(&s);
+        tasks.push(json!({
+            "id": t.id.to_string(),
+            "title": t.title,
+            "state": name,
+            "reasons": reasons,
+        }));
+    }
+    let drift: Vec<Value> = drift::drift_with_home(project, Some(home), now.top, now.config, c)?
+        .into_iter()
+        .map(|i| json!({"class": i.class.name(), "what": i.what}))
+        .collect();
+    let pending: Vec<Value> =
+        amend::pending(std::slice::from_ref(c)).into_iter().map(|p| json!({"id": p.id.to_string(), "reason": p.reason})).collect();
+    let waiting = pending.len();
+    let value = json!({
+        "id": c.dir.id.to_string(),
+        "title": c.loaded.proposal.title,
+        "stage": c.dir.stage.name(),
+        "tasks": tasks,
+        "drift": drift,
+        "pending": pending,
+    });
+    Ok((value, blocked, waiting))
 }
 
 #[cfg(test)]
@@ -236,6 +257,44 @@ mod tests {
         let v = view(&p, &home, &repo).unwrap().unwrap();
         assert_eq!(v["archive"][0]["outcome"], "dropped");
         assert_eq!(v["archive"][0]["title"], "Later");
+    }
+
+    #[test]
+    fn view_lists_active_changes_of_other_branches() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let wt = tmp.0.join("wt");
+        crate::git::testrepo::git(&repo, &["checkout", "-q", "-b", "other"]);
+        let v = dashboard(&p, &home, &repo).unwrap();
+        assert_eq!(v["changes"].as_array().unwrap().len(), 0);
+        assert_eq!(v["elsewhere"].as_array().unwrap().len(), 0);
+
+        crate::git::testrepo::git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "main"]);
+        let v = dashboard(&p, &home, &repo).unwrap();
+        assert_eq!(v["changes"].as_array().unwrap().len(), 0);
+        assert_eq!(v["elsewhere"][0]["tasks"][0]["id"], task.as_str());
+        assert_eq!(v["elsewhere"][0]["stage"], "active");
+        assert_eq!(v["needs_you"]["blocked"], 0);
+        assert!(v["elsewhere"][0]["pending"].is_array());
+    }
+
+    #[test]
+    fn view_names_the_worktree_of_a_plan_branch() {
+        let (tmp, p, repo, _task) = accepted();
+        let home = tmp.0.join("home");
+        let wt = tmp.0.join("wt");
+        change::new(&p, "Later", "main", true).unwrap();
+        let v = dashboard(&p, &home, &repo).unwrap();
+        assert!(v["backlog"][0]["worktree"].as_str().unwrap().ends_with("/r"));
+
+        crate::git::testrepo::git(&repo, &["checkout", "-q", "-b", "other"]);
+        let v = dashboard(&p, &home, &repo).unwrap();
+        assert_eq!(v["backlog"][0]["here"], false);
+        assert!(v["backlog"][0]["worktree"].is_null());
+
+        crate::git::testrepo::git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "main"]);
+        let v = dashboard(&p, &home, &repo).unwrap();
+        assert!(v["backlog"][0]["worktree"].as_str().unwrap().ends_with("/wt"));
     }
 
     #[test]

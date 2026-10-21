@@ -20,6 +20,8 @@ export type RvowPlan = {
   here: boolean
   /** The plan's folder. */
   path: string
+  /** The worktree that has `branch` checked out, or null when none has. */
+  worktree?: string | null
 }
 export type RvowArchived = {
   id: string
@@ -31,6 +33,8 @@ export type RvowArchived = {
 export type RvowView = {
   branch: string | null
   changes: RvowChange[]
+  /** Active changes of other branches that have a worktree. */
+  elsewhere?: RvowChange[]
   /** The plans on this branch. */
   plans: RvowPlan[]
   /** Every backlog plan of every branch, this branch first. */

@@ -42,13 +42,24 @@ export const firstTab = (v: RvowView): RvowTab =>
 
 /** Why a plan cannot be accepted here, in the order the author should fix it. */
 export const blocker = (p: RvowPlan) =>
-  !p.here
+  !p.here && !p.worktree
     ? 'take it to this branch first'
     : p.questions > 0
       ? 'answer the open questions first'
       : p.issues > 0
         ? 'fix what rvow check reports'
         : 'add at least one task with a verify command'
+
+/** A ready plan can be accepted from here when this branch or a worktree holds its branch. */
+export const acceptable = (p: RvowPlan) => p.ready && (p.here || !!p.worktree)
+
+/** The active change `id` on this branch, else in another worktree. */
+export function findChange<T extends { id: string }>(
+  view: { changes?: T[]; elsewhere?: T[] },
+  id: string,
+): T | undefined {
+  return view.changes?.find((c) => c.id === id) ?? view.elsewhere?.find((c) => c.id === id)
+}
 
 /** `text` on one line, cut to `width` characters with `...`. */
 export const cut = (text: string, width: number) => {
@@ -310,7 +321,8 @@ export function archiveBlockers(
   change: { id: string; tasks: { id: string; state: string }[]; pending: unknown[] } | undefined,
   id: string,
 ): string | null {
-  if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`
+  if (!change)
+    return `rvow: ${id} is not an active change on this branch or in any worktree; see rvow status --all`
   if (change.tasks.length === 0)
     return `rvow: ${id} has no task, so there is nothing proved to archive`
   const open = change.tasks

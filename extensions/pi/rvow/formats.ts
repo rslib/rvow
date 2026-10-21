@@ -40,8 +40,11 @@ export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/** A ready plan can be accepted from here when this branch or a worktree holds its branch. */
+export const acceptable = (p: Plan) => p.ready === true && (p.here === true || !!p.worktree);
+
 export function blocker(p: Plan): string {
-  return !p.here
+  return !p.here && !p.worktree
     ? "take it to this branch first"
     : (p.questions ?? 0) > 0
       ? "answer the open questions first"
@@ -190,7 +193,7 @@ export function buttonRuns(bs: Button[], n: number): Hit[] {
 }
 
 export function planButtons(p: Plan, inDetail: boolean, picked: boolean): Button[] {
-  const ready = p.ready === true && p.here === true;
+  const ready = acceptable(p);
   return [
     { key: "a", label: "Review & accept", primary: ready },
     ...(p.here ? [] : [{ key: "t", label: "Take to this branch", primary: true }]),
@@ -222,7 +225,7 @@ export function planCard(
   const inner = w - 6;
   const files =
     HOME_DIR && p.path?.startsWith(`${HOME_DIR}/`) ? `~${p.path.slice(HOME_DIR.length)}` : p.path;
-  const why = p.ready && p.here ? null : blocker(p);
+  const why = acceptable(p) ? null : blocker(p);
   const check =
     (p.issues ?? 0) > 0
       ? th.fg("error", plural(p.issues ?? 0, "issue"))

@@ -30,13 +30,22 @@ export const ACCEPT_DESCRIPTION =
 export const ARCHIVE_DESCRIPTION =
   "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Pending plan edits (amendments) of the change do not block it: the same dialog lists them, weaken ones first, and a yes accepts them all and then archives. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.";
 
+/** The active change `id` on this branch, else in another worktree. */
+export function findChange<T extends { id: string }>(
+  view: { changes?: T[]; elsewhere?: T[] },
+  id: string,
+): T | undefined {
+  return view.changes?.find((c) => c.id === id) ?? view.elsewhere?.find((c) => c.id === id);
+}
+
 /** Why a change cannot be archived yet, or `null` when every task is proved or stale. A stale task is allowed because archive re-proves it; a missing, failed, flaky or blocked task needs the user first. */
 export function archiveBlockers(
   found: { id: string; tasks?: { id: string; state?: string }[]; pending?: unknown[] } | undefined,
   id: string,
 ): string | null {
   const change = found && { id: found.id, tasks: found.tasks ?? [], pending: found.pending ?? [] };
-  if (!change) return `rvow: ${id} is not an active change on this branch; see rvow status`;
+  if (!change)
+    return `rvow: ${id} is not an active change on this branch or in any worktree; see rvow status --all`;
   if (change.tasks.length === 0)
     return `rvow: ${id} has no task, so there is nothing proved to archive`;
   const open = change.tasks
@@ -480,16 +489,13 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
       if (!ctx.hasUI) throw new Error("rvow: only the user can archive, and no one is here to ask");
       const seen = await queue(() => result(["hook", "view"], ctx.cwd, signal, SLOW_MS));
       if (seen.details.kind !== "view") return seen;
-      const blocked = archiveBlockers(
-        seen.details.data?.changes.find((c) => c.id === change),
-        change,
-      );
+      const found = seen.details.data ? findChange(seen.details.data, change) : undefined;
+      const blocked = archiveBlockers(found, change);
       if (blocked)
         return {
           content: [{ type: "text" as const, text: blocked }],
           details: { kind: "failure" as const, code: 1, error: blocked, stdout: "" },
         };
-      const found = seen.details.data?.changes.find((c) => c.id === change);
       const tail = `Archive ${change}? The gate trusts an archived change and never reruns its tasks.`;
       let accept: string[] = [];
       let asked = false;

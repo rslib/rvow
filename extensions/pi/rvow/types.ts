@@ -16,6 +16,8 @@ export type Plan = {
   questions?: number;
   issues?: number;
   path?: string;
+  /** The worktree that has `branch` checked out, or null when none has. */
+  worktree?: string | null;
   /** Each task's timeout in seconds, 0 when it uses the configured default. */
   task_timeouts_secs?: number[];
   /** The configured default timeout in seconds. */
@@ -28,6 +30,8 @@ export type NeedsYou = { amendments: number; questions: number; blocked: number;
 export type View = {
   branch: string | null;
   changes: Change[];
+  /** Active changes of other branches that have a worktree. */
+  elsewhere?: Change[];
   backlog: Plan[];
   archive: Archived[];
   questions: Question[];

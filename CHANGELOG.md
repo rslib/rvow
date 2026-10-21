@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Add `elsewhere` (active changes of other branches that have a worktree) and a `worktree` path on each backlog plan to the view of `rvow status --json`.
+  The Claude mod and pi use them, so the archive tool and `/rvow-archive` work for a change on another branch and a plan with a worktree can be accepted from any branch.
 - Make a runner change that only adds env keys, an env prefix, a `&&` check, `needs`, `artifacts` or `always` entries a confirm item and not weaken drift.
   A vow made before this change has no runner record, so its runner changes stay weaken.
 - Make the gate cache a passed check on a tree with uncommitted changes by the content of the work tree, so a retry skips the check.
