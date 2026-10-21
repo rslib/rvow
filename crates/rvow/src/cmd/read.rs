@@ -237,6 +237,7 @@ pub fn guide(artifact: Artifact) -> Result<Reply> {
         Artifact::Tasks => guide::TASKS,
         Artifact::Design => guide::DESIGN,
         Artifact::Judge => guide::JUDGE,
+        Artifact::Runners => guide::RUNNERS,
     };
     let at = cwd()?;
     if rvow_core::git::toplevel(&at).is_err() {
@@ -255,7 +256,7 @@ pub fn guide(artifact: Artifact) -> Result<Reply> {
         Artifact::Spec => config.rules.spec.as_deref(),
         Artifact::Tasks => config.rules.tasks.as_deref(),
         Artifact::Design => config.rules.design.as_deref(),
-        Artifact::Judge => None,
+        Artifact::Judge | Artifact::Runners => None,
     };
     let mut text = builtin.trim_end().to_owned();
     for (heading, extra) in [("Project context", Some(config.context.as_str())), ("Artifact rules", rule)] {

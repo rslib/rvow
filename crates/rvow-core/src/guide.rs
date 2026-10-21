@@ -5,6 +5,7 @@ pub const SPEC: &str = include_str!("../../../guides/spec.md");
 pub const TASKS: &str = include_str!("../../../guides/tasks.md");
 pub const DESIGN: &str = include_str!("../../../guides/design.md");
 pub const JUDGE: &str = include_str!("../../../guides/judge.md");
+pub const RUNNERS: &str = include_str!("../../../guides/runners.md");
 
 #[cfg(test)]
 mod tests {
@@ -33,6 +34,33 @@ mod tests {
         let skill = include_str!("../../../skills/rvow/SKILL.md.tmpl");
         assert!(skill.contains("{{cmd:guide tasks}}"));
         assert!(skill.contains("gate task"));
+    }
+
+    #[test]
+    fn runners_guide_fits_the_budget_and_is_ascii() {
+        let n = RUNNERS.split_whitespace().count();
+        assert!(n <= MAX_WORDS, "runners guide has {n} words");
+        assert!(RUNNERS.is_ascii());
+    }
+
+    #[test]
+    fn runners_guide_example_parses_and_fills_build_and_artifacts() {
+        #[derive(serde::Deserialize)]
+        struct Table {
+            runners: std::collections::BTreeMap<String, crate::template::Runner>,
+        }
+        let table: Table = toml::from_str(example(RUNNERS)).unwrap();
+        let task = crate::tasks::parse_tasks("- TSK-x7k2q4 T\n  verify: @cpp target=pool_test test=PoolShutdown\n  files: a\n").0.remove(0);
+        let plan = crate::template::plan(&table.runners, &task).unwrap();
+        assert_eq!(plan.build.as_deref(), Some("cmake --build build --target pool_test"));
+        assert_eq!(plan.artifacts, ["build/tests/pool_test".to_string()]);
+    }
+
+    #[test]
+    fn runners_guide_is_named_by_the_tasks_guide_and_the_skill() {
+        assert!(TASKS.contains("rvow guide runners"));
+        let skill = include_str!("../../../skills/rvow/SKILL.md.tmpl");
+        assert!(skill.contains("{{cmd:guide runners}}"));
     }
 
     #[test]

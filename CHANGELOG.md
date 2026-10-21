@@ -113,6 +113,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow guide runners`, a guide for an agent on how to set `build` and `artifacts` on a runner, find the artifact paths and move a plan onto the runner without weakening it.
 - Add `build` and `artifacts` to a runner, so `rvow prove --stale`, the background re-prove and `rvow archive` keep a stale proof without a verify run when the built files are unchanged.
   A passing proof records the hash of each artifact, and a revalidated proof carries the old results.
 - Add the `long-task`, `broad-verify`, `depends-chain` and `hot-file` warnings to `rvow check`, for a task title over 60 words, a verify that builds or runs everything, a `depends_on` chain of three tasks and a file in the scope of three tasks.

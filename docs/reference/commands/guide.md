@@ -12,4 +12,4 @@ rvow guide [OPTIONS] <ARTIFACT>
 
 | Argument | Description |
 | --- | --- |
-| `<ARTIFACT>` | One of `proposal`, `spec`, `tasks`, `design`, `judge`. |
+| `<ARTIFACT>` | One of `proposal`, `spec`, `tasks`, `design`, `judge`, `runners`. |

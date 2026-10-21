@@ -20,7 +20,7 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 - It must fail before the work and pass after. Write the test, then run `rvow prove <task>` to record the failure. The one exception is `baseline: pass`.
 - It runs real tests. A filter that matches nothing does not count, so name a test that exists.
 - Do not use `true`, `echo` or a build alone (`weak-verify`).
-- `verify: @<runner> key=value` runs a project runner with the keys filled; see `docs/settings.md`.
+- `verify: @<runner> key=value` runs a project runner; see `rvow guide runners`.
 - Prove one target: build it and run its tests only, such as `cmake --build build --target test_a` then `ctest -R '^a$'`. A whole-preset build, or a `ctest` with no `-R`, slows every proof and gate run (`broad-verify`).
 - Put the full build, the full suite, benchmarks and timing checks in one last gate task or in the project `checks`. A timing check in a task verify makes the gate flaky.
 - Each task lands its own tests.

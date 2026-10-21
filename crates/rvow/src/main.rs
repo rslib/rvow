@@ -418,6 +418,7 @@ enum Artifact {
     Tasks,
     Design,
     Judge,
+    Runners,
 }
 
 fn main() -> ExitCode {
