@@ -308,7 +308,7 @@ export function formatJudgeFindings(
 
 export const ARCHIVE = 'mcp__rvow__rvow_archive'
 export const ARCHIVE_DESCRIPTION =
-  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. When the change has pending plan edits (amendments), the same dialog lists every one, weaken first, and a yes accepts them all and then archives; a no leaves them pending. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
+  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. When the change has pending plan edits (amendments), the same dialog lists every one, weaken first, and a yes accepts them all and then archives; a no leaves them pending. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Edits to protected files that the plan does not record yet are recorded by this tool and listed in the same dialog, so do not run rvow amend for them. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
 export const ARCHIVE_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -332,6 +332,21 @@ export function archiveBlockers(
     return `rvow: ${id} is not ready to archive: ${open.join(', ')}; fix them first`
   return null
 }
+
+/** Drift that blocks the gate and that no pending plan edit records yet. */
+export function unrecordedDrift(
+  change: { drift?: { class: string; what: string }[]; pending: unknown[] } | undefined,
+): { class: string; what: string }[] {
+  if (!change || change.pending.length > 0) return []
+  return (change.drift ?? []).filter((d) => d.class !== 'free')
+}
+
+/** The reason of an amendment that the archive tool records for drift. */
+export const driftReason = (items: { what: string }[]) =>
+  cut(
+    `recorded by the archive tool for the user to confirm: ${items.map((d) => d.what).join('; ')}`,
+    500,
+  )
 
 /** The pending amendments of one change in a `rvow confirm` listing, those holding a weaken item first. */
 export function archiveAmendments(listing: string, change: string): Listed[] {

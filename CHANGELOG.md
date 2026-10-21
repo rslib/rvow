@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make the archive tool and `/rvow-archive` in the Claude mod and in pi record unrecorded drift with `rvow amend` themselves, so an edit to an existing test needs no step from the agent.
+  The archive dialog lists each edit with its diff, weaken first, and one yes accepts them and archives.
 - Add `elsewhere` (active changes of other branches that have a worktree) and a `worktree` path on each backlog plan to the view of `rvow status --json`.
   The Claude mod and pi use them, so the archive tool and `/rvow-archive` work for a change on another branch and a plan with a worktree can be accepted from any branch.
 - Make a runner change that only adds env keys, an env prefix, a `&&` check, `needs`, `artifacts` or `always` entries a confirm item and not weaken drift.

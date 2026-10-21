@@ -28,7 +28,23 @@ export type ConfirmInput = { decision?: "accept" | "reject"; id?: string };
 export const ACCEPT_DESCRIPTION =
   "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
 export const ARCHIVE_DESCRIPTION =
-  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Pending plan edits (amendments) of the change do not block it: the same dialog lists them, weaken ones first, and a yes accepts them all and then archives. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.";
+  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Pending plan edits (amendments) of the change do not block it: the same dialog lists them, weaken ones first, and a yes accepts them all and then archives. Edits to protected files that the plan does not record yet are recorded by this tool and listed in the same dialog, so do not run rvow amend for them. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.";
+
+/** The reason of an amendment that the archive tool records for drift. */
+export function driftReason(items: { what: string }[]): string {
+  const text = `recorded by the archive tool for the user to confirm: ${items.map((d) => d.what).join("; ")}`;
+  return text.length <= 500 ? text : `${text.slice(0, 497)}...`;
+}
+
+/** The `rvow amend` call that records drift the gate would refuse, or `null` when there is none or a pending plan edit holds it. */
+export function driftAmendArgs(
+  found: { drift?: { class: string; what: string }[]; pending?: unknown[] } | undefined,
+  id: string,
+): string[] | null {
+  if (!found || (found.pending ?? []).length > 0) return null;
+  const items = (found.drift ?? []).filter((d) => d.class !== "free");
+  return items.length > 0 ? ["amend", "--reason", driftReason(items), "--change", id] : null;
+}
 
 /** The active change `id` on this branch, else in another worktree. */
 export function findChange<T extends { id: string }>(
@@ -276,7 +292,10 @@ function parseOutput(args: string[], code: number, stdout: string): ToolOutput {
         duration_ms: Number(ms),
         event,
       };
-  } else if (code === 0 && ["accept", "confirm", "review", "archive"].includes(args[0] ?? "")) {
+  } else if (
+    code === 0 &&
+    ["accept", "confirm", "review", "archive", "amend"].includes(args[0] ?? "")
+  ) {
     return { kind: "decision", code, text: stdout };
   } else if (code === 0 && args[0] === "yolo") {
     const tier = scalar(stdout, "tier");
@@ -496,10 +515,15 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
           content: [{ type: "text" as const, text: blocked }],
           details: { kind: "failure" as const, code: 1, error: blocked, stdout: "" },
         };
+      const amendArgs = driftAmendArgs(found, change);
+      if (amendArgs) {
+        const amended = await queue(() => result(amendArgs, ctx.cwd, signal, SLOW_MS));
+        if (amended.details.kind !== "decision") return amended;
+      }
       const tail = `Archive ${change}? The gate trusts an archived change and never reruns its tasks.`;
       let accept: string[] = [];
       let asked = false;
-      if ((found?.pending ?? []).length > 0) {
+      if ((found?.pending ?? []).length > 0 || amendArgs) {
         const answer = await askPendingAmendments(
           change,
           async () => {

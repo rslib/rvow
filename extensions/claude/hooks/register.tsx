@@ -26,6 +26,7 @@ import {
   cut,
   DRIFT,
   decisionPrompt,
+  driftReason,
   EDIT_HINT,
   failedPrompt,
   failedText,
@@ -59,6 +60,7 @@ import {
   refinePrompt,
   splitListing,
   TABS,
+  unrecordedDrift,
   YOLO,
   YOLO_DESCRIPTION,
   YOLO_SCHEMA,
@@ -519,7 +521,12 @@ async function archiveFlow(
 ): Promise<{ text: string; archived?: boolean; failed?: boolean }> {
   const seen = await tellOut($, ['hook', 'claude', 'view'])
   if (!seen.ok) return { text: failedText(['hook', 'claude', 'view'], seen.out) }
-  type Seen = { id: string; tasks: { id: string; state: string }[]; pending: unknown[] }
+  type Seen = {
+    id: string
+    tasks: { id: string; state: string }[]
+    pending: unknown[]
+    drift?: { class: string; what: string }[]
+  }
   let view: { changes?: Seen[]; elsewhere?: Seen[] }
   try {
     view = JSON.parse(seen.out)
@@ -534,7 +541,14 @@ async function archiveFlow(
   const declined = {
     text: `The user did not archive ${change}; it stays active and any pending plan edit stays pending. The user can run /rvow-archive ${change} to archive it.`,
   }
-  const pending = found?.pending.length ?? 0
+  // Drift that no plan edit records yet is recorded here, so the user's one answer below covers it.
+  const drifted = unrecordedDrift(found)
+  if (drifted.length > 0) {
+    const argv = ['amend', '--reason', driftReason(drifted), '--change', change]
+    const amended = await tellOut($, argv)
+    if (!amended.ok) return { text: failedText(argv, amended.out) }
+  }
+  const pending = (found?.pending.length ?? 0) + (drifted.length > 0 ? 1 : 0)
   if (pending === 0) {
     const answer = await $.ui
       .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])

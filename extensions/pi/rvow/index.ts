@@ -62,7 +62,13 @@ import {
   SLOW_MS,
   shortReview,
 } from "./tools.ts";
-import { askPendingAmendments, registerTypedTools, yoloArgs } from "./typed-tools.ts";
+import {
+  askPendingAmendments,
+  driftAmendArgs,
+  findChange,
+  registerTypedTools,
+  yoloArgs,
+} from "./typed-tools.ts";
 import type { Change, HookOutput, Plan, View } from "./types.ts";
 
 const MAX_CONTINUES = 8;
@@ -1423,6 +1429,20 @@ export default function (pi: ExtensionAPI) {
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
+    // Drift that no plan edit records yet is recorded here, so the one answer below covers it.
+    const seen = await rvow(ctx, ["hook", "view"]);
+    let amendArgs: string[] | null = null;
+    try {
+      const shown: { changes?: Change[]; elsewhere?: Change[] } = JSON.parse(seen?.out ?? "{}");
+      amendArgs = driftAmendArgs(findChange(shown, arg), arg);
+    } catch {}
+    if (amendArgs) {
+      const amended = await rvow(ctx, amendArgs);
+      if (amended?.code !== 0) {
+        if (amended) ctx.ui.notify(amended.out.trim(), "error");
+        return;
+      }
+    }
     const answer = await askPendingAmendments(
       arg,
       async () => {
