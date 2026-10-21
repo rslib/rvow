@@ -15,6 +15,7 @@ use crate::stats::STATS_FILE;
 use crate::yolo::YOLO_FILE;
 
 use super::rule::{Denial, Rule, denial};
+use super::witness::{self, WITNESS_FILE};
 use crate::store::IDS_FILE;
 
 const SEPARATORS: &[char] = &[';', '&', '|', '(', ')', '`', '\n'];
@@ -426,6 +427,10 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
             Rule::YoloFile,
             "rvow yolo relaxes the hooks and belongs to the user; ask the user to run `! rvow yolo <tier>`".into(),
         ),
+        "hook" => denial(
+            Rule::WitnessFile,
+            "rvow hook answers the harness and records what the user made; an agent does not run it. Run `rvow status` to see the plan".into(),
+        ),
         "ingest" => denial(
             Rule::OwnerCommand,
             "rvow ingest records proofs from a CI file and belongs to the user; ask the user to run `! rvow ingest <file>`, or run `rvow prove <task>` to prove it here"
@@ -629,6 +634,10 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
             Rule::LeaseFile,
             format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
         );
+    }
+    let names_witness = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == WITNESS_FILE);
+    if names_witness && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
+        return denial(Rule::WitnessFile, witness::reason());
     }
     let names_cache = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == CACHE_FILE);
     let only_rvow_first = sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow");

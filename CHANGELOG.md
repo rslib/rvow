@@ -218,6 +218,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix a session being denied every writing call as `unseen-accept` after the user accepted a change in another session.
+  The hook now keeps what the user made in `witness.json` in the project folder, so every session of the project reads it.
+- Fix `unseen-accept` denying a call that writes nothing in the repository, such as `ssh`, a write to `/tmp` or a scratch folder, or a script run from there.
+  A write inside the repository is still denied.
+- Deny a shell call that runs `rvow hook` or names `witness.json`, so an agent cannot forge the record of what the user made.
 - Fix the hooks letting through `fish -c` and `ash -c` text, `rgit push --no-verify`, `rgit commit -n`, `git -c alias` and `-c core.hooksPath` tricks, awk programs that run an owner command, MCP calls with `no_verify` or `core.hooksPath` and the Monitor tool.
 - Fix shell writes such as `echo x > src/a.rs` and `sed -i` skipping the unaccepted-plan and lease rules that an Edit of the same file meets.
 - Fix pi's `rvow_prove` tool proving a task outside a subagent's lease.

@@ -595,8 +595,16 @@ The record holds these things:
 - the time span of each confirm that the mod ran for you and that accepted
 
 > [!IMPORTANT]
-> An accept or a confirm made since the session started that is not in the record keeps every writing call denied as `unseen-accept`.
+> An accept or a confirm made since the session started that is not in the record keeps every call that writes in the repository denied as `unseen-accept`.
 > It stays so until you check the change and type `/rvow-accept <id>`.
+
+The hook saves the record of each call to `witness.json` in the project folder and joins it with the record that the call brings.
+So an accept that you made in one session counts in every other session of the project, also in one that was already running.
+Only the hook call of the harness writes the file, and the hooks deny a shell call that names it or that runs `rvow hook`.
+
+The check looks at where a call writes.
+A call that writes nothing in the repository goes on, such as `ssh`, a file in `/tmp` or a scratch folder, or a script run from there.
+A script that edits the repository is not seen before it runs, so the gate and the provenance check catch it as drift.
 
 - A yolo tier switched on since the session started counts only when you switched it on with `/rvow-yolo` or the yolo dialog.
 - An accept under a yolo `auto` tier that you switched on counts, so a run with no dialog still works.

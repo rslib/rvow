@@ -37,6 +37,8 @@ pub enum Rule {
     BaselineFirst,
     /// Work on a change whose accept or confirm in this session the harness did not see the user make.
     UnseenAccept,
+    /// The record of what the user made, which only the harness's own hook call writes.
+    WitnessFile,
 }
 
 /// What a rule does when it fires.
@@ -82,7 +84,7 @@ impl Rule {
         )
     }
 
-    pub const ALL: [Rule; 17] = [
+    pub const ALL: [Rule; 18] = [
         Rule::OwnerCommand,
         Rule::GitHooks,
         Rule::Ledger,
@@ -100,6 +102,7 @@ impl Rule {
         Rule::Store,
         Rule::BaselineFirst,
         Rule::UnseenAccept,
+        Rule::WitnessFile,
     ];
 
     pub fn name(self) -> &'static str {
@@ -121,6 +124,7 @@ impl Rule {
             Rule::Store => "store",
             Rule::BaselineFirst => "baseline-first",
             Rule::UnseenAccept => "unseen-accept",
+            Rule::WitnessFile => "witness-file",
         }
     }
 }

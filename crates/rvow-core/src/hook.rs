@@ -30,12 +30,14 @@ mod shell;
 mod stop_state;
 mod store_guard;
 mod streak;
+mod witness;
 pub use rule::{Denial, Mode, Rule};
 #[cfg(test)]
 use shell::bash_enforcement_denial;
 use shell::{bash_changes, bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
 pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
 use store_guard::{bash_store_denial, store_denial};
+use witness::WITNESS_FILE;
 
 use crate::provenance::Locked;
 
@@ -618,6 +620,9 @@ fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) 
                 format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
             );
         }
+        if name == WITNESS_FILE {
+            return denial(Rule::WitnessFile, witness::reason());
+        }
     }
     None
 }
@@ -649,6 +654,9 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
             Rule::LeaseFile,
             format!("{LEASE_FILE} is written and read only by rvow; run `rvow delegate <task>` to lease a task instead"),
         );
+    }
+    if is(WITNESS_FILE) {
+        return denial(Rule::WitnessFile, witness::reason());
     }
     None
 }
@@ -802,8 +810,9 @@ struct UserYolo {
 const YOLO_SKEW_MS: u64 = 60_000;
 
 impl UserMade {
-    fn from(input: &Value) -> Option<UserMade> {
-        let seen = input.get("user_made")?;
+    fn from(project: &Project, input: &Value) -> Option<UserMade> {
+        let record = witness::merged(project, input.get("user_made")?);
+        let seen = &record;
         let since = seen.get("since").and_then(Value::as_u64)?;
         let changes =
             seen.get("changes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
@@ -849,16 +858,17 @@ impl UserMade {
 /// copy of the rvow binary under another name.
 fn unseen_denial(project: &Project, input: &Value, seen: &UserMade) -> Result<Option<Denial>> {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
-    let writes = match tool_kind(tool) {
-        ToolKind::ReadOnly => false,
-        ToolKind::Shell => shell_command(&input.get("tool_input").cloned().unwrap_or(Value::Null)).is_some_and(|c| !reads_only(&c)),
-        _ => writes_files(tool),
-    };
-    if !writes {
+    let kind = tool_kind(tool);
+    if kind == ToolKind::ReadOnly || (kind != ToolKind::Shell && !writes_files(tool)) {
         return Ok(None);
     }
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let Ok(top) = git::toplevel(&cwd) else { return Ok(None) };
+    let in_repo = !changed_rels(input, &cwd, &top).is_empty();
+    let names_no_file = kind != ToolKind::Shell && file_args(&input.get("tool_input").cloned().unwrap_or(Value::Null)).is_empty();
+    if !in_repo && !names_no_file {
+        return Ok(None);
+    }
     let Some(branch) = git::branch(&top)? else { return Ok(None) };
     let (living, _) = change::load_living(project)?;
     let active = proof::active(project, &living)?;
@@ -884,7 +894,7 @@ fn unseen_denial(project: &Project, input: &Value, seen: &UserMade) -> Result<Op
 /// `BACKSTOP` denials in a row the next one is a question for the user.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let session = input.get("session_id").and_then(Value::as_str);
-    let seen = UserMade::from(input);
+    let seen = UserMade::from(project, input);
     let tier = yolo::active(project).and_then(|on| seen.as_ref().map_or(Some(on), |s| s.yolo(on))).map(|on| on.tier);
     let unseen = match &seen {
         Some(s) => unseen_denial(project, input, s)?,
