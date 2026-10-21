@@ -777,6 +777,11 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     data.insert("programs".into(), json!(verify_programs(&cmd)));
     if proved {
         data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
+        if plan.build.is_some()
+            && let Some(hashes) = artifact_hashes(&top, &plan.artifacts)
+        {
+            data.insert("artifacts".into(), json!(hashes));
+        }
     }
     data.insert(
         "run".into(),
@@ -826,6 +831,89 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         baseline_recorded: red,
         hint,
     })
+}
+
+/// The SHA-256 of each artifact under `top`, or `None` when one is missing, is not a file or
+/// leaves the work tree.
+fn artifact_hashes(top: &Path, paths: &[String]) -> Option<BTreeMap<String, String>> {
+    let inside = |p: &Path| p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir));
+    paths
+        .iter()
+        .map(|path| {
+            let file = top.join(path);
+            let bytes = if inside(Path::new(path)) && file.is_file() { std::fs::read(&file).ok()? } else { return None };
+            Some((path.clone(), sha256_hex(&bytes)))
+        })
+        .collect()
+}
+
+/// Keeps the stale proof of a task whose runner builds its artifacts, when the files changed but
+/// the build leaves every artifact as the last passing proof recorded it. Records a new proof that
+/// carries the old results and returns its event hash. Returns `None`, and records nothing, when
+/// the task is not stale for its inputs alone or the artifacts differ, so the caller runs `prove`.
+pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut dyn Write) -> Result<Option<String>> {
+    let top = git::toplevel(cwd)?;
+    let (living, _) = change::load_living(project)?;
+    let changes = active(project, &living)?;
+    let (change, task) = find_task(&changes, input)?;
+    let config = config::load(project, home)?;
+    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let State::Stale(reasons) = state_for(project, home, change, task, &now)? else { return Ok(None) };
+    if reasons.iter().any(|r| !matches!(*r, "inputs-changed" | "dependency-changed")) {
+        return Ok(None);
+    }
+    let runners = config::runners(project)?;
+    let plan = crate::template::plan(&runners, task)?;
+    let (Some(build), false) = (plan.build.as_deref(), plan.artifacts.is_empty()) else { return Ok(None) };
+    if plan.missing_need(&top).is_some() {
+        return Ok(None);
+    }
+    let id = task.id.to_string();
+    let attempts = change.events.iter().filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id);
+    let Some(last) = attempts.enumerate().max_by_key(|(i, e)| (started(e), *i)).map(|(_, e)| e) else { return Ok(None) };
+    // A mutants or private check judged the old files, so only a full run can stand for the new ones.
+    if last.kind != Kind::Prove || !is_proved(last) || last.data.contains_key("mutants") || last.data.contains_key("private_check") {
+        return Ok(None);
+    }
+    let recorded: BTreeMap<String, String> = match last.data.get("artifacts").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+        Some(map) => map,
+        None => return Ok(None),
+    };
+    let started = ledger::now_ms();
+    let built = runner::run(build, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), echo)?;
+    if !built.passed() || artifact_hashes(&top, &plan.artifacts).as_ref() != Some(&recorded) {
+        return Ok(None);
+    }
+    let inputs = now.inputs(task)?;
+    let thash = task_hash(task);
+    let reqs = covered(task, &change.loaded, &living);
+    let env_key = now.env.key();
+    let stamp = runner_stamp(&runners, task);
+    let policy = last.data.get("private_policy").and_then(Value::as_str);
+    let mut data = last.data.clone();
+    data.remove(crate::seal::SEAL_FIELD);
+    for field in ["baseline", "red", "baseline_from", "baseline_run", "junit_baseline", "task_verify"] {
+        data.remove(field);
+    }
+    data.insert("revalidated".into(), true.into());
+    data.insert("revalidated_from".into(), last.hash.clone().into());
+    data.insert("started".into(), started.into());
+    data.insert("duration_ms".into(), built.duration_ms.into());
+    data.insert("inputs".into(), inputs.hash.clone().into());
+    data.insert("input_files".into(), inputs.files.into());
+    data.insert("worktree".into(), fingerprint::worktree(&top, project)?.into());
+    data.insert("depends".into(), json!(dependency_inputs(&change.loaded.tasks, task, &now)));
+    data.insert("env".into(), json!(now.env));
+    data.insert("env_key".into(), env_key.clone().into());
+    data.insert("key".into(), run_key(&thash, &reqs, &inputs.hash, &env_key, policy, stamp.as_deref()).into());
+    data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
+    let event = {
+        let lock = project.lock()?;
+        let key = crate::seal::key(home)?;
+        ledger::append_sealed(&change.dir.path.join(LEDGER), &lock, Kind::Prove, data, Some(&key))?
+    };
+    crate::lease::end_task(project, &id)?;
+    Ok(Some(event.hash))
 }
 
 /// Runs `task`'s baseline on the vow's base commit, with the hint for a slow
@@ -1094,6 +1182,96 @@ pub(crate) mod tests {
         assert!(stale_tasks(&p, &home, &repo).unwrap().is_empty());
         assert!(status(&p, &home, &repo, false).unwrap().is_empty());
         assert_eq!(status(&p, &home, &repo, true).unwrap().len(), 1);
+    }
+
+    const ARTIFACT_CONFIG: &str = "[runners.t]\nrun = \"cp src.bin built.bin && grep -q ok out.txt && echo ran >> ran.log && echo 'test result: ok. 1 passed; 0 failed;'\"\nbuild = \"cp src.bin built.bin\"\nartifacts = [\"built.bin\"]\n";
+
+    /// Like `accepted`, with a runner `t` in the project config and a task that names it.
+    fn accepted_runner(config: &str, verify: &str) -> (TempDir, Project, PathBuf, String) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        std::fs::write(p.root.join(crate::store::CONFIG_FILE), config).unwrap();
+        let c = change::new(&p, "Out", "main", false).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            format!("- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: {verify}\n  files: out.txt, src.bin, notes.txt\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            c.path.join("specs/out.md"),
+            "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+        )
+        .unwrap();
+        let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = vow::commit(&p, prepared).unwrap();
+        let task = vowed.minted.iter().find(|(from, _)| from == "TSK-new1").unwrap().1.to_string();
+        (tmp, p, repo, task)
+    }
+
+    fn proved_with_artifacts() -> (TempDir, Project, PathBuf, String) {
+        let (tmp, p, repo, task) = accepted_runner(ARTIFACT_CONFIG, "@t");
+        let home = tmp.0.join("home");
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().baseline_recorded);
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        std::fs::write(repo.join("src.bin"), "A").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        (tmp, p, repo, task)
+    }
+
+    fn runs(repo: &Path) -> usize {
+        std::fs::read_to_string(repo.join("ran.log")).map_or(0, |t| t.lines().count())
+    }
+
+    #[test]
+    fn revalidate_proof_keeps_a_stale_proof_when_the_artifacts_are_unchanged() {
+        let (tmp, p, repo, task) = proved_with_artifacts();
+        let home = tmp.0.join("home");
+        assert_eq!(runs(&repo), 1);
+        std::fs::write(repo.join("notes.txt"), "a comment").unwrap();
+        assert_eq!(state_of(&p, &home, &repo), "stale");
+        let event = revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        assert!(event.is_some(), "the artifacts did not change");
+        assert_eq!(state_of(&p, &home, &repo), "proved");
+        assert_eq!(runs(&repo), 1, "the verify did not run again");
+    }
+
+    #[test]
+    fn revalidate_proof_refuses_when_an_artifact_changed() {
+        let (tmp, p, repo, task) = proved_with_artifacts();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("src.bin"), "B").unwrap();
+        assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None);
+        assert_eq!(state_of(&p, &home, &repo), "stale");
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert_eq!(runs(&repo), 2, "a changed artifact runs the verify");
+    }
+
+    #[test]
+    fn revalidate_proof_refuses_a_task_that_is_not_stale_or_has_no_artifacts() {
+        let (tmp, p, repo, task) = proved_with_artifacts();
+        let home = tmp.0.join("home");
+        assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None, "a proved task needs nothing");
+        let (tmp, p, repo, task) =
+            accepted_runner("[runners.t]\nrun = \"true\"\n", "grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'");
+        let home = tmp.0.join("home");
+        prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(repo.join("notes.txt"), "x").unwrap();
+        assert_eq!(state_of(&p, &home, &repo), "stale");
+        assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None, "a plain verify has no artifacts");
+    }
+
+    #[test]
+    fn revalidate_proof_refuses_a_stale_proof_of_a_changed_task_or_runner() {
+        let (tmp, p, repo, task) = proved_with_artifacts();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("notes.txt"), "x").unwrap();
+        let other = ARTIFACT_CONFIG.replace("echo ran", "echo ran twice");
+        std::fs::write(p.root.join(crate::store::CONFIG_FILE), other).unwrap();
+        assert_eq!(revalidate(&p, &home, &repo, &task, &mut std::io::sink()).unwrap(), None, "a changed run command is runner-changed");
     }
 
     #[test]

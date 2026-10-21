@@ -257,6 +257,10 @@ fn reprove_stale(project: &Project, home: &Path, cwd: &Path, dir: &ChangeDir) ->
     let stale: Vec<String> = proof::stale_tasks(project, home, &top)?.into_iter().filter(|t| mine.contains(t)).collect();
     let mut echo = std::io::stderr();
     for task in &stale {
+        if proof::revalidate(project, home, &top, task, &mut echo)?.is_some() {
+            let _ = std::io::Write::write_fmt(&mut echo, format_args!("revalidated: {task}\n"));
+            continue;
+        }
         let _ = std::io::Write::write_fmt(&mut echo, format_args!("re-prove: {task}\n"));
         let proved = proof::prove(project, home, &top, task, &mut echo)?;
         if !proved.proved {

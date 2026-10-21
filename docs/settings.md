@@ -518,9 +518,37 @@ That means the words `cmake --preset`, `cmake -S`, `cmake -B` or any `--fresh`.
 When the output of a verify run holds `Re-running CMake`, the prove result notes that the build reconfigured.
 When the runner has a `needs` path, it also names it: `run ninja -C <dir> -d explain to see why`.
 
+### Keeping a proof when the artifacts are unchanged
+
+A proof goes stale when a file in the task's `files:` changes, also when the change does not alter what the test runs.
+A runner can set two more keys, and rvow then keeps such a proof without a verify run.
+rvow knows no build system for this. The runner names the build and the files it makes.
+
+```toml
+[runners.cpp]
+run = "cmake --build build --target {target} && ctest --test-dir build -R '^{target}$'"
+build = "cmake --build build --target {target}"
+artifacts = ["build/tests/{target}"]
+```
+
+- `build` is an incremental build command of what `run` executes, with the same `{param}` fill as `run`.
+- `artifacts` lists the built files that `run` executes, relative to the work tree. A path may use the same params. A file that the test reads but the build does not make, such as a data file, goes in the list too.
+- A runner that sets one of the two must set both. The two keys stay out of the runner hash, so adding them makes no proof stale.
+
+A passing proof records the SHA-256 of each artifact.
+`rvow prove --stale`, the background re-prove and `rvow archive` then try this before they run a verify.
+The task must be stale only because its input files or a dependency changed, and its last proof must have passed with no `mutants:` and no private check.
+rvow runs `build`, hashes the artifacts and compares them with the recorded hashes.
+When every hash is the same, rvow records a proof that carries the old results and marks it `revalidated`, and the verify does not run.
+When one differs, or the build fails, rvow runs the verify as before.
+
+A build that is not reproducible, such as one that embeds a timestamp, gives a new hash each time.
+That only costs a verify run.
+The gate in a clean worktree does not revalidate, since it builds from nothing.
+
 ### Runners and the vow
 
-The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`).
+The vow records a hash of each runner a task uses (`run`, `env`, `timeout`, `params`, `default`, `needs`; not `build` and `artifacts`).
 A changed runner is weaken drift for each task that uses it, like a changed verify, and a runner that no task uses can change with no drift.
 The runner hash is also part of the proof key and the gate cache key, so a confirmed runner change makes the old proofs stale.
 `rvow review` and `rvow show` print the filled command as a `run:` line under the `verify:` line.

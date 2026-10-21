@@ -33,6 +33,12 @@ pub struct Runner {
     /// How long the command may run, when the task sets no `timeout:` of its own.
     #[serde(default, with = "opt_duration", skip_serializing_if = "Option::is_none")]
     pub timeout: Option<Duration>,
+    /// An incremental build of what `run` executes, with params filled. Needs `artifacts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// The built files `run` executes, relative to the work tree, with params filled. Needs `build`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
 }
 
 mod opt_duration {
@@ -61,7 +67,9 @@ impl Runner {
     /// The identity of the runner that a vow records for each task that uses
     /// it: every field that changes what the command runs.
     pub fn hash(&self) -> String {
-        let text = serde_json::to_string(self).map_err(|e| Error::internal(format!("runner does not serialize: {e}")));
+        // `build` and `artifacts` only decide whether a proof may be kept, so they stay out of the stamp.
+        let own = Runner { build: None, artifacts: Vec::new(), ..self.clone() };
+        let text = serde_json::to_string(&own).map_err(|e| Error::internal(format!("runner does not serialize: {e}")));
         sha256_hex(text.unwrap_or_default().as_bytes())
     }
 }
@@ -119,6 +127,10 @@ pub struct Plan {
     pub junit: Option<PathBuf>,
     /// The runner's `needs` paths, with every param filled.
     pub needs: Vec<String>,
+    /// The runner's `build` command, with every param filled.
+    pub build: Option<String>,
+    /// The runner's `artifacts` paths, with every param filled.
+    pub artifacts: Vec<String>,
 }
 
 impl Drop for Plan {
@@ -140,7 +152,16 @@ impl Plan {
     }
 
     fn plain(verify: &str) -> Plan {
-        Plan { command: verify.to_string(), env: Vec::new(), timeout: None, runner: None, junit: None, needs: Vec::new() }
+        Plan {
+            command: verify.to_string(),
+            env: Vec::new(),
+            timeout: None,
+            runner: None,
+            junit: None,
+            needs: Vec::new(),
+            build: None,
+            artifacts: Vec::new(),
+        }
     }
 }
 
@@ -179,6 +200,15 @@ fn plan_inner(runners: &BTreeMap<String, Runner>, task: &Task, display: bool) ->
             "runner",
             format!("runner {name:?} quotes {{junit}} in its run"),
             "write {junit} without quotes in the runner's run",
+        ));
+    }
+
+    if runner.build.is_some() != !runner.artifacts.is_empty() {
+        let (set, missing) = if runner.build.is_some() { ("build", "artifacts") } else { ("artifacts", "build") };
+        return Err(Error::new(
+            "runner",
+            format!("runner {name:?} sets {set} but not {missing}"),
+            format!("set both build and artifacts on runners.{name}, or neither"),
         ));
     }
 
@@ -278,7 +308,19 @@ fn plan_inner(runners: &BTreeMap<String, Runner>, task: &Task, display: bool) ->
     let needs =
         runner.needs.iter().map(|need| fill(need, &values, &format!("a needs path of runner {name:?}"))).collect::<Result<Vec<_>>>()?;
     let env = runner.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    Ok(Plan { command, env, timeout: runner.timeout, runner: Some(name.to_string()), junit: if display { None } else { junit }, needs })
+    let build = runner.build.as_ref().map(|b| fill(b, &values, &format!("the build of runner {name:?}"))).transpose()?;
+    let artifacts =
+        runner.artifacts.iter().map(|a| fill(a, &values, &format!("an artifacts path of runner {name:?}"))).collect::<Result<Vec<_>>>()?;
+    Ok(Plan {
+        command,
+        env,
+        timeout: runner.timeout,
+        runner: Some(name.to_string()),
+        junit: if display { None } else { junit },
+        needs,
+        build,
+        artifacts,
+    })
 }
 
 /// The dir one run's JUnit report goes in: the runner's `RVOW_JUNIT_DIR`
@@ -383,6 +425,49 @@ mod tests {
         let e = plan(&rs, &t).unwrap_err();
         assert_eq!(e.code, "runner");
         assert!(e.message.contains("target") && e.message.contains("TSK"), "{e}");
+    }
+
+    const ARTIFACT_RUNNER: &str = "[runners.cpp]\nrun = \"cmake --build --preset {preset} --target {target} && ctest --preset {preset} -R '{target}'\"\nbuild = \"cmake --build --preset {preset} --target {target}\"\nartifacts = [\"build/{preset}/{target}\"]\ndefault = { preset = \"tests\" }\n";
+
+    #[test]
+    fn runner_artifacts_fill_build_and_artifacts_with_the_params() {
+        let rs = runners(ARTIFACT_RUNNER);
+        let p = plan(&rs, &task("@cpp target=pool_test")).unwrap();
+        assert_eq!(p.build.as_deref(), Some("cmake --build --preset tests --target pool_test"));
+        assert_eq!(p.artifacts, ["build/tests/pool_test".to_string()]);
+        let plain = runners("[runners.cpp]\nrun = \"true\"\n");
+        let p = plan(&plain, &task("@cpp")).unwrap();
+        assert_eq!((p.build.as_deref(), p.artifacts.is_empty()), (None, true));
+        let p = plan(&rs, &task("cargo test")).unwrap();
+        assert_eq!((p.build.as_deref(), p.artifacts.is_empty()), (None, true));
+    }
+
+    #[test]
+    fn runner_artifacts_need_a_build_and_the_build_needs_artifacts() {
+        let only_artifacts = runners("[runners.cpp]\nrun = \"t {target}\"\nartifacts = [\"build/{target}\"]\n");
+        let e = plan(&only_artifacts, &task("@cpp target=a")).unwrap_err();
+        assert_eq!(e.code, "runner");
+        assert!(e.message.contains("artifacts") && e.message.contains("build"), "{e}");
+        let only_build = runners("[runners.cpp]\nrun = \"t {target}\"\nbuild = \"b {target}\"\n");
+        let e = plan(&only_build, &task("@cpp target=a")).unwrap_err();
+        assert_eq!(e.code, "runner");
+        assert!(e.message.contains("build") && e.message.contains("artifacts"), "{e}");
+    }
+
+    #[test]
+    fn runner_artifacts_refuse_a_param_the_run_does_not_use_and_junit() {
+        let stray = runners("[runners.cpp]\nrun = \"t {target}\"\nbuild = \"b {other}\"\nartifacts = [\"build/{target}\"]\n");
+        let e = plan(&stray, &task("@cpp target=a")).unwrap_err();
+        assert!(e.message.contains("other"), "{e}");
+        let junit = runners("[runners.cpp]\nrun = \"t {target} {junit}\"\nbuild = \"b {target}\"\nartifacts = [\"{junit}\"]\n");
+        assert!(plan(&junit, &task("@cpp target=a")).is_err());
+    }
+
+    #[test]
+    fn runner_artifacts_leave_the_runner_stamp_alone() {
+        let with = runners(ARTIFACT_RUNNER).remove("cpp").unwrap();
+        let without = Runner { build: None, artifacts: Vec::new(), ..with.clone() };
+        assert_eq!(with.hash(), without.hash(), "adding build and artifacts must not make old proofs runner-changed");
     }
 
     #[test]

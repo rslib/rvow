@@ -134,14 +134,21 @@ pub fn prove_stale() -> Result<Reply> {
     }
     let mut rows = Vec::new();
     let mut all_warnings = Vec::new();
+    let mut revalidated = 0;
     for task in &stale {
+        if proof::revalidate(&p, &home, &cwd, task, &mut std::io::stderr())?.is_some() {
+            r.line(format!("revalidated {task}: its artifacts are unchanged, so its verify did not run"));
+            revalidated += 1;
+            continue;
+        }
         let proved = proof::prove(&p, &home, &cwd, task, &mut std::io::stderr())?;
         let (row, warnings) = proof_run(&mut r, &proved);
         rows.push(row);
         all_warnings.extend(warnings);
         r.ok &= proved.proved;
     }
-    r.set("count", format!("{} stale tasks", rows.len()));
+    let kept = if revalidated > 0 { format!(", {revalidated} revalidated") } else { String::new() };
+    r.set("count", format!("{} stale tasks{kept}", rows.len() + revalidated));
     r.table("proofs", rows, "");
     if !all_warnings.is_empty() {
         r.set("warnings", all_warnings);

@@ -113,6 +113,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `build` and `artifacts` to a runner, so `rvow prove --stale`, the background re-prove and `rvow archive` keep a stale proof without a verify run when the built files are unchanged.
+  A passing proof records the hash of each artifact, and a revalidated proof carries the old results.
 - Add the `long-task`, `broad-verify`, `depends-chain` and `hot-file` warnings to `rvow check`, for a task title over 60 words, a verify that builds or runs everything, a `depends_on` chain of three tasks and a file in the scope of three tasks.
   `rvow guide tasks` and the skill now say to prove one target per task and to put the full suite and benchmarks in one last gate task.
 - Add `rvow hook json <event>`, a neutral hook format for a harness other than Claude Code or pi, and `rvow hook codex <event>`, which answers Codex and turns an ask into a deny.

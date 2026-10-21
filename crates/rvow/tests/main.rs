@@ -144,6 +144,8 @@ mod rerun_cache;
 mod rerun_depends;
 #[path = "suite/rerun_scope.rs"]
 mod rerun_scope;
+#[path = "suite/revalidate.rs"]
+mod revalidate;
 #[path = "suite/script_finder.rs"]
 mod script_finder;
 #[path = "suite/sealed_proofs.rs"]
