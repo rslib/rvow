@@ -21,6 +21,7 @@ esac
 );
 chmodSync(bin, 0o755);
 process.env.RVOW_BIN = bin;
+process.env.RVOW_FAST_MS = "300";
 process.env.RVOW_FOCUS_SHORTCUT = "not a chord";
 
 test("a run that times out says so instead of returning nothing", async () => {
@@ -30,7 +31,9 @@ test("a run that times out says so instead of returning nothing", async () => {
   assert.match(r?.out ?? "", /rvow 5: stopped after 0 s with no result; run it in a terminal/);
 });
 
-test("a pre-tool-use hook that times out blocks a write and allows a read", async () => {
+test("a pre-tool-use hook that times out blocks a write and allows a read", {
+  timeout: 5000,
+}, async () => {
   const { default: extension } = await import("./rvow.ts");
   const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
   extension({

@@ -1,6 +1,7 @@
 # Run with prek (https://github.com/j178/prek); install the git hooks once with `prek install`, then
 # `rvow install`, so the rvow pre-push gate runs prek's pre-push hook first.
-# The slow checks run at push, not at each commit.
+# The slow checks run at push, not at each commit. The three test suites share priority 100,
+# so prek runs them at the same time.
 default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: local
@@ -26,6 +27,7 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
+        priority: 100
         always_run: true
       - id: ascii
         name: ASCII-only Rust source
@@ -62,6 +64,7 @@ repos:
         files: ^extensions/
         pass_filenames: false
         stages: [pre-push]
+        priority: 100
       - id: ext-tsc-claude
         name: tsc claude mod
         # Installs the npm deps once; skips (exit 0) when the claude CLI is missing.
@@ -84,3 +87,4 @@ repos:
         files: ^extensions/
         pass_filenames: false
         stages: [pre-push]
+        priority: 100

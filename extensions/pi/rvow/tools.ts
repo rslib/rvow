@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 export const BIN = process.env.RVOW_BIN || "rvow";
-export const FAST_MS = 10_000;
+/** The wait for a hook call. A test sets RVOW_FAST_MS to see a timeout in less than a second. */
+export const FAST_MS = Number(process.env.RVOW_FAST_MS) || 10_000;
 export const SLOW_MS = 60_000;
 /** `rvow archive` runs the gate checks, and rvow bounds each check with its own
  *  timeout, so the wait only guards against a hung binary. */
