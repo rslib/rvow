@@ -200,6 +200,19 @@ The lines of one runner, such as the `test result:` lines of libtest or the summ
 A file check does not count toward the chain: a segment whose first word is `grep`, `rg`, `test`, `[`, `diff` or `cmp`, after any leading `!` and `NAME=value` words.
 So `grep -q x a.md && grep -q y b.md && cargo test --test main docs::` chains one command and does not warn.
 
+## The task size warnings
+
+A task that is wide makes the gate slow and makes other proofs go stale.
+`rvow check` warns about these four shapes.
+
+- `long-task`: a task title of more than 60 words. Keep the title to one line and put the detail in the spec or in the test.
+- `broad-verify`: a verify that builds or runs everything, such as `cmake --build --preset tests` with no `--target`, `ninja` or `make` with no target, or `ctest` with no `-R`, `-L`, `-E` or `-I`. Build one target and run its tests.
+- `depends-chain`: a task that ends a `depends_on` chain of three or more tasks. One edit in any of them makes the chain stale.
+- `hot-file`: a tracked file in the `files:` of three or more tasks. One edit to it makes all of those proofs stale. Name the file in one task only.
+
+Put the full build, the full suite, benchmarks and timing checks in one last gate task or in the project `checks`.
+A timing check in a task verify makes the gate flaky.
+
 ## Running each check once per commit
 
 A `checks` entry that passes records its result in the same gate cache as a rerun task, so a commit that already passed the check does not run it again.

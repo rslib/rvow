@@ -205,6 +205,135 @@ fn wide_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
         .collect()
 }
 
+/// A task title longer than this many words is a spec, not a title.
+pub const MAX_TITLE_WORDS: usize = 60;
+/// A `depends_on` chain of this many tasks makes one edit stale for all of them.
+pub const CHAIN_TASKS: usize = 3;
+/// A file in the scope of this many tasks makes all of their proofs stale at once.
+pub const HOT_TASKS: usize = 3;
+
+const NINJA_VALUE_FLAGS: [&str; 5] = ["-C", "-j", "-k", "-l", "-f"];
+const CTEST_SELECTORS: [&str; 6] = ["-R", "-L", "-E", "-I", "--tests-regex", "--label-regex"];
+
+/// Whether a `ninja` or `make` segment names a target: a word that is not a flag, a flag value or a variable.
+fn names_target(words: &[&str]) -> bool {
+    let mut skip = false;
+    words.iter().skip(1).any(|w| {
+        if std::mem::take(&mut skip) {
+            return false;
+        }
+        skip = NINJA_VALUE_FLAGS.contains(w);
+        !w.starts_with('-') && !w.contains('=')
+    })
+}
+
+/// Why a verify command builds or runs everything, or `None` when it names a target.
+fn broad_verify(cmd: &str) -> Option<&'static str> {
+    cmd.replace("&&", ";").split([';', '|']).find_map(|segment| {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        match *words.first()? {
+            "cmake" if words.contains(&"--build") => {
+                let targeted = words.iter().any(|w| matches!(*w, "--target" | "-t") || w.starts_with("--target="));
+                (!targeted).then_some("builds every target")
+            }
+            "ninja" | "make" => (!names_target(&words)).then_some("builds every target"),
+            "ctest" => {
+                let selected = words.iter().any(|w| CTEST_SELECTORS.iter().any(|f| w.starts_with(f)) || *w == "--rerun-failed");
+                (!selected).then_some("runs every test")
+            }
+            _ => None,
+        }
+    })
+}
+
+/// A warning for each task whose title is a spec, and for each whose verify builds or runs everything.
+fn task_sizes(tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for t in tasks {
+        let words = t.title.split_whitespace().count();
+        if words > MAX_TITLE_WORDS {
+            let message = format!("{} has a title of {words} words, more than {MAX_TITLE_WORDS}", t.id);
+            out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::LongTask, t.line, message)));
+        }
+        let Some(cmd) = filled.get(&t.id.to_string()) else { continue };
+        if let Some(why) = broad_verify(cmd) {
+            let message = format!("{} verify ({cmd}) {why}; every proof and every gate run pays for it", t.id);
+            out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::BroadVerify, t.line, message)));
+        }
+    }
+    out
+}
+
+/// The longest `depends_on` chain that ends at the task at `at`, oldest task first.
+fn chain_to(tasks: &[Task], at: usize, seen: &mut Vec<usize>) -> Vec<usize> {
+    seen.push(at);
+    let mut best: Vec<usize> = Vec::new();
+    for d in &tasks[at].depends_on {
+        let Some(next) = tasks.iter().position(|t| t.id == *d) else { continue };
+        if seen.contains(&next) {
+            continue;
+        }
+        let chain = chain_to(tasks, next, seen);
+        if chain.len() > best.len() {
+            best = chain;
+        }
+    }
+    seen.pop();
+    best.push(at);
+    best
+}
+
+/// A warning for each task that ends a `depends_on` chain of `CHAIN_TASKS` or more tasks.
+fn depends_chains(tasks: &[Task]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (at, t) in tasks.iter().enumerate().filter(|(_, t)| !tasks.iter().any(|o| o.depends_on.contains(&t.id))) {
+        let chain = chain_to(tasks, at, &mut Vec::new());
+        if chain.len() < CHAIN_TASKS {
+            continue;
+        }
+        let path = chain.iter().map(|&i| tasks[i].id.to_string()).collect::<Vec<_>>().join(" -> ");
+        let message = format!(
+            "{} ends a depends_on chain of {} tasks ({path}); one edit in any of their files makes the chain stale",
+            t.id,
+            chain.len()
+        );
+        out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::DependsChain, t.line, message)));
+    }
+    out
+}
+
+/// One warning that names the files in the scope of `HOT_TASKS` or more tasks, most shared first.
+fn hot_files(listing: &str, tasks: &[Task]) -> Vec<Finding> {
+    let sets: Vec<_> = tasks.iter().map(|t| crate::fingerprint::globset(&t.files).ok()).collect();
+    let mut hot: Vec<(usize, &str, usize)> = Vec::new();
+    for file in listing.lines() {
+        let hits: Vec<usize> =
+            sets.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.is_match(file))).map(|(i, _)| i).collect();
+        if hits.len() >= HOT_TASKS {
+            hot.push((hits.len(), file, hits[0]));
+        }
+    }
+    hot.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    let Some(&(_, _, first)) = hot.first() else { return Vec::new() };
+    let listed = hot.iter().take(SHARED_LISTED).map(|(n, f, _)| format!("{f} ({n} tasks)")).collect::<Vec<_>>().join(", ");
+    let rest = hot.len().saturating_sub(SHARED_LISTED);
+    let more = if rest > 0 { format!(" and {rest} more") } else { String::new() };
+    let noun = if hot.len() == 1 { "file is" } else { "files are" };
+    let message = format!(
+        "{} {noun} in the scope of {HOT_TASKS} or more tasks, such as {listed}{more}; one edit to one of them makes each of those proofs stale",
+        hot.len()
+    );
+    vec![(change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::HotFile, tasks[first].line, message))]
+}
+
+/// `hot_files` over the tracked files of `top`.
+fn hot_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
+    match git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]) {
+        Ok(listing) => hot_files(&listing, tasks),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// The most shared files a `shared-scope` warning lists by name.
 const SHARED_LISTED: usize = 3;
 
@@ -373,6 +502,9 @@ fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded,
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
     findings.extend(wide_scopes(top, &loaded.tasks));
     findings.extend(shared_scopes(top, &loaded.tasks));
+    findings.extend(hot_scopes(top, &loaded.tasks));
+    findings.extend(task_sizes(&loaded.tasks, &filled));
+    findings.extend(depends_chains(&loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
     let missing = blamed_programs(top, &loaded.tasks, &runners, &filled);
     Report { missing, questions: questions(&loaded.texts), no_tasks: loaded.tasks.is_empty(), findings, change, slow }
@@ -472,6 +604,86 @@ mod tests {
         let text = std::fs::read_to_string(c.path.join(change::PROPOSAL)).unwrap();
         assert!(text.starts_with("branch: main\n"), "{text}");
         assert_eq!(check(&p, &repo, None).unwrap().len(), 1);
+    }
+
+    fn parsed(src: &str) -> Vec<Task> {
+        let (tasks, diags) = crate::tasks::parse_tasks(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        tasks
+    }
+
+    fn codes(found: &[Finding]) -> Vec<&'static str> {
+        found.iter().map(|(_, d)| d.rule.code()).collect()
+    }
+
+    #[test]
+    fn task_size_warns_about_a_title_over_the_word_limit() {
+        let long = vec!["word"; MAX_TITLE_WORDS + 1].join(" ");
+        let ok = vec!["word"; MAX_TITLE_WORDS].join(" ");
+        let tasks = parsed(&format!(
+            "- TSK-new1 {long}\n    verify: cargo test a\n    files: a\n- TSK-new2 {ok}\n    verify: cargo test b\n    files: b\n"
+        ));
+        let found = task_sizes(&tasks, &BTreeMap::new());
+        assert_eq!(codes(&found), ["long-task"]);
+        assert!(found[0].1.message.contains("TSK-new1"), "{}", found[0].1.message);
+    }
+
+    #[test]
+    fn task_size_warns_about_a_verify_that_builds_or_runs_everything() {
+        for cmd in [
+            "cmake --build --preset tests && ctest --preset tests -R '^a/'",
+            "cmake --build build && ctest --test-dir build -R '^a$'",
+            "cmake --build build --target test_a && ctest --test-dir build",
+            "ninja -C build && ctest --test-dir build -R a",
+            "make -j8 && ctest -R a",
+        ] {
+            assert!(broad_verify(cmd).is_some(), "{cmd}");
+        }
+        for cmd in [
+            "cmake --build build --target test_a && ctest --test-dir build -R '^a$'",
+            "cmake --build --preset tests --target test_a && ctest --preset tests -R '^a$'",
+            "ninja -C build test_a && ctest --test-dir build -R a",
+            "make test_a && ctest -R a",
+            "cargo nextest run --locked a",
+            "python3 scripts/check.py --self-test",
+        ] {
+            assert_eq!(broad_verify(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn task_size_reports_a_broad_verify_on_its_task() {
+        let tasks = parsed("- TSK-new1 A\n    verify: cmake --build --preset tests && ctest --preset tests -R a\n    files: a\n");
+        let filled = BTreeMap::from([("TSK-new1".to_string(), "cmake --build --preset tests && ctest --preset tests -R a".to_string())]);
+        let found = task_sizes(&tasks, &filled);
+        assert_eq!(codes(&found), ["broad-verify"]);
+        assert!(found[0].1.message.contains("TSK-new1"), "{}", found[0].1.message);
+    }
+
+    #[test]
+    fn task_size_warns_once_about_a_depends_on_chain() {
+        let two =
+            parsed("- TSK-new1 A\n    verify: x\n    files: a\n- TSK-new2 B\n    verify: x\n    files: b\n    depends_on: TSK-new1\n");
+        assert!(depends_chains(&two).is_empty());
+        let four = parsed(
+            "- TSK-new1 A\n    verify: x\n    files: a\n- TSK-new2 B\n    verify: x\n    files: b\n    depends_on: TSK-new1\n- TSK-new3 C\n    verify: x\n    files: c\n    depends_on: TSK-new2\n- TSK-new4 D\n    verify: x\n    files: d\n    depends_on: TSK-new3\n",
+        );
+        let found = depends_chains(&four);
+        assert_eq!(codes(&found), ["depends-chain"]);
+        assert!(found[0].1.message.contains("TSK-new4") && found[0].1.message.contains("4 tasks"), "{}", found[0].1.message);
+    }
+
+    #[test]
+    fn task_size_warns_about_a_file_in_the_scope_of_three_tasks() {
+        let tasks = parsed(
+            "- TSK-new1 A\n    verify: x\n    files: src/**\n- TSK-new2 B\n    verify: x\n    files: src/a.rs, tests/**\n- TSK-new3 C\n    verify: x\n    files: src/a.rs\n- TSK-new4 D\n    verify: x\n    files: docs/**\n",
+        );
+        let found = hot_files("src/a.rs\nsrc/b.rs\ntests/t.rs\ndocs/d.md\n", &tasks);
+        assert_eq!(codes(&found), ["hot-file"]);
+        let message = &found[0].1.message;
+        assert!(message.contains("src/a.rs") && message.contains("3 tasks"), "{message}");
+        assert!(!message.contains("src/b.rs"), "a file in two tasks is not hot: {message}");
+        assert!(hot_files("src/b.rs\ntests/t.rs\n", &tasks).is_empty());
     }
 
     #[test]

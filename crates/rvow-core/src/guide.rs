@@ -20,6 +20,22 @@ mod tests {
     }
 
     #[test]
+    fn task_guide_names_each_sizing_warning_and_the_gate_task() {
+        use crate::diag::Rule;
+        for rule in [Rule::LongTask, Rule::HotFile, Rule::DependsChain, Rule::BroadVerify] {
+            assert!(TASKS.contains(&format!("(`{}`)", rule.code())), "{}", rule.code());
+        }
+        assert!(TASKS.contains("last gate task"));
+    }
+
+    #[test]
+    fn task_guide_skill_sends_the_agent_to_the_sizing_rules() {
+        let skill = include_str!("../../../skills/rvow/SKILL.md.tmpl");
+        assert!(skill.contains("{{cmd:guide tasks}}"));
+        assert!(skill.contains("gate task"));
+    }
+
+    #[test]
     fn every_guide_fits_the_word_budget() {
         for (name, text) in [("proposal", PROPOSAL), ("spec", SPEC), ("tasks", TASKS), ("design", DESIGN), ("judge", JUDGE)] {
             let n = text.split_whitespace().count();

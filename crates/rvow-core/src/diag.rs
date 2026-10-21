@@ -37,6 +37,10 @@ pub enum Rule {
     Runner,
     ConfigureInVerify,
     TestQuery,
+    LongTask,
+    BroadVerify,
+    DependsChain,
+    HotFile,
 }
 
 impl Rule {
@@ -56,7 +60,11 @@ impl Rule {
             | Rule::SharedScope
             | Rule::WeakVerify
             | Rule::ConfigureInVerify
-            | Rule::TestQuery => Severity::Warning,
+            | Rule::TestQuery
+            | Rule::LongTask
+            | Rule::BroadVerify
+            | Rule::DependsChain
+            | Rule::HotFile => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -91,6 +99,10 @@ impl Rule {
             Rule::Runner => "runner",
             Rule::ConfigureInVerify => "configure-in-verify",
             Rule::TestQuery => "test-query",
+            Rule::LongTask => "long-task",
+            Rule::BroadVerify => "broad-verify",
+            Rule::DependsChain => "depends-chain",
+            Rule::HotFile => "hot-file",
         }
     }
 
@@ -130,6 +142,12 @@ impl Rule {
                 "build with `cmake --build --preset ...` and keep the configure step in a `setup` entry or a configured build dir"
             }
             Rule::TestQuery => "fix the query, or remove test_queries for this language",
+            Rule::LongTask => "cut the title to one line and put the detail in the spec or in the test the task adds",
+            Rule::BroadVerify => {
+                "build and run one target, such as `cmake --build <dir> --target <t>` then `ctest -R '^<t>$'`, and put the full build in a final gate task"
+            }
+            Rule::DependsChain => "keep depends_on to a task whose files really break this one, so one edit does not make a chain stale",
+            Rule::HotFile => "name each file in the files: of one task only, and let a final gate task cover what the tasks share",
         }
     }
 }

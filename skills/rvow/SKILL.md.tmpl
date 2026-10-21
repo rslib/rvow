@@ -18,7 +18,7 @@ The brief at session start names the next task. {{cmd:brief}} prints it again.
 
 ## Before accept
 
-- A new plan starts with {{cmd:new "<title>"}}, and {{cmd:new --spec "<title>"}} when the change alters behavior. {{cmd:guide design}} allows a `design` only for the changes it lists; put a technical decision there only then, otherwise the reason goes in the task.
+- A new plan starts with {{cmd:new "<title>"}}, and {{cmd:new --spec "<title>"}} when the change alters behavior. {{cmd:guide design}} allows a `design` only for the changes it lists; put a technical decision there only then, otherwise the reason goes in the task. Before you write tasks, run {{cmd:guide tasks}}: a one-line title, one target and a targeted verify per task, and the full suite in one last gate task.
 - While a plan waits for accept, code edits are denied. Before accept, {{cmd:put}} alone changes the plan; {{cmd:amend}} is only for an accepted plan. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}. The `rvow_ask` tool takes an optional `change` for the questions of another change.
 - Then run {{cmd:check}} and call the `rvow_accept` tool: the user answers in a dialog, and a failure comes back to you. Without the tool, ask the user to run `/rvow-accept <id>`.
 
