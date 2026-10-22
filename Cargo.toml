@@ -17,10 +17,16 @@ push = true
 # One consolidated tag for the whole workspace; release.yml triggers on v*.
 tag-name = "v{{version}}"
 
-# The hooks start rvow on every tool call, so the release binary is built for
-# size and speed: fat LTO makes it 5% smaller than thin, for a longer build.
+# Local release builds use thin LTO: fat LTO gave no measured hook speed gain and
+# took about 4x longer to rebuild. The shipped binaries use the dist profile,
+# which keeps fat LTO for a smaller binary.
 [profile.release]
 strip = "symbols"
+lto = "thin"
+codegen-units = 16
+
+[profile.dist]
+inherits = "release"
 lto = "fat"
 codegen-units = 1
 

@@ -128,3 +128,55 @@ fn audit_build_dev_profile_optimizes_every_dependency() {
         manifest.lines().filter(|l| l.starts_with("[profile.dev.package.") && !l.starts_with("[profile.dev.package.\"*\"]")).collect();
     assert!(others.is_empty(), "the \"*\" entry covers {others:?}");
 }
+
+/// The trimmed body of the `[name]` table in `manifest`, without the header.
+fn toml_section(manifest: &str, name: &str) -> String {
+    let header = format!("[{name}]");
+    let mut body = String::new();
+    let mut inside = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            if inside {
+                break;
+            }
+            inside = line == header;
+            continue;
+        }
+        if inside {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    assert!(!body.is_empty(), "Cargo.toml has no {header} section");
+    body
+}
+
+#[test]
+fn audit_build_release_profile_is_thin_with_16_codegen_units() {
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml")).unwrap();
+    let release = toml_section(&manifest, "profile.release");
+    assert!(release.contains("strip = \"symbols\"\n"), "a release build strips symbols:\n{release}");
+    assert!(release.contains("lto = \"thin\"\n"), "a release build uses thin LTO:\n{release}");
+    assert!(release.contains("codegen-units = 16\n"), "a release build uses 16 codegen units:\n{release}");
+}
+
+#[test]
+fn audit_build_release_profile_dist_keeps_fat_lto() {
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml")).unwrap();
+    let dist = toml_section(&manifest, "profile.dist");
+    assert!(dist.contains("inherits = \"release\"\n"), "the dist profile inherits release:\n{dist}");
+    assert!(dist.contains("lto = \"fat\"\n"), "a dist build uses fat LTO:\n{dist}");
+    assert!(dist.contains("codegen-units = 1\n"), "a dist build uses 1 codegen unit:\n{dist}");
+}
+
+#[test]
+fn audit_build_release_profile_ships_dist_binaries() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for path in [".github/workflows/release.yml", ".github/scripts/build-musl.sh"] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        assert!(text.contains("--profile dist"), "{path} does not build with --profile dist:\n{text}");
+        assert!(text.contains("/dist/rvow"), "{path} does not read the dist binary:\n{text}");
+        assert!(!text.contains("--release"), "{path} still builds with --release:\n{text}");
+        assert!(!text.contains("/release/rvow"), "{path} still reads the release binary:\n{text}");
+    }
+}

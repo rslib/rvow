@@ -25,8 +25,8 @@ docker run --rm \
   -v "$out/registry":/root/.cargo/registry \
   ${flags[@]+"${flags[@]}"} \
   "$image" \
-  sh -c "rustup toolchain install $toolchain --profile minimal --target $target && cargo build --release --locked --target $target -p rvow"
-bin="$out/target/$target/release/rvow"
+  sh -c "rustup toolchain install $toolchain --profile minimal --target $target && cargo build --profile dist --locked --target $target -p rvow"
+bin="$out/target/$target/dist/rvow"
 file "$bin" >&2
 if ! file "$bin" | grep -Eq 'statically linked|static-pie linked'; then
   echo "$bin is not static" >&2

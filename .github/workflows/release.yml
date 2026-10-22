@@ -68,25 +68,25 @@ jobs:
         run: .github/scripts/build-musl.sh ${{ matrix.target }} "$RUNNER_TEMP/musl"
       - name: Build
         if: runner.os == 'macOS'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p rvow
+        run: cargo build --profile dist --locked --target ${{ matrix.target }} -p rvow
       - name: The Linux binary links no shared library
         if: runner.os == 'Linux'
         run: |
-          bin="${{ matrix.binroot }}/${{ matrix.target }}/release/rvow"
+          bin="${{ matrix.binroot }}/${{ matrix.target }}/dist/rvow"
           if ldd "$bin" 2>&1 | grep -q '=>'; then
             echo "$bin links shared libraries"
             exit 1
           fi
       - name: The binary runs and reports the version
         run: |
-          out=$("${{ matrix.binroot }}/${{ matrix.target }}/release/rvow" --version)
+          out=$("${{ matrix.binroot }}/${{ matrix.target }}/dist/rvow" --version)
           echo "$out"
           echo "$out" | grep -q "$VERSION"
       - name: Pack
         run: |
           archive="rvow-${{ matrix.name }}-v$VERSION.tar.gz"
           mkdir -p pkg
-          cp "${{ matrix.binroot }}/${{ matrix.target }}/release/rvow" pkg/rvow
+          cp "${{ matrix.binroot }}/${{ matrix.target }}/dist/rvow" pkg/rvow
           tar -czf "$archive" -C pkg rvow
           shasum -a 256 "$archive" > "$archive.sha256"
           cat "$archive.sha256"
