@@ -121,6 +121,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow delegate <task> --worktree [path]`, which makes a branch and a worktree for the task, with rgit when it is on `PATH`, or records a worktree that already exists.
+  The first hook call of a session from that worktree binds the session to the lease by its session id, in every harness, and the session meets the rules of the lease's change whatever its branch is called.
+  A worktree lease lives until its task is proved or blocked, or the worktree is gone.
+- Bind a top-level Claude session to a lease when a prompt of the user starts with the `lease:` line.
 - Add `always`, `extends` and glob entries in `artifacts` to a runner, so a kept proof still runs source-text checks, runners share their keys and a build with many libraries lists them once.
 - Add `rvow guide runners`, a guide for an agent on how to set `build` and `artifacts` on a runner, find the artifact paths and move a plan onto the runner without weakening it.
 - Add `build` and `artifacts` to a runner, so `rvow prove --stale`, the background re-prove and `rvow archive` keep a stale proof without a verify run when the built files are unchanged.

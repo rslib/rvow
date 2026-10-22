@@ -218,6 +218,9 @@ enum Cmd {
     Delegate {
         /// The task id or a unique prefix of it.
         task: String,
+        /// Make a worktree for the task, or record the one at this path.
+        #[arg(long, num_args = 0..=1)]
+        worktree: Option<Option<PathBuf>>,
     },
     /// Record that a task cannot be finished as written.
     Block {
@@ -505,7 +508,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
         Cmd::Reprove => prove::background(),
         Cmd::Stats { days } => cmd::stats::stats(days),
-        Cmd::Delegate { task } => cmd::delegate::delegate(&task),
+        Cmd::Delegate { task, worktree } => cmd::delegate::delegate(&task, worktree),
         Cmd::Yolo { tier, length } => cmd::yolo::yolo(
             tier.map(|t| match t {
                 YoloTier::Audit => Some(rvow_core::yolo::Tier::Audit),

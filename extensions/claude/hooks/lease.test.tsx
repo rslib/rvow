@@ -79,6 +79,78 @@ test('a tool call carries the session id of the last prompt to the hook', async 
   expect(pre?.input).toMatchObject({ session_id: 's9' })
 })
 
+test('a top-level prompt that starts with a lease line binds the session to it', async ($, on) => {
+  const calls = fakeRvow(on)
+  on('classic.UserPromptSubmit', () => ({}))
+  await $.classic.UserPromptSubmit({
+    session_id: 's1',
+    transcript_path: '/t/s1.jsonl',
+    cwd: '/tmp',
+    prompt: 'lease: TSK-abc123\nYou hold one task.',
+  })
+  const bind = calls.find((c) => c.event === 'lease-bind')
+  expect(bind?.input).toMatchObject({
+    agent_id: 's1',
+    prompt: 'lease: TSK-abc123\nYou hold one task.',
+  })
+  // The session is bound before the brief is asked for, so the brief names the leased task.
+  const events = calls.map((c) => c.event)
+  expect(events.indexOf('lease-bind')).toBeLessThan(events.indexOf('session-start'))
+})
+
+test('a top-level prompt without a lease line binds no lease', async ($, on) => {
+  const calls = fakeRvow(on)
+  on('classic.UserPromptSubmit', () => ({}))
+  await $.classic.UserPromptSubmit({
+    session_id: 's1',
+    transcript_path: '/t/s1.jsonl',
+    cwd: '/tmp',
+    prompt: 'Read README.md and summarize it.',
+  })
+  expect(calls.filter((c) => c.event === 'lease-bind')).toHaveLength(0)
+})
+
+test('a top-level prompt whose lease line is not first binds no lease', async ($, on) => {
+  const calls = fakeRvow(on)
+  on('classic.UserPromptSubmit', () => ({}))
+  await $.classic.UserPromptSubmit({
+    session_id: 's1',
+    transcript_path: '/t/s1.jsonl',
+    cwd: '/tmp',
+    prompt: 'please read this first\nlease: TSK-abc123\nYou hold one task.',
+  })
+  expect(calls.filter((c) => c.event === 'lease-bind')).toHaveLength(0)
+})
+
+test('a top-level lease that does not bind shows the reason to the user', async ($, on) => {
+  const toasts: string[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', async (_$, e) => {
+    const out =
+      e.argv[3] === 'lease-bind'
+        ? JSON.stringify({
+            bound: false,
+            task: 'TSK-abc123',
+            reason: 'no open lease for TSK-abc123',
+          })
+        : ''
+    return { value: procResult(0, out) }
+  })
+  on('classic.UserPromptSubmit', () => ({}))
+  await $.classic.UserPromptSubmit({
+    session_id: 's1',
+    transcript_path: '/t/s1.jsonl',
+    cwd: '/tmp',
+    prompt: 'lease: TSK-abc123\nYou hold one task.',
+  })
+  expect(toasts.join('\n')).toContain('no open lease for TSK-abc123')
+})
+
 test('a subagent that stops ends its lease', async ($, on) => {
   const calls = fakeRvow(on)
   on('classic.SubagentStop', async () => ({}))
@@ -115,6 +187,49 @@ test('a lease that does not bind is shown to the user and returned to the agent'
     description: 'd',
   } as never)
   expect((r.context ?? []).join('\n')).toContain('rvow delegate TSK-abc123')
+})
+
+test('a subagent bind that fails without a reason says to start the subagent again', async ($, on) => {
+  const toasts: string[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', async (_$, e) => {
+    const out =
+      e.argv[3] === 'lease-bind' ? JSON.stringify({ bound: false, task: 'TSK-abc123' }) : ''
+    return { value: procResult(0, out) }
+  })
+  on('agent.spawn', async () => ({ model: 'm', agentId: 'a1' }))
+  await $.agent.spawn(spawn('lease: TSK-abc123\nYou hold one task.'))
+  expect(toasts.join('\n')).toContain('start the subagent again')
+  expect(toasts.join('\n')).not.toContain('send the prompt again')
+})
+
+test('a top-level bind that fails without a reason says to send the prompt again', async ($, on) => {
+  const toasts: string[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', async (_$, e) => {
+    const out =
+      e.argv[3] === 'lease-bind' ? JSON.stringify({ bound: false, task: 'TSK-abc123' }) : ''
+    return { value: procResult(0, out) }
+  })
+  on('classic.UserPromptSubmit', () => ({}))
+  await $.classic.UserPromptSubmit({
+    session_id: 's1',
+    transcript_path: '/t/s1.jsonl',
+    cwd: '/tmp',
+    prompt: 'lease: TSK-abc123\nYou hold one task.',
+  })
+  expect(toasts.join('\n')).toContain('send the prompt again')
+  expect(toasts.join('\n')).not.toContain('start the subagent again')
 })
 
 test('a lease that binds shows nothing', async ($, on) => {

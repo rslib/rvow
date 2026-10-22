@@ -177,6 +177,17 @@ fn docs_name_the_snapshot_lock() {
 }
 
 #[test]
+fn docs_name_the_worktree_lease() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("`rvow delegate <task> --worktree`"), "how-it-works lacks the worktree flag");
+    assert!(how.contains("binds the session to the lease by its session id"), "how-it-works lacks the worktree bind");
+    assert!(how.contains("A worktree lease has no time limit"), "how-it-works lacks the worktree lease life");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("--worktree [path]"), "the Unreleased changelog lacks the worktree flag");
+}
+
+#[test]
 fn docs_name_the_automatic_baseline() {
     let how = doc("docs/how-it-works.md");
     assert!(how.contains("## The baseline: the code at accept"), "how-it-works lacks the automatic baseline");

@@ -48,7 +48,7 @@ impl Fixture {
             hash: String::new(),
             line: 1,
         };
-        proof::Active { dir, loaded, events: vec![event], ledger_diags: vec![] }
+        proof::Active { dir, loaded, events: vec![event], ledger_diags: vec![], lease_branches: vec![] }
     }
 
     fn hooks_path(&self, path: &str) {

@@ -114,7 +114,7 @@ pub fn attest(project: &Project, home: &Path, cwd: &Path, input: &str, out: &Pat
             "set signing_key in the global config to the path of an ssh signing key",
         ));
     }
-    let active = proof::Active { dir, loaded, events, ledger_diags: Vec::new() };
+    let active = proof::Active { dir, loaded, events, ledger_diags: Vec::new(), lease_branches: Vec::new() };
     let now = proof::Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     let mut lines = Vec::new();
     let mut unproved = Vec::new();

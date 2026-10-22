@@ -108,6 +108,10 @@ const user = {
 }
 // The reason a subagent's lease did not bind, by the tool use id of its Agent call.
 const unbound = new Map<string, string>()
+/** The line `rvow delegate` puts at the top of a prompt, in a subagent's prompt or a user's. */
+const LEASE_LINE = /^\s*lease:\s*TSK-/m
+/** The same line, only at the start of the prompt: what `rvow delegate` hands a subagent. */
+const LEASE_START = /^\s*lease:\s*TSK-/
 // True while the last pre-tool-use hook failed, so the status line shows it.
 let failing = false
 const STDERR_LINES = 20
@@ -187,6 +191,26 @@ function warnBroken($: EngineInterface, error: string) {
   if (warned) return
   warned = true
   $.ui.toast(`rvow could not run, so tools that write are denied: ${cut(error, 80)}`)
+}
+
+/**
+ * Binds the lease its `lease:` line names to `agentId`: the id of a subagent, or the session id of a
+ * top-level session. Nothing when it bound or the prompt names no lease, else why it did not;
+ * `retry` is the one next step it names when rvow gave no reason.
+ */
+async function bindLease(
+  $: EngineInterface,
+  agentId: string,
+  prompt: string,
+  retry: string,
+): Promise<string | undefined> {
+  const r = await runHook($, 'lease-bind', { agent_id: agentId, prompt })
+  if (r.error !== undefined) return `rvow could not run: ${cut(r.error, 80)}`
+  if (r.out?.bound !== false) return undefined
+  const task = String(r.out.task ?? 'its task')
+  return String(
+    r.out.reason ?? `no open lease for ${task}; run rvow delegate ${task}, then ${retry}`,
+  )
 }
 
 /** Runs `rvow hook claude <event>`. A failure allows, except before a tool that writes (see `tool.call`). */
@@ -1106,18 +1130,8 @@ export const register: Register = (on) => {
   // the hook can judge its edits by the leased task. Other prompts never start rvow.
   on('agent.spawn', async ($, e, next) => {
     const started = await next(e)
-    if (started.agentId && /^\s*lease:\s*TSK-/m.test(e.prompt)) {
-      const r = await runHook($, 'lease-bind', { agent_id: started.agentId, prompt: e.prompt })
-      const task = String(r.out?.task ?? 'its task')
-      const reason =
-        r.error !== undefined
-          ? `rvow could not run: ${cut(r.error, 80)}`
-          : r.out?.bound === false
-            ? String(
-                r.out.reason ??
-                  `no open lease for ${task}; run rvow delegate ${task}, then start the subagent again`,
-              )
-            : undefined
+    if (started.agentId && LEASE_LINE.test(e.prompt)) {
+      const reason = await bindLease($, started.agentId, e.prompt, 'start the subagent again')
       if (reason !== undefined) {
         $.ui.toast(`rvow: the subagent is not bound to its lease: ${reason}`)
         unbound.set(e.tool_use_id, reason)
@@ -1138,6 +1152,13 @@ export const register: Register = (on) => {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     sessionId = e.session_id
     const result = await next(e)
+    // A top-level prompt that starts with the `lease:` line of `rvow delegate` binds this session to
+    // that lease, under its session id, before the brief is asked for.
+    const prompt = typeof e.prompt === 'string' ? e.prompt : ''
+    if (!(e as Record<string, unknown>).agent_id && LEASE_START.test(prompt)) {
+      const reason = await bindLease($, e.session_id, prompt, 'send the prompt again')
+      if (reason !== undefined) $.ui.toast(`rvow: the session is not bound to its lease: ${reason}`)
+    }
     const source = briefSource
     const out = await Promise.race([
       hook($, 'session-start', { session_id: e.session_id, source }),

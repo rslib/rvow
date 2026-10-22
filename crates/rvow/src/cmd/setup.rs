@@ -5,6 +5,7 @@ use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::hook as hooks;
 use rvow_core::install;
+use rvow_core::lease;
 use rvow_core::stats;
 use rvow_core::store::{self, Mode, Rebind};
 use rvow_core::view;
@@ -68,7 +69,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
     if matches!(harness, Harness::Json) {
         neutral_input(&mut input);
     }
-    let run = || -> Result<Option<serde_json::Value>> {
+    let mut run = || -> Result<Option<serde_json::Value>> {
         // Timed from here, so a hook's duration includes finding the project.
         let start = std::time::Instant::now();
         // Without a home or a working folder there is no store to find, so no project to check.
@@ -79,6 +80,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
             let warnings = if matches!(harness, Harness::Claude) { skill_warnings()? } else { Vec::new() };
             return match store::find(&cwd, &home) {
                 Ok(Some(p)) => {
+                    bind_session_lease(&p, &cwd, &mut input);
                     let out = hooks::claude_session_start(Some(&p), &home, &input, &warnings);
                     count_duration(&p, stats::Hook::SessionStart, &input, start);
                     out
@@ -93,6 +95,7 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
             Err(e) if e.code == "no-commit" || git::toplevel(&cwd).is_err() => return Ok(None),
             Err(e) => return Err(e),
         };
+        bind_session_lease(&p, &cwd, &mut input);
         let (counted, out) = match (harness, event) {
             (_, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
             (_, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
@@ -125,6 +128,23 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
         println!("{out}");
     }
     ExitCode::SUCCESS
+}
+
+/// Binds the session of a call to the live lease of the worktree the call
+/// comes from, so the handlers below judge the session and its subagents by
+/// that lease. Only rvow sets `lease_holder`, so a value in the input is
+/// dropped. A failure is ignored: a hook never fails over a lease.
+fn bind_session_lease(project: &store::Project, cwd: &Path, input: &mut serde_json::Value) {
+    if let Some(fields) = input.as_object_mut() {
+        fields.remove("lease_holder");
+    }
+    let Some(session) = input.get("session_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from) else {
+        return;
+    };
+    let Ok(top) = git::toplevel(cwd) else { return };
+    if lease::bind_worktree(project, &top, &session).is_ok_and(|found| found.is_some()) {
+        input["lease_holder"] = serde_json::json!(session);
+    }
 }
 
 /// Reads a neutral call (`tool`, `input`) into the names the handlers read

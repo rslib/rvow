@@ -442,6 +442,23 @@ The first line of the brief is `lease: <task id>`, so put the brief at the start
 The Claude mod reads that line when the subagent starts and binds the new agent id to the lease.
 
 In pi a subagent is a session of its own that loads the rvow extension, so the extension reads the same line from a prompt of that session and binds the session id.
+A top-level Claude session binds the same way when a prompt of the user starts with that line.
+
+### A lease with a worktree
+
+An orchestrator such as rmaestro runs one top-level agent per task, each in its own worktree.
+`rvow delegate <task> --worktree` makes the branch `rvow/<change>/<task>` at the tip of the change's branch and a worktree for it in `<repo>.worktrees/<task>` beside the repository.
+It runs `rgit worktree add` when rgit is on `PATH`, else git.
+`rvow delegate <task> --worktree <path>` records a worktree that the orchestrator already made, with its branch, and creates nothing.
+It refuses the main checkout and a worktree on the change's own branch, since a lease there would put the whole checkout under one task.
+
+The first hook call of a session from that worktree binds the session to the lease by its session id, in every harness.
+A second session in the same worktree is not bound.
+A subagent of the session that holds no lease of its own meets the session's lease.
+A write into another worktree of the repository, such as the main checkout, is denied, while a scratch file outside the repository is allowed.
+
+A session in the worktree meets the rules of the lease's change, whatever its branch is called, so its brief, its edits and its stop follow the leased task.
+A worktree lease has no time limit: it lives until its task is proved or blocked, or the worktree is gone.
 
 ### What a lease denies
 

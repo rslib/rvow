@@ -50,4 +50,5 @@ pub mod tasks;
 pub mod template;
 pub mod view;
 pub mod vow;
+pub mod worktree;
 pub mod yolo;

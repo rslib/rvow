@@ -1,7 +1,7 @@
-//! Leases: one task for one subagent. `leases.jsonl` in the project folder is
-//! append-only; the newest events decide what a lease is now.
+//! Leases: one task for one subagent or session. `leases.jsonl` in the project
+//! folder is append-only; the newest events decide what a lease is now.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,10 +22,33 @@ pub const TTL_MS: u64 = 4 * 3_600_000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum Event {
-    Issue { task: String, change: String, files: Vec<String>, time: u64 },
-    Bind { task: String, agent_id: String, time: u64 },
-    End { agent_id: String, time: u64 },
-    EndTask { task: String, time: u64 },
+    Issue {
+        task: String,
+        change: String,
+        files: Vec<String>,
+        time: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    Bind {
+        task: String,
+        agent_id: String,
+        time: u64,
+        /// The worktree of the lease a session bound by its worktree, so the
+        /// bind takes that lease and not a newer one of the task elsewhere.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<PathBuf>,
+    },
+    End {
+        agent_id: String,
+        time: u64,
+    },
+    EndTask {
+        task: String,
+        time: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +62,17 @@ pub struct Lease {
     /// bound last wins over one that was only issued later.
     pub bound: usize,
     pub ended: bool,
+    /// The worktree the task is built in, when the lease has one of its own.
+    pub worktree: Option<PathBuf>,
+    /// The branch checked out in `worktree`.
+    pub branch: Option<String>,
+}
+
+/// The worktree and branch of a lease that has a worktree of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub worktree: PathBuf,
+    pub branch: String,
 }
 
 /// The task id of the first `lease: TSK-xxxxxx` line of a prompt, if any.
@@ -61,9 +95,29 @@ pub struct Delegation {
 }
 
 impl Lease {
-    /// Not stopped by hand and not older than `TTL_MS` at `now`.
+    /// Not ended, and either its worktree still exists or it is not older
+    /// than `TTL_MS` at `now`. A worktree lease has no time limit, since an
+    /// agent on a long task must not lose it.
     pub fn live(&self, now: u64) -> bool {
-        !self.ended && now.saturating_sub(self.issued) <= TTL_MS
+        if self.ended {
+            return false;
+        }
+        match &self.worktree {
+            Some(w) => w.is_dir(),
+            None => now.saturating_sub(self.issued) <= TTL_MS,
+        }
+    }
+
+    /// Whether `top`, a worktree root, is the worktree of this lease.
+    pub fn in_worktree(&self, top: &Path) -> bool {
+        self.worktree.as_deref().is_some_and(|w| same_dir(w, top))
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -87,11 +141,12 @@ pub fn leases(project: &Project) -> Result<Vec<Lease>> {
     let mut out: Vec<Lease> = Vec::new();
     for (seq, event) in read(project)?.into_iter().enumerate() {
         match event {
-            Event::Issue { task, change, files, time } => {
-                out.push(Lease { task, change, files, issued: time, agent_id: None, bound: 0, ended: false })
+            Event::Issue { task, change, files, time, worktree, branch } => {
+                out.push(Lease { task, change, files, issued: time, agent_id: None, bound: 0, ended: false, worktree, branch })
             }
-            Event::Bind { task, agent_id, .. } => {
-                if let Some(l) = out.iter_mut().rev().find(|l| l.task == task && l.agent_id.is_none() && !l.ended) {
+            Event::Bind { task, agent_id, worktree, .. } => {
+                let fits = |l: &Lease| l.task == task && l.agent_id.is_none() && !l.ended && (worktree.is_none() || l.worktree == worktree);
+                if let Some(l) = out.iter_mut().rev().find(|l| fits(l)) {
                     l.agent_id = Some(agent_id);
                     l.bound = seq;
                 }
@@ -114,6 +169,12 @@ pub fn leases(project: &Project) -> Result<Vec<Lease>> {
 /// Records a lease for `input`, a task id or a unique prefix. A task that is
 /// proved or blocked has nothing left to lease.
 pub fn issue(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<Delegation> {
+    issue_at(project, home, cwd, input, None)
+}
+
+/// The task and change that `input` names, refused when the task is proved
+/// or blocked, so a caller can check before it makes a worktree.
+pub fn open_task(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<(String, String)> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
@@ -128,6 +189,15 @@ pub fn issue(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<
             "run rvow status and delegate a task that is missing, failed or stale",
         ));
     }
+    Ok((task.id.to_string(), c.dir.id.to_string()))
+}
+
+/// Records a lease for `input` like `issue`, built in the worktree of `place` when it has one.
+pub fn issue_at(project: &Project, home: &Path, cwd: &Path, input: &str, place: Option<Place>) -> Result<Delegation> {
+    open_task(project, home, cwd, input)?;
+    let (living, _) = change::load_living(project)?;
+    let changes = proof::active(project, &living)?;
+    let (c, task) = proof::find_task(&changes, input)?;
     let lease = Lease {
         task: task.id.to_string(),
         change: c.dir.id.to_string(),
@@ -136,11 +206,20 @@ pub fn issue(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<
         agent_id: None,
         bound: 0,
         ended: false,
+        worktree: place.as_ref().map(|p| p.worktree.clone()),
+        branch: place.map(|p| p.branch),
     };
     let lock = project.lock()?;
     write(
         project,
-        &Event::Issue { task: lease.task.clone(), change: lease.change.clone(), files: lease.files.clone(), time: lease.issued },
+        &Event::Issue {
+            task: lease.task.clone(),
+            change: lease.change.clone(),
+            files: lease.files.clone(),
+            time: lease.issued,
+            worktree: lease.worktree.clone(),
+            branch: lease.branch.clone(),
+        },
     )?;
     drop(lock);
     let runners = crate::config::runners(project).unwrap_or_default();
@@ -173,7 +252,7 @@ pub fn bind_checked(project: &Project, task: &str, agent_id: &str, is_open: impl
     if !all.iter().any(|l| l.task == task && l.agent_id.is_none() && !l.ended) {
         return Ok(Bound::NoLease);
     }
-    write(project, &Event::Bind { task: task.into(), agent_id: agent_id.into(), time: now_ms() })?;
+    write(project, &Event::Bind { task: task.into(), agent_id: agent_id.into(), time: now_ms(), worktree: None })?;
     Ok(Bound::Yes)
 }
 
@@ -195,6 +274,38 @@ pub fn end_task(project: &Project, task: &str) -> Result<()> {
         return Ok(());
     }
     write(project, &Event::EndTask { task: task.into(), time: now_ms() })
+}
+
+/// Binds `session` to the live lease of the worktree at `top` that no one
+/// holds yet, unless the session already holds a live lease. Returns the
+/// lease the session holds after the call, if any. Takes the project lock
+/// only to bind.
+pub fn bind_worktree(project: &Project, top: &Path, session: &str) -> Result<Option<Lease>> {
+    let now = now_ms();
+    let held = |all: &[Lease]| bound_last(all, session).filter(|l| l.live(now)).cloned();
+    let all = leases(project)?;
+    if let Some(l) = held(&all) {
+        return Ok(Some(l));
+    }
+    if !all.iter().any(|l| l.agent_id.is_none() && l.live(now) && l.in_worktree(top)) {
+        return Ok(None);
+    }
+    let _lock = project.lock()?;
+    let all = leases(project)?;
+    if let Some(l) = held(&all) {
+        return Ok(Some(l));
+    }
+    let Some(free) = all.iter().rev().find(|l| l.agent_id.is_none() && l.live(now) && l.in_worktree(top)) else {
+        return Ok(None);
+    };
+    write(project, &Event::Bind { task: free.task.clone(), agent_id: session.into(), time: now, worktree: free.worktree.clone() })?;
+    Ok(leases(project)?.into_iter().filter(|l| l.agent_id.as_deref() == Some(session)).max_by_key(|l| l.bound))
+}
+
+/// The live lease whose worktree is `top`, held or not.
+pub fn of_worktree(project: &Project, top: &Path) -> Result<Option<Lease>> {
+    let now = now_ms();
+    Ok(leases(project)?.into_iter().rev().find(|l| l.live(now) && l.in_worktree(top)))
 }
 
 /// Whether `task` has a live lease at `now` that `session` does not hold:

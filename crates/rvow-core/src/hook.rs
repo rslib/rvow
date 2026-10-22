@@ -660,6 +660,22 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
     None
 }
 
+/// The lease holder of a call: its subagent when that subagent holds a live
+/// lease, else the session that the hook bound to a lease, so a subagent of a
+/// leased session meets the session's lease. A subagent of no leased session
+/// is its own holder, as before.
+fn lease_holder<'a>(project: &Project, input: &'a Value) -> Option<&'a str> {
+    let agent = input.get("agent_id").and_then(Value::as_str);
+    let session = input.get("lease_holder").and_then(Value::as_str);
+    let now = crate::ledger::now_ms();
+    let holds = |id: &str| lease::leases(project).is_ok_and(|all| all.iter().any(|l| l.agent_id.as_deref() == Some(id) && l.live(now)));
+    match (agent, session) {
+        (Some(a), Some(s)) if !holds(a) => Some(s),
+        (Some(a), _) => Some(a),
+        (None, s) => s,
+    }
+}
+
 /// Why a subagent that holds a lease must not edit `file`: it lies outside the
 /// files of the task leased to it.
 fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Result<Option<Denial>> {
@@ -668,9 +684,23 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
         return Ok(None);
     };
     let top = git::toplevel(cwd)?;
+    let base = lease.worktree.clone().unwrap_or(top);
     let target = key(&real_path(Path::new(file), cwd));
-    let Some(rel) = target.strip_prefix(&format!("{}/", key(&real_path(&top, cwd)))) else {
-        return Ok(None);
+    let Some(rel) = target.strip_prefix(&format!("{}/", key(&real_path(&base, cwd)))) else {
+        // A worktree lease keeps its writes out of the other worktrees of the
+        // repository, such as the main checkout; a scratch file elsewhere is
+        // no work of the repository.
+        if lease.worktree.is_none() || !in_other_worktree(&base, &target) {
+            return Ok(None);
+        }
+        return Ok(denial(
+            Rule::LeaseScope,
+            format!(
+                "{file} is outside {worktree}, the worktree of {task}, the task leased to this agent; edit the files of {task} in that worktree",
+                worktree = base.display(),
+                task = lease.task
+            ),
+        ));
     };
     if fingerprint::globset(&lease.files).is_ok_and(|set| set.is_match(rel)) {
         return Ok(None);
@@ -683,6 +713,16 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
             files = lease_files_text(&lease.files)
         ),
     ))
+}
+
+/// Whether `target` lies in a worktree of the repository of `worktree` other
+/// than `worktree` itself. A git failure counts as yes, so a lease fails closed.
+fn in_other_worktree(worktree: &Path, target: &str) -> bool {
+    let Ok(list) = git::run(worktree, &["worktree", "list", "--porcelain"]) else { return true };
+    list.lines().filter_map(|l| l.strip_prefix("worktree ")).any(|w| {
+        let w = key(&std::fs::canonicalize(w).unwrap_or_else(|_| PathBuf::from(w)));
+        target.starts_with(&format!("{}/", w.trim_end_matches('/')))
+    })
 }
 
 const MAX_LEASE_FILES: usize = 5;
@@ -737,7 +777,7 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
             .or_else(|| bash_store_denial(project, &cwd, c))
             .or_else(|| bash_secret_rule(c, &secret_paths()))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
-        let agent = input.get("agent_id").and_then(Value::as_str);
+        let agent = lease_holder(project, input);
         if found.is_some() {
             return Ok(found);
         }
@@ -768,7 +808,7 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
     if !writes_files(tool) {
         return Ok(None);
     }
-    let agent = input.get("agent_id").and_then(Value::as_str);
+    let agent = lease_holder(project, input);
     for f in &files {
         let mut found = edit_rule(project, &git::toplevel(&cwd)?, &cwd, f)?;
         if found.is_none() {
@@ -1160,7 +1200,7 @@ pub fn claude_lease_end(project: &Project, input: &Value) -> Result<Option<Value
 /// project only the warnings go.
 pub fn claude_session_start(project: Option<&Project>, home: &Path, input: &Value, warnings: &[String]) -> Result<Option<Value>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let agent = input.get("agent_id").and_then(Value::as_str);
+    let agent = project.and_then(|p| lease_holder(p, input));
     let mut text = match project {
         Some(p) => brief::brief_for(p, home, &cwd, agent)?,
         None => String::new(),

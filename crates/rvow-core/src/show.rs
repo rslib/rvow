@@ -397,7 +397,7 @@ fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDi
         (Some(top), Some(config)) => Some(proof::Now { top, config, env: crate::fingerprint::env(top, config)?, living }),
         _ => None,
     };
-    let active = proof::Active { dir: dir.clone(), loaded, events: events.clone(), ledger_diags: diags };
+    let active = proof::Active { dir: dir.clone(), loaded, events: events.clone(), ledger_diags: diags, lease_branches: Vec::new() };
     let loaded = &active.loaded;
     let mut out =
         format!("{}\nstage: {}\nbranch: {}\ntitle: {}\n", dir.id, dir.stage.name(), loaded.proposal.branch, loaded.proposal.title);

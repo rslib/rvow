@@ -30,6 +30,9 @@ pub struct Active {
     pub loaded: Loaded,
     pub events: Vec<Event>,
     pub ledger_diags: Vec<Diagnostic>,
+    /// The branches of the live leases of this change: a session in the
+    /// worktree of one of them works on this change, whatever its branch is.
+    pub lease_branches: Vec<String>,
 }
 
 impl Active {
@@ -106,19 +109,24 @@ impl Active {
 /// Every change in `active/`, oldest vow first.
 pub fn active(project: &Project, living: &[CapSpec]) -> Result<Vec<Active>> {
     let (changes, _) = change::list(project)?;
+    let now = crate::ledger::now_ms();
+    let leases = crate::lease::leases(project)?;
     let mut out = Vec::new();
     for dir in changes.into_iter().filter(|c| c.stage == Stage::Active) {
         let loaded = change::load(&dir.path, living)?;
         let (events, ledger_diags) = ledger::read(&dir.path.join(LEDGER))?;
-        out.push(Active { dir, loaded, events, ledger_diags });
+        let id = dir.id.to_string();
+        let lease_branches = leases.iter().filter(|l| l.change == id && l.live(now)).filter_map(|l| l.branch.clone()).collect();
+        out.push(Active { dir, loaded, events, ledger_diags, lease_branches });
     }
     out.sort_by_key(|a| a.vow_time());
     Ok(out)
 }
 
-/// The active changes whose vow names `branch`.
+/// The active changes whose vow names `branch`, or that a live lease whose
+/// worktree is on `branch` works on.
 pub fn on_branch<'a>(changes: &'a [Active], branch: &str) -> Vec<&'a Active> {
-    changes.iter().filter(|a| a.branch() == Some(branch)).collect()
+    changes.iter().filter(|a| a.branch() == Some(branch) || a.lease_branches.iter().any(|b| b == branch)).collect()
 }
 
 /// The current hash of every requirement a task covers: the delta text when

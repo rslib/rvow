@@ -76,6 +76,8 @@ mod cli;
 mod committed_tests;
 #[path = "suite/confirm_friction.rs"]
 mod confirm_friction;
+#[path = "suite/delegate_worktree.rs"]
+mod delegate_worktree;
 #[path = "suite/diff_mutants.rs"]
 mod diff_mutants;
 #[path = "suite/docs_reference.rs"]
@@ -128,8 +130,14 @@ mod hook_json;
 mod hook_stats;
 #[path = "suite/judge.rs"]
 mod judge;
+#[path = "suite/lease_bind_worktree.rs"]
+mod lease_bind_worktree;
 #[path = "suite/lease_brief.rs"]
 mod lease_brief;
+#[path = "suite/lease_worktree.rs"]
+mod lease_worktree;
+#[path = "suite/lease_worktree_rules.rs"]
+mod lease_worktree_rules;
 #[path = "suite/literal_paths.rs"]
 mod literal_paths;
 #[path = "suite/plan_access.rs"]

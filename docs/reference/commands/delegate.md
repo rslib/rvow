@@ -13,3 +13,9 @@ rvow delegate [OPTIONS] <TASK>
 | Argument | Description |
 | --- | --- |
 | `<TASK>` | The task id or a unique prefix of it |
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--worktree` `<WORKTREE>` | Make a worktree for the task, or record the one at this path |
