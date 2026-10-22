@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::diag::{Diagnostic, Rule};
 
 pub const MAX_WORDS: usize = 60;
@@ -59,12 +61,22 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 /// Lowercase words joined by single spaces and padded, so `" if necessary "`
 /// matches whole words only.
 pub(super) fn phrase_text(text: &str) -> String {
-    let joined: Vec<String> = words(text).map(str::to_lowercase).collect();
-    format!(" {} ", joined.join(" "))
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(' ');
+    for w in words(text) {
+        for c in w.chars() {
+            out.extend(c.to_lowercase());
+        }
+        out.push(' ');
+    }
+    out
 }
 
 pub(super) fn has_phrase(haystack: &str, phrase: &str) -> bool {
-    haystack.contains(&format!(" {phrase} "))
+    let bytes = haystack.as_bytes();
+    haystack
+        .match_indices(phrase)
+        .any(|(start, _)| start > 0 && bytes.get(start - 1) == Some(&b' ') && bytes.get(start + phrase.len()) == Some(&b' '))
 }
 
 pub(super) fn lint_keywords(text: &str, line: usize, out: &mut Vec<Diagnostic>) {
@@ -111,7 +123,11 @@ pub(super) fn lint_ears(text: &str, line: usize, out: &mut Vec<Diagnostic>) {
             ears("an IF condition takes the form IF <condition>, THEN <system> SHALL");
         }
     }
-    let plain = text.replace("e.g.", "eg").replace("i.e.", "ie");
+    let plain: Cow<str> = if text.contains("e.g.") || text.contains("i.e.") {
+        Cow::Owned(text.replace("e.g.", "eg").replace("i.e.", "ie"))
+    } else {
+        Cow::Borrowed(text)
+    };
     let breaks =
         plain.char_indices().filter(|(i, c)| matches!(c, '.' | '!' | '?') && plain[i + 1..].starts_with(char::is_whitespace)).count();
     if breaks > 0 {
@@ -155,4 +171,24 @@ fn looks_like_design(span: &str) -> bool {
         .rsplit_once('.')
         .is_some_and(|(stem, ext)| !stem.is_empty() && (1..=4).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()));
     span.contains('/') || span.contains("::") || span.contains("()") || has_ext
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_phrase, phrase_text};
+
+    #[test]
+    fn has_phrase_matches_whole_words_only() {
+        assert!(has_phrase(" use as needed here ", "as needed"));
+        assert!(!has_phrase(" use as neededly here ", "as needed"));
+        assert!(!has_phrase(" has needed ", "as needed"));
+        assert!(has_phrase(" fast ", "fast"));
+        assert!(!has_phrase(" breakfast ", "fast"));
+    }
+
+    #[test]
+    fn phrase_text_lowercases_and_pads() {
+        assert_eq!(phrase_text(" Hello, World! "), " hello world ");
+        assert_eq!(phrase_text("\u{c4}"), " \u{e4} ");
+    }
 }

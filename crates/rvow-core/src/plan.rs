@@ -539,7 +539,7 @@ fn change_top(top: &Path, loaded: &Loaded) -> PathBuf {
 /// branch.
 pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<Report>> {
     let top = git::toplevel(cwd)?;
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let dirs = match target {
         Some(t) => vec![change::resolve(project, t)?],
         None => {

@@ -26,7 +26,7 @@ pub fn ready(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> 
     let Some(branch) = git::branch(&top)? else {
         return Ok(Vec::new());
     };
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let changes = proof::active(project, &living)?;
     let config = config::load(project, home)?;
     let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);

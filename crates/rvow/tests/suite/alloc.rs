@@ -378,6 +378,28 @@ fn alloc_stop() {
     assert!(count <= STOP, "alloc stop: count={count} bytes={bytes} over {STOP}");
 }
 
+/// The steady-state count of one background re-prove check.
+const REPROVE_READY: usize = 4080; // measured 2026-10-22 on macOS: 3701; budget +10% for other platforms; before: 27192
+
+#[test]
+fn alloc_reprove_ready() {
+    let fx = Fx::new("reprove-ready");
+    let (count, bytes) = counted(&fx, |project, home, cwd| rvow_core::reprove::ready(project, home, cwd).map(|_| None));
+    eprintln!("alloc reprove_ready: count={count} bytes={bytes}");
+    assert!(count <= REPROVE_READY, "alloc reprove_ready: count={count} bytes={bytes} over {REPROVE_READY}");
+}
+
+/// The steady-state count of one load of the fixture's living specs.
+const LOAD_LIVING: usize = 5090; // measured 2026-10-22 on macOS: 4620; budget +10% for other platforms; before: 26580
+
+#[test]
+fn alloc_load_living() {
+    let fx = Fx::new("load-living");
+    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_core::change::load_living(project).map(|_| None));
+    eprintln!("alloc load_living: count={count} bytes={bytes}");
+    assert!(count <= LOAD_LIVING, "alloc load_living: count={count} bytes={bytes} over {LOAD_LIVING}");
+}
+
 /// The steady-state count of one SessionStart call.
 const SESSION_START: usize = 4300; // measured 2026-10-22 on macOS: 3902; budget +10% for other platforms; trunk d05d6ee: 29184
 
@@ -398,7 +420,7 @@ fn alloc_session_start() {
 }
 
 /// The steady-state count of one SessionStart call while a plan waits for accept.
-const SESSION_START_WAITING: usize = 34070; // measured 2026-10-22 on macOS: 30971; budget +10% for other platforms
+const SESSION_START_WAITING: usize = 8230; // measured 2026-10-22 on macOS: 7480; budget +10% for other platforms; before: 30971
 
 #[test]
 fn alloc_session_start_with_a_waiting_plan() {

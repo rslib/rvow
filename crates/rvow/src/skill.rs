@@ -1,8 +1,11 @@
-//! The skill template, rendered from the real command tree at install time.
+//! The skill template, rendered at install time and checked against the command tree in tests.
 
-use clap::{Command, CommandFactory};
+use clap::Command;
+#[cfg(test)]
+use clap::CommandFactory;
 use rvow_core::error::{Error, Result};
 
+#[cfg(test)]
 use crate::Cli;
 
 const TEMPLATE: &str = include_str!("../../../skills/rvow/SKILL.md.tmpl");
@@ -14,6 +17,7 @@ pub(crate) fn problem(line: &str) -> Option<String> {
 }
 
 /// The whole command tree, built once for every line a caller checks.
+#[cfg(test)]
 fn built() -> Command {
     let mut cmd = Cli::command();
     cmd.build();
@@ -56,8 +60,8 @@ fn problem_in(root: &Command, line: &str) -> Option<String> {
     None
 }
 
-fn render_text(template: &str) -> Result<String> {
-    let root = built();
+/// Fills the placeholders of `template`, checking each command against `root` when it is given.
+fn render_text(template: &str, root: Option<&Command>) -> Result<String> {
     let mut out = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -68,7 +72,7 @@ fn render_text(template: &str) -> Result<String> {
             return Err(Error::internal(format!("the skill template has an unknown placeholder {{{{{}}}}}", &after[..end])));
         };
         let line = format!("rvow {args}");
-        if let Some(why) = problem_in(&root, &line) {
+        if let Some(why) = root.and_then(|root| problem_in(root, &line)) {
             return Err(Error::internal(format!("the skill template names a missing command: {why}")));
         }
         out.push_str(&format!("`{line}`"));
@@ -78,9 +82,20 @@ fn render_text(template: &str) -> Result<String> {
     Ok(out)
 }
 
-/// The skill text that `rvow install` writes, with every command checked against the CLI.
+/// The skill text that `rvow install` writes, with every command placeholder filled in.
 pub fn render() -> Result<String> {
-    render_text(TEMPLATE)
+    render_text(TEMPLATE, None)
+}
+
+/// The skill text with every command checked against the CLI; the check runs in tests only.
+#[cfg(test)]
+pub(crate) fn checked_render() -> Result<String> {
+    checked_text(TEMPLATE)
+}
+
+#[cfg(test)]
+fn checked_text(template: &str) -> Result<String> {
+    render_text(template, Some(&built()))
 }
 
 #[cfg(test)]
@@ -190,12 +205,17 @@ mod tests {
     }
 
     #[test]
+    fn the_runtime_render_matches_the_checked_render() {
+        assert_eq!(render().unwrap(), checked_render().unwrap());
+    }
+
+    #[test]
     fn a_missing_command_or_placeholder_fails_the_render() {
-        assert!(render_text("{{cmd:nope}}").is_err());
-        assert!(render_text("{{cmd:prove --nope}}").is_err());
-        assert!(render_text("{{what:prove}}").is_err());
-        assert!(render_text("{{cmd:prove").is_err());
-        assert_eq!(render_text("a {{cmd:prove <task>}} b").unwrap(), "a `rvow prove <task>` b");
+        assert!(checked_text("{{cmd:nope}}").is_err());
+        assert!(checked_text("{{cmd:prove --nope}}").is_err());
+        assert!(render_text("{{what:prove}}", None).is_err());
+        assert!(render_text("{{cmd:prove", None).is_err());
+        assert_eq!(render_text("a {{cmd:prove <task>}} b", None).unwrap(), "a `rvow prove <task>` b");
     }
 
     #[test]
