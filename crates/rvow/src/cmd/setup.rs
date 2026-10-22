@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use rvow_core::change;
 use rvow_core::error::{Error, Result};
 use rvow_core::git;
 use rvow_core::hook as hooks;
@@ -101,9 +102,14 @@ pub fn hook(harness: Harness, event: HookEvent) -> ExitCode {
             (_, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
             (_, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
             (_, HookEvent::Stop) => {
-                let out = hooks::claude_stop(&p, &home, &input);
+                // Both the stop answer and the re-prove read the living specs, so the hook loads them once.
+                let living = hooks::stop_needs_specs(&input).then(|| change::living(&p).ok()).flatten();
+                let out = match &living {
+                    Some(living) => hooks::claude_stop_over(&p, &home, &input, living),
+                    None => hooks::claude_stop(&p, &home, &input),
+                };
                 if matches!(out, Ok(None)) && input.get("agent_id").is_none() {
-                    start_reprove(&p, &home, &cwd);
+                    start_reprove(&p, &home, &cwd, living.as_deref());
                 }
                 (Some(stats::Hook::Stop), out)
             }
@@ -196,8 +202,15 @@ fn answer(harness: Harness, event: HookEvent, out: Option<serde_json::Value>) ->
 /// Starts `rvow reprove` detached when a finished change has stale tasks, so
 /// it runs while the person reads the answer. A failure here only costs the
 /// head start: `rvow archive` proves the stale tasks itself.
-fn start_reprove(p: &store::Project, home: &Path, cwd: &Path) {
-    if rvow_core::reprove::running(p) || !rvow_core::reprove::ready(p, home, cwd).is_ok_and(|r| !r.is_empty()) {
+fn start_reprove(p: &store::Project, home: &Path, cwd: &Path, living: Option<&[change::CapSpec]>) {
+    if rvow_core::reprove::running(p) {
+        return;
+    }
+    let ready = match living {
+        Some(living) => rvow_core::reprove::ready_over(p, home, cwd, living),
+        None => rvow_core::reprove::ready(p, home, cwd),
+    };
+    if !ready.is_ok_and(|r| !r.is_empty()) {
         return;
     }
     let (Ok(exe), Ok(top)) = (std::env::current_exe(), git::toplevel(cwd)) else {

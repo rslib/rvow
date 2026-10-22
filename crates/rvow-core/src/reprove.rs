@@ -22,14 +22,19 @@ const LOG_FILE: &str = "hook-state/reprove.log";
 /// The changes on the branch at `cwd` whose tasks are all proved or stale,
 /// with at least one stale: the work is done and only the proofs are old.
 pub fn ready(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> {
+    let living = change::living(project)?;
+    ready_over(project, home, cwd, &living)
+}
+
+/// Like `ready`, with the living specs a caller already loaded.
+pub fn ready_over(project: &Project, home: &Path, cwd: &Path, living: &[change::CapSpec]) -> Result<Vec<String>> {
     let top = git::toplevel(cwd)?;
     let Some(branch) = git::branch(&top)? else {
         return Ok(Vec::new());
     };
-    let living = change::living(project)?;
-    let changes = proof::active(project, &living)?;
+    let changes = proof::active(project, living)?;
     let config = config::load(project, home)?;
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, living);
     let mut out = Vec::new();
     for c in proof::on_branch(&changes, &branch) {
         let mut stale = false;

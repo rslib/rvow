@@ -1413,6 +1413,18 @@ fn stop_hold(items: Vec<OpenItem>) -> Option<StopHold> {
 /// file of a task, or a file that drift names, is held. A change with a pending amendment holds
 /// nothing, since only the user can decide it.
 pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&str>) -> Result<Option<StopHold>> {
+    let living = change::living(project)?;
+    stop_reason_over(project, home, cwd, session, &living)
+}
+
+/// Like `stop_reason`, with the living specs a caller already loaded.
+fn stop_reason_over(
+    project: &Project,
+    home: &Path,
+    cwd: &Path,
+    session: Option<&str>,
+    living: &[change::CapSpec],
+) -> Result<Option<StopHold>> {
     let top = git::toplevel(cwd)?;
     let Some(branch) = git::branch(&top)? else {
         return Ok(None);
@@ -1420,8 +1432,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
     if git_operation_running(&top) {
         return Ok(None);
     }
-    let living = change::living(project)?;
-    let changes = proof::active(project, &living)?;
+    let changes = proof::active(project, living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
         return Ok(None);
@@ -1449,7 +1460,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         if pending.iter().any(|p| p.change == c.dir.id) {
             continue;
         }
-        let blocking: Vec<String> = drift::drift_over(project, Some(home), &top, &config, c, &living)?
+        let blocking: Vec<String> = drift::drift_over(project, Some(home), &top, &config, c, living)?
             .into_iter()
             .filter(|i| i.class.blocks())
             .map(|i| i.what)
@@ -1472,7 +1483,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         }
         items.push(OpenItem { kind: StopReason::Drift, text: unamended_text(&blocking) });
     }
-    let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, &living);
+    let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, living);
     let leases = lease::leases(project)?;
     // Only the newest accepted change is the agent's current plan; older changes on the branch are
     // enforced by the pre-push gate, and nagging about them each time hides the plan that matters.
@@ -1525,7 +1536,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
     let changes = proof::active(project, &living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        let plans: Vec<String> = crate::plan::check(project, cwd, None)?
+        let plans: Vec<String> = crate::plan::check_over(project, cwd, None, &living)?
             .into_iter()
             .filter(|r| r.change.stage == change::Stage::Backlog)
             .map(|r| r.change.id.to_string())
@@ -1565,17 +1576,27 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
 
 /// Claude Code `Stop`: a block response, or `None` to let the agent stop.
 pub fn claude_stop(project: &Project, home: &Path, input: &Value) -> Result<Option<Value>> {
-    let out = stop_decision(project, home, input)?;
+    let living = if stop_needs_specs(input) { change::living(project)? } else { Vec::new() };
+    claude_stop_over(project, home, input, &living)
+}
+
+/// Like `claude_stop`, with the living specs a caller already loaded.
+pub fn claude_stop_over(project: &Project, home: &Path, input: &Value, living: &[change::CapSpec]) -> Result<Option<Value>> {
+    let out = stop_decision(project, home, input, living)?;
     let outcome = if out.is_some() { Outcome::Block } else { Outcome::Pass };
     let kind = out.as_ref().map(|(_, kind)| *kind);
     stats::record_stop(project, outcome, kind, input.get("session_id").and_then(Value::as_str));
     Ok(out.map(|(block, _)| block))
 }
 
-fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option<(Value, StopReason)>> {
+/// False for a stop that passes before any check: a subagent's, or one that a stop hook started.
+pub fn stop_needs_specs(input: &Value) -> bool {
+    input.get("agent_id").is_none() && !input.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change::CapSpec]) -> Result<Option<(Value, StopReason)>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let flag = |k: &str| input.get(k).and_then(Value::as_bool).unwrap_or(false);
-    if input.get("agent_id").is_some() || flag("stop_hook_active") {
+    if !stop_needs_specs(input) {
         return Ok(None);
     }
     if yolo::active(project).is_some_and(|on| on.tier == Tier::Bypass) {
@@ -1586,7 +1607,7 @@ fn stop_decision(project: &Project, home: &Path, input: &Value) -> Result<Option
     if let (Some(s), Ok(top)) = (session, git::toplevel(&cwd)) {
         crate::provenance::catch_up_at_stop(project, &top, s, None);
     }
-    let Some(hold) = stop_reason(project, home, &cwd, session)? else {
+    let Some(hold) = stop_reason_over(project, home, &cwd, session, living)? else {
         if let Some(s) = session {
             stop_state::clear(project, s);
         }

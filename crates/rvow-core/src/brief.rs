@@ -126,9 +126,9 @@ fn fits(text: &str) -> bool {
 
 /// The brief while the branch has only plans waiting for accept: what is
 /// open and the next steps, so an agent keeps interviewing after compaction.
-fn planning(project: &Project, cwd: &Path) -> Result<String> {
+fn planning(project: &Project, cwd: &Path, living: &[CapSpec]) -> Result<String> {
     let mut out = String::new();
-    for r in crate::plan::check(project, cwd, None)?.into_iter().filter(|r| r.change.stage == crate::change::Stage::Backlog) {
+    for r in crate::plan::check_over(project, cwd, None, living)?.into_iter().filter(|r| r.change.stage == crate::change::Stage::Backlog) {
         let id = &r.change.id;
         let mut counters = Vec::new();
         match r.questions.len() {
@@ -200,7 +200,7 @@ pub fn brief_for(project: &Project, home: &Path, cwd: &Path, agent: Option<&str>
     // rules after it; a waiting plan keeps its planning brief instead.
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        let text = planning(project, cwd)?;
+        let text = planning(project, cwd, &living)?;
         if text.is_empty() {
             return Ok(
                 "rvow is here and this branch has no plan: run `rvow new \"<title>\"` to start one, `rvow guide proposal` shows how\n"

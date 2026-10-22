@@ -401,7 +401,7 @@ fn alloc_load_living() {
 }
 
 /// The steady-state count of one SessionStart call.
-const SESSION_START: usize = 4300; // measured 2026-10-22 on macOS: 3902; budget +10% for other platforms; trunk d05d6ee: 29184
+const SESSION_START: usize = 4200; // measured 2026-10-22 on macOS: 3812; budget +10% for other platforms; before: 3812; trunk d05d6ee: 29184
 
 #[test]
 fn alloc_session_start() {
@@ -420,7 +420,7 @@ fn alloc_session_start() {
 }
 
 /// The steady-state count of one SessionStart call while a plan waits for accept.
-const SESSION_START_WAITING: usize = 8230; // measured 2026-10-22 on macOS: 7480; budget +10% for other platforms; before: 30971
+const SESSION_START_WAITING: usize = 4720; // measured 2026-10-22 on macOS: 4283; budget +10% for other platforms; before: 7300; was: 30971
 
 #[test]
 fn alloc_session_start_with_a_waiting_plan() {
@@ -435,6 +435,23 @@ fn alloc_session_start_with_a_waiting_plan() {
     });
     eprintln!("alloc session_start_waiting: count={count} bytes={bytes}");
     assert!(count <= SESSION_START_WAITING, "alloc session_start_waiting: count={count} bytes={bytes} over {SESSION_START_WAITING}");
+}
+
+/// The steady-state count of one Stop call followed by its background re-prove check.
+const STOP_WITH_REPROVE: usize = 6750; // measured 2026-10-22 on macOS: 6136; budget +10% for other platforms; before: 9153
+
+#[test]
+fn alloc_stop_with_reprove() {
+    let fx = Fx::new("stop-reprove");
+    let input = json!({"session_id": SESSION, "hook_event_name": "Stop", "cwd": fx.repo()});
+    let (count, bytes) = counted(&fx, |project, home, cwd| {
+        let living = rvow_core::change::living(project)?;
+        let out = rvow_core::hook::claude_stop_over(project, home, &input, &living)?;
+        rvow_core::reprove::ready_over(project, home, cwd, &living)?;
+        Ok(out)
+    });
+    eprintln!("alloc stop_with_reprove: count={count} bytes={bytes}");
+    assert!(count <= STOP_WITH_REPROVE, "alloc stop_with_reprove: count={count} bytes={bytes} over {STOP_WITH_REPROVE}");
 }
 
 /// The steady-state count of one view call, the status line's source.

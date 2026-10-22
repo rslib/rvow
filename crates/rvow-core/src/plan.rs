@@ -538,8 +538,13 @@ fn change_top(top: &Path, loaded: &Loaded) -> PathBuf {
 /// Checks `target`, or every open change whose proposal names the current
 /// branch.
 pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<Report>> {
-    let top = git::toplevel(cwd)?;
     let living = change::living(project)?;
+    check_over(project, cwd, target, &living)
+}
+
+/// Like `check`, with the living specs a caller already loaded.
+pub fn check_over(project: &Project, cwd: &Path, target: Option<&str>, living: &[change::CapSpec]) -> Result<Vec<Report>> {
+    let top = git::toplevel(cwd)?;
     let dirs = match target {
         Some(t) => vec![change::resolve(project, t)?],
         None => {
@@ -547,7 +552,7 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
             let (all, _) = change::list(project)?;
             let mut out = Vec::new();
             for c in all.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
-                if change::load(&c.path, &living)?.proposal.branch == branch {
+                if change::load(&c.path, living)?.proposal.branch == branch {
                     out.push(c);
                 }
             }
@@ -560,7 +565,7 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
     let mut trees = Trees::default();
     let mut out = Vec::new();
     for d in dirs {
-        let loaded = change::load(&d.path, &living)?;
+        let loaded = change::load(&d.path, living)?;
         let change_top = if target.is_some() { change_top(&top, &loaded) } else { top.clone() };
         let mut r = report(project, &config, &runs, &mut trees, d, loaded, &change_top);
         r.findings.extend(crate::lint::test_query_checks(&home, &change_top, &config));
