@@ -311,7 +311,12 @@ pub fn of_worktree(project: &Project, top: &Path) -> Result<Option<Lease>> {
 /// Whether `task` has a live lease at `now` that `session` does not hold:
 /// another worker builds it.
 pub fn leased_away(project: &Project, task: &str, session: Option<&str>, now: u64) -> Result<bool> {
-    Ok(leases(project)?.iter().any(|l| l.task == task && l.live(now) && (session.is_none() || l.agent_id.as_deref() != session)))
+    Ok(leased_away_in(&leases(project)?, task, session, now))
+}
+
+/// `leased_away` over leases the caller already read, for a loop over tasks.
+pub fn leased_away_in(all: &[Lease], task: &str, session: Option<&str>, now: u64) -> bool {
+    all.iter().any(|l| l.task == task && l.live(now) && (session.is_none() || l.agent_id.as_deref() != session))
 }
 
 /// The lease that `agent_id` bound last, live or not.
@@ -335,12 +340,12 @@ pub fn holder(project: &Project, home: &Path, cwd: &Path, agent_id: &str, now: u
 /// Whether `task` is in an active change and is neither proved nor blocked.
 pub fn task_open(project: &Project, home: &Path, cwd: &Path, task: &str) -> Result<bool> {
     let top = git::toplevel(cwd)?;
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let changes = proof::active(project, &living)?;
     let Ok((c, task)) = proof::find_task(&changes, task) else {
         return Ok(false);
     };
     let config = config::load(project, home)?;
-    let state_now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let state_now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
     Ok(!matches!(proof::state(c, task, &state_now)?, State::Proved | State::Blocked))
 }

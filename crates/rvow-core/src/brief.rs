@@ -183,7 +183,7 @@ pub fn brief(project: &Project, home: &Path, cwd: &Path) -> Result<String> {
 /// first in `next:`, since that is the one work it may edit.
 pub fn brief_for(project: &Project, home: &Path, cwd: &Path, agent: Option<&str>) -> Result<String> {
     let top = git::toplevel(cwd)?;
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let changes = proof::active(project, &living)?;
     let Some(branch) = git::branch(&top)? else {
         if changes.is_empty() {
@@ -210,7 +210,7 @@ pub fn brief_for(project: &Project, home: &Path, cwd: &Path, agent: Option<&str>
         return Ok(bounded(text));
     }
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
 
     let mut out = String::new();
     for c in &queue {

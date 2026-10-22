@@ -112,3 +112,31 @@ fn hook_git_count_one_edit_call_starts_at_most_seven_git_processes() {
     assert!(count > 0, "the counting git never ran");
     assert!(count <= 7, "one Edit call started {count} git processes, at most 7 allowed");
 }
+
+impl Fx {
+    /// A repository with a home-mode rvow store, where the project lookup reads
+    /// the home index, and a committed `a.txt`.
+    fn new_home(name: &str) -> Fx {
+        let root = std::env::temp_dir().join(format!("rvow-hook-git-count-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let fx = Fx { root: root.canonicalize().unwrap() };
+        std::fs::write(fx.repo().join("a.txt"), "a").unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["add", "a.txt"], &["commit", "-q", "-m", "init"], &["gc", "-q"]] {
+            assert!(fx.cmd("git").args(args).status().unwrap().success(), "git {args:?}");
+        }
+        assert!(fx.cmd(RVOW).arg("init").output().unwrap().status.success());
+        fx
+    }
+}
+
+#[test]
+fn hook_git_count_a_home_store_finds_its_project_with_one_git_process() {
+    let fx = Fx::new_home("home");
+    // The first call walks the home and writes the index; the next ones read it.
+    fx.edit_git_count();
+    let count = fx.edit_git_count();
+    assert!(count > 0, "the counting git never ran");
+    assert!(count <= 7, "one Edit call on a home store started {count} git processes, at most 7 allowed");
+}

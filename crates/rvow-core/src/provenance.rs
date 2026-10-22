@@ -302,12 +302,13 @@ fn rewrite(dir: &Path, records: &[Record]) -> Result<()> {
 }
 
 fn append_to(path: &Path, records: &[Record]) -> Result<()> {
-    let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| Error::io(path, e))?;
+    let mut text = Vec::new();
     for record in records {
-        let text = serde_json::to_string(record).map_err(|e| Error::internal(format!("provenance record does not serialize: {e}")))?;
-        writeln!(out, "{text}").map_err(|e| Error::io(path, e))?;
+        serde_json::to_writer(&mut text, record).map_err(|e| Error::internal(format!("provenance record does not serialize: {e}")))?;
+        text.push(b'\n');
     }
-    Ok(())
+    let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| Error::io(path, e))?;
+    out.write_all(&text).map_err(|e| Error::io(path, e))
 }
 
 fn is_call(s: &Start, session: &str, agent_id: Option<&str>, tool_use_id: &str) -> bool {
@@ -351,11 +352,12 @@ pub(crate) fn before_call(
     // A partial snapshot keeps the rest of the private index as it was, so it
     // needs an index and a last tree of this session; else the next full scan
     // would put every file that is already dirty on this session.
-    let paths = if store.dir.join("index").is_file() && has_last(&store, session, agent_id) { paths } else { &[] };
+    let records = load(&store.dir);
+    let paths = if store.dir.join("index").is_file() && has_last(&records, session, agent_id) { paths } else { &[] };
     let Ok(before) = tree(top, &store, paths) else {
         return Locked::Taken;
     };
-    let _ = catch_up(top, &store, session, agent_id, &before);
+    let _ = catch_up(top, &store, session, agent_id, &before, records);
     let start = Start {
         session: session.to_string(),
         agent_id: agent_id.map(String::from),
@@ -368,16 +370,15 @@ pub(crate) fn before_call(
     Locked::Taken
 }
 
-fn has_last(store: &Store, session: &str, agent_id: Option<&str>) -> bool {
-    load(&store.dir).iter().any(|r| matches!(r, Record::Last(l) if l.session == session && l.agent_id.as_deref() == agent_id))
+fn has_last(records: &[Record], session: &str, agent_id: Option<&str>) -> bool {
+    records.iter().any(|r| matches!(r, Record::Last(l) if l.session == session && l.agent_id.as_deref() == agent_id))
 }
 
 /// Records each path that differs between the session's last recorded tree and
 /// `now`, a change that no call of the session recorded, such as one from a
 /// background job, and makes `now` the session's last tree. A write that a
 /// call of another session or agent recorded in the window is not the session's.
-fn catch_up(top: &Path, store: &Store, session: &str, agent_id: Option<&str>, now: &str) -> Result<()> {
-    let mut records = load(&store.dir);
+fn catch_up(top: &Path, store: &Store, session: &str, agent_id: Option<&str>, now: &str, mut records: Vec<Record>) -> Result<()> {
     let mine = |s: &str, a: &Option<String>| s == session && a.as_deref() == agent_id;
     let Some(last) = records.iter().rev().find_map(|r| match r {
         Record::Last(l) if mine(&l.session, &l.agent_id) => Some(l.clone()),
@@ -434,7 +435,7 @@ pub(crate) fn catch_up_at_stop(project: &Project, top: &Path, session: &str, age
         return;
     };
     if let Ok(now) = tree(top, &store, &[]) {
-        let _ = catch_up(top, &store, session, agent_id, &now);
+        let _ = catch_up(top, &store, session, agent_id, &now, load(&store.dir));
     }
 }
 
@@ -451,7 +452,7 @@ pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, ag
         Ok(None) => return Locked::Busy,
         Err(_) => return Locked::Taken,
     };
-    let has_last = has_last(&store, session, agent_id);
+    let has_last = has_last(&load(&store.dir), session, agent_id);
     let before = if has_last {
         LIGHT.to_string()
     } else {

@@ -54,6 +54,9 @@ pub struct Cache {
     path: PathBuf,
     home: PathBuf,
     entries: Vec<Body>,
+    /// The newest position in `entries` for each `(unit, key)`, so a lookup
+    /// is one probe instead of a walk back over every entry.
+    index: std::collections::HashMap<(String, String), usize>,
     warnings: Vec<String>,
     last: String,
 }
@@ -67,7 +70,14 @@ impl Cache {
     /// ignored with a warning; it never fails the open.
     pub fn open(project: &Project, home: &Path) -> Result<Cache> {
         let path = project.root.join(CACHE_FILE);
-        let mut cache = Cache { path, home: home.to_path_buf(), entries: Vec::new(), warnings: Vec::new(), last: String::new() };
+        let mut cache = Cache {
+            path,
+            home: home.to_path_buf(),
+            entries: Vec::new(),
+            index: std::collections::HashMap::new(),
+            warnings: Vec::new(),
+            last: String::new(),
+        };
         let text = match std::fs::read_to_string(&cache.path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cache),
@@ -89,7 +99,11 @@ impl Cache {
             };
             cache.last = short_hash(line.as_bytes());
             match verdict {
-                None => cache.entries.extend(entry.map(|e| e.body)),
+                None => {
+                    if let Some(e) = entry {
+                        cache.remember(e.body);
+                    }
+                }
                 Some(why) => {
                     broken |= why != BAD_MAC;
                     cache.warnings.push(format!("{} line {} {why}, so it was ignored", cache.path.display(), i + 1));
@@ -99,16 +113,26 @@ impl Cache {
         Ok(cache)
     }
 
+    /// Appends one entry, which the index then names as the newest for its key.
+    fn remember(&mut self, body: Body) {
+        self.index.insert((body.unit.clone(), body.key.clone()), self.entries.len());
+        self.entries.push(body);
+    }
+
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
 
     /// The newest trusted entry for `unit` with this key, not older than `max_age_ms`.
     pub fn lookup(&self, unit: &str, key: &str, now_ms: u64, max_age_ms: u64) -> Option<Hit> {
-        self.entries.iter().rev().find(|e| e.unit == unit && e.key == key && now_ms.saturating_sub(e.time) <= max_age_ms).map(|e| Hit {
-            tests_run: e.tests_run,
-            duration_ms: e.duration_ms,
-            time: e.time,
+        // Only the newest entry for the key is asked. An older one usually has an
+        // older time too, and a miss only reruns the check.
+        let at = *self.index.get(&(unit.to_string(), key.to_string()))?;
+        let entry = self.entries.get(at)?;
+        (now_ms.saturating_sub(entry.time) <= max_age_ms).then_some(Hit {
+            tests_run: entry.tests_run,
+            duration_ms: entry.duration_ms,
+            time: entry.time,
         })
     }
 
@@ -124,6 +148,7 @@ impl Cache {
             let aside = self.path.with_extension(format!("jsonl.bad-{}", now_ms()));
             std::fs::rename(&self.path, &aside).map_err(|e| Error::io(&self.path, e))?;
             self.entries.clear();
+            self.index.clear();
             self.warnings.clear();
             self.last.clear();
         }
@@ -142,7 +167,7 @@ impl Cache {
             .map_err(|e| Error::internal(format!("cache entry does not serialize: {e}")))?;
         append_line(&self.path, &line)?;
         self.last = short_hash(line.as_bytes());
-        self.entries.push(body);
+        self.remember(body);
         Ok(())
     }
 
@@ -311,4 +336,47 @@ pub fn dependent_keys(tasks: &[Task], own: &BTreeMap<String, Option<String>>) ->
         done.entry(id).or_insert(None);
     }
     done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(unit: &str, key: &str, time: u64) -> Body {
+        Body {
+            unit: unit.into(),
+            key: key.into(),
+            tests_run: None,
+            duration_ms: 1,
+            rvow: "0".into(),
+            machine: "m".into(),
+            time,
+            prev: String::new(),
+        }
+    }
+
+    /// A cache holding `bodies` in file order, with the index `open` builds.
+    fn cache_of(bodies: Vec<Body>) -> Cache {
+        let mut cache = Cache {
+            path: PathBuf::new(),
+            home: PathBuf::new(),
+            entries: Vec::new(),
+            index: std::collections::HashMap::new(),
+            warnings: Vec::new(),
+            last: String::new(),
+        };
+        for body in bodies {
+            cache.remember(body);
+        }
+        cache
+    }
+
+    #[test]
+    fn cache_limit_gate_cache_lookup_returns_the_newest_matching_entry() {
+        let cache = cache_of(vec![body("t1", "k", 10), body("t2", "k", 20), body("t1", "k", 30), body("t1", "other", 40)]);
+        assert_eq!(cache.lookup("t1", "k", 100, 1000).map(|h| h.time), Some(30), "the newest entry for the key answers");
+        assert_eq!(cache.lookup("t2", "k", 100, 1000).map(|h| h.time), Some(20), "another unit keeps its own entry");
+        assert!(cache.lookup("t3", "k", 100, 1000).is_none(), "an unknown unit has no entry");
+        assert!(cache.lookup("t1", "k", 100, 20).is_none(), "the newest entry is too old to answer");
+    }
 }

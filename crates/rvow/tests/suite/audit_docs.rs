@@ -213,3 +213,11 @@ fn docs_name_the_automatic_baseline() {
     );
     assert!(!unreleased.contains("`baseline-first`"), "the Unreleased changelog still names the removed rule");
 }
+
+#[test]
+fn audit_docs_names_the_alloc_budgets() {
+    let agents = doc("AGENTS.md");
+    assert!(agents.contains("`crates/rvow/tests/suite/alloc.rs` holds an allocation budget per hook"), "AGENTS.md lacks the alloc budgets");
+    assert!(agents.contains("never raise one to make a test pass"), "AGENTS.md lacks the budget rule");
+    assert!(agents.contains("load specs with `change::living` (no lint)"), "AGENTS.md lacks the hot-path rule");
+}

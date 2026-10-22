@@ -397,10 +397,11 @@ impl Change<'_> {
             }
         }
 
-        for q in questions(self.texts).iter().filter(|q| q.recommended.is_none()) {
+        let asked = questions(self.texts);
+        for q in asked.iter().filter(|q| q.recommended.is_none()) {
             out.push((q.path.clone(), Diagnostic::new(Rule::ClarifyForm, q.line, "the open question has no recommended answer")));
         }
-        let marks = clarifications(self.texts);
+        let marks: Vec<(String, usize)> = asked.into_iter().map(|q| (q.path, q.line)).collect();
         if let Some((path, line)) = marks.get(MAX_CLARIFICATIONS) {
             out.push((
                 path.clone(),

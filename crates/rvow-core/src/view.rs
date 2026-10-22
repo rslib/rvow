@@ -58,7 +58,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     let top = git::toplevel(cwd)?;
     let branch = git::branch(&top)?;
     let config = config::load(project, home)?;
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let active = proof::active(project, &living)?;
     let queue = match &branch {
         Some(b) => proof::on_branch(&active, b),
@@ -66,6 +66,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     };
 
     let (all, _) = change::list(project)?;
+    let runners = config::runners(project).unwrap_or_default();
     let mut plans = Vec::new();
     let mut backlog = Vec::new();
     let mut open_questions = Vec::new();
@@ -82,7 +83,6 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
                 }));
             }
         }
-        let runners = config::runners(project).unwrap_or_default();
         let filled = crate::plan::filled_commands(&runners, &loaded.tasks);
         let missing = crate::plan::blamed_programs(&top, &loaded.tasks, &runners, &filled).len();
         let runner_errors = crate::lint::runner_checks(&runners, &loaded.tasks)
@@ -137,7 +137,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
         })
         .collect();
 
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
     let mut changes = Vec::new();
     let mut blocked = 0;
     let mut amendments = 0;
@@ -151,7 +151,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     let mut elsewhere = Vec::new();
     for c in active.iter().filter(|a| !queue.iter().any(|q| q.dir.id == a.dir.id)) {
         let Some(other) = c.branch().and_then(|b| git::top_for_branch(&top, b).ok().flatten()) else { continue };
-        let there = Now { top: &other, config: &config, env: fingerprint::env(&other, &config)?, living: &living };
+        let there = Now { top: &other, config: &config, env: fingerprint::check_env(&other, &config)?, living: &living };
         elsewhere.push(change_json(project, home, &there, c)?.0);
     }
     let next = proof::next(&queue, &now)?.map(|(c, t, s)| {
@@ -200,7 +200,7 @@ fn change_json(project: &Project, home: &Path, now: &Now, c: &proof::Active) -> 
             "reasons": reasons,
         }));
     }
-    let drift: Vec<Value> = drift::drift_with_home(project, Some(home), now.top, now.config, c)?
+    let drift: Vec<Value> = drift::drift_over(project, Some(home), now.top, now.config, c, now.living)?
         .into_iter()
         .map(|i| json!({"class": i.class.name(), "what": i.what}))
         .collect();

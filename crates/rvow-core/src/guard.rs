@@ -188,9 +188,23 @@ pub fn drift(project: &Project, top: &Path, change: &Active) -> Vec<Item> {
 
 /// `drift` with the rvow home given, whose config and grammar cache it reads.
 fn drift_in(project: &Project, top: &Path, change: &Active, home: &Path) -> Vec<Item> {
+    let test_queries = crate::config::load(project, home).map(|c| c.test_queries).unwrap_or_default();
+    drift_with(project, top, change, Some(home), &test_queries)
+}
+
+/// `drift` with the home and the test queries of a config the caller already loaded.
+pub(crate) fn drift_with(
+    project: &Project,
+    top: &Path,
+    change: &Active,
+    home: Option<&Path>,
+    test_queries: &BTreeMap<String, String>,
+) -> Vec<Item> {
     let mut out = Vec::new();
-    let home = home.to_path_buf();
-    let test_queries = crate::config::load(project, &home).map(|c| c.test_queries).unwrap_or_default();
+    let home = match home {
+        Some(h) => h.to_path_buf(),
+        None => crate::store::home_dir().unwrap_or_default(),
+    };
     let mut session = None;
     for (key, hash) in guarded(change) {
         let what = |how: &str| format!("test {key} {how} after its first passing proof");
@@ -210,7 +224,7 @@ fn drift_in(project: &Project, top: &Path, change: &Active, home: &Path) -> Vec<
             continue;
         }
         if let Kept::No(names) =
-            preserved(&key, &before, &now, Some(home.as_path()), Some(units::Repo { top, protected: None }), &test_queries, &mut session)
+            preserved(&key, &before, &now, Some(home.as_path()), Some(units::Repo { top, protected: None }), test_queries, &mut session)
         {
             let helpers = if names.is_empty() && key.ends_with(RUST_TESTS) { rust::added_helpers(&before, &now) } else { None };
             let what = if let Some(helpers) = helpers.filter(|h| !h.is_empty()) {

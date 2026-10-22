@@ -8,14 +8,25 @@ use crate::Cli;
 const TEMPLATE: &str = include_str!("../../../skills/rvow/SKILL.md.tmpl");
 
 /// Why `rvow <args>` is not a command this CLI has, or `None` when it is one.
-pub fn problem(line: &str) -> Option<String> {
+#[cfg(test)]
+pub(crate) fn problem(line: &str) -> Option<String> {
+    problem_in(&built(), line)
+}
+
+/// The whole command tree, built once for every line a caller checks.
+fn built() -> Command {
+    let mut cmd = Cli::command();
+    cmd.build();
+    cmd
+}
+
+fn problem_in(root: &Command, line: &str) -> Option<String> {
     let line = line.trim().trim_start_matches(['!', '$']).trim();
     let mut words = line.split_whitespace();
     if words.next() != Some("rvow") {
         return None;
     }
-    let mut cmd: Command = Cli::command();
-    cmd.build();
+    let mut cmd = root;
     let mut in_quote = false;
     let mut positional = false;
     for word in words {
@@ -34,7 +45,7 @@ pub fn problem(line: &str) -> Option<String> {
             }
         } else if word.starts_with('-') || word.starts_with('<') || word.starts_with('[') {
             positional = true;
-        } else if !positional && let Some(sub) = cmd.find_subcommand(word).cloned() {
+        } else if !positional && let Some(sub) = cmd.find_subcommand(word) {
             cmd = sub;
         } else if !positional && cmd.has_subcommands() {
             return Some(format!("`{line}`: `{}` has no subcommand {word}", cmd.get_name()));
@@ -46,6 +57,7 @@ pub fn problem(line: &str) -> Option<String> {
 }
 
 fn render_text(template: &str) -> Result<String> {
+    let root = built();
     let mut out = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -56,7 +68,7 @@ fn render_text(template: &str) -> Result<String> {
             return Err(Error::internal(format!("the skill template has an unknown placeholder {{{{{}}}}}", &after[..end])));
         };
         let line = format!("rvow {args}");
-        if let Some(why) = problem(&line) {
+        if let Some(why) = problem_in(&root, &line) {
             return Err(Error::internal(format!("the skill template names a missing command: {why}")));
         }
         out.push_str(&format!("`{line}`"));

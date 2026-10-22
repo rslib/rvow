@@ -4,6 +4,8 @@
 mod accept_speed;
 #[path = "suite/agent_mode.rs"]
 mod agent_mode;
+#[path = "suite/alloc.rs"]
+mod alloc;
 #[path = "suite/amend_baseline.rs"]
 mod amend_baseline;
 #[path = "suite/amend_fixes.rs"]

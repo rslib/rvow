@@ -1,6 +1,7 @@
 //! The logic behind the harness hooks. Adapters pass the harness's JSON in and
 //! print what comes back; every rule lives here.
 
+use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
@@ -79,6 +80,68 @@ pub(crate) fn real_path(path: &Path, cwd: &Path) -> PathBuf {
 pub(crate) fn key(p: &Path) -> String {
     let s = p.to_string_lossy().into_owned();
     if cfg!(target_os = "macos") { s.to_lowercase() } else { s }
+}
+
+/// Whether the key `target` is the key `dir` or lies under it.
+fn at_or_under(target: &str, dir: &str) -> bool {
+    target == dir || under(target, dir)
+}
+
+/// Whether the key `target` lies under the key `dir`.
+fn under(target: &str, dir: &str) -> bool {
+    rel_under(target, dir).is_some()
+}
+
+/// The rest of the key `target` below the key `dir`, without the separator.
+fn rel_under<'t>(target: &'t str, dir: &str) -> Option<&'t str> {
+    target.strip_prefix(dir)?.strip_prefix('/')
+}
+
+/// What one hook call reads from the store, read at its first use and kept for
+/// the rest of the call, so each rule of the call does not load it again.
+pub(crate) struct Call<'a> {
+    pub(crate) project: &'a Project,
+    living: OnceCell<Vec<change::CapSpec>>,
+    active: OnceCell<Vec<proof::Active>>,
+    home: OnceCell<Option<PathBuf>>,
+    config: OnceCell<Option<config::Config>>,
+}
+
+impl<'a> Call<'a> {
+    pub(crate) fn new(project: &'a Project) -> Call<'a> {
+        Call { project, living: OnceCell::new(), active: OnceCell::new(), home: OnceCell::new(), config: OnceCell::new() }
+    }
+
+    fn living(&self) -> Result<&[change::CapSpec]> {
+        if let Some(living) = self.living.get() {
+            return Ok(living);
+        }
+        let living = change::living(self.project)?;
+        Ok(self.living.get_or_init(|| living))
+    }
+
+    fn active(&self) -> Result<&[proof::Active]> {
+        if let Some(active) = self.active.get() {
+            return Ok(active);
+        }
+        let active = proof::active(self.project, self.living()?)?;
+        Ok(self.active.get_or_init(|| active))
+    }
+
+    /// The active changes whose vow names `branch`; `proof::on_branch` also
+    /// counts the changes that a lease on `branch` works on.
+    fn vowed_on(&self, branch: &str) -> Result<Vec<&proof::Active>> {
+        Ok(self.active()?.iter().filter(|c| c.branch() == Some(branch)).collect())
+    }
+
+    fn home(&self) -> Option<&Path> {
+        self.home.get_or_init(|| crate::store::home_dir().ok()).as_deref()
+    }
+
+    /// The config, or `None` when it does not load.
+    fn config(&self) -> Option<&config::Config> {
+        self.config.get_or_init(|| self.home().and_then(|h| config::load(self.project, h).ok())).as_ref()
+    }
 }
 
 /// The argument names that carry a file path for a writing tool.
@@ -230,15 +293,14 @@ fn mcp_git_hooks_denial(args: &Value) -> Option<Denial> {
 
 /// The directory that holds the hidden checks, which the implementing agent
 /// may not read or write.
-fn secret_paths() -> Vec<PathBuf> {
-    crate::store::home_dir().map(|h| vec![h.join("hidden-checks")]).unwrap_or_default()
+fn secret_paths(call: &Call) -> Vec<PathBuf> {
+    call.home().map(|h| vec![h.join("hidden-checks")]).unwrap_or_default()
 }
 
 /// The allowed-signers file that signed confirmations are checked against, as
 /// the configured path resolves from `top`.
-fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
-    let home = crate::store::home_dir().ok()?;
-    let config = config::load(project, &home).ok()?;
+fn signers_path(call: &Call, top: &Path) -> Option<PathBuf> {
+    let config = call.config()?;
     (!config.allowed_signers.is_empty()).then(|| top.join(&config.allowed_signers))
 }
 
@@ -248,7 +310,7 @@ fn signers_path(project: &Project, top: &Path) -> Option<PathBuf> {
 /// path is resolved against `cwd`, canonicalized, and must lie inside `top`.
 /// Any path failure or git failure means the whole file, so the check fails
 /// closed.
-fn committed_test_text(project: &Project, top: Option<&Path>, path: &Path) -> Option<String> {
+fn committed_test_text(call: &Call, top: Option<&Path>, path: &Path) -> Option<String> {
     let whole = || std::fs::read_to_string(path).ok();
     let Some(top) = top else { return whole() };
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -257,8 +319,7 @@ fn committed_test_text(project: &Project, top: Option<&Path>, path: &Path) -> Op
     let Ok(path) = path.canonicalize() else { return whole() };
     let Ok(top) = top.canonicalize() else { return whole() };
     let Some(rel) = path.strip_prefix(&top).ok().and_then(|r| r.to_str()) else { return whole() };
-    let Ok(home) = crate::store::home_dir() else { return whole() };
-    let Ok(config) = config::load(project, &home) else { return whole() };
+    let Some(config) = call.config() else { return whole() };
     let Ok(tests) = fingerprint::globset(&config.test_globs) else { return whole() };
     if !tests.is_match(rel) {
         return whole();
@@ -301,12 +362,13 @@ fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Why an edit of `file` must not happen, or `None`.
-fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Option<Denial>> {
+fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<Denial>> {
+    let project = call.project;
     let target = key(&real_path(Path::new(file), cwd));
-    let trust = signers_path(project, top);
+    let trust = signers_path(call, top);
     for p in enforcement_paths(trust.as_deref()) {
         let p = key(&real_path(&p, cwd));
-        if target == p || target.starts_with(&format!("{p}/")) {
+        if at_or_under(&target, &p) {
             return Ok(denial(
                 Rule::EnforcementFile,
                 format!(
@@ -318,12 +380,12 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
     let root = key(&real_path(&project.root, cwd));
     let top_key = key(&real_path(top, cwd));
     let name = Path::new(&target).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    if target.starts_with(&format!("{root}/"))
+    if under(&target, &root)
         && (name == LEDGER
             || name == IDS_FILE
             || name == PROJECT_FILE
             || name == crate::record::RECORD_FILE
-            || target.starts_with(&format!("{root}/objects/")))
+            || rel_under(&target, &root).is_some_and(|r| r.starts_with("objects/")))
     {
         return Ok(denial(
             Rule::Ledger,
@@ -332,30 +394,29 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
             ),
         ));
     }
-    if target.starts_with(&format!("{root}/archive/")) {
+    if rel_under(&target, &root).is_some_and(|r| r.starts_with("archive/")) {
         return Ok(denial(
             Rule::History,
             "an archived change is history and does not change; run `rvow new \"<title>\"` to start a new change".into(),
         ));
     }
-    if target.starts_with(&format!("{root}/specs/")) {
+    if rel_under(&target, &root).is_some_and(|r| r.starts_with("specs/")) {
         return Ok(denial(
             Rule::History,
             "living specs change only through a change and rvow archive; run rvow guide spec to see how".into(),
         ));
     }
-    if target.starts_with(&format!("{top_key}/.git/")) {
+    if rel_under(&target, &top_key).is_some_and(|r| r.starts_with(".git/")) {
         return Ok(denial(
             Rule::GitHooks,
             ".git/ is not edited by hand; the hooks there run the gate. Use git commands, and run rvow install for the hooks".into(),
         ));
     }
-    let Some(rel) = target.strip_prefix(&format!("{top_key}/")) else {
+    let Some(rel) = rel_under(&target, &top_key) else {
         return Ok(None);
     };
-    if !target.starts_with(&format!("{root}/"))
-        && let Some(id) = unaccepted_plan(project, top)?
-    {
+    let in_store = under(&target, &root);
+    if !in_store && let Some(id) = unaccepted_plan(call, top)? {
         return Ok(unaccepted_denial(&id));
     }
     if ENFORCEMENT.iter().any(|e| key(Path::new(e)) == rel) {
@@ -366,7 +427,7 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
             ),
         ));
     }
-    if protected(project, top)?.contains(rel) && !unlocked(project, top, rel)? {
+    if protected_in(call, top)?.contains(rel) && !unlocked(call, top, rel)? {
         return Ok(denial(
             Rule::ProtectedTest,
             format!(
@@ -374,8 +435,8 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
             ),
         ));
     }
-    if !target.starts_with(&format!("{root}/"))
-        && let Some(files) = active_scope(project, top)?
+    if !in_store
+        && let Some(files) = active_scope(call, top)?
         && !files.is_match(rel)
         // check-ignore rejects --literal-pathspecs, so a leading ./ keeps a
         // magic-looking name literal while matching the same ignore rules.
@@ -393,11 +454,9 @@ fn edit_rule(project: &Project, top: &Path, cwd: &Path, file: &str) -> Result<Op
 
 /// The `files:` globs of every task of the active changes on this branch, or
 /// `None` when the branch has no active change.
-fn active_scope(project: &Project, top: &Path) -> Result<Option<globset::GlobSet>> {
-    let (living, _) = change::load_living(project)?;
+fn active_scope(call: &Call, top: &Path) -> Result<Option<globset::GlobSet>> {
     let branch = git::branch(top)?.unwrap_or_default();
-    let active = proof::active(project, &living)?;
-    let mine = proof::on_branch(&active, &branch);
+    let mine = proof::on_branch(call.active()?, &branch);
     if mine.is_empty() {
         return Ok(None);
     }
@@ -413,16 +472,15 @@ fn active_scope(project: &Project, top: &Path) -> Result<Option<globset::GlobSet
 pub(crate) fn rel_path(file: &Path, cwd: &Path, top: &Path) -> Option<String> {
     let target = key(&real_path(file, cwd));
     let top = key(&real_path(top, cwd));
-    target.strip_prefix(&format!("{top}/")).map(String::from)
+    rel_under(&target, &top).map(String::from)
 }
 
 /// Whether the user confirmed an unlock of `rel` and no proof of a task whose
 /// files match it has happened since.
-fn unlocked(project: &Project, top: &Path, rel: &str) -> Result<bool> {
-    let (living, _) = change::load_living(project)?;
+fn unlocked(call: &Call, top: &Path, rel: &str) -> Result<bool> {
     let branch = git::branch(top)?.unwrap_or_default();
     let mut open = false;
-    for c in proof::active(project, &living)?.iter().filter(|c| c.branch() == Some(branch.as_str())) {
+    for c in call.vowed_on(&branch)? {
         let unlock_ids: BTreeSet<&str> = c
             .events
             .iter()
@@ -463,7 +521,8 @@ fn unaccepted_denial(id: &crate::id::Id) -> Option<Denial> {
 /// targets: the plan on the branch is not accepted, or a leased subagent
 /// writes outside its task. A file that a program writes without naming it,
 /// or that only script text names, is not seen here.
-fn shell_write_denial(project: &Project, cmd: &str, cwd: &Path, agent: Option<&str>) -> Result<Option<Denial>> {
+fn shell_write_denial(call: &Call, cmd: &str, cwd: &Path, agent: Option<&str>) -> Result<Option<Denial>> {
+    let project = call.project;
     let Ok(top) = git::toplevel(cwd) else { return Ok(None) };
     let root = key(&real_path(&project.root, cwd));
     let files: Vec<PathBuf> = shell::written_paths(cmd)
@@ -471,12 +530,12 @@ fn shell_write_denial(project: &Project, cmd: &str, cwd: &Path, agent: Option<&s
         .filter_map(|f| repo_rel(f, cwd, &top))
         .filter(|rel| !rel.starts_with(".git/"))
         .map(|rel| top.join(rel))
-        .filter(|f| !key(&real_path(f, cwd)).starts_with(&format!("{root}/")))
+        .filter(|f| !under(&key(&real_path(f, cwd)), &root))
         .collect();
     if files.is_empty() {
         return Ok(None);
     }
-    if let Some(id) = unaccepted_plan(project, &top)? {
+    if let Some(id) = unaccepted_plan(call, &top)? {
         return Ok(unaccepted_denial(&id));
     }
     let Some(agent) = agent else { return Ok(None) };
@@ -490,17 +549,16 @@ fn shell_write_denial(project: &Project, cmd: &str, cwd: &Path, agent: Option<&s
 
 /// The backlog change whose plan blocks code edits: the branch has one and no
 /// active change, so the user has not accepted a plan to work on yet.
-fn unaccepted_plan(project: &Project, top: &Path) -> Result<Option<crate::id::Id>> {
+fn unaccepted_plan(call: &Call, top: &Path) -> Result<Option<crate::id::Id>> {
     let Some(branch) = git::branch(top)? else {
         return Ok(None);
     };
-    let (living, _) = change::load_living(project)?;
-    if !proof::on_branch(&proof::active(project, &living)?, &branch).is_empty() {
+    if !proof::on_branch(call.active()?, &branch).is_empty() {
         return Ok(None);
     }
-    let (all, _) = change::list(project)?;
+    let (all, _) = change::list(call.project)?;
     for c in all.into_iter().filter(|c| c.stage == change::Stage::Backlog) {
-        if change::load(&c.path, &living)?.proposal.branch == branch {
+        if change::load(&c.path, call.living()?)?.proposal.branch == branch {
             return Ok(Some(c.id));
         }
     }
@@ -509,10 +567,14 @@ fn unaccepted_plan(project: &Project, top: &Path) -> Result<Option<crate::id::Id
 
 /// The protected paths of every active change, from their baselines.
 pub(crate) fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String>> {
-    let (living, _) = change::load_living(project)?;
+    protected_in(&Call::new(project), top)
+}
+
+fn protected_in(call: &Call, top: &Path) -> Result<BTreeSet<String>> {
+    let project = call.project;
     let mut out = BTreeSet::new();
     let branch = git::branch(top)?.unwrap_or_default();
-    for c in proof::active(project, &living)?.iter().filter(|c| c.branch() == Some(branch.as_str())) {
+    for c in call.vowed_on(&branch)? {
         out.extend(crate::guard::guarded(c).into_keys().filter(|k| !k.ends_with(crate::guard::RUST_TESTS)).map(|k| key(Path::new(&k))));
         let Some(hash) = c.baseline().and_then(|b| b.get("protected")).and_then(Value::as_str) else {
             continue;
@@ -529,11 +591,11 @@ pub(crate) fn protected(project: &Project, top: &Path) -> Result<BTreeSet<String
 }
 
 /// Why `file` must not be read or written: it is inside the hidden checks.
-fn secret_denial(cwd: &Path, file: &str) -> Option<Denial> {
+fn secret_denial(call: &Call, cwd: &Path, file: &str) -> Option<Denial> {
     let target = key(&real_path(Path::new(file), cwd));
-    secret_paths().into_iter().find_map(|p| {
+    secret_paths(call).into_iter().find_map(|p| {
         let p = key(&real_path(&p, cwd));
-        if !(target == p || target.starts_with(&format!("{p}/"))) {
+        if !at_or_under(&target, &p) {
             return None;
         }
         denial(
@@ -548,8 +610,8 @@ fn secret_denial(cwd: &Path, file: &str) -> Option<Denial> {
 /// Why a Bash command whose shell glob expands to a protected file must not run.
 /// A glob hides the name from the text rules, so each glob word is expanded from
 /// `cwd` and the result is matched by the rule that guards it.
-fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) -> Option<Denial> {
-    let secrets = secret_paths();
+fn glob_denial(call: &Call, cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) -> Option<Denial> {
+    let secrets = secret_paths(call);
     let enforcement = enforcement_paths(trust);
     let hooks = top.map(|t| t.join(".git/hooks"));
     let read_only = reads_only(cmd);
@@ -557,7 +619,7 @@ fn glob_denial(cmd: &str, cwd: &Path, top: Option<&Path>, trust: Option<&Path>) 
         let real = key(&real_path(&path, cwd));
         let under = |p: &Path| {
             let p = key(&real_path(p, cwd));
-            real == p || real.starts_with(&format!("{p}/"))
+            at_or_under(&real, &p)
         };
         if let Some(p) = secrets.iter().find(|p| under(p)) {
             return denial(
@@ -760,28 +822,39 @@ fn lease_prove_denial(project: &Project, cwd: &Path, agent_id: &str, cmd: &str) 
 
 /// The rule and the reason that deny a tool call, or `None` to allow it.
 pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<Denial>> {
+    denial_in(&Call::new(project), input)
+}
+
+/// The tool input of a call, borrowed: an Edit or Write input holds whole file texts.
+fn tool_input(input: &Value) -> &Value {
+    static NONE: Value = Value::Null;
+    input.get("tool_input").unwrap_or(&NONE)
+}
+
+fn denial_in(call: &Call, input: &Value) -> Result<Option<Denial>> {
+    let project = call.project;
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
-    let args = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    let args = tool_input(input);
     if tool_kind(tool) == ToolKind::Shell {
-        let Some(c) = shell_command(&args) else {
+        let Some(c) = shell_command(args) else {
             return Ok(None);
         };
         let c = c.as_str();
         let top = git::toplevel(&cwd).ok();
-        let trust = top.as_deref().and_then(|t| signers_path(project, t));
-        let committed = |path: &Path| committed_test_text(project, top.as_deref(), path);
+        let trust = top.as_deref().and_then(|t| signers_path(call, t));
+        let committed = |path: &Path| committed_test_text(call, top.as_deref(), path);
         let found = bash_rule(c)
             .or_else(|| shell::script_rule_committed(c, &cwd, &committed))
-            .or_else(|| glob_denial(c, &cwd, top.as_deref(), trust.as_deref()))
+            .or_else(|| glob_denial(call, c, &cwd, top.as_deref(), trust.as_deref()))
             .or_else(|| bash_store_denial(project, &cwd, c))
-            .or_else(|| bash_secret_rule(c, &secret_paths()))
+            .or_else(|| bash_secret_rule(c, &secret_paths(call)))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
         let agent = lease_holder(project, input);
         if found.is_some() {
             return Ok(found);
         }
-        if let Some(found) = shell_write_denial(project, c, &cwd, agent)? {
+        if let Some(found) = shell_write_denial(call, c, &cwd, agent)? {
             return Ok(Some(found));
         }
         return match agent {
@@ -790,16 +863,16 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
         };
     }
     if tool.starts_with("mcp__")
-        && let Some(found) = mcp_git_hooks_denial(&args)
+        && let Some(found) = mcp_git_hooks_denial(args)
     {
         return Ok(Some(found));
     }
-    let files = file_args(&args);
+    let files = file_args(args);
     // The hidden checks are closed to every tool. The plan files of the store are closed to direct
     // reads, and the stats, lease, yolo and cache files are only closed to writes.
     let writer = writes_files(tool);
     if let Some(found) = files.iter().find_map(|f| {
-        secret_denial(&cwd, f)
+        secret_denial(call, &cwd, f)
             .or_else(|| (!writer).then(|| store_denial(project, &cwd, f, false)).flatten())
             .or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten())
     }) {
@@ -808,9 +881,13 @@ pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<De
     if !writes_files(tool) {
         return Ok(None);
     }
+    if files.is_empty() {
+        return Ok(None);
+    }
     let agent = lease_holder(project, input);
+    let top = git::toplevel(&cwd)?;
     for f in &files {
-        let mut found = edit_rule(project, &git::toplevel(&cwd)?, &cwd, f)?;
+        let mut found = edit_rule(call, &top, &cwd, f)?;
         if found.is_none() {
             found = store_denial(project, &cwd, f, true);
         }
@@ -895,7 +972,7 @@ impl UserMade {
 /// Why work on the branch must wait: an active change was accepted, or an
 /// amendment of it confirmed, in this session without the user, as with a
 /// copy of the rvow binary under another name.
-fn unseen_denial(project: &Project, input: &Value, seen: &UserMade) -> Result<Option<Denial>> {
+fn unseen_denial(call: &Call, input: &Value, seen: &UserMade) -> Result<Option<Denial>> {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let kind = tool_kind(tool);
     if kind == ToolKind::ReadOnly || (kind != ToolKind::Shell && !writes_files(tool)) {
@@ -904,14 +981,12 @@ fn unseen_denial(project: &Project, input: &Value, seen: &UserMade) -> Result<Op
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let Ok(top) = git::toplevel(&cwd) else { return Ok(None) };
     let in_repo = !changed_rels(input, &cwd, &top).is_empty();
-    let names_no_file = kind != ToolKind::Shell && file_args(&input.get("tool_input").cloned().unwrap_or(Value::Null)).is_empty();
+    let names_no_file = kind != ToolKind::Shell && file_args(tool_input(input)).is_empty();
     if !in_repo && !names_no_file {
         return Ok(None);
     }
     let Some(branch) = git::branch(&top)? else { return Ok(None) };
-    let (living, _) = change::load_living(project)?;
-    let active = proof::active(project, &living)?;
-    for c in proof::on_branch(&active, &branch) {
+    for c in proof::on_branch(call.active()?, &branch) {
         let id = c.dir.id.to_string();
         let accepted = |e: &&crate::ledger::Event| {
             e.kind == Kind::Vow || (e.kind == Kind::Confirm && e.data.get("decision").and_then(Value::as_str) == Some("accept"))
@@ -935,11 +1010,12 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
     let session = input.get("session_id").and_then(Value::as_str);
     let seen = UserMade::from(project, input);
     let tier = yolo::active(project).and_then(|on| seen.as_ref().map_or(Some(on), |s| s.yolo(on))).map(|on| on.tier);
+    let call = Call::new(project);
     let unseen = match &seen {
-        Some(s) => unseen_denial(project, input, s)?,
+        Some(s) => unseen_denial(&call, input, s)?,
         None => None,
     };
-    let found = unseen.map_or_else(|| pre_tool_use_denial(project, input), |d| Ok(Some(d)))?;
+    let found = unseen.map_or_else(|| denial_in(&call, input), |d| Ok(Some(d)))?;
     // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
     let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
     let mode = |d: &Denial| {
@@ -1286,10 +1362,16 @@ fn unamended_text(blocking: &[String]) -> String {
 
 /// True while a rebase, merge or cherry-pick is half done in the repository at `top`.
 fn git_operation_running(top: &Path) -> bool {
-    let Ok(dir) = git::run(top, &["rev-parse", "--absolute-git-dir"]) else {
-        return false;
+    // The project lookup of this call already printed the git dir.
+    let dir = match crate::store::known_dirs(top) {
+        Some((git_dir, _)) => git_dir,
+        None => {
+            let Ok(dir) = git::run(top, &["rev-parse", "--absolute-git-dir"]) else {
+                return false;
+            };
+            PathBuf::from(dir.trim())
+        }
     };
-    let dir = PathBuf::from(dir.trim());
     ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"].iter().any(|n| dir.join(n).exists())
 }
 
@@ -1338,7 +1420,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
     if git_operation_running(&top) {
         return Ok(None);
     }
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let changes = proof::active(project, &living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
@@ -1367,7 +1449,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         if pending.iter().any(|p| p.change == c.dir.id) {
             continue;
         }
-        let blocking: Vec<String> = drift::drift_with_home(project, Some(home), &top, &config, c)?
+        let blocking: Vec<String> = drift::drift_over(project, Some(home), &top, &config, c, &living)?
             .into_iter()
             .filter(|i| i.class.blocks())
             .map(|i| i.what)
@@ -1390,7 +1472,8 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         }
         items.push(OpenItem { kind: StopReason::Drift, text: unamended_text(&blocking) });
     }
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
+    let leases = lease::leases(project)?;
     // Only the newest accepted change is the agent's current plan; older changes on the branch are
     // enforced by the pre-push gate, and nagging about them each time hides the plan that matters.
     let newest = queue.iter().max_by_key(|c| c.vow().map_or(0, |e| e.time));
@@ -1412,7 +1495,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
                 continue;
             }
             let id = t.id.to_string();
-            if lease::leased_away(project, &id, session, crate::ledger::now_ms())? {
+            if lease::leased_away_in(&leases, &id, session, crate::ledger::now_ms()) {
                 continue;
             }
             let text = format!("{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written");
@@ -1438,7 +1521,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
     let Some(branch) = git::branch(&top)? else {
         return Ok(None);
     };
-    let (living, _) = change::load_living(project)?;
+    let living = change::living(project)?;
     let changes = proof::active(project, &living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
@@ -1454,7 +1537,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
         });
     }
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
     let (mut proved, mut total, mut drift_count) = (0, 0, 0);
     for c in &queue {
         for t in &c.loaded.tasks {
@@ -1463,7 +1546,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
                 proved += 1;
             }
         }
-        drift_count += drift::drift_with_home(project, Some(home), &top, &config, c)?.iter().filter(|i| i.class.blocks()).count();
+        drift_count += drift::drift_over(project, Some(home), &top, &config, c, &living)?.iter().filter(|i| i.class.blocks()).count();
     }
     let pending = amend::pending(&changes).len();
     let name = match queue.as_slice() {
@@ -1710,6 +1793,18 @@ mod tests {
         for cmd in denied {
             assert!(bash_denial(cmd).is_some(), "{cmd}");
         }
+    }
+
+    #[test]
+    fn a_corrupt_spec_record_fails_the_edit_check() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        std::fs::write(p.root.join(crate::record::RECORD_FILE), "{ not json").unwrap();
+        let input = json!({"cwd": repo, "tool_name": "Edit", "tool_input": {"file_path": repo.join("src/lib.rs")}});
+        // An error here makes the hook entry deny every writing tool.
+        assert!(pre_tool_use_denial(&p, &input).is_err(), "a corrupt record must not let the edit through");
     }
 
     #[test]

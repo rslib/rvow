@@ -5,6 +5,7 @@
 //! run time (a generated name, a downloaded script) stays a known gap that the
 //! final gate covers.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -272,7 +273,36 @@ pub fn is_builtin(word: &str) -> bool {
     BUILTINS.contains(&base_name(word))
 }
 
-fn expand_vars(word: &str, vars: &HashMap<String, String>) -> String {
+/// The variables a command line sees: the ones it sets, then, with `env`, the
+/// process environment, read one name at a time instead of copied whole.
+#[derive(Clone, Default)]
+struct Vars {
+    own: HashMap<String, String>,
+    env: bool,
+}
+
+impl Vars {
+    fn with_env() -> Vars {
+        Vars { own: HashMap::new(), env: true }
+    }
+
+    fn get(&self, name: &str) -> Option<Cow<'_, str>> {
+        match self.own.get(name) {
+            Some(v) => Some(Cow::Borrowed(v)),
+            None if self.env => std::env::var(name).ok().map(Cow::Owned),
+            None => None,
+        }
+    }
+
+    fn insert(&mut self, name: &str, value: &str) {
+        self.own.insert(name.to_string(), value.to_string());
+    }
+}
+
+fn expand_vars(word: &str, vars: &Vars) -> String {
+    if !word.contains('$') {
+        return word.to_string();
+    }
     let mut out = String::new();
     let chars: Vec<char> = word.chars().collect();
     let mut i = 0;
@@ -290,7 +320,7 @@ fn expand_vars(word: &str, vars: &HashMap<String, String>) -> String {
         let closed = !braced || chars.get(end) == Some(&'}');
         match vars.get(&name).filter(|_| !name.is_empty() && closed) {
             Some(v) => {
-                out.push_str(v);
+                out.push_str(&v);
                 i = end + usize::from(braced);
             }
             None => {
@@ -343,13 +373,13 @@ fn inline_code(inv: &[String]) -> Option<String> {
     inv.get(at + 1).cloned()
 }
 
-fn parse(cmd: &str, depth: u8, outer: &HashMap<String, String>) -> Shell {
+fn parse(cmd: &str, depth: u8, outer: &Vars) -> Shell {
     let tokens = tokenize(&without_heredocs(cmd));
     let mut vars = outer.clone();
     for seg in &tokens.commands {
         for w in seg {
             if let Some((name, value)) = w.split_once('=').filter(|_| is_assignment(w)) {
-                vars.insert(name.to_string(), value.to_string());
+                vars.insert(name, value);
             } else if !DECLARATIONS.contains(&base_name(w)) {
                 break;
             }
@@ -370,6 +400,25 @@ fn parse(cmd: &str, depth: u8, outer: &HashMap<String, String>) -> Shell {
         }
     }
     Shell { commands, words }
+}
+
+/// The top-level parse of `cmd`, with the process environment when `env`. A
+/// command with no `$` reads no variable, so its parse is the same either way,
+/// and the last one is kept: one hook call runs a dozen rules over one command.
+fn parsed(cmd: &str, env: bool) -> std::rc::Rc<Shell> {
+    use std::rc::Rc;
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(String, Rc<Shell>)>> = const { std::cell::RefCell::new(None) };
+    }
+    if cmd.contains('$') {
+        return Rc::new(parse(cmd, 0, &if env { Vars::with_env() } else { Vars::default() }));
+    }
+    if let Some(sh) = LAST.with(|last| last.borrow().as_ref().filter(|(c, _)| c == cmd).map(|(_, sh)| Rc::clone(sh))) {
+        return sh;
+    }
+    let sh = Rc::new(parse(cmd, 0, &Vars::default()));
+    LAST.with(|last| *last.borrow_mut() = Some((cmd.to_string(), Rc::clone(&sh))));
+    sh
 }
 
 fn mentions_accept(code: &str) -> bool {
@@ -552,7 +601,7 @@ fn only_reads(invs: &[&[String]], cmd: &str) -> bool {
 /// True when the whole `cmd` only reads, so a glob that expands to a file
 /// rvow trusts may still run.
 pub(super) fn reads_only(cmd: &str) -> bool {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     only_reads(&invs, cmd)
 }
@@ -570,7 +619,7 @@ fn only_text(invs: &[&[String]], cmd: &str) -> bool {
 
 /// Why a Bash command must not run, or `None`.
 pub fn bash_rule(cmd: &str) -> Option<Denial> {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     if let Some(reason) = invs.iter().find_map(|inv| rvow_denial(inv)) {
         return Some(reason);
@@ -663,7 +712,7 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
 /// True when every `rvow` call in `cmd` that the user owns is an `accept` or a `confirm`, and the command
 /// holds no other owner-only call. The `auto` tier lets such a command run.
 pub(super) fn only_accept_or_confirm(cmd: &str) -> bool {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let subs: Vec<&str> = sh
         .commands
         .iter()
@@ -676,7 +725,7 @@ pub(super) fn only_accept_or_confirm(cmd: &str) -> bool {
 
 /// What each `rvow prove` in `cmd` is given: the task words and flags after `prove`.
 pub(super) fn prove_args(cmd: &str) -> Vec<Vec<String>> {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let calls = sh.commands.iter().flat_map(|seg| invocations(seg)).filter(|inv| base_name(&inv[0]) == "rvow");
     calls
         .filter_map(|inv| {
@@ -703,10 +752,8 @@ fn has_glob(word: &str) -> bool {
 /// shell would: every word that holds a `/` or starts with `~` or `.`, without
 /// the glob words, which `glob_paths` expands instead.
 pub(super) fn path_words(cmd: &str) -> Vec<String> {
-    let env: HashMap<String, String> =
-        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
-    let home = env.get("HOME").cloned();
-    let sh = parse(cmd, 0, &env);
+    let home = std::env::var("HOME").ok();
+    let sh = parsed(cmd, true);
     sh.words
         .iter()
         .filter(|w| !has_glob(w))
@@ -728,13 +775,11 @@ pub(super) struct Call {
 /// moves the directory of the calls after it; a wrapper such as `xargs` or
 /// `env` adds a call for the program it starts.
 pub(super) fn calls(cmd: &str, cwd: &Path) -> Vec<Call> {
-    let env: HashMap<String, String> =
-        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
-    let home = env.get("HOME").cloned();
+    let home = std::env::var("HOME").ok();
     let mut dir = cwd.to_path_buf();
     let mut moved = false;
     let mut out = Vec::new();
-    for seg in &parse(cmd, 0, &env).commands {
+    for seg in &parsed(cmd, true).commands {
         for (n, inv) in invocations(seg).into_iter().enumerate() {
             let Some((program, args)) = inv.split_first() else {
                 continue;
@@ -762,7 +807,7 @@ pub(super) fn calls(cmd: &str, cwd: &Path) -> Vec<Call> {
 /// bare file names such as `out.txt` or `Cargo.toml`, which hold a dot but no `/`.
 pub(super) fn changed_words(cmd: &str) -> Vec<String> {
     let mut out = path_words(cmd);
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let bare = |w: &&String| !w.starts_with('-') && !w.contains('/') && !has_glob(w) && w.trim_matches('.').contains('.');
     out.extend(sh.words.iter().filter(bare).cloned());
     out
@@ -807,7 +852,7 @@ pub(super) struct Changes {
 /// inline scripts such as `python3 -c "open('src/a.rs', 'w')"`. A line of git
 /// read commands changes nothing.
 pub(super) fn bash_changes(cmd: &str, cwd: &Path) -> Changes {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     let git_read = |inv: &&[String]| {
         matches!(base_name(&inv[0]), "git" | "rgit") && git_subcommand(&inv[1..]).is_some_and(|(sub, _)| GIT_READS.contains(&sub))
@@ -872,12 +917,9 @@ pub(super) fn bash_changes(cmd: &str, cwd: &Path) -> Changes {
 /// exist is dropped, so a pattern that matches nothing yields nothing.
 pub(super) fn glob_paths(cmd: &str, cwd: &Path) -> Vec<PathBuf> {
     // A name the command sets itself wins; any other `$NAME` or `${NAME}` falls back to
-    // the process environment, as a shell does. `parse` clones this map before it inserts
-    // the command's own assignments.
-    let env: HashMap<String, String> =
-        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
-    let home = env.get("HOME").cloned();
-    let sh = parse(cmd, 0, &env);
+    // the process environment, as a shell does.
+    let home = std::env::var("HOME").ok();
+    let sh = parsed(cmd, true);
     let mut out = Vec::new();
     for word in &sh.words {
         if !has_glob(word) {
@@ -986,7 +1028,7 @@ pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
 /// read. When it returns text, only that text is checked; every other script
 /// keeps the whole-file check.
 pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) -> Option<String>) -> Option<Denial> {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     for inv in sh.commands.iter().flat_map(|seg| invocations(seg)) {
         let name = base_name(&inv[0]);
         let file = if is_shell(name) {
@@ -1149,12 +1191,11 @@ fn is_writer(inv: &[String]) -> bool {
 /// ones the command sets and the ones in the process environment.
 pub(super) fn written_paths(cmd: &str) -> Vec<String> {
     let text = without_heredocs(cmd);
-    let mut vars: HashMap<String, String> =
-        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    let mut vars = Vars::with_env();
     for seg in &tokenize(&text).commands {
         for w in seg.iter().take_while(|w| is_assignment(w)) {
             if let Some((name, value)) = w.split_once('=') {
-                vars.insert(name.to_string(), value.to_string());
+                vars.insert(name, value);
             }
         }
     }
@@ -1209,7 +1250,7 @@ fn names_path(sh: &Shell, cmd: &str, path: &Path) -> bool {
 /// Why a Bash command that names an enforcement file must not run: a write to
 /// one of them could switch rvow off.
 pub(super) fn bash_enforcement_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let named = paths.iter().find(|p| names_path(&sh, cmd, p))?;
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     let writes = writes_files(&invs, cmd);
@@ -1233,7 +1274,7 @@ pub(super) fn bash_enforcement_denial(cmd: &str, paths: &[PathBuf]) -> Option<St
 /// Why a Bash command that names a secret path (the hidden checks) must not
 /// run: the implementing agent may not read or write them.
 pub(super) fn bash_secret_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
-    let sh = parse(cmd, 0, &HashMap::new());
+    let sh = parsed(cmd, false);
     let invs: Vec<&[String]> = sh.commands.iter().flat_map(|seg| invocations(seg)).collect();
     // Text that only names the folder reads nothing: an echo, or a commit or tag message.
     if only_text(&invs, cmd) {

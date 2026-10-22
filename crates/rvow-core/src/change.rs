@@ -305,6 +305,15 @@ pub fn living_from(texts: &[(String, String)]) -> (Vec<CapSpec>, Vec<Finding>) {
     (specs, findings)
 }
 
+/// The living specs, keyed by capability, parsed without the lint: for a
+/// caller that needs the requirements and not their findings, such as a hook.
+pub fn living(project: &Project) -> Result<Vec<CapSpec>> {
+    // The record is read only to fail as `load_living` does: a corrupt record
+    // must keep a hook failing closed.
+    record::load(project)?;
+    Ok(living_texts(project)?.into_iter().map(|(cap, text)| (cap, parse_spec(&text).0)).collect())
+}
+
 /// The living specs, keyed by capability, and their parse findings, with the
 /// findings of untouched imported requirements marked legacy.
 pub fn load_living(project: &Project) -> Result<(Vec<CapSpec>, Vec<Finding>)> {

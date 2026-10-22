@@ -715,12 +715,17 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         crate::lease::end_task(project, &task.id.to_string())?;
     }
 
-    let (events, _) = ledger::read(&ledger_path)?;
-    let runs: Vec<&Event> = events.iter().filter(|e| e.kind == Kind::Prove && str_of(e, "task") == id).collect();
+    // The changes are re-read for the new event anyway, so the loop check reads
+    // its runs from that one read rather than the ledger a second time.
+    let changes = active(project, &living)?;
+    let runs: Vec<&Event> = changes
+        .iter()
+        .find(|c| c.dir.id == change.dir.id)
+        .map(|c| c.events.iter().filter(|e| e.kind == Kind::Prove && str_of(e, "task") == id).collect())
+        .unwrap_or_default();
     let looping = runs.len() >= LOOP_RUNS
         && runs[runs.len() - LOOP_RUNS..].iter().all(|e| !is_proved(e) && e.data.get("tail") == runs[runs.len() - 1].data.get("tail"));
 
-    let changes = active(project, &living)?;
     let branch = change_branch(&changes, &change.dir.id);
     let queue = on_branch(&changes, &branch);
     let next = next_for(project, home, &queue, &now)?

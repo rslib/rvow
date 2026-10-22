@@ -95,6 +95,8 @@ Update this section in the change that moves an area.
 - A fixed set of values is an enum, not a string or an int.
 - Rust source is ASCII only; the hook and CI reject any other byte.
 - Add a dependency with `cargo add`.
+- A hook path (pre-tool-use, post-tool-use, stop, session-start, the view) runs on every tool call: read the store, config and leases once per call and pass them down, load specs with `change::living` (no lint), borrow `&Value` and `&str`, and make no `format!`, `clone`, `collect` or `to_string` per item in a loop over specs, tasks, records, tokens or bytes. A process-wide cache has an entry limit and a key that includes what makes it stale.
+- A git `Command` that sets or removes an env var copies the whole environment; remove a var only when it is set (`without_hook_env` in `crates/rvow-core/src/git.rs`).
 
 ## Claude mod rules
 
@@ -107,6 +109,7 @@ Update this section in the change that moves an area.
 ## Tests and proof
 
 - A bug fix adds a test that fails without the fix.
+- `crates/rvow/tests/suite/alloc.rs` holds an allocation budget per hook, counted in process on a fixed fixture store. A hook change that raises a count past its budget fails; lower a budget when a change cuts the count, and never raise one to make a test pass.
 - The integration tests build as one binary, `crates/rvow/tests/main.rs`, with one `#[path]` module per file in `crates/rvow/tests/suite/`. A new test file needs a `mod` entry there. A test that sets an env var holds `crate::env_lock::lock()` and its module joins the `serial` group in `.config/nextest.toml`; `audit_nextest` fails when either is missing.
 - CLI behavior tests live in `crates/rvow/tests/suite/cli.rs`. They run in temporary git repositories, so the git hook must not leak `GIT_*` variables into them (see `.pre-commit-config.yaml`).
 - The native pi codemode proof is skipped unless `RVOW_NATIVE_SDK` is set. From `extensions/`, with a built binary: `RVOW_NATIVE_SDK=$PWD/node_modules/@earendil-works/pi-coding-agent RVOW_NATIVE_BIN=<repo>/target/debug/rvow node --test pi/native-codemode.test.ts`.

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -434,6 +435,11 @@ enum Artifact {
 
 fn main() -> ExitCode {
     reset_sigpipe();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // A hook call is most of the traffic, so it skips the clap tree of every command.
+    if let Some((harness, event)) = hook_argv(&args) {
+        return setup::hook(harness, event);
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => return usage_error(e),
@@ -456,6 +462,36 @@ fn reset_sigpipe() {
     // `rvow ... | head` ends quietly instead of panicking on a closed pipe.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// The hook call these arguments name, without building the clap tree: exactly
+/// `hook <claude|codex|json> <event>` or `hook <event>`, with no flags or extra
+/// words. Anything else returns None, so clap parses it as it always does.
+fn hook_argv(args: &[OsString]) -> Option<(Harness, HookEvent)> {
+    if args.first()?.to_str()? != "hook" {
+        return None;
+    }
+    match args {
+        [_, target, event] => Some((hook_variant::<HookTarget>(target.to_str()?)?.harness()?, hook_variant::<HookEvent>(event.to_str()?)?)),
+        [_, event] => Some((Harness::Claude, hook_variant::<HookEvent>(event.to_str()?)?)),
+        _ => None,
+    }
+}
+
+/// The enum variant whose clap value name is `name`, such as `pre-tool-use`.
+fn hook_variant<T: ValueEnum + Copy>(name: &str) -> Option<T> {
+    T::value_variants().iter().copied().find(|v| v.to_possible_value().is_some_and(|p| p.get_name() == name))
+}
+
+/// The harness and event a parsed hook call names, if it names both.
+fn hook_call(target: HookTarget, event: Option<HookEvent>) -> Option<(Harness, HookEvent)> {
+    match (target, event) {
+        (HookTarget::Claude, Some(event)) => Some((Harness::Claude, event)),
+        (HookTarget::Codex, Some(event)) => Some((Harness::Codex, event)),
+        (HookTarget::Json, Some(event)) => Some((Harness::Json, event)),
+        (target, None) => target.event().map(|event| (Harness::Claude, event)),
+        _ => None,
     }
 }
 
@@ -494,14 +530,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Brief => read::brief(),
         Cmd::Next => read::next(),
         Cmd::Hook { target, event } => {
-            let call = match (target, event) {
-                (HookTarget::Claude, Some(event)) => Some((Harness::Claude, event)),
-                (HookTarget::Codex, Some(event)) => Some((Harness::Codex, event)),
-                (HookTarget::Json, Some(event)) => Some((Harness::Json, event)),
-                (target, None) => target.event().map(|event| (Harness::Claude, event)),
-                _ => None,
-            };
-            return match call {
+            return match hook_call(target, event) {
                 Some((harness, event)) => setup::hook(harness, event),
                 None => usage_error(clap::Error::raw(
                     clap::error::ErrorKind::InvalidValue,
@@ -663,7 +692,7 @@ enum NoteArg {
     Handoff,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Harness {
     /// Claude Code's hook JSON.
     Claude,
@@ -685,7 +714,7 @@ enum YoloTier {
     Off,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum HookTarget {
     Claude,
     Codex,
@@ -701,6 +730,15 @@ enum HookTarget {
 }
 
 impl HookTarget {
+    fn harness(self) -> Option<Harness> {
+        match self {
+            Self::Claude => Some(Harness::Claude),
+            Self::Codex => Some(Harness::Codex),
+            Self::Json => Some(Harness::Json),
+            _ => None,
+        }
+    }
+
     fn event(self) -> Option<HookEvent> {
         match self {
             Self::Claude | Self::Codex | Self::Json => None,
@@ -716,7 +754,7 @@ impl HookTarget {
     }
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum HookEvent {
     PreToolUse,
     PostToolUse,
@@ -744,4 +782,70 @@ enum ClaudeMode {
 enum ViaArg {
     Dialog,
     Chat,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    /// What clap's own parse of the same argv yields.
+    fn clap_call(args: &[&str]) -> Option<(Harness, HookEvent)> {
+        let mut full = vec!["rvow"];
+        full.extend_from_slice(args);
+        match Cli::try_parse_from(full).ok()?.cmd {
+            Some(Cmd::Hook { target, event }) => hook_call(target, event),
+            _ => None,
+        }
+    }
+
+    /// Every event, named the way clap names it.
+    fn event_names() -> Vec<String> {
+        HookEvent::value_variants().iter().filter_map(|event| event.to_possible_value()).map(|value| value.get_name().to_owned()).collect()
+    }
+
+    #[test]
+    fn hook_argv_matches_clap_for_every_event() {
+        for event in event_names() {
+            for args in [
+                vec!["hook", event.as_str()],
+                vec!["hook", "claude", event.as_str()],
+                vec!["hook", "codex", event.as_str()],
+                vec!["hook", "json", event.as_str()],
+            ] {
+                let got = hook_argv(&argv(&args));
+                assert!(got.is_some(), "{args:?} did not take the fast path");
+                assert_eq!(got, clap_call(&args), "{args:?}");
+            }
+            // The short form is the claude harness, as the dispatch arm does.
+            let short = hook_argv(&argv(&["hook", event.as_str()]));
+            assert_eq!(short.map(|(harness, _)| harness), Some(Harness::Claude), "{event}");
+        }
+    }
+
+    #[test]
+    fn hook_argv_falls_through_on_other_arguments() {
+        for args in [
+            vec!["hook"],
+            vec!["hook", "claude"],
+            vec!["hook", "claude", "pre-tool-use", "extra"],
+            vec!["hook", "--help"],
+            vec!["hook", "claude", "pre-tool-use", "--toon"],
+            vec!["status"],
+            vec!["hook", "nope"],
+        ] {
+            assert_eq!(hook_argv(&argv(&args)), None, "{args:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_argv_falls_through_on_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let args = [OsString::from("hook"), OsString::from_vec(vec![b'p', 0xff])];
+        assert_eq!(hook_argv(&args), None);
+    }
 }

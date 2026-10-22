@@ -47,12 +47,16 @@ pub struct Event {
     pub line: usize,
 }
 
+/// The lowercase hex digit of each half byte.
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// The first 16 hex characters of the SHA-256 of `bytes`.
 pub fn short_hash(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(HASH_LEN);
     for b in digest.iter().take(HASH_LEN / 2) {
-        hex.push_str(&format!("{b:02x}"));
+        hex.push(HEX[usize::from(b >> 4)] as char);
+        hex.push(HEX[usize::from(b & 0x0f)] as char);
     }
     hex
 }
@@ -67,11 +71,20 @@ pub(crate) fn now_ms() -> u64 {
 /// ties. A last line with no newline is a crashed write and is skipped with a
 /// warning. Malformed lines and parents that name no line are errors.
 pub fn read(path: &Path) -> Result<(Vec<Event>, Vec<Diagnostic>)> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(Error::io(path, e)),
-    };
+    Ok(parse(&read_text(path)?))
+}
+
+/// The text of a ledger, where a missing file is an empty one.
+fn read_text(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(Error::io(path, e)),
+    }
+}
+
+/// The events of a ledger text in event order, with the diagnostics.
+fn parse(text: &str) -> (Vec<Event>, Vec<Diagnostic>) {
     let mut diags = Vec::new();
     let mut events: Vec<Event> = Vec::new();
     let mut seen = HashSet::new();
@@ -105,7 +118,7 @@ pub fn read(path: &Path) -> Result<(Vec<Event>, Vec<Diagnostic>)> {
             diags.push(Diagnostic::new(Rule::Ledger, ev.line, format!("parent {p} names no line, an event was edited or removed")));
         }
     }
-    Ok((order(events), diags))
+    (order(events), diags)
 }
 
 fn order(events: Vec<Event>) -> Vec<Event> {
@@ -140,8 +153,17 @@ fn order(events: Vec<Event>) -> Vec<Event> {
 /// crashed write is removed first; the caller's lock means no writer is still
 /// working on it.
 pub(crate) fn append_line(path: &Path, line: &str) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| Error::io(path, e))?;
+    let mut file = open_append(path)?;
     let old = std::fs::read(path).map_err(|e| Error::io(path, e))?;
+    write_after(&mut file, path, line, &old)
+}
+
+fn open_append(path: &Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| Error::io(path, e))
+}
+
+/// Removes the partial last line `old` ends with, then appends `line` and a newline.
+fn write_after(file: &mut std::fs::File, path: &Path, line: &str, old: &[u8]) -> Result<()> {
     if !old.is_empty() && !old.ends_with(b"\n") {
         let keep = old.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
         file.set_len(keep as u64).map_err(|e| Error::io(path, e))?;
@@ -284,7 +306,9 @@ pub fn append(path: &Path, lock: &Lock, kind: Kind, data: Map<String, Value>) ->
 /// seal covers the kind, time and parents that this call picks, so a sealed
 /// event copied after a later one no longer checks.
 pub fn append_sealed(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Value>, key: Option<&[u8]>) -> Result<Event> {
-    let (events, _) = read(path)?;
+    // One read of the ledger: it tells the parents and the partial last line.
+    let text = read_text(path)?;
+    let (events, _) = parse(&text);
     let time = now_ms();
     let parents = heads(&events);
     let mut data = data;
@@ -294,7 +318,8 @@ pub fn append_sealed(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Va
     }
     let mut ev = Event { kind, time, parents, data, hash: String::new(), line: 0 };
     let line = serde_json::to_string(&ev).map_err(|e| Error::internal(format!("ledger event does not serialize: {e}")))?;
-    append_line(path, &line)?;
+    let mut file = open_append(path)?;
+    write_after(&mut file, path, &line, text.as_bytes())?;
     ev.hash = short_hash(line.as_bytes());
     Ok(ev)
 }

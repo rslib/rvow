@@ -74,11 +74,42 @@ impl Runner {
     /// The identity of the runner that a vow records for each task that uses
     /// it: every field that changes what the command runs.
     pub fn hash(&self) -> String {
-        // `build` and `artifacts` only decide whether a proof may be kept, so they stay out of the stamp.
-        let own = Runner { build: None, artifacts: Vec::new(), ..self.clone() };
-        let text = serde_json::to_string(&own).map_err(|e| Error::internal(format!("runner does not serialize: {e}")));
+        let text = serde_json::to_string(&self.stamp()).map_err(|e| Error::internal(format!("runner does not serialize: {e}")));
         sha256_hex(text.unwrap_or_default().as_bytes())
     }
+
+    /// The stamp as a borrowed view, so no runner is cloned. `build` and
+    /// `artifacts` only decide whether a proof may be kept, so the view leaves
+    /// them out.
+    fn stamp(&self) -> Stamp<'_> {
+        // Every field is named, so a new `Runner` field fails to compile here
+        // until it is added to the stamp or left out on purpose.
+        let Runner { run, params, default, needs, env, timeout, build: _, artifacts: _, always, extends } = self;
+        Stamp { run, params, default, needs, env, timeout: *timeout, artifacts: &[], always, extends: extends.as_deref() }
+    }
+}
+
+/// The serialized form of a runner stamp. The field order, the names and the
+/// skip rules match `Runner`, so the JSON is the one the derived form wrote.
+#[derive(Serialize)]
+struct Stamp<'a> {
+    run: &'a str,
+    params: &'a BTreeMap<String, Vec<String>>,
+    default: &'a BTreeMap<String, String>,
+    needs: &'a [String],
+    env: &'a BTreeMap<String, String>,
+    #[serde(serialize_with = "opt_duration::serialize", skip_serializing_if = "Option::is_none")]
+    timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "slice_empty")]
+    artifacts: &'a [String],
+    #[serde(skip_serializing_if = "slice_empty")]
+    always: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extends: Option<&'a str>,
+}
+
+fn slice_empty<T>(items: &&[T]) -> bool {
+    items.is_empty()
 }
 
 /// Appends the entries of `more` that `list` does not hold yet.
@@ -558,6 +589,25 @@ mod tests {
         let with = runners(ARTIFACT_RUNNER).remove("cpp").unwrap();
         let without = Runner { build: None, artifacts: Vec::new(), ..with.clone() };
         assert_eq!(with.hash(), without.hash(), "adding build and artifacts must not make old proofs runner-changed");
+    }
+
+    #[test]
+    fn runner_hash_hashes_the_derived_json() {
+        let base = Runner { build: None, artifacts: Vec::new(), ..runners(ARTIFACT_RUNNER).remove("cpp").unwrap() };
+        let full = Runner {
+            timeout: Some(Duration::from_secs(90)),
+            extends: Some("base".to_string()),
+            always: vec!["test ! -e old.h".to_string()],
+            ..base.clone()
+        };
+        // The borrowed view writes the JSON the derived form writes.
+        assert_eq!(serde_json::to_string(&full.stamp()).unwrap(), serde_json::to_string(&full).unwrap());
+        // The stamp leaves build and artifacts out, so the hash is the one of
+        // the runner with both cleared.
+        let with = Runner { build: Some("cmake --build build".to_string()), artifacts: vec!["build/a".to_string()], ..base };
+        let cleared = Runner { build: None, artifacts: Vec::new(), ..with.clone() };
+        assert_eq!(with.hash(), sha256_hex(serde_json::to_string(&cleared).unwrap().as_bytes()));
+        assert_eq!(full.hash(), sha256_hex(serde_json::to_string(&full).unwrap().as_bytes()));
     }
 
     const SHARED: &str = "[runners.base]\nbuild = \"cmake --build build --target {target}\"\nneeds = [\"build\"]\nartifacts = [\"build/lib/*.so\"]\nenv = { ZERO_AR_DATE = \"1\" }\nalways = [\"test ! -e include/old.h\"]\n\n[runners.cpp]\nextends = \"base\"\nrun = \"cmake --build build --target {target} && ctest --test-dir build -R '^{target}$'\"\nartifacts = [\"build/tests/{target}\"]\nenv = { CCACHE_DISABLE = \"1\" }\n";

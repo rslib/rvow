@@ -71,6 +71,27 @@ const RESULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// The file name prefix of a saved compare result.
 const RESULT_PREFIX: &str = "syntax-";
 
+/// The results folders this process already pruned. A compare saves on every
+/// run, and walking the folder each time costs a read for every result file.
+/// In practice rvow has one home, so this prunes once per process.
+static PRUNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+
+/// The most results folders to remember as pruned.
+const PRUNED_LIMIT: usize = 64;
+
+/// Prunes `dir` at most once per process.
+fn prune_once(dir: &Path) {
+    let Ok(mut pruned) = PRUNED.get_or_init(Default::default).lock() else { return };
+    if pruned.contains(dir) {
+        return;
+    }
+    if pruned.len() >= PRUNED_LIMIT {
+        pruned.clear();
+    }
+    pruned.insert(dir.to_path_buf());
+    prune_results(dir);
+}
+
 /// Removes the saved compare results in `dir` that were last changed more
 /// than `RESULT_MAX_AGE` ago. Only files named like a result are touched,
 /// and a file that cannot be read or removed is left for the next save.
@@ -158,15 +179,16 @@ fn read_result(home: &Path, entry: &Entry, before: &str, after: &str) -> Option<
 }
 
 /// Saves the compare result, and removes saved results older than 30 days.
-/// A write failure is ignored: the caller still returns the computed
-/// outcome, and the next compare tries again.
+/// The prune runs at most once per process for this folder. A write failure
+/// is ignored: the caller still returns the computed outcome, and the next
+/// compare tries again.
 fn write_result(home: &Path, entry: &Entry, before: &str, after: &str, outcome: Compare) {
     let file = result_file(home, entry, before, after);
     let Some(dir) = file.parent() else { return };
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    prune_results(dir);
+    prune_once(dir);
     let tmp = dir.join(format!(".rvow-compare-{}.tmp", std::process::id()));
     if std::fs::write(&tmp, result_text(outcome)).is_err() {
         return;
@@ -327,6 +349,21 @@ mod tests {
         std::fs::write(path, "same").unwrap();
         let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         file.set_modified(SystemTime::now() - DAY * days as u32).unwrap();
+    }
+
+    #[test]
+    fn cache_limit_prune_runs_once() {
+        let tmp = home();
+        let home = tmp.0.clone();
+        let first = home.join("grammars/syntax-first");
+        aged(&first, 31);
+        write_result(&home, &entry(), "a", "b", Compare::Different);
+        assert!(!first.exists(), "the first save prunes the folder");
+        let second = home.join("grammars/syntax-second");
+        aged(&second, 31);
+        write_result(&home, &entry(), "c", "d", Compare::Different);
+        assert!(second.exists(), "a later save leaves the folder alone");
+        assert!(result_file(&home, &entry(), "c", "d").is_file());
     }
 
     #[test]

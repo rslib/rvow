@@ -376,14 +376,6 @@ fn delta_items(before: &BTreeMap<String, String>, after: &BTreeMap<String, Strin
     }
 }
 
-/// The tasks of the change as the accepted baseline recorded them, for
-/// callers that compare the plan then and now, such as the amend baseline.
-/// The snapshot stores each tasks file by its content hash, as `drift` reads
-/// it, so both stay on the same bytes.
-pub(crate) fn baseline_tasks(project: &Project, change: &Active) -> Result<Vec<Task>> {
-    Ok(baseline_texts(project, change)?.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default())
-}
-
 /// The baseline's tasks.md and delta files. A placeholder that `rvow ids`
 /// replaced with an id minted for this change reads as that id, when the
 /// minted item has the same content; any other difference stays drift.
@@ -478,6 +470,18 @@ pub fn drift(project: &Project, top: &Path, config: &Config, change: &Active) ->
 /// and tests with a temporary home use this and skip the `RVOW_HOME`
 /// lookup. A home of `None` keeps the missing-home item per file.
 pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, config: &Config, change: &Active) -> Result<Vec<Item>> {
+    drift_over(project, home, top, config, change, &crate::change::living(project)?)
+}
+
+/// `drift_with_home` over the living specs that the caller already loaded.
+pub fn drift_over(
+    project: &Project,
+    home: Option<&Path>,
+    top: &Path,
+    config: &Config,
+    change: &Active,
+    living: &[crate::change::CapSpec],
+) -> Result<Vec<Item>> {
     let Some(base) = change.baseline() else {
         return Ok(Vec::new());
     };
@@ -498,18 +502,17 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
         out.push(item(Class::Free, "design changed"));
     }
 
-    let old_tasks = baseline_tasks(project, change)?;
+    let old_texts = baseline_texts(project, change)?;
+    let old_tasks = old_texts.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default();
     task_items(&old_tasks, &loaded.tasks, &mut out);
     out.extend(runner_items(project, base, &loaded.tasks));
 
     let prefix = format!("{DELTAS}/");
-    let old_deltas: BTreeMap<String, String> =
-        baseline_texts(project, change)?.into_iter().filter(|(rel, _)| rel.starts_with(&prefix)).collect();
+    let old_deltas: BTreeMap<String, String> = old_texts.into_iter().filter(|(rel, _)| rel.starts_with(&prefix)).collect();
     let new_deltas: BTreeMap<String, String> = loaded.texts.iter().filter(|(rel, _)| rel.starts_with(&prefix)).cloned().collect();
     delta_items(&old_deltas, &new_deltas, &mut out);
 
-    let (living, _) = crate::change::load_living(project)?;
-    for (id, now) in change.moved_bases(&living) {
+    for (id, now) in change.moved_bases(living) {
         let what = match now {
             Some(_) => format!("the living {id} changed since its base was recorded; update the delta to the new living text"),
             None => {
@@ -589,7 +592,7 @@ pub fn drift_with_home(project: &Project, home: Option<&Path>, top: &Path, confi
             out.push(item(Class::Weaken, format!("protected file {rel} added")));
         }
     }
-    out.extend(crate::guard::drift(project, top, change));
+    out.extend(crate::guard::drift_with(project, top, change, home, &config.test_queries));
     out.sort_by_key(|i| i.class);
     Ok(out)
 }

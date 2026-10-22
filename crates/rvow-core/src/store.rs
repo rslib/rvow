@@ -446,8 +446,77 @@ fn index_hit(top: &Path, home: &Path, common: &str) -> Option<Project> {
     }
     let meta = read_meta(&entry.project).ok()?;
     let shared = meta.roots.iter().find(|r| entry.roots.contains(r))?;
-    git::run(top, &["cat-file", "-e", &format!("{shared}^{{commit}}")]).ok()?;
+    // Most hooks find the commit on disk; only a miss costs a git process.
+    if !has_object(&Path::new(common).join("objects"), shared) {
+        git::run(top, &["cat-file", "-e", &format!("{shared}^{{commit}}")]).ok()?;
+    }
     Some(Project { root: entry.project, meta })
+}
+
+/// Whether the object `hex` is in the object store at `objects`, as a loose
+/// object or in a version 2 pack index, read without a git process. `false`
+/// means "not seen here", not "missing": an alternate store, a multi-pack
+/// index alone or an unknown format is left to git. Unlike `cat-file -e
+/// <id>^{commit}` it does not check the type: the id hashes the content that
+/// the project recorded as a root commit.
+fn has_object(objects: &Path, hex: &str) -> bool {
+    let Some(id) = hex_bytes(hex) else { return false };
+    let (dir, file) = hex.split_at(2);
+    if objects.join(dir).join(file).is_file() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(objects.join("pack")) else { return false };
+    entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "idx")).any(|p| pack_index_has(&p, &id))
+}
+
+/// The bytes of a lowercase hex object id of 40 or 64 digits.
+fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if !matches!(hex.len(), 40 | 64) {
+        return None;
+    }
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    hex.as_bytes().chunks(2).map(|pair| Some(digit(*pair.first()?)? << 4 | digit(*pair.get(1)?)?)).collect()
+}
+
+/// Whether the version 2 pack index at `path` lists `id`: a binary search in
+/// the fan-out range of its first byte, reading one id per step.
+#[cfg(unix)]
+fn pack_index_has(path: &Path, id: &[u8]) -> bool {
+    use std::os::unix::fs::FileExt;
+    const MAGIC: [u8; 8] = [0xff, b't', b'O', b'c', 0, 0, 0, 2];
+    const IDS_AT: u64 = 8 + 256 * 4;
+    let Ok(file) = File::open(path) else { return false };
+    let mut head = [0u8; IDS_AT as usize];
+    if file.read_exact_at(&mut head, 0).is_err() || head.get(..8) != Some(&MAGIC[..]) {
+        return false;
+    }
+    let fan = |i: usize| head.get(8 + i * 4..12 + i * 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
+    let Some(&first) = id.first() else { return false };
+    let first = usize::from(first);
+    let lo = if first == 0 { Some(0) } else { fan(first - 1) };
+    let (Some(mut lo), Some(mut hi)) = (lo, fan(first)) else { return false };
+    let mut found = vec![0u8; id.len()];
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if file.read_exact_at(&mut found, IDS_AT + u64::from(mid) * id.len() as u64).is_err() {
+            return false;
+        }
+        match found.as_slice().cmp(id) {
+            std::cmp::Ordering::Equal => return true,
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn pack_index_has(_path: &Path, _id: &[u8]) -> bool {
+    false
 }
 
 /// Records the project of `common`. The index is a cache, so a failed write is
@@ -535,6 +604,20 @@ fn open_lock(path: &Path) -> Result<File> {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
+
+    #[test]
+    fn has_object_finds_a_loose_and_a_packed_commit_and_not_a_missing_one() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let head = git::run(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let objects = repo.join(".git/objects");
+        assert!(has_object(&objects, &head), "a loose commit is found");
+        git(&repo, &["gc", "-q"]);
+        assert!(!objects.join(&head[..2]).join(&head[2..]).exists(), "gc packed the commit");
+        assert!(has_object(&objects, &head), "a packed commit is found");
+        assert!(!has_object(&objects, &"0".repeat(40)), "a missing id is not");
+        assert!(!has_object(&objects, "not-hex"), "a malformed id is not");
+    }
 
     fn ignored(repo: &Path, rel: &str) -> bool {
         std::process::Command::new(git::bin())

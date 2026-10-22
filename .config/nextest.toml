@@ -20,7 +20,8 @@ serial = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = """
 binary_id(rvow::main) and (
-    test(/^confirm_friction::/)
+    test(/^alloc::/)
+  | test(/^confirm_friction::/)
   | test(/^syntax_drift::/)
   | test(/^syntax_units::/)
 )

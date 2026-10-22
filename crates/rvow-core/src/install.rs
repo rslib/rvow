@@ -392,14 +392,19 @@ pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
 /// that is not installed is not listed.
 pub fn stale_managed_files(claude_dir: &Path, mod_dir: &Path, pi_dir: Option<&Path>, skill_text: &str) -> Vec<PathBuf> {
     let mut stale = Vec::new();
+    // The two marked forms of the skill, built once for its three copies.
+    let marked = marked_skill(skill_text);
+    let (front, body) = split_front_matter(skill_text);
+    let legacy = format!("{front}<!-- {MARK}{} -->\n{body}", sha256_hex(body.as_bytes()));
+    let skill_current = |t: &str| t == skill_text || t == marked || t == legacy;
     let mut check = |path: PathBuf, current: &dyn Fn(&str) -> bool| {
         if std::fs::read_to_string(&path).is_ok_and(|installed| !current(&installed)) {
             stale.push(path);
         }
     };
-    check(claude_dir.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
+    check(claude_dir.join("skills/rvow/SKILL.md"), &skill_current);
     let plugin = mod_dir.join("plugins/rvow");
-    check(plugin.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
+    check(plugin.join("skills/rvow/SKILL.md"), &skill_current);
     check(plugin.join("hooks/hooks.json"), &|t| t == MOD_HOOKS_JSON);
     check(plugin.join("types/index.d.ts"), &|t| t == MOD_TYPES);
     for (name, src) in MOD_MODULES {
@@ -408,13 +413,20 @@ pub fn stale_managed_files(claude_dir: &Path, mod_dir: &Path, pi_dir: Option<&Pa
     check(plugin.join("hooks/register.tsx"), &|t| {
         // The installed copy holds the binary path where the template holds the placeholder.
         let literal = t.lines().find_map(|l| l.split_once("const INSTALLED_BIN = ").map(|(_, v)| v.trim().to_string()));
-        literal.is_some_and(|bin| t == MOD_REGISTER.replace("'__RVOW_BIN__'", &bin))
+        literal.is_some_and(|bin| {
+            t.len() + "'__RVOW_BIN__'".len() == MOD_REGISTER.len() + bin.len() && t == MOD_REGISTER.replace("'__RVOW_BIN__'", &bin)
+        })
     });
     if let Some(pi) = pi_dir {
-        check(pi.join("skills/rvow/SKILL.md"), &|t| t == skill_text || skill_is_current(t, skill_text));
+        check(pi.join("skills/rvow/SKILL.md"), &skill_current);
         let dir = pi.join("extensions/rvow");
         for (name, body) in std::iter::once(("index.ts", PI_EXTENSION)).chain(PI_MODULES) {
-            check(dir.join(name), &|t| t == format!("// {MARK}{}\n{body}", sha256_hex(body.as_bytes())));
+            // The header is `// <MARK><64 hex digits>\n`, so only a file of that length is hashed.
+            check(dir.join(name), &|t| {
+                t.len() == 3 + MARK.len() + 64 + 1 + body.len()
+                    && t.ends_with(body)
+                    && t == format!("// {MARK}{}\n{body}", sha256_hex(body.as_bytes()))
+            });
         }
     }
     stale

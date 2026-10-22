@@ -19,6 +19,29 @@ const ENV_TIMEOUT: Duration = Duration::from_secs(30);
 const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/";
 
 pub fn globset(patterns: &[String]) -> Result<GlobSet> {
+    // A compiled set is a pure function of its patterns, and one hook call asks
+    // for the same few sets many times; building one compiles every regex.
+    thread_local! {
+        static SETS: std::cell::RefCell<Vec<(Vec<String>, GlobSet)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if let Some(set) = SETS.with(|sets| sets.borrow().iter().find(|(p, _)| p == patterns).map(|(_, set)| set.clone())) {
+        return Ok(set);
+    }
+    let set = build_globset(patterns)?;
+    SETS.with(|sets| {
+        let mut sets = sets.borrow_mut();
+        if sets.len() >= GLOBSETS_KEPT {
+            sets.remove(0);
+        }
+        sets.push((patterns.to_vec(), set.clone()));
+    });
+    Ok(set)
+}
+
+/// The compiled glob sets each thread keeps, oldest dropped first.
+const GLOBSETS_KEPT: usize = 32;
+
+fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     let mut b = GlobSetBuilder::new();
     for p in patterns {
         let glob = GlobBuilder::new(p)
@@ -137,7 +160,18 @@ pub fn env(top: &Path, config: &Config) -> Result<Env> {
     env_with(top, config, &[])
 }
 
+/// The environment to compare with recorded proofs, without the CPU model,
+/// cores and memory: no proof key reads them, and on macOS each one starts a
+/// `sysctl` process. A proof that records its environment uses `env`.
+pub fn check_env(top: &Path, config: &Config) -> Result<Env> {
+    env_parts(top, config, &[], false)
+}
+
 pub(crate) fn env_with(top: &Path, config: &Config, overrides: &[(String, String)]) -> Result<Env> {
+    env_parts(top, config, overrides, true)
+}
+
+fn env_parts(top: &Path, config: &Config, overrides: &[(String, String)], with_machine: bool) -> Result<Env> {
     let mut commands = BTreeMap::new();
     for cmd in &config.env {
         let out = runner::run(cmd, top, overrides, ENV_TIMEOUT, &mut std::io::sink())?;
@@ -164,7 +198,7 @@ pub(crate) fn env_with(top: &Path, config: &Config, overrides: &[(String, String
             (k.clone(), value)
         })
         .collect();
-    let (cpu, cores, memory) = machine();
+    let (cpu, cores, memory) = if with_machine { machine() } else { (String::new(), None, None) };
     Ok(Env { os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(), commands, vars, cpu, cores, memory })
 }
 

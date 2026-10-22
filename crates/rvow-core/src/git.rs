@@ -5,14 +5,20 @@ use std::process::Command;
 
 use crate::error::{Error, Result};
 
-static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static BIN: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// The git binary to run: `RVOW_GIT` when it names a file, else `git`.
 /// A sandbox whose `git` on `PATH` cannot run sets `RVOW_GIT` to one that can.
 /// `EVAL_RVOW_GIT` is the same setting through the eval harness, whose
 /// sandbox passes only `EVAL_*` variables to the agent session.
+/// Resolved once per process; the one leaked string is the whole cost.
+pub fn bin_str() -> &'static str {
+    BIN.get_or_init(|| Box::leak(resolve().into_boxed_str()))
+}
+
+/// The git binary as an owned string, for a caller that keeps it.
 pub fn bin() -> String {
-    BIN.get_or_init(resolve).clone()
+    bin_str().to_string()
 }
 
 fn resolve() -> String {
@@ -142,16 +148,20 @@ fn cache_file() -> Option<PathBuf> {
     crate::store::home_dir().ok().filter(|home| home.is_dir()).map(|home| home.join("hook-state").join("git-bin"))
 }
 
+/// Removes the repository vars that a git hook sets for its own repository,
+/// which would override `-C`. Only a set var is removed: any removal makes the
+/// child's environment a copy of the whole parent environment.
+fn without_hook_env(cmd: &mut Command) -> &mut Command {
+    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        if std::env::var_os(var).is_some() {
+            cmd.env_remove(var);
+        }
+    }
+    cmd
+}
+
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(bin())
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        // A git hook sets these for its own repository, and they would
-        // override `-C`.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
+    let out = without_hook_env(Command::new(bin_str()).arg("-C").arg(dir).args(args))
         .output()
         .map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
     if !out.status.success() {
@@ -198,34 +208,82 @@ enum Question {
     Branch,
 }
 
-type Answers = std::sync::Mutex<std::collections::HashMap<(PathBuf, Question), String>>;
+type Answers = std::sync::Mutex<std::collections::HashMap<(PathBuf, Question), Known>>;
+
+/// The most answers this process keeps: a long-lived process with many
+/// folders would else grow the map without end.
+const ANSWER_LIMIT: usize = 256;
+
+/// One remembered answer, with the HEAD mtime it was stored under.
+struct Known {
+    answer: String,
+    /// The mtime of the repository's HEAD file when the answer was stored.
+    /// A change means HEAD moved, so the answer is stale. `None` for a
+    /// question HEAD cannot date, which is never stale.
+    head_mtime: Option<std::time::SystemTime>,
+}
 
 static ANSWERS: std::sync::OnceLock<Answers> = std::sync::OnceLock::new();
 
 /// Keeps the answers of `toplevel` and `branch` for the rest of the process.
 /// Only a hook turns it on: it runs for one tool call, and nothing moves HEAD
-/// meanwhile. A longer process could see a branch switch, so it never does.
+/// meanwhile. A longer process re-asks once HEAD moves, since a branch answer
+/// carries the mtime of the HEAD file it came from.
 pub fn remember_answers() {
     ANSWERS.get_or_init(Default::default);
+}
+
+/// Keeps one answer, clearing the map first when it is full.
+fn keep(map: &mut std::collections::HashMap<(PathBuf, Question), Known>, key: (PathBuf, Question), known: Known) {
+    if map.len() >= ANSWER_LIMIT {
+        map.clear();
+    }
+    map.insert(key, known);
+}
+
+/// The HEAD file of the repository that holds `dir`, from `dir/.git` or from
+/// the git dir a linked worktree's `.git` file names.
+fn head_path(dir: &Path) -> Option<PathBuf> {
+    let dot = dir.ancestors().map(|a| a.join(".git")).find(|p| p.exists())?;
+    if dot.is_dir() {
+        return Some(dot.join("HEAD"));
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    let git_dir = PathBuf::from(text.trim().strip_prefix("gitdir: ")?);
+    let git_dir = if git_dir.is_absolute() { git_dir } else { dot.parent()?.join(git_dir) };
+    Some(git_dir.join("HEAD"))
+}
+
+/// The mtime of the HEAD file that a branch answer depends on. Only a branch
+/// can change while the process lives, and only a moved HEAD changes it.
+fn head_mtime(dir: &Path, question: Question) -> Option<std::time::SystemTime> {
+    if question != Question::Branch {
+        return None;
+    }
+    std::fs::metadata(head_path(dir)?).ok()?.modified().ok()
 }
 
 fn answer(dir: &Path, question: Question, ask: impl FnOnce() -> Result<String>) -> Result<String> {
     let Some(answers) = ANSWERS.get() else { return ask() };
     let key = (dir.to_path_buf(), question);
-    if let Some(known) = answers.lock().ok().and_then(|a| a.get(&key).cloned()) {
+    let mtime = head_mtime(dir, question);
+    let known = answers.lock().ok().and_then(|a| a.get(&key).filter(|k| k.head_mtime == mtime).map(|k| k.answer.clone()));
+    if let Some(known) = known {
         return Ok(known);
     }
     let found = ask()?;
     if let Ok(mut a) = answers.lock() {
-        a.insert(key, found.clone());
+        keep(&mut a, key, Known { answer: found.clone(), head_mtime: mtime });
     }
     Ok(found)
 }
 
 /// Records the top folder of `dir` that another git call already printed.
 pub(crate) fn known_toplevel(dir: &Path, top: &Path) {
-    if let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) {
-        a.entry((dir.to_path_buf(), Question::Toplevel)).or_insert_with(|| top.display().to_string());
+    let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) else { return };
+    let key = (dir.to_path_buf(), Question::Toplevel);
+    if !a.contains_key(&key) {
+        keep(&mut a, key, Known { answer: top.display().to_string(), head_mtime: None });
     }
 }
 
@@ -237,8 +295,11 @@ pub(crate) fn known_branch(dir: &Path, head_file: &str) {
     if name.is_empty() || name == ".invalid" {
         return;
     }
-    if let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) {
-        a.entry((dir.to_path_buf(), Question::Branch)).or_insert_with(|| name.to_string());
+    let mtime = head_mtime(dir, Question::Branch);
+    let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) else { return };
+    let key = (dir.to_path_buf(), Question::Branch);
+    if !a.contains_key(&key) {
+        keep(&mut a, key, Known { answer: name.to_string(), head_mtime: mtime });
     }
 }
 
@@ -361,15 +422,9 @@ pub fn task_diff(top: &Path, base: &str, globs: &[String]) -> Result<TaskDiff> {
 /// `git diff --no-index /dev/null <file>`: the added-file diff of an
 /// untracked file. It exits 1 on a difference, which is the expected case.
 fn diff_no_index(top: &Path, rel: &str) -> Result<String> {
-    let out = Command::new(bin())
-        .arg("-C")
-        .arg(top)
-        .args(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output()
-        .map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
+    let mut cmd = Command::new(bin_str());
+    cmd.arg("-C").arg(top).args(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel]);
+    let out = without_hook_env(&mut cmd).output().map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
     match out.status.code() {
         Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string()),
         _ => Err(Error::new(
@@ -433,7 +488,7 @@ pub(crate) mod testrepo {
     /// Runs git with the user's global and system config ignored, so fixture
     /// repositories never depend on or sign with the user's settings.
     pub fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new(super::bin())
+        let ok = Command::new(super::bin_str())
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -471,10 +526,47 @@ mod tests {
         known_branch(&dir.join("a"), "ref: refs/heads/feat/x\n");
         known_branch(&dir.join("b"), "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n");
         known_branch(&dir.join("c"), "ref: refs/heads/.invalid\n");
-        let get = |d: &str| ANSWERS.get().unwrap().lock().unwrap().get(&(dir.join(d), Question::Branch)).cloned();
+        let get = |d: &str| ANSWERS.get().unwrap().lock().unwrap().get(&(dir.join(d), Question::Branch)).map(|k| k.answer.clone());
         assert_eq!(get("a").as_deref(), Some("feat/x"));
         assert_eq!(get("b"), None);
         assert_eq!(get("c"), None);
+    }
+
+    #[test]
+    fn cache_limit_answers_map_never_holds_more_than_the_limit() {
+        remember_answers();
+        let base = Path::new("/answer-limit-test");
+        for i in 0..ANSWER_LIMIT + 8 {
+            known_toplevel(&base.join(i.to_string()), &base.join("top"));
+        }
+        let len = ANSWERS.get().unwrap().lock().unwrap().len();
+        assert!(len <= ANSWER_LIMIT, "{len} answers kept over a limit of {ANSWER_LIMIT}");
+    }
+
+    #[test]
+    fn cache_limit_keep_clears_a_full_map_and_keeps_the_new_answer() {
+        let mut map = std::collections::HashMap::new();
+        for i in 0..(ANSWER_LIMIT * 2 + 4) {
+            let key = (PathBuf::from(i.to_string()), Question::Toplevel);
+            keep(&mut map, key.clone(), Known { answer: "top".to_string(), head_mtime: None });
+            assert!(map.len() <= ANSWER_LIMIT, "{} answers at {i}", map.len());
+            assert_eq!(map.get(&key).map(|k| k.answer.as_str()), Some("top"));
+        }
+    }
+
+    #[test]
+    fn cache_limit_branch_answer_refreshes_after_head_moves() {
+        remember_answers();
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        git(&repo, &["branch", "other"]);
+        assert_eq!(branch(&repo).unwrap().as_deref(), Some("main"));
+        git(&repo, &["checkout", "-q", "other"]);
+        // Both writes can land in one mtime tick, so the test moves HEAD on.
+        let head = repo.join(".git/HEAD");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+        std::fs::OpenOptions::new().write(true).open(&head).unwrap().set_modified(later).unwrap();
+        assert_eq!(branch(&repo).unwrap().as_deref(), Some("other"), "a moved HEAD is a miss");
     }
 
     #[cfg(unix)]
