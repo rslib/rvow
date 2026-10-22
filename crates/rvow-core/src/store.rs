@@ -15,6 +15,8 @@ pub const IDS_FILE: &str = "ids.jsonl";
 pub const LOCK_FILE: &str = ".lock";
 /// The local index in the rvow home from a repository to its project.
 pub const INDEX_FILE: &str = "project-index.json";
+/// The git common dirs whose pre-push gate `rvow install` wrote, local to one machine.
+pub const GATE_REPOS_FILE: &str = "gate-repos.json";
 /// The folder in the rvow home that holds one warm worktree per project.
 pub const WORKTREES_DIR: &str = "worktrees";
 pub const REPO_DIR: &str = "rvow";
@@ -163,7 +165,13 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         Mode::Home => {
             let key = format!("{}/{}", crate::seal::KEY_FOLDER, crate::seal::KEY_FILE);
             let mut lines = local_files().to_vec();
-            lines.extend([format!("{}/", crate::install::MARKETPLACE_DIR), key, INDEX_FILE.to_string(), format!("{WORKTREES_DIR}/")]);
+            lines.extend([
+                format!("{}/", crate::install::MARKETPLACE_DIR),
+                key,
+                INDEX_FILE.to_string(),
+                GATE_REPOS_FILE.to_string(),
+                format!("{WORKTREES_DIR}/"),
+            ]);
             add_lines(&home.join(".gitignore"), &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
     }
@@ -539,6 +547,41 @@ fn index_store(home: &Path, common: &str, project: &Project, roots: &[String]) {
     }
 }
 
+/// The git common dirs whose pre-push gate `rvow install` wrote. A missing or
+/// corrupt file is an empty list.
+pub fn gate_repos(home: &Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(home.join(GATE_REPOS_FILE)).ok().and_then(|t| serde_json::from_str::<Vec<PathBuf>>(&t).ok()).unwrap_or_default()
+}
+
+/// Remembers the gate at `common` once, so `rvow install --all` finds it again.
+/// The git common dir is the one `rev-parse --path-format=absolute` prints. The
+/// list is local to one machine, so a failed write is ignored, like the index's.
+pub fn remember_gate(home: &Path, common: &Path) {
+    let mut repos = gate_repos(home);
+    if repos.iter().any(|path| path == common) {
+        return;
+    }
+    repos.push(common.to_path_buf());
+    repos.sort();
+    let Ok(text) = serde_json::to_string(&repos) else {
+        return;
+    };
+    let tmp = home.join(format!("{GATE_REPOS_FILE}.{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, home.join(GATE_REPOS_FILE))).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    // A home made before this file existed lacks the ignore line `init` writes.
+    let ignore = home.join(".gitignore");
+    if ignore.is_file() {
+        let _ = add_lines(&ignore, &[GATE_REPOS_FILE]);
+    }
+}
+
+/// The git common dirs that the project index knows.
+pub fn indexed_repos(home: &Path) -> Vec<PathBuf> {
+    read_index(home).into_keys().map(PathBuf::from).collect()
+}
+
 fn walk(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
     if dir.join(PROJECT_FILE).is_file() {
         f(dir);
@@ -680,7 +723,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\nproject-index.json\nworktrees/\n"
+                ".lock\nhook-state/\nprovenance/\nhook-stats.jsonl\nleases.jsonl\nyolo.json\nrerun-cache.jsonl\nclaude-plugin/\n{key}\nproject-index.json\ngate-repos.json\nworktrees/\n"
             )
         );
 

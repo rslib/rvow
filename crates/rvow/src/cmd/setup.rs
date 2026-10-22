@@ -283,7 +283,7 @@ fn env_dir(k: &str) -> Option<PathBuf> {
     std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
-pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
+pub fn install(mode: ClaudeMode, scope: Scope, all: bool) -> Result<Reply> {
     let mut r = Reply::new();
     let rvow_home = store::home_dir()?;
     if let Some(pointer) = store::record_home(&rvow_home)? {
@@ -304,7 +304,11 @@ pub fn install(mode: ClaudeMode, scope: Scope) -> Result<Reply> {
         }
     }
     install_pi(&mut r, &home)?;
-    install_pre_push(&mut r, &rvow)?;
+    if all {
+        install_all_gates(&mut r, &rvow)?;
+    } else {
+        install_pre_push(&mut r, &rvow)?;
+    }
     let text = std::mem::take(&mut r.text);
     Ok(Reply::lines(text))
 }
@@ -351,10 +355,77 @@ fn install_pi(r: &mut Reply, home: &Path) -> Result<()> {
 
 fn install_pre_push(r: &mut Reply, rvow: &Path) -> Result<()> {
     match store::find(&cwd()?, &store::home_dir()?) {
-        Ok(Some(_)) => report(r, "pre-push gate", install::pre_push(&git::toplevel(&cwd()?)?, rvow)?),
+        Ok(Some(_)) => {
+            let top = git::toplevel(&cwd()?)?;
+            report(r, "pre-push gate", install::pre_push(&top, rvow)?);
+            remember_gate(&top)?;
+        }
         _ => r.line("pre-push gate: skipped, run rvow install inside a repository with an rvow tree"),
     }
     Ok(())
+}
+
+/// Remembers the git common dir of the work tree at `top`, where the gate that
+/// `rvow install` just wrote lives, so `rvow install --all` finds it again.
+fn remember_gate(top: &Path) -> Result<()> {
+    let common = PathBuf::from(git::run(top, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
+    if common.is_absolute() {
+        store::remember_gate(&store::home_dir()?, &common);
+    }
+    Ok(())
+}
+
+/// Refreshes every gate that `rvow install` remembered, naming each repository
+/// it leaves alone, then lists the repositories of the project index that have
+/// no gate.
+fn install_all_gates(r: &mut Reply, rvow: &Path) -> Result<()> {
+    let home = store::home_dir()?;
+    let remembered = store::gate_repos(&home);
+    let (mut refreshed, mut skipped) = (0, 0);
+    for common in &remembered {
+        if refresh_gate(r, common, rvow)? {
+            refreshed += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    for common in store::indexed_repos(&home) {
+        if remembered.contains(&common) || install::has_gate(&common) {
+            continue;
+        }
+        let Some(top) = install::work_tree(&common) else {
+            continue;
+        };
+        r.line(format!("pre-push gate: {} has none; run: cd {} && rvow install", top.display(), top.display()));
+    }
+    r.line(format!("pre-push gates: {refreshed} refreshed, {skipped} skipped"));
+    Ok(())
+}
+
+/// Refreshes the gate of `common`, or names why it leaves the repository as it
+/// is. Returns whether it refreshed the gate.
+fn refresh_gate(r: &mut Reply, common: &Path, rvow: &Path) -> Result<bool> {
+    let repo = install::work_tree(common).unwrap_or(common);
+    if !common.is_dir() {
+        r.line(format!("pre-push gate: {} is gone; skipped", repo.display()));
+        return Ok(false);
+    }
+    if !install::has_gate(common) {
+        r.line(format!("pre-push gate: {} has no rvow gate any more; skipped", repo.display()));
+        return Ok(false);
+    }
+    let Some(top) = install::work_tree(common) else {
+        r.line(format!("pre-push gate: {} is not a work tree; skipped", common.display()));
+        return Ok(false);
+    };
+    // With another hook manager, pre_push still re-pins the recorded binary and leaves the hook to the user.
+    let outcome = install::pre_push(top, rvow)?;
+    let refreshed = !matches!(outcome, install::Outcome::AddLine { .. });
+    if !refreshed {
+        r.line(format!("pre-push gate: another hook manager owns the hook of {}", top.display()));
+    }
+    report(r, "pre-push gate", outcome);
+    Ok(refreshed)
 }
 
 #[cfg(test)]

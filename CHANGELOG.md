@@ -121,6 +121,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow install --all`, which installs the user-level parts once and refreshes the pre-push gate of every repository where `rvow install` wrote one, so an upgrade needs one command.
+  It names each repository it skips and why, and lists known rvow repositories that have no gate with the command to add one.
+  The hooks deny `rvow install` in any form to agents, since it re-pins the gate to the binary on PATH.
 - Add `rvow land <change or task>`, which applies the proved task branches of a change onto the change branch in a temporary worktree, re-proves what moved, runs the gate and moves the change branch when it passes.
   It keeps each commit of a task, or makes one merge commit per task with `--merge`, and prints the steps to rebase, resolve and prove a task branch that conflicts.
 - Add `rvow delegate <task> --worktree [path]`, which makes a branch and a worktree for the task, with rgit when it is on `PATH`, or records a worktree that already exists.

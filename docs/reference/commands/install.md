@@ -14,3 +14,4 @@ rvow install [OPTIONS]
 | --- | --- |
 | `--claude` `<CLAUDE>` | How rvow joins Claude Code: a mod (plugin), or hooks in a settings file One of `mod`, `settings`. |
 | `--scope` `<SCOPE>` | For --claude settings: your user settings, or this repository's .claude/settings.json One of `user`, `project`. |
+| `--all` | Also refresh the pre-push gate of every repository where rvow install wrote one |

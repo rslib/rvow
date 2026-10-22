@@ -538,6 +538,20 @@ pub fn pre_push_line(rvow: &Path) -> String {
     format!("{} gate --strict --rerun || exit 1", shell_quote(&rvow.display().to_string()))
 }
 
+/// Whether the rvow gate is still at `common`: the record file `rvow install`
+/// writes, or a hook that runs the gate.
+pub fn has_gate(common: &Path) -> bool {
+    let hooks = common.join("hooks");
+    hooks.join(PRE_PUSH_RECORD).is_file()
+        || std::fs::read(hooks.join("pre-push")).is_ok_and(|script| String::from_utf8_lossy(&script).contains(PRE_PUSH_MARK))
+}
+
+/// The work tree of a git common dir: the folder that holds `.git`. A bare
+/// repository's common dir, or one named otherwise, belongs to no single work tree.
+pub fn work_tree(common: &Path) -> Option<&Path> {
+    if common.file_name().is_some_and(|name| name == ".git") { common.parent() } else { None }
+}
+
 /// Writes `.git/hooks/pre-push` when no other hook manager owns it.
 pub fn pre_push(top: &Path, rvow: &Path) -> Result<Outcome> {
     let script = pre_push_script(rvow)?;

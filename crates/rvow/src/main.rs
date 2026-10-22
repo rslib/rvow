@@ -153,6 +153,9 @@ enum Cmd {
         /// For --claude settings: your user settings, or this repository's .claude/settings.json.
         #[arg(long, value_enum, default_value = "user")]
         scope: Scope,
+        /// Also refresh the pre-push gate of every repository where rvow install wrote one.
+        #[arg(long)]
+        all: bool,
     },
     /// Report on a plan before accept: findings, checks that cannot run, open questions.
     Check {
@@ -538,7 +541,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
                 )),
             };
         }
-        Cmd::Install { claude, scope } => setup::install(claude, scope),
+        Cmd::Install { claude, scope, all } => setup::install(claude, scope, all),
         Cmd::Check { change } => plan::check(change.as_deref()),
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),

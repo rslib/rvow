@@ -130,6 +130,8 @@ mod hook_git_count;
 mod hook_json;
 #[path = "suite/hook_stats.rs"]
 mod hook_stats;
+#[path = "suite/install_all.rs"]
+mod install_all;
 #[path = "suite/judge.rs"]
 mod judge;
 #[path = "suite/land.rs"]

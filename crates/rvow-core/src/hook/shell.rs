@@ -468,6 +468,11 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
     let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
     match sub.as_str() {
         "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        // Install re-pins the pre-push gate to the binary on PATH, which an agent may have rebuilt.
+        "install" if !args.iter().any(|w| w == "--help" || w == "-h") => denial(
+            Rule::OwnerCommand,
+            "rvow install re-pins the pre-push gate and belongs to the user; the hooks deny it for agents. Ask the user to type ! rvow install, or ! rvow install --all".into(),
+        ),
         "review" if args.iter().any(|w| w == "--judge" || w.starts_with("--judge=")) => denial(
             Rule::OwnerCommand,
             "rvow review --judge records the judge note and belongs to the user; ask the user to run /rvow-judge".into(),
@@ -1292,4 +1297,27 @@ pub(super) fn bash_secret_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
             named.display()
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule_of(cmd: &str) -> Option<Rule> {
+        bash_rule(cmd).map(|d| d.rule)
+    }
+
+    #[test]
+    fn owner_install_is_denied_in_every_form() {
+        for cmd in ["rvow install", "rvow install --all", "cd /tmp && rvow install --all", "rvow --human install", "cargo run -- install"] {
+            assert_eq!(rule_of(cmd), Some(Rule::OwnerCommand), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn owner_install_help_is_allowed() {
+        for cmd in ["rvow install --help", "rvow install -h"] {
+            assert_eq!(rule_of(cmd), None, "{cmd}");
+        }
+    }
 }
