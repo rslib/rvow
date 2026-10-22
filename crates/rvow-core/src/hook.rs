@@ -1472,7 +1472,7 @@ pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&
         }
         items.push(OpenItem { kind: StopReason::Drift, text: unamended_text(&blocking) });
     }
-    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
+    let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, &living);
     let leases = lease::leases(project)?;
     // Only the newest accepted change is the agent's current plan; older changes on the branch are
     // enforced by the pre-push gate, and nagging about them each time hides the plan that matters.
@@ -1537,7 +1537,7 @@ fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Optio
         });
     }
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
+    let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, &living);
     let (mut proved, mut total, mut drift_count) = (0, 0, 0);
     for c in &queue {
         for t in &c.loaded.tasks {

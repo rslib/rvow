@@ -192,7 +192,7 @@ fn audit_hardening_explicit_home_and_requirement_checks() {
     let (living, _) = change::load_living(&f.project).unwrap();
     let changes = proof::active(&f.project, &living).unwrap();
     let cfg = config::load(&f.project, &f.home).unwrap();
-    let now = proof::Now { top: &f.repo, config: &cfg, env: fingerprint::env(&f.repo, &cfg).unwrap(), living: &living };
+    let now = proof::Now::new(&f.repo, &cfg, fingerprint::env(&f.repo, &cfg).unwrap(), &living);
     assert!(matches!(proof::state(&changes[0], &changes[0].loaded.tasks[0], &now).unwrap(), proof::State::Stale(_)));
     assert!(matches!(
         proof::state_for(&f.project, &f.home, &changes[0], &changes[0].loaded.tasks[0], &now).unwrap(),
@@ -231,7 +231,7 @@ fn audit_hardening_explicit_home_and_requirement_checks() {
     );
     assert_eq!(data["key"], keyed);
     let (living, _) = change::load_living(&f.project).unwrap();
-    let now = proof::Now { top: &f.repo, config: &cfg, env: fingerprint::env(&f.repo, &cfg).unwrap(), living: &living };
+    let now = proof::Now::new(&f.repo, &cfg, fingerprint::env(&f.repo, &cfg).unwrap(), &living);
     let changes = proof::active(&f.project, &living).unwrap();
     let active = &changes[0];
     let task = &active.loaded.tasks[0];

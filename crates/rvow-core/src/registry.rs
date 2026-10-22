@@ -17,6 +17,12 @@ struct Entry {
     time: u64,
 }
 
+#[derive(Deserialize)]
+struct Line<'a> {
+    id: &'a str,
+    change: Option<&'a str>,
+}
+
 /// Every id in the registry. A partial last line from a crashed write is
 /// ignored, and an unreadable line is an error.
 pub fn load(project: &Project) -> Result<HashSet<Id>> {
@@ -56,8 +62,9 @@ pub fn minted_for(project: &Project, change: &Id) -> Result<HashSet<Id>> {
     let want = change.to_string();
     Ok(text
         .lines()
-        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .filter(|e| e.change.as_deref() == Some(want.as_str()))
+        .filter(|line| line.contains(&want))
+        .filter_map(|line| serde_json::from_str::<Line<'_>>(line).ok())
+        .filter(|e| e.change == Some(want.as_str()))
         .filter_map(|e| e.id.parse::<Id>().ok())
         .collect())
 }
@@ -90,6 +97,24 @@ mod tests {
             assert!(seen.insert(mint(&p, &lock, Kind::Tsk, Some(&chg)).unwrap()));
         }
         assert_eq!(load(&p).unwrap(), seen);
+    }
+
+    #[test]
+    fn minted_for_returns_only_ids_of_its_change() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let chg: Id = "CHG-k3f9m2".parse().unwrap();
+        let lines = [
+            r#"{"id":"CHG-k3f9m2","time":1}"#,
+            r#"{"id":"TSK-aaaaaa","change":"CHG-k3f9m2","time":2}"#,
+            r#"{"id":"TSK-bbbbbb","change":"CHG-k3f9m2","time":3}"#,
+            r#"{"id":"TSK-cccccc","change":"CHG-zzzzzz","time":4}"#,
+            "not json CHG-k3f9m2",
+        ];
+        std::fs::write(p.root.join(IDS_FILE), lines.join("\n") + "\n").unwrap();
+        let want: HashSet<Id> = ["TSK-aaaaaa", "TSK-bbbbbb"].into_iter().map(|s| s.parse().unwrap()).collect();
+        assert_eq!(minted_for(&p, &chg).unwrap(), want);
     }
 
     #[test]

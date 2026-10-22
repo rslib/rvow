@@ -4,8 +4,9 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use rvow_core::error::Result;
 use rvow_core::store::Project;
@@ -175,6 +176,28 @@ impl Fx {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// `rvow` with `text` on stdin, as `rvow put` reads the replacement text.
+    fn put(&self, args: &[&str], text: &str) -> String {
+        let mut child = self.command().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(text.as_bytes()).unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "rvow {args:?}: {}", String::from_utf8_lossy(&out.stdout));
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Switches to a new branch whose plan waits for accept, with 6 tasks and no
+    /// accepted change.
+    fn waiting(&self) {
+        self.git(&["checkout", "-q", "-b", "waiting"]);
+        let out = self.rvow(&["new", "Waiting"]);
+        let id = field(&out, "created");
+        let proposal = "branch: waiting\n\n# Waiting\n\n## Why\nIt helps.\n\n## What changes\n- One thing.\n\n## Out of scope\nNone.\n";
+        self.put(&["put", &id, "proposal"], proposal);
+        self.put(&["put", &id, "tasks"], &tasks());
+    }
+
     /// Points this process's env at the fixture, as the CLI that runs the hooks has it.
     fn set_env(&self) {
         unsafe {
@@ -301,7 +324,7 @@ fn alloc_harness_counts_a_known_allocation() {
 }
 
 /// The steady-state count of one PreToolUse Edit call.
-const PRE_TOOL_USE_EDIT: usize = 17218; // trunk d05d6ee: 86090
+const PRE_TOOL_USE_EDIT: usize = 5400; // measured 2026-10-22 on macOS: 4902; budget +10% for other platforms; trunk d05d6ee: 86090
 
 #[test]
 fn alloc_pre_tool_use_edit() {
@@ -313,7 +336,7 @@ fn alloc_pre_tool_use_edit() {
 }
 
 /// The steady-state count of one PreToolUse Bash call.
-const PRE_TOOL_USE_BASH: usize = 1512; // trunk d05d6ee: 7560
+const PRE_TOOL_USE_BASH: usize = 1510; // measured 2026-10-22 on macOS: 1365; budget +10% for other platforms; trunk d05d6ee: 7560
 
 #[test]
 fn alloc_pre_tool_use_bash() {
@@ -332,7 +355,7 @@ fn alloc_pre_tool_use_bash() {
 }
 
 /// The steady-state count of one PostToolUse call.
-const POST_TOOL_USE: usize = 257; // trunk d05d6ee: 1288
+const POST_TOOL_USE: usize = 120; // measured 2026-10-22 on macOS: 103; budget +10% for other platforms; trunk d05d6ee: 1288
 
 #[test]
 fn alloc_post_tool_use() {
@@ -344,7 +367,7 @@ fn alloc_post_tool_use() {
 }
 
 /// The steady-state count of one Stop call.
-const STOP: usize = 13205; // trunk d05d6ee: 66025
+const STOP: usize = 6280; // measured 2026-10-22 on macOS: 5704; budget +10% for other platforms; trunk d05d6ee: 66025
 
 #[test]
 fn alloc_stop() {
@@ -356,7 +379,7 @@ fn alloc_stop() {
 }
 
 /// The steady-state count of one SessionStart call.
-const SESSION_START: usize = 5836; // trunk d05d6ee: 29184
+const SESSION_START: usize = 4300; // measured 2026-10-22 on macOS: 3902; budget +10% for other platforms; trunk d05d6ee: 29184
 
 #[test]
 fn alloc_session_start() {
@@ -374,8 +397,26 @@ fn alloc_session_start() {
     assert!(count <= SESSION_START, "alloc session_start: count={count} bytes={bytes} over {SESSION_START}");
 }
 
+/// The steady-state count of one SessionStart call while a plan waits for accept.
+const SESSION_START_WAITING: usize = 34070; // measured 2026-10-22 on macOS: 30971; budget +10% for other platforms
+
+#[test]
+fn alloc_session_start_with_a_waiting_plan() {
+    let fx = Fx::new("start-waiting");
+    fx.waiting();
+    let mut n = 0;
+    let (count, bytes) = counted(&fx, |project, home, _cwd| {
+        n += 1;
+        let input =
+            json!({ "session_id": format!("{SESSION}-w{n}"), "hook_event_name": "SessionStart", "source": "startup", "cwd": fx.repo() });
+        rvow_core::hook::claude_session_start(Some(project), home, &input, &[])
+    });
+    eprintln!("alloc session_start_waiting: count={count} bytes={bytes}");
+    assert!(count <= SESSION_START_WAITING, "alloc session_start_waiting: count={count} bytes={bytes} over {SESSION_START_WAITING}");
+}
+
 /// The steady-state count of one view call, the status line's source.
-const VIEW: usize = 13770; // trunk d05d6ee: 68850
+const VIEW: usize = 10450; // measured 2026-10-22 on macOS: 9498; budget +10% for other platforms; trunk d05d6ee: 68850
 
 #[test]
 fn alloc_view() {

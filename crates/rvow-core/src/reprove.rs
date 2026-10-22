@@ -29,7 +29,7 @@ pub fn ready(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> 
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let mut out = Vec::new();
     for c in proof::on_branch(&changes, &branch) {
         let mut stale = false;

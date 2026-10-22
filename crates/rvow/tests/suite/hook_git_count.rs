@@ -77,11 +77,16 @@ impl Fx {
 
     /// Runs `rvow hook claude <event>` on `payload` through the counting git.
     fn hook(&self, event: &str, payload: Value) {
+        self.hook_through(event, payload, &self.counting_git());
+    }
+
+    /// Runs `rvow hook claude <event>` on `payload` through `git`.
+    fn hook_through(&self, event: &str, payload: Value, git: &std::path::Path) {
         let mut child = self
             .cmd(RVOW)
             .arg("hook")
             .args(["claude", event])
-            .env("RVOW_GIT", self.counting_git())
+            .env("RVOW_GIT", git)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -129,6 +134,164 @@ impl Fx {
         assert!(fx.cmd(RVOW).arg("init").output().unwrap().status.success());
         fx
     }
+}
+
+impl Fx {
+    /// Runs `rvow <args>` with `stdin` and returns its stdout.
+    fn rvow(&self, args: &[&str], stdin: &str) -> String {
+        let mut child = self.cmd(RVOW).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "rvow {args:?} exited {}: {}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A backlog plan on `main` of two tasks whose scopes name `files`.
+    fn plan(&self, title: &str, files: &str) -> String {
+        let out = self.rvow(&["new", title], "");
+        let id = out.lines().find_map(|l| l.strip_prefix("created: ")).map(|l| l.split(' ').next().unwrap_or(l)).unwrap().to_string();
+        let proposal = "branch: main\n\n# A plan\n\n## Why\nIt helps.\n\n## What changes\n- One thing.\n\n## Out of scope\nNone.\n";
+        self.rvow(&["put", &id, "proposal"], proposal);
+        let tasks = format!(
+            "- TSK-new1 First\n  verify: test -f a.txt\n  files: {files}\n- TSK-new2 Second\n  verify: test -f b.txt\n  files: {files}\n"
+        );
+        self.rvow(&["put", &id, "tasks"], &tasks);
+        id
+    }
+
+    /// The number of git processes one SessionStart call with three waiting
+    /// plans started.
+    fn waiting_plan_session_start_git_count(&self) -> usize {
+        std::fs::write(self.count_file(), "").unwrap();
+        self.hook("session-start", json!({"cwd": self.repo(), "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}));
+        std::fs::read_to_string(self.count_file()).unwrap_or_default().lines().count()
+    }
+}
+
+/// The waiting plans the session-start hook reports on.
+const WAITING_PLANS: usize = 3;
+
+/// Before the listing was shared, session-start started 10 git processes with
+/// these 3 plans: one `ls-tree` per plan from each of three rules, and one more.
+const BEFORE: usize = 10;
+
+/// After: one shared `ls-tree` for the whole call, and the one other process.
+const AFTER: usize = 2;
+
+#[test]
+fn hook_git_count_a_waiting_plan_session_start_lists_the_tree_once() {
+    let fx = Fx::new("waiting");
+    for n in 0..WAITING_PLANS {
+        fx.plan(&format!("Plan {n}"), "a.txt");
+    }
+    let count = fx.waiting_plan_session_start_git_count();
+    eprintln!("session-start with {WAITING_PLANS} waiting plans: {count} git processes");
+    assert!(count > 0, "the counting git never ran");
+    assert!(
+        count <= AFTER,
+        "session-start with {WAITING_PLANS} waiting plans started {count} git processes, at most {AFTER} allowed (it was {BEFORE})"
+    );
+}
+
+impl Fx {
+    /// A git that logs its arguments, one line per process, so a test can
+    /// count one subcommand.
+    fn logging_git(&self) -> PathBuf {
+        let out = Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
+        let real = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(!real.is_empty(), "the test needs a git on PATH");
+        let path = self.root.join("logging-git.sh");
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n", self.count_file().display(), real);
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    /// An accepted change on `main` with `TASKS_PER_CHANGE` tasks over `a.txt`,
+    /// the last one unproved, so the stop hook still holds the session.
+    fn accepted_plan(&self, title: &str) -> String {
+        let out = self.rvow(&["new", title], "");
+        let id = out.lines().find_map(|l| l.strip_prefix("created: ")).map(|l| l.split(' ').next().unwrap_or(l)).unwrap().to_string();
+        let proposal = "branch: main\n\n# A plan\n\n## Why\nIt helps.\n\n## What changes\n- One thing.\n\n## Out of scope\nNone.\n";
+        self.rvow(&["put", &id, "proposal"], proposal);
+        let mut tasks = String::new();
+        for n in 1..=TASKS_PER_CHANGE {
+            tasks.push_str(&format!("- TSK-new{n} Task {n}\n  verify: test -f a.txt\n  files: a.txt\n"));
+        }
+        self.rvow(&["put", &id, "tasks"], &tasks);
+        self.rvow(&["accept", &id, "--yes"], "");
+        let active = self.repo().join("rvow/active");
+        let dir = std::fs::read_dir(&active).unwrap().next().unwrap().unwrap().path();
+        let text = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+        let ids: Vec<String> =
+            text.lines().filter_map(|l| l.strip_prefix("- ")).map(|l| l.split(' ').next().unwrap_or(l).to_string()).collect();
+        for task in ids.iter().take(TASKS_PER_CHANGE - 1) {
+            self.rvow(&["prove", task], "");
+        }
+        id
+    }
+
+    /// Puts `a.txt` in the files of session `s1`: a pre-tool-use record with no
+    /// after record is the text record the stop hook reads.
+    fn own_a_txt(&self) {
+        self.hook(
+            "pre-tool-use",
+            json!({
+                "cwd": self.repo(),
+                "session_id": "s1",
+                "tool_use_id": "own",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": self.repo().join("a.txt"), "old_string": "a", "new_string": "a"},
+            }),
+        );
+    }
+
+    /// The number of `ls-files` processes one stop hook started.
+    fn stop_ls_files_count(&self) -> usize {
+        std::fs::write(self.count_file(), "").unwrap();
+        let git = self.logging_git();
+        self.hook_through("stop", json!({"cwd": self.repo(), "hook_event_name": "Stop", "session_id": "s1"}), &git);
+        std::fs::read_to_string(self.count_file())
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.ends_with("ls-files -co --exclude-standard"))
+            .count()
+    }
+}
+
+/// The tasks of the accepted change in the stop-hook test.
+const TASKS_PER_CHANGE: usize = 6;
+
+/// Before the file list was shared, the stop hook started one `ls-files` per
+/// proved task it read the state of, plus one for the drift check.
+const BEFORE_LS_FILES: usize = 6;
+
+/// After: the shared list of the stop hook's states, plus the one `ls-files`
+/// that drift's protected-file check starts on its own.
+const AFTER_LS_FILES: usize = 2;
+
+#[test]
+fn hook_git_count_a_stop_lists_files_once() {
+    let fx = Fx::new("stop");
+    fx.accepted_plan("Stop plan");
+    fx.own_a_txt();
+    let count = fx.stop_ls_files_count();
+    eprintln!("a stop over {TASKS_PER_CHANGE} tasks: {count} ls-files processes");
+    assert!(count > 0, "the counting git never ran");
+    assert!(
+        count <= AFTER_LS_FILES,
+        "a stop over {TASKS_PER_CHANGE} tasks started {count} ls-files processes, at most {AFTER_LS_FILES} allowed (it was {BEFORE_LS_FILES})"
+    );
 }
 
 #[test]

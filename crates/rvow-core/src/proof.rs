@@ -197,12 +197,32 @@ pub struct Now<'a> {
     pub config: &'a Config,
     pub env: Env,
     pub living: &'a [CapSpec],
+    files: std::cell::OnceCell<Vec<String>>,
+    cached: bool,
 }
 
-impl Now<'_> {
+impl<'a> Now<'a> {
+    /// A `Now` that lists the files again on every `inputs` call.
+    pub fn new(top: &'a Path, config: &'a Config, env: Env, living: &'a [CapSpec]) -> Now<'a> {
+        Now { top, config, env, living, files: std::cell::OnceCell::new(), cached: false }
+    }
+
+    /// A `Now` that lists the files once and reuses the list, for a caller
+    /// that runs no command between two `inputs` calls.
+    pub fn cached(top: &'a Path, config: &'a Config, env: Env, living: &'a [CapSpec]) -> Now<'a> {
+        Now { top, config, env, living, files: std::cell::OnceCell::new(), cached: true }
+    }
+
     pub fn inputs(&self, task: &Task) -> Result<fingerprint::Inputs> {
         let globs: Vec<String> = task.files.iter().chain(&self.config.inputs).cloned().collect();
-        fingerprint::inputs(self.top, &globs)
+        if !self.cached {
+            return fingerprint::inputs(self.top, &globs);
+        }
+        if let Some(files) = self.files.get() {
+            return fingerprint::inputs_in(self.top, files, &globs);
+        }
+        let list = fingerprint::candidate_files(self.top)?;
+        fingerprint::inputs_in(self.top, self.files.get_or_init(|| list), &globs)
     }
 }
 
@@ -581,7 +601,7 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     }
     let config = config::load(project, home)?;
     crate::drift::fetch_missing_grammars(project, &top, home, &config, change);
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let inputs = now.inputs(task)?;
     let tree = fingerprint::worktree(&top, project)?;
     let runners = config::runners(project)?;
@@ -808,7 +828,7 @@ pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo:
     let changes = active(project, &living)?;
     let (change, task) = find_task(&changes, input)?;
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let State::Stale(reasons) = state_for(project, home, change, task, &now)? else { return Ok(None) };
     if reasons.iter().any(|r| !matches!(*r, "inputs-changed" | "dependency-changed")) {
         return Ok(None);
@@ -944,7 +964,7 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let branch = git::branch(&top)?;
     let mut out = Vec::new();
     for c in &changes {
@@ -980,7 +1000,7 @@ pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<Str
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let branch = git::branch(&top)?.unwrap_or_default();
     let mut out = Vec::new();
     for c in on_branch(&changes, &branch) {
@@ -1218,7 +1238,7 @@ pub(crate) mod tests {
         let mut changes = active(p, &living).unwrap();
         changes[0].events = events(&changes[0].events);
         let config = config::load(p, home).unwrap();
-        let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config).unwrap(), living: &living };
+        let now = Now::new(&top, &config, fingerprint::env(&top, &config).unwrap(), &living);
         state_for(p, home, &changes[0], &changes[0].loaded.tasks[0], &now).unwrap()
     }
 

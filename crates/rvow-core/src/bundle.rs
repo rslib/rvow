@@ -80,7 +80,7 @@ pub fn export(project: &store::Project, home: &Path, cwd: &Path) -> Result<Bundl
             }
         }
     }
-    let now = proof::Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = proof::Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let mut report = gate::Report::default();
     gate::check_lifecycle(project, &mut report)?;
     gate::check_record(project, &living, &mut report)?;

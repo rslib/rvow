@@ -180,7 +180,7 @@ pub fn open_task(project: &Project, home: &Path, cwd: &Path, input: &str) -> Res
     let changes = proof::active(project, &living)?;
     let (c, task) = proof::find_task(&changes, input)?;
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let state = proof::state(c, task, &now)?;
     if matches!(state, State::Proved | State::Blocked) {
         return Err(Error::new(
@@ -346,6 +346,6 @@ pub fn task_open(project: &Project, home: &Path, cwd: &Path, task: &str) -> Resu
         return Ok(false);
     };
     let config = config::load(project, home)?;
-    let state_now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
+    let state_now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, &living);
     Ok(!matches!(proof::state(c, task, &state_now)?, State::Proved | State::Blocked))
 }

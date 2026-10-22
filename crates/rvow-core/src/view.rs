@@ -137,7 +137,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
         })
         .collect();
 
-    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
+    let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, &living);
     let mut changes = Vec::new();
     let mut blocked = 0;
     let mut amendments = 0;
@@ -151,7 +151,7 @@ pub fn dashboard(project: &Project, home: &Path, cwd: &Path) -> Result<Value> {
     let mut elsewhere = Vec::new();
     for c in active.iter().filter(|a| !queue.iter().any(|q| q.dir.id == a.dir.id)) {
         let Some(other) = c.branch().and_then(|b| git::top_for_branch(&top, b).ok().flatten()) else { continue };
-        let there = Now { top: &other, config: &config, env: fingerprint::check_env(&other, &config)?, living: &living };
+        let there = Now::cached(&other, &config, fingerprint::check_env(&other, &config)?, &living);
         elsewhere.push(change_json(project, home, &there, c)?.0);
     }
     let next = proof::next(&queue, &now)?.map(|(c, t, s)| {

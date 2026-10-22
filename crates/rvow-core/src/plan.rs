@@ -108,29 +108,38 @@ pub fn chained_commands(cmd: &str) -> usize {
     cmd.replace("&&", ";").split(';').filter_map(segment_program).filter(|p| !FILE_CHECKS.contains(p)).count()
 }
 
-/// The duration of the newest recorded proof of `cmd` in this project, in ms.
-fn last_run_ms(project: &Project, cmd: &str) -> Option<u64> {
-    let dirs = change::list(project).ok()?.0;
-    let mut newest: Option<(u64, u64)> = None;
+/// The time and duration in ms of the newest recorded proof of each verify
+/// command in this project, read once for a whole `check` call.
+fn last_runs(project: &Project) -> BTreeMap<String, (u64, u64)> {
+    let mut out: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let Ok((dirs, _)) = change::list(project) else { return out };
     for d in &dirs {
         let Ok((events, _)) = ledger::read(&d.path.join(change::LEDGER)) else { continue };
         for e in events.iter().filter(|e| e.kind == Kind::Prove) {
-            if e.data.get("verify").and_then(Value::as_str) != Some(cmd) {
-                continue;
-            }
+            let Some(cmd) = e.data.get("verify").and_then(Value::as_str) else { continue };
             let Some(ms) = e.data.get("duration_ms").and_then(Value::as_u64) else { continue };
-            if newest.is_none_or(|(time, _)| e.time > time) {
-                newest = Some((e.time, ms));
+            if out.get(cmd).is_none_or(|(time, _)| e.time > *time) {
+                out.insert(cmd.to_string(), (e.time, ms));
             }
         }
     }
-    newest.map(|(_, ms)| ms)
+    out
+}
+
+/// The duration of the newest recorded proof of `cmd` in this project, in ms.
+fn last_run_ms(runs: &BTreeMap<String, (u64, u64)>, cmd: &str) -> Option<u64> {
+    runs.get(cmd).map(|(_, ms)| *ms)
 }
 
 /// A warning for each task whose verify runs the full suite instead of one
 /// target: it chains commands, repeats a configured check, or ran slowly the
 /// last time the same command was proved in this project.
-pub fn full_suite(project: &Project, config: &Config, tasks: &[Task], filled: &BTreeMap<String, String>) -> Vec<SlowVerify> {
+pub fn full_suite(
+    runs: &BTreeMap<String, (u64, u64)>,
+    config: &Config,
+    tasks: &[Task],
+    filled: &BTreeMap<String, String>,
+) -> Vec<SlowVerify> {
     let mut out = Vec::new();
     for t in tasks {
         let Some(cmd) = filled.get(&t.id.to_string()).map(|s| s.trim()) else { continue };
@@ -142,7 +151,7 @@ pub fn full_suite(project: &Project, config: &Config, tasks: &[Task], filled: &B
         if config.checks.iter().any(|s| s.run().trim() == cmd) {
             why.push("repeats a configured `checks` entry".to_string());
         }
-        if let Some(ms) = last_run_ms(project, cmd)
+        if let Some(ms) = last_run_ms(runs, cmd)
             && ms > SLOW_PROOF_SECS * 1000
         {
             why.push(format!("took {} s on its last recorded run", ms / 1000));
@@ -184,10 +193,31 @@ impl Report {
 /// A task whose `files:` match more than this many tracked files goes stale on most changes.
 const WIDE_FILES: usize = 40;
 
+/// The tracked files of each worktree a `check` call reads, listed at most
+/// once per worktree for the whole call.
+#[derive(Default)]
+struct Trees {
+    listed: Vec<(PathBuf, Option<String>)>,
+}
+
+impl Trees {
+    fn get(&mut self, top: &Path) -> Option<&str> {
+        let at = match self.listed.iter().position(|(p, _)| p == top) {
+            Some(at) => at,
+            None => {
+                let listing = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]).ok();
+                self.listed.push((top.to_path_buf(), listing));
+                self.listed.len() - 1
+            }
+        };
+        self.listed[at].1.as_deref()
+    }
+}
+
 /// A warning for each task whose scope covers a large part of the repository: its proof goes
 /// stale whenever any of those files changes, so the plan should name what the task changes.
-fn wide_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
-    let Ok(listing) = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]) else {
+fn wide_scopes(trees: &mut Trees, top: &Path, tasks: &[Task]) -> Vec<Finding> {
+    let Some(listing) = trees.get(top) else {
         return Vec::new();
     };
     let files: Vec<&str> = listing.lines().collect();
@@ -327,10 +357,10 @@ fn hot_files(listing: &str, tasks: &[Task]) -> Vec<Finding> {
 }
 
 /// `hot_files` over the tracked files of `top`.
-fn hot_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
-    match git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]) {
-        Ok(listing) => hot_files(&listing, tasks),
-        Err(_) => Vec::new(),
+fn hot_scopes(trees: &mut Trees, top: &Path, tasks: &[Task]) -> Vec<Finding> {
+    match trees.get(top) {
+        Some(listing) => hot_files(listing, tasks),
+        None => Vec::new(),
     }
 }
 
@@ -339,11 +369,11 @@ const SHARED_LISTED: usize = 3;
 
 /// A warning for each pair of tasks whose `files:` match a common tracked file: the proof
 /// of both goes stale when that file changes.
-fn shared_scopes(top: &Path, tasks: &[Task]) -> Vec<Finding> {
+fn shared_scopes(trees: &mut Trees, top: &Path, tasks: &[Task]) -> Vec<Finding> {
     if tasks.len() < 2 {
         return Vec::new();
     }
-    let Ok(listing) = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"]) else {
+    let Some(listing) = trees.get(top) else {
         return Vec::new();
     };
     let sets: Vec<_> = tasks.iter().map(|t| crate::fingerprint::globset(&t.files).ok()).collect();
@@ -466,18 +496,26 @@ pub fn proposal_blanks(loaded: &Loaded) -> Vec<(String, crate::diag::Diagnostic)
         .unwrap_or_default()
 }
 
-fn report(project: &Project, config: &Config, change: ChangeDir, loaded: Loaded, top: &Path) -> Report {
+fn report(
+    project: &Project,
+    config: &Config,
+    runs: &BTreeMap<String, (u64, u64)>,
+    trees: &mut Trees,
+    change: ChangeDir,
+    loaded: Loaded,
+    top: &Path,
+) -> Report {
     let runners = config::runners(project).unwrap_or_default();
     let filled = filled_commands(&runners, &loaded.tasks);
-    let slow = full_suite(project, config, &loaded.tasks, &filled);
+    let slow = full_suite(runs, config, &loaded.tasks, &filled);
     let blanks = proposal_blanks(&loaded);
     let mut findings = loaded.findings;
     findings.extend(blanks);
     findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
-    findings.extend(wide_scopes(top, &loaded.tasks));
-    findings.extend(shared_scopes(top, &loaded.tasks));
-    findings.extend(hot_scopes(top, &loaded.tasks));
+    findings.extend(wide_scopes(trees, top, &loaded.tasks));
+    findings.extend(shared_scopes(trees, top, &loaded.tasks));
+    findings.extend(hot_scopes(trees, top, &loaded.tasks));
     findings.extend(task_sizes(&loaded.tasks, &filled));
     findings.extend(depends_chains(&loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
@@ -518,11 +556,13 @@ pub fn check(project: &Project, cwd: &Path, target: Option<&str>) -> Result<Vec<
     };
     let home = crate::hardening::project_home(project)?;
     let config = config::load(project, &home)?;
+    let runs = last_runs(project);
+    let mut trees = Trees::default();
     let mut out = Vec::new();
     for d in dirs {
         let loaded = change::load(&d.path, &living)?;
         let change_top = if target.is_some() { change_top(&top, &loaded) } else { top.clone() };
-        let mut r = report(project, &config, d, loaded, &change_top);
+        let mut r = report(project, &config, &runs, &mut trees, d, loaded, &change_top);
         r.findings.extend(crate::lint::test_query_checks(&home, &change_top, &config));
         out.push(r);
     }

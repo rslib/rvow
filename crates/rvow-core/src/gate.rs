@@ -135,7 +135,7 @@ fn gate_for(
 
     let config = config::load(project, home)?;
     let runners = config::runners(project)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         check::check_change_only(project, c, &now, &opts, only, &mut r)?;
     }
@@ -247,7 +247,7 @@ fn gate_for(
                     .strip_prefix(home)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| project.root.to_string_lossy().into_owned());
-                let run_now = Now { top: dir, config: &config, env: fingerprint::env_with(dir, &config, &env)?, living: &living };
+                let run_now = Now::new(dir, &config, fingerprint::env_with(dir, &config, &env)?, &living);
                 Some((folder, run_now))
             }
             None => None,

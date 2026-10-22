@@ -115,7 +115,7 @@ pub fn attest(project: &Project, home: &Path, cwd: &Path, input: &str, out: &Pat
         ));
     }
     let active = proof::Active { dir, loaded, events, ledger_diags: Vec::new(), lease_branches: Vec::new() };
-    let now = proof::Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = proof::Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let mut lines = Vec::new();
     let mut unproved = Vec::new();
     for task in &active.loaded.tasks {

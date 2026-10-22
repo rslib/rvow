@@ -291,7 +291,7 @@ pub fn next() -> Result<Reply> {
     let branch = git::branch(&top)?.unwrap_or_default();
     let queue = proof::on_branch(&changes, &branch);
     let config = config::load(&p, &home)?;
-    let now = proof::Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
+    let now = proof::Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     match proof::next(&queue, &now)? {
         Some((_, t, s)) => {
             r.line(format!("next: {} {} [{}]", t.id, t.title, s.name()));

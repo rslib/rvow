@@ -95,22 +95,27 @@ fn file_hash(top: &Path, rel: &str) -> Result<(String, bool)> {
 
 /// Hashes every candidate file that matches `globs`, by path and content.
 pub fn inputs(top: &Path, globs: &[String]) -> Result<Inputs> {
+    inputs_in(top, &candidate_files(top)?, globs)
+}
+
+/// Hashes, from a given candidate list, every file that matches `globs`.
+pub fn inputs_in(top: &Path, files: &[String], globs: &[String]) -> Result<Inputs> {
     let set = globset(globs)?;
     let mut list = String::new();
-    let mut files = 0;
+    let mut count = 0;
     let mut lfs_pointers = Vec::new();
-    for rel in candidate_files(top)?.into_iter().filter(|f| set.is_match(f)) {
-        let (hash, lfs) = file_hash(top, &rel)?;
+    for rel in files.iter().filter(|f| set.is_match(f)) {
+        let (hash, lfs) = file_hash(top, rel)?;
         if lfs {
             lfs_pointers.push(rel.clone());
         }
-        list.push_str(&rel);
+        list.push_str(rel);
         list.push('\0');
         list.push_str(&hash);
         list.push('\n');
-        files += 1;
+        count += 1;
     }
-    Ok(Inputs { hash: sha256_hex(list.as_bytes()), files, lfs_pointers })
+    Ok(Inputs { hash: sha256_hex(list.as_bytes()), files: count, lfs_pointers })
 }
 
 /// Hashes every tracked file plus every untracked file that git does not

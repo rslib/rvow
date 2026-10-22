@@ -210,7 +210,7 @@ pub fn brief_for(project: &Project, home: &Path, cwd: &Path, agent: Option<&str>
         return Ok(bounded(text));
     }
     let config = config::load(project, home)?;
-    let now = Now { top: &top, config: &config, env: fingerprint::check_env(&top, &config)?, living: &living };
+    let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, &living);
 
     let mut out = String::new();
     for c in &queue {

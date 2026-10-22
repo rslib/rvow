@@ -394,7 +394,7 @@ fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDi
         _ => None,
     };
     let now = match (top.as_ref(), config.as_ref()) {
-        (Some(top), Some(config)) => Some(proof::Now { top, config, env: crate::fingerprint::env(top, config)?, living }),
+        (Some(top), Some(config)) => Some(proof::Now::new(top, config, crate::fingerprint::env(top, config)?, living)),
         _ => None,
     };
     let active = proof::Active { dir: dir.clone(), loaded, events: events.clone(), ledger_diags: diags, lease_branches: Vec::new() };

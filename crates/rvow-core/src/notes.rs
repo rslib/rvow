@@ -91,7 +91,7 @@ mod tests {
         let (living, _) = change::load_living(p).unwrap();
         let changes = proof::active(p, &living).unwrap();
         let cfg = config::load(p, home).unwrap();
-        let now = Now { top: repo, config: &cfg, env: fingerprint::env(repo, &cfg).unwrap(), living: &living };
+        let now = Now::new(repo, &cfg, fingerprint::env(repo, &cfg).unwrap(), &living);
         proof::state(&changes[0], &changes[0].loaded.tasks[0], &now).unwrap()
     }
 

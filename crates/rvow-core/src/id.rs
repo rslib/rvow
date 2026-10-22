@@ -39,7 +39,7 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id {
     kind: Kind,
-    body: String,
+    body: [u8; BODY_LEN],
 }
 
 /// A reference written in a file: a real id or a placeholder such as `REQ-new1`
@@ -105,8 +105,19 @@ fn normalize_char(c: char) -> Result<char, ParseError> {
     if c.is_ascii() && ALPHABET.contains(&(c as u8)) { Ok(c) } else { Err(ParseError::BadChar(c)) }
 }
 
-fn normalize_body(s: &str) -> Result<String, ParseError> {
-    s.chars().map(normalize_char).collect()
+/// Writes the canonical bytes of `s` into the array and returns them with their
+/// count, which is above `BODY_LEN` when `s` is longer than a body.
+fn normalize_body(s: &str) -> Result<([u8; BODY_LEN], usize), ParseError> {
+    let mut body = [0u8; BODY_LEN];
+    let mut len = 0;
+    for (i, c) in s.chars().enumerate() {
+        let b = normalize_char(c)? as u8;
+        if let Some(slot) = body.get_mut(i) {
+            *slot = b;
+        }
+        len += 1;
+    }
+    Ok((body, len))
 }
 
 impl Id {
@@ -115,7 +126,7 @@ impl Id {
     }
 
     pub fn body(&self) -> &str {
-        &self.body
+        std::str::from_utf8(&self.body).expect("an id body holds only ASCII from ALPHABET")
     }
 
     /// Draws a fresh id of `kind` that is not in `taken`.
@@ -124,7 +135,7 @@ impl Id {
     pub fn mint(kind: Kind, taken: &HashSet<Id>) -> crate::error::Result<Id> {
         loop {
             let bytes = Error::random::<BODY_LEN>()?;
-            let body = bytes.iter().map(|b| ALPHABET[(b & 31) as usize] as char).collect();
+            let body = bytes.map(|b| ALPHABET[(b & 31) as usize]);
             let id = Id { kind, body };
             if !taken.contains(&id) {
                 return Ok(id);
@@ -143,13 +154,13 @@ impl FromStr for Id {
         if len != BODY_LEN {
             return Err(ParseError::BadLength(len));
         }
-        Ok(Id { kind, body: normalize_body(body)? })
+        Ok(Id { kind, body: normalize_body(body)?.0 })
     }
 }
 
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.kind.prefix(), self.body)
+        write!(f, "{}-{}", self.kind.prefix(), self.body())
     }
 }
 
@@ -197,12 +208,13 @@ pub fn resolve<'a>(input: &str, known: impl IntoIterator<Item = &'a Id>) -> Resu
         Some((k, b)) => (Some(Kind::from_prefix(k).ok_or_else(|| ResolveError::Invalid(ParseError::UnknownKind(k.into())))?), b),
         None => (None, input),
     };
-    let body = normalize_body(body).map_err(ResolveError::Invalid)?;
-    if body.is_empty() {
+    let (body, len) = normalize_body(body).map_err(ResolveError::Invalid)?;
+    if len == 0 || len > BODY_LEN {
         return Err(ResolveError::NotFound);
     }
+    let prefix = &body[..len];
     let mut hits: Vec<Id> =
-        known.into_iter().filter(|id| kind.is_none_or(|k| id.kind == k) && id.body.starts_with(&body)).cloned().collect();
+        known.into_iter().filter(|id| kind.is_none_or(|k| id.kind == k) && id.body.starts_with(prefix)).cloned().collect();
     hits.sort();
     hits.dedup();
     match hits.len() {
@@ -254,6 +266,24 @@ mod tests {
             assert_eq!(new.to_string().parse::<Id>().unwrap(), new);
             assert!(taken.insert(new));
         }
+    }
+
+    #[test]
+    fn id_allocates_no_heap() {
+        assert!(std::mem::size_of::<Id>() <= 8);
+        let text = id("TSK-0a1b2c").to_string();
+        assert_eq!(text, "TSK-0a1b2c");
+        assert_eq!(text.parse::<Id>(), Ok(id("TSK-0a1b2c")));
+    }
+
+    #[test]
+    fn id_order_matches_its_text_order() {
+        let ids = [id("TSK-zzzzzz"), id("TSK-0a1b2c"), id("TSK-999999"), id("TSK-110abc"), id("TSK-jkmnpq")];
+        let mut by_id = ids.to_vec();
+        by_id.sort();
+        let mut by_text: Vec<Id> = ids.to_vec();
+        by_text.sort_by_key(Id::to_string);
+        assert_eq!(by_id, by_text);
     }
 
     #[test]

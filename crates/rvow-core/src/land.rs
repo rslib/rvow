@@ -198,7 +198,7 @@ fn candidates(
     let now = ledger::now_ms();
     let config = config::load(project, home)?;
     let (living, _) = change::load_living(project)?;
-    let now_files = Now { top, config: &config, env: fingerprint::env(top, &config)?, living: &living };
+    let now_files = Now::new(top, &config, fingerprint::env(top, &config)?, &living);
     let mut out = Vec::new();
     for task in &change.loaded.tasks {
         let id = task.id.to_string();
@@ -407,7 +407,7 @@ fn reprove(
     let changes = proof::active(project, &living)?;
     let Some(change) = changes.iter().find(|c| c.dir.id == *change_id) else { return Ok(()) };
     let config = config::load(project, home)?;
-    let now = Now { top: temp, config: &config, env: fingerprint::env(temp, &config)?, living: &living };
+    let now = Now::new(temp, &config, fingerprint::env(temp, &config)?, &living);
     for task in &change.loaded.tasks {
         let id = task.id.to_string();
         if !landed.contains(&id) || matches!(proof::state_for(project, home, change, task, &now)?, State::Proved) {

@@ -148,7 +148,7 @@ fn audit_ci_bundle_runs_without_home_and_ingested_inputs_go_stale() {
     let (living, _) = change::load_living(&f.project).unwrap();
     let active = proof::active(&f.project, &living).unwrap();
     let cfg = config::load(&f.project, &f.home).unwrap();
-    let now = proof::Now { top: &f.repo, config: &cfg, env: fingerprint::env(&f.repo, &cfg).unwrap(), living: &living };
+    let now = proof::Now::new(&f.repo, &cfg, fingerprint::env(&f.repo, &cfg).unwrap(), &living);
     assert_eq!(proof::state(&active[0], &active[0].loaded.tasks[0], &now).unwrap(), proof::State::Proved);
     std::fs::write(f.repo.join("out.txt"), "changed").unwrap();
     assert!(matches!(proof::state(&active[0], &active[0].loaded.tasks[0], &now).unwrap(), proof::State::Stale(_)));
