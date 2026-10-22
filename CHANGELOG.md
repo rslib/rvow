@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Take the snapshot lock of the worktree in the hooks instead of the project lock, so a prove, a lease or an agent in another worktree never makes a writing call wait or fail as busy.
+- Hash only the files that an editor call names in its snapshots; a change from a background job now counts at the next shell call or at stop.
+- Run the real git behind the macOS `/usr/bin/git` shim, and start fewer git processes for one Edit call.
 - Send a session no brief update when only the count of tasks changed, and only the part from `next:` when the next task moves, so the proofs of other agents stay out of its context.
   A session that holds a lease, such as a pi session, sees its leased task as `next:`.
 - Give a session one stop block that lists every open item, at most 3 and then a count, instead of one stop for each item.

@@ -1,12 +1,13 @@
-//! A hook waits a bounded time for the project lock: a writing call is denied
-//! as busy after 5 s, a read goes on, and a short hold only waits.
+//! REQ-p8exep: a hook waits a bounded time for the snapshot lock of its
+//! worktree: a writing call is denied as busy after 5 s, a read goes on, a
+//! short hold only waits, and the project lock does not stop a snapshot.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use rvow_core::store;
+use rvow_core::{provenance, store};
 use serde_json::{Value, json};
 
 const RVOW: &str = env!("CARGO_BIN_EXE_rvow");
@@ -84,7 +85,7 @@ impl Fx {
 fn lock_held_too_long_denies_a_write_as_busy_and_allows_a_read() {
     let fx = Fx::new("held");
     let project = fx.project();
-    let _held = project.lock().unwrap();
+    let _held = provenance::snapshot_lock(&project, &fx.repo()).unwrap();
     let start = Instant::now();
     let reason = fx.call("Edit", fx.edit());
     let took = start.elapsed();
@@ -99,11 +100,21 @@ fn lock_held_too_long_denies_a_write_as_busy_and_allows_a_read() {
 fn lock_held_briefly_only_waits() {
     let fx = Fx::new("brief");
     let project = fx.project();
-    let held = project.lock().unwrap();
+    let held = provenance::snapshot_lock(&project, &fx.repo()).unwrap();
     let free = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(1));
         drop(held);
     });
     assert_eq!(fx.call("Edit", fx.edit()), None);
     free.join().unwrap();
+}
+
+#[test]
+fn lock_held_on_the_project_does_not_stop_a_snapshot() {
+    let fx = Fx::new("project");
+    let project = fx.project();
+    let _held = project.lock().unwrap();
+    let start = Instant::now();
+    assert_eq!(fx.call("Edit", fx.edit()), None);
+    assert!(start.elapsed() < Duration::from_secs(2), "took {:?}", start.elapsed());
 }

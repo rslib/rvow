@@ -84,6 +84,8 @@ mod docs_reference;
 mod done_scope;
 #[path = "suite/drift_fixes.rs"]
 mod drift_fixes;
+#[path = "suite/editor_snapshot.rs"]
+mod editor_snapshot;
 #[path = "suite/first_edit_notice.rs"]
 mod first_edit_notice;
 #[path = "suite/fix_enforcement.rs"]
@@ -118,6 +120,8 @@ mod gate_writes;
 mod git_bin;
 #[path = "suite/hook_calls.rs"]
 mod hook_calls;
+#[path = "suite/hook_git_count.rs"]
+mod hook_git_count;
 #[path = "suite/hook_json.rs"]
 mod hook_json;
 #[path = "suite/hook_stats.rs"]

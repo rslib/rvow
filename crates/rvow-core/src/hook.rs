@@ -1063,8 +1063,9 @@ fn may_write(tool: &str, args: &Value) -> bool {
     }
 }
 
-/// The pre-tool-use provenance: snapshots the work tree before an allowed
-/// write call and stores the before tree per (session, agent, tool_use_id).
+/// The pre-tool-use provenance: snapshots the work tree, or the files an
+/// editor call names, before an allowed write call, and stores the before tree
+/// per (session, agent, tool_use_id).
 fn record_before_snapshot(project: &Project, session: &str, input: &Value) -> Locked {
     let Some(id) = input.get("tool_use_id").and_then(Value::as_str) else {
         return Locked::Taken;
@@ -1080,16 +1081,27 @@ fn record_before_snapshot(project: &Project, session: &str, input: &Value) -> Lo
     // The editors and the shell keep a before snapshot, since overlapping calls of
     // other sessions are judged by it; any other writer takes one snapshot after.
     if matches!(tool_kind(tool), ToolKind::Editor | ToolKind::Shell) {
-        crate::provenance::before_call(project, &top, session, agent, id)
+        let paths = if tool_kind(tool) == ToolKind::Editor { named_paths(&args, &cwd, &top) } else { Vec::new() };
+        crate::provenance::before_call(project, &top, session, agent, id, &paths)
     } else {
         crate::provenance::before_call_light(project, &top, session, agent, id)
     }
 }
 
-/// Claude Code `PostToolUse`: snapshots the tree after a checked call, diffs it
-/// against the before snapshot of the same call, and records each changed path
-/// with its new blob id for the session (or its subagent). A call with no
-/// before record (a read) takes no snapshot and records nothing.
+/// The repo-relative files an editor call names, when every file it names is
+/// inside the work tree: its two snapshots then hash only those, so a change a
+/// background job makes elsewhere is not recorded as this call's work. A call
+/// that names one file outside the work tree, or none, scans the whole tree.
+fn named_paths(args: &Value, cwd: &Path, top: &Path) -> Vec<String> {
+    let named = file_args(args);
+    let paths: Vec<String> = named.iter().filter_map(|f| repo_rel(f, cwd, top)).collect();
+    if paths.len() == named.len() { paths } else { Vec::new() }
+}
+
+/// Claude Code `PostToolUse`: snapshots the same paths again after a checked
+/// call, diffs it against the before snapshot of the same call, and records
+/// each changed path with its new blob id for the session (or its subagent). A
+/// call with no before record (a read) takes no snapshot and records nothing.
 pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let Some(session) = input.get("session_id").and_then(Value::as_str) else {
         return Ok(None);

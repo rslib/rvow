@@ -218,11 +218,13 @@ The classes are an editor, a shell, a read-only tool and any other tool.
 Each class takes snapshots in its own way:
 
 - An editor or a shell write takes a snapshot before and after the call.
+  An editor call that names its files hashes only those files, so its cost does not grow with the repository.
+  When git rejects a named file, such as an ignored one, that call takes a full snapshot.
 - Any other tool that may write, such as an MCP tool or codemode, takes one snapshot after it and compares it with the session's last recorded tree.
 - A read-only tool takes none.
   A read takes no snapshot.
 
-A change that no call recorded, such as one from a background job, counts for the session at its next shell or editor call, which `rvow prove` is, and at the Stop hook.
+A change that no call recorded, such as one from a background job, counts for the session at its next shell call, which `rvow prove` is, and at the Stop hook.
 
 A session whose hooks send no after-call record, such as an older mod that sent only pre-tool-use, falls back to today's text record.
 
@@ -541,7 +543,9 @@ The status line says so until a later call works.
 > [!NOTE]
 > A repository with no rvow store, and a folder outside git, are not projects, so nothing there is denied.
 
-The hook waits at most 5 s for the project lock.
+A snapshot takes the snapshot lock of its worktree, not the project lock.
+So a prove, a lease or an agent in another worktree never makes it wait.
+The hook waits at most 5 s for the snapshot lock.
 When another rvow process holds it longer, a writing call is denied as busy and a read goes on.
 
 ### What the user made

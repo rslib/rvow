@@ -165,6 +165,18 @@ fn docs_name_the_quiet_brief() {
 }
 
 #[test]
+fn docs_name_the_snapshot_lock() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("takes the snapshot lock of its worktree, not the project lock"), "how-it-works lacks the snapshot lock");
+    assert!(how.contains("names its files hashes only those files"), "how-it-works lacks the named-file snapshot");
+    let settings = doc("docs/settings.md");
+    assert!(settings.contains("`xcrun --find git`"), "settings lacks the real git");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("snapshot lock of the worktree"), "the Unreleased changelog lacks the snapshot lock");
+}
+
+#[test]
 fn docs_name_the_automatic_baseline() {
     let how = doc("docs/how-it-works.md");
     assert!(how.contains("## The baseline: the code at accept"), "how-it-works lacks the automatic baseline");

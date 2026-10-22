@@ -328,15 +328,46 @@ fn add_lines(path: &Path, lines: &[&str]) -> Result<()> {
     std::fs::write(path, text).map_err(|e| Error::io(path, e))
 }
 
+/// The git dirs that this process already learned for a folder: the work
+/// tree's git dir and its repository's common dir. A hook lives for one tool
+/// call and moves no worktree, so the answer stays true for it, and the
+/// snapshot of that call starts no git process of its own.
+static GIT_DIRS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, (PathBuf, PathBuf)>>> = std::sync::OnceLock::new();
+
+/// The absolute git dir and common dir of the work tree at `dir`, when a
+/// `find` of this process already printed them.
+pub(crate) fn known_dirs(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    GIT_DIRS.get()?.lock().ok()?.get(dir).cloned()
+}
+
+/// Keeps the two dirs a `rev-parse` already printed for `dir`, under every
+/// name this process may ask with: the folder the call came from and the work
+/// tree root that git named for it.
+fn remember_dirs(dir: &Path, top: &Path, git_dir: &str, common: &str) {
+    let Ok(mut dirs) = GIT_DIRS.get_or_init(Default::default).lock() else { return };
+    let entry = (PathBuf::from(git_dir), PathBuf::from(common));
+    dirs.insert(dir.to_path_buf(), entry.clone());
+    dirs.insert(top.to_path_buf(), entry);
+}
+
 /// Finds the rvow tree of the repository that contains `dir`: repo mode when
 /// `rvow/config.toml` exists, else the home project whose roots match.
 pub fn find(dir: &Path, home: &Path) -> Result<Option<Project>> {
-    // One git call for both, since every hook runs this lookup.
-    let out = git::run(dir, &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"])?;
+    // One git call answers for the work tree, its git dir and its repository,
+    // since every hook runs this lookup and then snapshots the work tree.
+    let out = git::run(dir, &["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"])?;
     let mut lines = out.lines();
     let top = PathBuf::from(lines.next().unwrap_or_default());
-    let common = lines.next().filter(|c| !c.is_empty()).map(String::from);
+    let git_dir = lines.next().unwrap_or_default();
+    let common = lines.next().filter(|c| !c.is_empty());
     git::known_toplevel(dir, &top);
+    if !git_dir.is_empty() {
+        remember_dirs(dir, &top, git_dir, common.unwrap_or(git_dir));
+        if let Ok(head) = std::fs::read_to_string(Path::new(git_dir).join("HEAD")) {
+            git::known_branch(&top, &head);
+        }
+    }
+    let common = common.map(String::from);
     let repo_root = top.join(REPO_DIR);
     if repo_root.join(CONFIG_FILE).exists() {
         let meta = read_meta(&repo_root)?;
@@ -464,28 +495,40 @@ pub struct Lock {
 
 impl Project {
     pub fn lock(&self) -> Result<Lock> {
-        let path = self.root.join(LOCK_FILE);
-        let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| Error::io(&path, e))?;
-        file.lock().map_err(|e| Error::io(&path, e))?;
-        Ok(Lock { _file: file })
+        lock_file(&self.root.join(LOCK_FILE))
     }
 
     /// The project lock, or `None` when another process still holds it after `wait`.
     pub fn lock_within(&self, wait: std::time::Duration) -> Result<Option<Lock>> {
-        let path = self.root.join(LOCK_FILE);
-        let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| Error::io(&path, e))?;
-        let end = std::time::Instant::now() + wait;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Some(Lock { _file: file })),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < end => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-                Err(std::fs::TryLockError::Error(e)) => return Err(Error::io(&path, e)),
+        lock_file_within(&self.root.join(LOCK_FILE), wait)
+    }
+}
+
+/// An exclusive lock on the file at `path`, created when missing.
+pub(crate) fn lock_file(path: &Path) -> Result<Lock> {
+    let file = open_lock(path)?;
+    file.lock().map_err(|e| Error::io(path, e))?;
+    Ok(Lock { _file: file })
+}
+
+/// The lock on the file at `path`, or `None` when another process still holds it after `wait`.
+pub(crate) fn lock_file_within(path: &Path, wait: std::time::Duration) -> Result<Option<Lock>> {
+    let file = open_lock(path)?;
+    let end = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(Lock { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(Error::io(path, e)),
         }
     }
+}
+
+fn open_lock(path: &Path) -> Result<File> {
+    File::options().create(true).truncate(false).write(true).open(path).map_err(|e| Error::io(path, e))
 }
 
 #[cfg(test)]

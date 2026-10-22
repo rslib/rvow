@@ -5,17 +5,141 @@ use std::process::Command;
 
 use crate::error::{Error, Result};
 
+static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// The git binary to run: `RVOW_GIT` when it names a file, else `git`.
 /// A sandbox whose `git` on `PATH` cannot run sets `RVOW_GIT` to one that can.
 /// `EVAL_RVOW_GIT` is the same setting through the eval harness, whose
 /// sandbox passes only `EVAL_*` variables to the agent session.
 pub fn bin() -> String {
+    BIN.get_or_init(resolve).clone()
+}
+
+fn resolve() -> String {
     for key in ["RVOW_GIT", "EVAL_RVOW_GIT"] {
         if let Some(v) = std::env::var(key).ok().filter(|v| !v.is_empty()) {
             return v;
         }
     }
-    "git".to_string()
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    match cache_file() {
+        Some(cache) => real_git(&path_env, cfg!(target_os = "macos"), &cache, find_real_git),
+        None => "git".to_string(),
+    }
+}
+
+/// The `git` that `PATH` names: the first executable file so called.
+fn git_on_path(path_env: &str) -> Option<PathBuf> {
+    path_env.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join("git")).find(|p| executable(p))
+}
+
+fn executable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// The git to run for one `PATH`, macOS-ness, cache file and resolver. Split
+/// off from the process environment so a test can pose the macOS shim case
+/// anywhere.
+fn real_git(path_env: &str, is_macos: bool, cache: &Path, resolver: impl Fn() -> Option<PathBuf>) -> String {
+    real_git_in(path_env, Path::new("/usr/bin/git"), is_macos, cache, resolver, root_owned)
+}
+
+fn real_git_in(
+    path_env: &str,
+    shim: &Path,
+    is_macos: bool,
+    cache: &Path,
+    resolver: impl Fn() -> Option<PathBuf>,
+    trusted: impl Fn(&Path) -> bool,
+) -> String {
+    let Some(found) = git_on_path(path_env) else {
+        return "git".to_string();
+    };
+    // Off macOS, and for any other git, the `git` on PATH is the one to run.
+    if !is_macos || found != shim {
+        return "git".to_string();
+    }
+    if let Some(cached) = cached_git(cache, trusted) {
+        return cached;
+    }
+    match resolver().filter(|p| executable(p)) {
+        Some(real) => {
+            write_cache(cache, &real);
+            path_string(&real)
+        }
+        // A failed lookup leaves the shim, which still runs git, only slower.
+        None => "git".to_string(),
+    }
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// The real git a previous rvow process recorded, while it is still there.
+fn cached_git(cache: &Path, trusted: impl Fn(&Path) -> bool) -> Option<String> {
+    let text = std::fs::read_to_string(cache).ok()?;
+    let real = PathBuf::from(text.trim());
+    (executable(&real) && trusted(&real)).then(|| path_string(&real))
+}
+
+/// The Xcode git belongs to root, and an agent cannot make a root-owned file,
+/// so a path that an agent wrote into the cache is never run.
+fn root_owned(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).is_ok_and(|m| m.uid() == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Writes through a temp file in the same folder, so a reader never sees half
+/// a path. Best effort: a failure only costs the next lookup.
+fn write_cache(cache: &Path, real: &Path) {
+    let Some(parent) = cache.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let tmp = parent.join(format!(".rvow-git-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, path_string(real)).is_ok() && std::fs::rename(&tmp, cache).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Asks the Xcode tools for the git behind `/usr/bin/git`, the xcrun shim that
+/// costs about 6 ms on every call.
+fn find_real_git() -> Option<PathBuf> {
+    let out = Command::new("xcrun").args(["--find", "git"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// The cache sits in the rvow home. A missing home stays missing, since a CI
+/// run must not make one.
+fn cache_file() -> Option<PathBuf> {
+    crate::store::home_dir().ok().filter(|home| home.is_dir()).map(|home| home.join("hook-state").join("git-bin"))
 }
 
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
@@ -102,6 +226,19 @@ fn answer(dir: &Path, question: Question, ask: impl FnOnce() -> Result<String>) 
 pub(crate) fn known_toplevel(dir: &Path, top: &Path) {
     if let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) {
         a.entry((dir.to_path_buf(), Question::Toplevel)).or_insert_with(|| top.display().to_string());
+    }
+}
+
+/// Records the branch of `dir` that `head_file`, the text of its git dir's
+/// `HEAD`, names. A reftable repository writes a placeholder there, and a
+/// detached or unknown HEAD records nothing, so `branch` still asks git.
+pub(crate) fn known_branch(dir: &Path, head_file: &str) {
+    let Some(name) = head_file.trim().strip_prefix("ref: refs/heads/") else { return };
+    if name.is_empty() || name == ".invalid" {
+        return;
+    }
+    if let Some(Ok(mut a)) = ANSWERS.get().map(|a| a.lock()) {
+        a.entry((dir.to_path_buf(), Question::Branch)).or_insert_with(|| name.to_string());
     }
 }
 
@@ -326,6 +463,148 @@ pub(crate) mod testrepo {
 mod tests {
     use super::testrepo::*;
     use super::*;
+
+    #[test]
+    fn known_branch_reads_a_branch_and_skips_detached_and_reftable_heads() {
+        remember_answers();
+        let dir = Path::new("/known-branch-test");
+        known_branch(&dir.join("a"), "ref: refs/heads/feat/x\n");
+        known_branch(&dir.join("b"), "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n");
+        known_branch(&dir.join("c"), "ref: refs/heads/.invalid\n");
+        let get = |d: &str| ANSWERS.get().unwrap().lock().unwrap().get(&(dir.join(d), Question::Branch)).cloned();
+        assert_eq!(get("a").as_deref(), Some("feat/x"));
+        assert_eq!(get("b"), None);
+        assert_eq!(get("c"), None);
+    }
+
+    #[cfg(unix)]
+    fn make_exe(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A shim on `PATH`, a real git elsewhere, and a cache file under `tmp`.
+    #[cfg(unix)]
+    fn macos_fixture(tmp: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let shim = tmp.join("shim/git");
+        let real = tmp.join("real/git");
+        make_exe(&shim);
+        make_exe(&real);
+        let cache = tmp.join("cache/rvow-git");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let path_env = tmp.join("shim").to_str().unwrap().to_string();
+        (shim, real, cache, PathBuf::from(path_env))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_shim_on_macos_resolves_once_and_writes_the_cache() {
+        let tmp = TempDir::new();
+        let (shim, real, cache, path_env) = macos_fixture(&tmp.0);
+        let calls = std::cell::Cell::new(0);
+        let resolver = || {
+            calls.set(calls.get() + 1);
+            Some(real.clone())
+        };
+        let got = real_git_in(path_env.to_str().unwrap(), &shim, true, &cache, resolver, executable);
+        assert_eq!(got, real.to_str().unwrap());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), real.to_str().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_ignores_a_cached_path_it_does_not_trust() {
+        let tmp = TempDir::new();
+        let (shim, real, cache, path_env) = macos_fixture(&tmp.0);
+        let planted = tmp.0.join("planted/git");
+        make_exe(&planted);
+        std::fs::write(&cache, planted.display().to_string()).unwrap();
+        let trusted = |p: &Path| p == real.as_path();
+        let got = real_git_in(path_env.to_str().unwrap(), &shim, true, &cache, || Some(real.clone()), trusted);
+        assert_eq!(got, real.to_str().unwrap(), "a planted path is never run");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_git_uses_a_valid_cache_without_resolving() {
+        let tmp = TempDir::new();
+        let (shim, real, cache, path_env) = macos_fixture(&tmp.0);
+        std::fs::write(&cache, format!("{}\n", real.display())).unwrap();
+        let got = real_git_in(
+            path_env.to_str().unwrap(),
+            &shim,
+            true,
+            &cache,
+            || {
+                panic!("the cache must be used as it is");
+            },
+            executable,
+        );
+        assert_eq!(got, real.to_str().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_resolves_again_when_the_cached_path_is_gone() {
+        let tmp = TempDir::new();
+        let (shim, real, cache, path_env) = macos_fixture(&tmp.0);
+        std::fs::write(&cache, tmp.0.join("gone/git").display().to_string()).unwrap();
+        let got = real_git_in(path_env.to_str().unwrap(), &shim, true, &cache, || Some(real.clone()), executable);
+        assert_eq!(got, real.to_str().unwrap());
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), real.to_str().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_off_macos_keeps_git() {
+        let tmp = TempDir::new();
+        let (shim, _real, cache, path_env) = macos_fixture(&tmp.0);
+        let got = real_git_in(
+            path_env.to_str().unwrap(),
+            &shim,
+            false,
+            &cache,
+            || {
+                panic!("a git that is not the macOS shim needs no lookup");
+            },
+            executable,
+        );
+        assert_eq!(got, "git");
+        assert!(!cache.exists(), "nothing to cache when the shim is not in play");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_keeps_git_for_a_non_shim_git_on_path() {
+        let tmp = TempDir::new();
+        let (_shim, _real, cache, path_env) = macos_fixture(&tmp.0);
+        let elsewhere = tmp.0.join("other/git");
+        let got = real_git_in(
+            path_env.to_str().unwrap(),
+            &elsewhere,
+            true,
+            &cache,
+            || {
+                panic!("a git that is not the macOS shim needs no lookup");
+            },
+            executable,
+        );
+        assert_eq!(got, "git");
+        assert!(!cache.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_keeps_git_when_the_resolver_fails() {
+        let tmp = TempDir::new();
+        let (shim, _real, cache, path_env) = macos_fixture(&tmp.0);
+        let got = real_git_in(path_env.to_str().unwrap(), &shim, true, &cache, || None, executable);
+        assert_eq!(got, "git", "the shim is the fallback");
+        assert!(!cache.exists(), "a failed lookup writes nothing");
+    }
 
     #[test]
     fn remote_paths() {

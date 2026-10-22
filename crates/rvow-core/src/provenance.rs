@@ -3,7 +3,10 @@
 //!
 //! Around each tool call that may write, the hooks snapshot the work tree with
 //! a private git index and object store, then record each changed path with
-//! its new git blob id (or "deleted"). The private store lives under
+//! its new git blob id (or "deleted"). An editor call that names its files
+//! hashes only those, so a change a background job makes elsewhere is not the
+//! call's work; a shell call, and an editor call whose files git will not take,
+//! scans the whole work tree. The private store lives under
 //! `<project>/provenance/` and lists the repository's own object store as an
 //! alternate, so nothing is ever written into the user's `.git`.
 //!
@@ -23,11 +26,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::git;
 use crate::ledger::now_ms;
-use crate::store::Project;
+use crate::store::{Lock, Project};
 
 /// The folder that holds the private store per worktree under the project root.
 const DIR: &str = "provenance";
 const RECORDS: &str = "records.jsonl";
+const LOCK_FILE: &str = ".lock";
 
 /// The blob marker of a path a call deleted.
 pub const DELETED: &str = ":deleted";
@@ -68,6 +72,11 @@ struct Start {
     tool_use_id: String,
     before: String,
     start: u64,
+    /// The repo-relative paths the call names, which both of its snapshots
+    /// hash; empty when the call scans the whole work tree, as an older
+    /// record and a shell call do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
 }
 
 /// The marker that the session sent post-tool-use (an "after-call record").
@@ -126,19 +135,44 @@ struct Store {
     alternate: PathBuf,
 }
 
+impl Store {
+    /// The lock on this worktree's private index and records. It is not the
+    /// project lock, so a prove, a lease or another worktree never waits on it.
+    fn lock(&self) -> Result<Lock> {
+        crate::store::lock_file(&self.dir.join(LOCK_FILE))
+    }
+
+    fn lock_within(&self, wait: std::time::Duration) -> Result<Option<Lock>> {
+        crate::store::lock_file_within(&self.dir.join(LOCK_FILE), wait)
+    }
+}
+
+/// Holds the snapshot lock of the worktree at `top` until the lock is dropped.
+pub fn snapshot_lock(project: &Project, top: &Path) -> Result<Lock> {
+    locate(project, top)?.lock()
+}
+
 /// Resolves and creates the private store of the worktree at `top`.
 fn locate(project: &Project, top: &Path) -> Result<Store> {
-    let out = git::run(top, &["rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])?;
-    let mut lines = out.lines();
-    let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
-        return Err(Error::new(
-            "git",
-            format!("git rev-parse printed no git dir for {}", top.display()),
-            "run the command in a git repository",
-        ));
+    // A hook's `find` already printed both dirs, so a snapshot of the same call
+    // starts no git process of its own.
+    let (git_dir, common) = match crate::store::known_dirs(top) {
+        Some(dirs) => dirs,
+        None => {
+            let out = git::run(top, &["rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])?;
+            let mut lines = out.lines();
+            let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
+                return Err(Error::new(
+                    "git",
+                    format!("git rev-parse printed no git dir for {}", top.display()),
+                    "run the command in a git repository",
+                ));
+            };
+            (PathBuf::from(git_dir), PathBuf::from(common))
+        }
     };
     let root = project.root.join(DIR);
-    let dir = root.join(&crate::vow::sha256_hex(git_dir.as_bytes())[..16]);
+    let dir = root.join(&crate::vow::sha256_hex(git_dir.to_string_lossy().as_bytes())[..16]);
     let objects = dir.join("objects");
     std::fs::create_dir_all(&objects).map_err(|e| Error::io(&objects, e))?;
     // In repo mode the store sits inside the work tree, and `git add -A` would
@@ -147,7 +181,7 @@ fn locate(project: &Project, top: &Path) -> Result<Store> {
     if !hide.is_file() {
         std::fs::write(&hide, "*\n").map_err(|e| Error::io(&hide, e))?;
     }
-    Ok(Store { dir, alternate: PathBuf::from(common).join("objects") })
+    Ok(Store { dir, alternate: common.join("objects") })
 }
 
 /// Runs `git` in `top` with the private index and object store set, the
@@ -179,8 +213,24 @@ fn git_private(top: &Path, store: &Store, args: &[&str]) -> Result<String> {
 }
 
 /// The tree the work tree would commit, hashed through the private store. The
-/// caller holds the project lock, since one private index cannot be shared.
-fn tree(top: &Path, store: &Store) -> Result<String> {
+/// caller holds the snapshot lock, since one private index cannot be shared.
+///
+/// With `paths`, only those paths are re-hashed, so a change another process
+/// made elsewhere stays out of the snapshot; the rest of the private index
+/// keeps the blobs of the last full scan. A path git refuses (an ignored file,
+/// or a name it has never seen) falls back to the whole work tree, since a
+/// snapshot must never fail.
+fn tree(top: &Path, store: &Store, paths: &[String]) -> Result<String> {
+    if !paths.is_empty() {
+        // `literal` keeps a name with a glob character its own, and `top` reads
+        // it from the work tree root, whatever folder the hook was called in.
+        let specs: Vec<String> = paths.iter().map(|p| format!(":(top,literal){p}")).collect();
+        let mut args = vec!["add", "-A", "--"];
+        args.extend(specs.iter().map(String::as_str));
+        if git_private(top, store, &args).is_ok() {
+            return Ok(git_private(top, store, &["write-tree"])?.trim_end().to_string());
+        }
+    }
     git_private(top, store, &["add", "-A"])?;
     Ok(git_private(top, store, &["write-tree"])?.trim_end().to_string())
 }
@@ -264,11 +314,11 @@ fn is_call(s: &Start, session: &str, agent_id: Option<&str>, tool_use_id: &str) 
     s.session == session && s.agent_id.as_deref() == agent_id && s.tool_use_id == tool_use_id
 }
 
-/// How long a hook waits for the project lock: below the 10 s limit the mod
+/// How long a hook waits for the snapshot lock: below the 10 s limit the mod
 /// gives a pre-tool-use hook.
 pub(crate) const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Whether a hook got the project lock in time. Any other failure counts as
+/// Whether a hook got the snapshot lock in time. Any other failure counts as
 /// `Taken`, since the record fails silently, like every hook.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Locked {
@@ -277,18 +327,32 @@ pub(crate) enum Locked {
 }
 
 /// The pre-tool-use handler: snapshots the work tree and stores the before
-/// tree and start time of the call. Fails silently, like every hook, except
-/// that it reports a project lock that stayed busy for `LOCK_WAIT`.
-pub(crate) fn before_call(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) -> Locked {
+/// tree and start time of the call. `paths` names the repo-relative files the
+/// call says it changes, which are the only ones both snapshots hash, so a
+/// change another process made elsewhere is not recorded for this call; an
+/// empty `paths` scans the whole work tree. Fails silently, like every hook,
+/// except that it reports a snapshot lock that stayed busy for `LOCK_WAIT`.
+pub(crate) fn before_call(
+    project: &Project,
+    top: &Path,
+    session: &str,
+    agent_id: Option<&str>,
+    tool_use_id: &str,
+    paths: &[String],
+) -> Locked {
     let Ok(store) = locate(project, top) else {
         return Locked::Taken;
     };
-    let _lock = match project.lock_within(LOCK_WAIT) {
+    let _lock = match store.lock_within(LOCK_WAIT) {
         Ok(Some(lock)) => lock,
         Ok(None) => return Locked::Busy,
         Err(_) => return Locked::Taken,
     };
-    let Ok(before) = tree(top, &store) else {
+    // A partial snapshot keeps the rest of the private index as it was, so it
+    // needs an index and a last tree of this session; else the next full scan
+    // would put every file that is already dirty on this session.
+    let paths = if store.dir.join("index").is_file() && has_last(&store, session, agent_id) { paths } else { &[] };
+    let Ok(before) = tree(top, &store, paths) else {
         return Locked::Taken;
     };
     let _ = catch_up(top, &store, session, agent_id, &before);
@@ -298,9 +362,14 @@ pub(crate) fn before_call(project: &Project, top: &Path, session: &str, agent_id
         tool_use_id: tool_use_id.to_string(),
         before,
         start: now_ms(),
+        paths: paths.to_vec(),
     };
     let _ = append(&store.dir, &[Record::Start(start)]);
     Locked::Taken
+}
+
+fn has_last(store: &Store, session: &str, agent_id: Option<&str>) -> bool {
+    load(&store.dir).iter().any(|r| matches!(r, Record::Last(l) if l.session == session && l.agent_id.as_deref() == agent_id))
 }
 
 /// Records each path that differs between the session's last recorded tree and
@@ -361,10 +430,10 @@ pub(crate) fn catch_up_at_stop(project: &Project, top: &Path, session: &str, age
     let Ok(store) = locate(project, top) else {
         return;
     };
-    let Ok(Some(_lock)) = project.lock_within(LOCK_WAIT) else {
+    let Ok(Some(_lock)) = store.lock_within(LOCK_WAIT) else {
         return;
     };
-    if let Ok(now) = tree(top, &store) {
+    if let Ok(now) = tree(top, &store, &[]) {
         let _ = catch_up(top, &store, session, agent_id, &now);
     }
 }
@@ -377,17 +446,16 @@ pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, ag
     let Ok(store) = locate(project, top) else {
         return Locked::Taken;
     };
-    let _lock = match project.lock_within(LOCK_WAIT) {
+    let _lock = match store.lock_within(LOCK_WAIT) {
         Ok(Some(lock)) => lock,
         Ok(None) => return Locked::Busy,
         Err(_) => return Locked::Taken,
     };
-    let has_last =
-        load(&store.dir).iter().any(|r| matches!(r, Record::Last(l) if l.session == session && l.agent_id.as_deref() == agent_id));
+    let has_last = has_last(&store, session, agent_id);
     let before = if has_last {
         LIGHT.to_string()
     } else {
-        let Ok(tree) = tree(top, &store) else {
+        let Ok(tree) = tree(top, &store, &[]) else {
             return Locked::Taken;
         };
         tree
@@ -398,19 +466,21 @@ pub(crate) fn before_call_light(project: &Project, top: &Path, session: &str, ag
         tool_use_id: tool_use_id.to_string(),
         before,
         start: now_ms(),
+        paths: Vec::new(),
     };
     let _ = append(&store.dir, &[Record::Start(start)]);
     Locked::Taken
 }
 
 /// The post-tool-use handler: with a before record for the call, snapshots the
-/// tree again and records a Post marker plus one After record per changed
-/// path. A call with no before record (a read) takes no snapshot at all.
+/// tree again over the same paths that the before snapshot hashed and
+/// records a Post marker plus one After record per changed path. A call with no
+/// before record (a read) takes no snapshot at all.
 pub(crate) fn after_call(project: &Project, top: &Path, session: &str, agent_id: Option<&str>, tool_use_id: &str) {
     let Ok(store) = locate(project, top) else {
         return;
     };
-    let Ok(Some(_lock)) = project.lock_within(LOCK_WAIT) else {
+    let Ok(Some(_lock)) = store.lock_within(LOCK_WAIT) else {
         return;
     };
     let mut records = load(&store.dir);
@@ -433,7 +503,7 @@ pub(crate) fn after_call(project: &Project, top: &Path, session: &str, agent_id:
     } else {
         (Some(start.before.clone()), start.start, BTreeSet::new())
     };
-    let after = tree(top, &store).ok();
+    let after = tree(top, &store, &start.paths).ok();
     if let (Some(before), Some(after)) = (&before, &after)
         && let Ok(changes) = changed(top, &store, before, after)
     {
@@ -515,7 +585,7 @@ fn overlaps(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
 /// and a change no call recorded never takes a path from a call that did.
 pub(crate) fn owned(project: &Project, top: &Path, session: &str) -> Result<Option<BTreeSet<String>>> {
     let store = locate(project, top)?;
-    let _lock = project.lock()?;
+    let _lock = store.lock()?;
     let records = load(&store.dir);
     let had_after = records.iter().any(|r| match r {
         Record::Post(p) => p.session == session,
@@ -542,7 +612,7 @@ pub(crate) fn owned(project: &Project, top: &Path, session: &str) -> Result<Opti
     if latest.is_empty() {
         return Ok(Some(BTreeSet::new()));
     }
-    let Ok(current) = tree(top, &store).and_then(|t| blobs(top, &store, &t)) else {
+    let Ok(current) = tree(top, &store, &[]).and_then(|t| blobs(top, &store, &t)) else {
         return Ok(Some(BTreeSet::new()));
     };
     let owned = latest
@@ -561,6 +631,14 @@ pub(crate) fn owned(project: &Project, top: &Path, session: &str) -> Result<Opti
         .map(|(path, _)| path.to_string())
         .collect();
     Ok(Some(owned))
+}
+
+/// The paths `session` owns right now, as the Stop hook's ownership judge reads
+/// them, for a caller outside this module that has to see the records: a test,
+/// or a reader of the provenance. `None` when the session has no after-call
+/// record at all.
+pub fn owned_paths(project: &Project, top: &Path, session: &str) -> Result<Option<BTreeSet<String>>> {
+    owned(project, top, session)
 }
 
 #[cfg(test)]
@@ -588,7 +666,7 @@ mod tests {
     /// Runs one write call of `session`: the before snapshot, the work-tree
     /// change, then the after snapshot and record.
     fn run_call(p: &Project, repo: &Path, session: &str, agent: Option<&str>, id: &str, write: impl FnOnce()) {
-        before_call(p, repo, session, agent, id);
+        before_call(p, repo, session, agent, id, &[]);
         write();
         after_call(p, repo, session, agent, id);
     }
@@ -685,7 +763,7 @@ mod tests {
         // The catch-up of s2 runs while s1's call is still open, so it cannot see s1's record.
         let (_tmp, p, repo) = setup();
         run_call(&p, &repo, "s2", None, "d1", || {});
-        before_call(&p, &repo, "s1", None, "c1");
+        before_call(&p, &repo, "s1", None, "c1", &[]);
         std::fs::write(repo.join("a.txt"), "first").unwrap();
         catch_up_at_stop(&p, &repo, "s2", None);
         after_call(&p, &repo, "s1", None, "c1");
@@ -731,8 +809,8 @@ mod tests {
     #[test]
     fn provenance_overlapping_calls_with_the_same_blob_have_no_owner() {
         let (_tmp, p, repo) = setup();
-        before_call(&p, &repo, "s1", None, "t1");
-        before_call(&p, &repo, "s2", None, "t2");
+        before_call(&p, &repo, "s1", None, "t1", &[]);
+        before_call(&p, &repo, "s2", None, "t2", &[]);
         std::fs::write(repo.join("out.txt"), "ok").unwrap();
         after_call(&p, &repo, "s1", None, "t1");
         after_call(&p, &repo, "s2", None, "t2");
@@ -743,7 +821,7 @@ mod tests {
     #[test]
     fn provenance_a_subagent_write_inside_a_main_call_is_not_the_sessions() {
         let (_tmp, p, repo) = setup();
-        before_call(&p, &repo, "s1", None, "main");
+        before_call(&p, &repo, "s1", None, "main", &[]);
         run_call(&p, &repo, "s1", Some("a1"), "sub", || std::fs::write(repo.join("out.txt"), "sub").unwrap());
         after_call(&p, &repo, "s1", None, "main");
         assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), BTreeSet::new(), "the subagent wrote out.txt during the main call");
@@ -761,7 +839,7 @@ mod tests {
     #[test]
     fn provenance_a_session_without_after_records_falls_back() {
         let (_tmp, p, repo) = setup();
-        before_call(&p, &repo, "s1", None, "t1");
+        before_call(&p, &repo, "s1", None, "t1", &[]);
         assert_eq!(owned(&p, &repo, "s1").unwrap(), None, "no after-call record means keep today's text record");
     }
 
@@ -776,7 +854,7 @@ mod tests {
     #[test]
     fn provenance_a_reused_call_id_diffs_against_its_latest_before() {
         let (_tmp, p, repo) = setup();
-        before_call(&p, &repo, "s1", None, "t1");
+        before_call(&p, &repo, "s1", None, "t1", &[]);
         std::fs::write(repo.join("other.txt"), "x").unwrap();
         run_call(&p, &repo, "s1", None, "t1", || std::fs::write(repo.join("out.txt"), "ok").unwrap());
         assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["out.txt"]), "other.txt changed before the second call");
@@ -798,7 +876,7 @@ mod tests {
         let (tmp, p, repo) = setup();
         let wt = tmp.0.join("wt");
         crate::git::testrepo::git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
-        before_call(&p, &wt, "s1", None, "t1");
+        before_call(&p, &wt, "s1", None, "t1", &[]);
         assert_eq!(walk(&dir(&p, &wt).join("objects")), BTreeSet::new(), "committed content is read from the shared store, not copied");
     }
 
@@ -854,7 +932,7 @@ mod tests {
     #[test]
     fn provenance_a_live_call_of_another_session_holds_the_prune() {
         let (_tmp, p, repo) = setup();
-        before_call(&p, &repo, "s2", None, "live");
+        before_call(&p, &repo, "s2", None, "live", &[]);
         let big = grow(&dir(&p, &repo));
         run_call(&p, &repo, "s1", None, "t1", || {});
         assert!(big.exists(), "s2 still needs its before tree");
@@ -865,8 +943,14 @@ mod tests {
         let (_tmp, p, repo) = setup();
         let d = dir(&p, &repo);
         let now = now_ms();
-        let stale =
-            Start { session: "s2".into(), agent_id: None, tool_use_id: "gone".into(), before: "x".into(), start: now - STALE_MS - 1 };
+        let stale = Start {
+            session: "s2".into(),
+            agent_id: None,
+            tool_use_id: "gone".into(),
+            before: "x".into(),
+            start: now - STALE_MS - 1,
+            paths: Vec::new(),
+        };
         let old = After {
             session: "s3".into(),
             agent_id: None,

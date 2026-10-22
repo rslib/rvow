@@ -438,6 +438,10 @@ Without `test_queries`, only the shipped queries name tests.
 ## Choosing the git binary
 
 rvow runs the git it finds on `PATH`.
+On macOS, when that git is `/usr/bin/git`, rvow runs the real git behind it, which `xcrun --find git` names, since the shim adds about 6 ms to each git call.
+It keeps that path in `hook-state/git-bin` in the rvow home and asks `xcrun` again only when the path is gone.
+It runs a kept path only when root owns the file, so a path that an agent writes there is never run.
+
 Set `RVOW_GIT` to the path of a git binary to run that one for every git call instead.
 Set it when the git on `PATH` cannot run, such as a sandbox where `/usr/bin/git` is a launcher shim that the sandbox stops.
 An empty value falls back to `PATH`.
