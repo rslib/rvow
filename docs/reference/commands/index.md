@@ -39,6 +39,7 @@ Every rvow command. Each page comes from `rvow docs`, so it matches `rvow <comma
 | [`amend`](amend.md) | Record the current plan edits as an amendment for the user to confirm |
 | [`confirm`](confirm.md) | List pending amendments, or accept or reject them (user only) |
 | [`prove`](prove.md) | Run a task's stored verify command and record the proof |
+| [`land`](land.md) | Land the proved task branches of a change onto its branch |
 | [`status`](status.md) | Show the state of each task on this branch |
 | [`archive`](archive.md) | Merge an active change into the living specs and move it to archive/done/ |
 | [`drop`](drop.md) | Give up a backlog or active change; the specs stay as they are |

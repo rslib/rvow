@@ -121,6 +121,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow land <change or task>`, which applies the proved task branches of a change onto the change branch in a temporary worktree, re-proves what moved, runs the gate and moves the change branch when it passes.
+  It keeps each commit of a task, or makes one merge commit per task with `--merge`, and prints the steps to rebase, resolve and prove a task branch that conflicts.
 - Add `rvow delegate <task> --worktree [path]`, which makes a branch and a worktree for the task, with rgit when it is on `PATH`, or records a worktree that already exists.
   The first hook call of a session from that worktree binds the session to the lease by its session id, in every harness, and the session meets the rules of the lease's change whatever its branch is called.
   A worktree lease lives until its task is proved or blocked, or the worktree is gone.

@@ -188,6 +188,17 @@ fn docs_name_the_worktree_lease() {
 }
 
 #[test]
+fn docs_name_the_land() {
+    let how = doc("docs/how-it-works.md");
+    assert!(how.contains("`rvow land <change>`"), "how-it-works lacks rvow land");
+    assert!(how.contains("`--merge` makes one merge commit per task"), "how-it-works lacks the merge mode");
+    assert!(how.contains("When the gate fails, it moves nothing"), "how-it-works lacks the gate rule");
+    let log = doc("CHANGELOG.md");
+    let unreleased = log.split("## [").nth(1).unwrap_or_default();
+    assert!(unreleased.contains("`rvow land <change or task>`"), "the Unreleased changelog lacks rvow land");
+}
+
+#[test]
 fn docs_name_the_automatic_baseline() {
     let how = doc("docs/how-it-works.md");
     assert!(how.contains("## The baseline: the code at accept"), "how-it-works lacks the automatic baseline");

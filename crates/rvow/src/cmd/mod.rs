@@ -10,6 +10,7 @@ pub mod docs;
 pub mod export;
 pub mod grammar;
 pub mod ingest;
+pub mod land;
 pub mod lifecycle;
 pub mod plan;
 pub mod prove;

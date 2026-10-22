@@ -492,6 +492,22 @@ Two limits stay:
 - A subagent without the mod is unbound, so it meets the usual rules.
 - The hook judges a shell command only by the files it names as write targets, so a lease does not cover a file that a program writes without naming it, such as a build output.
 
+## Landing task branches
+
+`rvow land <change>` brings the task branches of a change back onto the change branch, and `rvow land <task>` brings one.
+It takes each task whose lease has a branch and has ended and whose task is not blocked, in task order.
+It applies them in a clean temporary worktree, re-proves there the tasks the merge moved and runs the gate of the change on the result.
+That gate checks the proofs of the tasks that landed only, since a task left out is not on the result yet.
+
+By default land keeps each commit of a task, as a rebase does, and `--merge` makes one merge commit per task instead.
+It runs rgit for these steps when rgit is on `PATH`, else git.
+When the gate passes, land moves the change branch forward on this machine, and it never pushes.
+When the gate fails, it moves nothing and prints the failed checks.
+
+A task branch that does not apply cleanly is left out, and the others still land.
+For it, land prints the files in conflict and the steps to fix it in the task's worktree: rebase onto the change branch, resolve, prove the task and run land again.
+Land refuses to start while the checkout of the change branch has uncommitted changes.
+
 ## What a hook denies and what it only counts
 
 A rule has a mode.

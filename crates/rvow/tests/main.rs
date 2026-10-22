@@ -130,6 +130,12 @@ mod hook_json;
 mod hook_stats;
 #[path = "suite/judge.rs"]
 mod judge;
+#[path = "suite/land.rs"]
+mod land;
+#[path = "suite/land_conflict.rs"]
+mod land_conflict;
+#[path = "suite/land_merge.rs"]
+mod land_merge;
 #[path = "suite/lease_bind_worktree.rs"]
 mod lease_bind_worktree;
 #[path = "suite/lease_brief.rs"]

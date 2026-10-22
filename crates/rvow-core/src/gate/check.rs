@@ -75,6 +75,18 @@ pub(crate) fn check_record(project: &Project, living: &[CapSpec], r: &mut Report
 }
 
 pub(crate) fn check_change(project: &Project, c: &Active, now: &Now, opts: &Options, r: &mut Report) -> Result<()> {
+    check_change_only(project, c, now, opts, None, r)
+}
+
+/// Like `check_change`, checking the proofs of the tasks in `only` alone when it is set.
+pub(crate) fn check_change_only(
+    project: &Project,
+    c: &Active,
+    now: &Now,
+    opts: &Options,
+    only: Option<&[String]>,
+    r: &mut Report,
+) -> Result<()> {
     if let Ok(home) = crate::store::home_dir() {
         drift::fetch_missing_grammars(project, now.top, &home, now.config, c);
     }
@@ -123,7 +135,7 @@ pub(crate) fn check_change(project: &Project, c: &Active, now: &Now, opts: &Opti
     if opts.rerun {
         return Ok(());
     }
-    for t in &c.loaded.tasks {
+    for t in c.loaded.tasks.iter().filter(|t| only.is_none_or(|only| only.contains(&t.id.to_string()))) {
         let s = proof::state(c, t, now)?;
         let line = match &s {
             State::Stale(why) => format!("{} is stale ({})", t.id, why.join(", ")),

@@ -126,7 +126,18 @@ pub fn active(project: &Project, living: &[CapSpec]) -> Result<Vec<Active>> {
 /// The active changes whose vow names `branch`, or that a live lease whose
 /// worktree is on `branch` works on.
 pub fn on_branch<'a>(changes: &'a [Active], branch: &str) -> Vec<&'a Active> {
-    changes.iter().filter(|a| a.branch() == Some(branch) || a.lease_branches.iter().any(|b| b == branch)).collect()
+    changes
+        .iter()
+        .filter(|a| {
+            a.branch() == Some(branch) || a.lease_branches.iter().any(|b| b == branch) || land_branch(&a.dir.id.to_string()) == branch
+        })
+        .collect()
+}
+
+/// The scratch branch that `rvow land` builds the result of change `id` on,
+/// which counts as the change's own branch.
+pub fn land_branch(id: &str) -> String {
+    format!("rvow/land/{id}")
 }
 
 /// The current hash of every requirement a task covers: the delta text when

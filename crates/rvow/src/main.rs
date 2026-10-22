@@ -283,6 +283,14 @@ enum Cmd {
         #[arg(long)]
         stale: bool,
     },
+    /// Land the proved task branches of a change onto its branch.
+    Land {
+        /// The change id, or a task id to land only that task.
+        target: String,
+        /// Land each task as one merge commit instead of its commits one by one.
+        #[arg(long)]
+        merge: bool,
+    },
     /// Show the state of each task on this branch.
     Status {
         /// Show every active change, not only this branch's.
@@ -526,6 +534,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         }
         Cmd::Prove { task: Some(t), .. } => prove::prove(&t),
         Cmd::Prove { .. } => prove::prove_stale(),
+        Cmd::Land { target, merge } => cmd::land::land(&target, merge),
         Cmd::Status { all, json } => read::status(all, json),
         Cmd::Bundle { out } => prove::bundle(&out),
         Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),

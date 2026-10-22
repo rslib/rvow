@@ -68,6 +68,14 @@ struct Caching {
     record: bool,
 }
 
+/// What a gate looks at: one change or every change of the branch, and the
+/// proofs of some tasks only or of all.
+#[derive(Clone, Copy, Default)]
+struct Reach<'a> {
+    target: Option<&'a crate::id::Id>,
+    only: Option<&'a [String]>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     pub strict: bool,
@@ -78,12 +86,12 @@ pub struct Options {
 
 /// Checks the active changes of the current branch.
 pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, Caching { use_cache: true, record: true }, echo)
+    gate_for(project, home, cwd, opts, Reach::default(), Caching { use_cache: true, record: true }, echo)
 }
 
 /// Like `gate`, but a rerun runs every task and ignores the cache.
 pub fn gate_uncached(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
-    gate_for(project, home, cwd, opts, None, Caching { use_cache: false, record: true }, echo)
+    gate_for(project, home, cwd, opts, Reach::default(), Caching { use_cache: false, record: true }, echo)
 }
 
 fn gate_for(
@@ -91,10 +99,11 @@ fn gate_for(
     home: &Path,
     cwd: &Path,
     opts: Options,
-    target: Option<&crate::id::Id>,
+    reach: Reach,
     caching: Caching,
     echo: &mut dyn Write,
 ) -> Result<Report> {
+    let Reach { target, only } = reach;
     let (use_cache, record) = (caching.use_cache, caching.record);
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
@@ -128,7 +137,7 @@ fn gate_for(
     let runners = config::runners(project)?;
     let now = Now { top: &top, config: &config, env: fingerprint::env(&top, &config)?, living: &living };
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
-        check_change(project, c, &now, &opts, &mut r)?;
+        check::check_change_only(project, c, &now, &opts, only, &mut r)?;
     }
     for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
         r.warnings.extend(judge_warnings(project, home, cwd, &c.dir.id.to_string()));
@@ -394,7 +403,22 @@ pub fn change_gate_echo(project: &Project, home: &Path, cwd: &Path, c: &Active, 
         home,
         cwd,
         Options { strict: true, rerun: false, out: None },
-        Some(&c.dir.id),
+        Reach { target: Some(&c.dir.id), only: None },
+        Caching { use_cache: true, record: false },
+        echo,
+    )
+}
+
+/// The gate of change `c` for `rvow land`: like `change_gate_echo`, but it
+/// checks the proofs of `tasks` only, the ones that landed, since a task that
+/// was left out is not on the result yet.
+pub fn land_gate(project: &Project, home: &Path, cwd: &Path, c: &Active, tasks: &[String], echo: &mut dyn Write) -> Result<Report> {
+    gate_for(
+        project,
+        home,
+        cwd,
+        Options { strict: true, rerun: false, out: None },
+        Reach { target: Some(&c.dir.id), only: Some(tasks) },
         Caching { use_cache: true, record: false },
         echo,
     )
