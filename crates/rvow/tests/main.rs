@@ -4,8 +4,6 @@
 mod accept_speed;
 #[path = "suite/agent_mode.rs"]
 mod agent_mode;
-#[path = "suite/alloc.rs"]
-mod alloc;
 #[path = "suite/any_tool_change.rs"]
 mod any_tool_change;
 #[path = "suite/archive_reprove.rs"]
@@ -170,9 +168,3 @@ mod verify_runners;
 mod worktrees;
 #[path = "suite/yolo.rs"]
 mod yolo;
-
-/// Tests in this binary share the process env, so every one that sets an
-/// env var holds this lock: alloc sets HOME and RVOW_HOME.
-pub(crate) mod env_lock {
-    pub use rvow_core::git::testrepo::env_lock as lock;
-}

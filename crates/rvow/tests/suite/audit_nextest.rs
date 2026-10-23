@@ -92,3 +92,27 @@ fn audit_nextest_runner_is_nextest_in_the_hook_ci_and_agents_md() {
         assert!(agents.contains(command), "AGENTS.md does not show `{command}`");
     }
 }
+
+/// Under `cargo test` the modules of one main.rs share a process, so a module
+/// that sets PATH or HOME breaks every test that starts a tool. It builds as
+/// its own test binary instead.
+#[test]
+fn audit_nextest_main_binaries_leave_path_and_home_alone() {
+    let mut checked = 0;
+    for dir in test_dirs() {
+        let Ok(main) = std::fs::read_to_string(dir.join("main.rs")) else { continue };
+        for rel in main.lines().filter_map(|l| l.trim().strip_prefix("#[path = \"")?.split('"').next()) {
+            let source = std::fs::read_to_string(dir.join(rel)).unwrap();
+            for var in ["PATH", "HOME"] {
+                assert!(
+                    !source.contains(&format!("set_var(\"{var}\"")) && !source.contains(&format!("remove_var(\"{var}\"")),
+                    "{} sets {var} but builds into {}; give it its own test binary",
+                    dir.join(rel).display(),
+                    dir.join("main.rs").display()
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "only {checked} test modules found");
+}
