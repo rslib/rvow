@@ -174,3 +174,24 @@ fn install_all_lists_a_known_repo_without_a_gate() {
     assert!(out.contains(&format!("cd {} && rvow install", repo.display())), "{out}");
     assert!(!repo.join(".git/hooks/pre-push").exists(), "a listed repository gets no gate");
 }
+
+#[test]
+fn install_all_refreshes_a_known_old_gate() {
+    let f = Fixture::new("known-old");
+    let repo = f.repo("known");
+    f.ok(&repo, &["init"]);
+    f.ok(&repo, &["status"]);
+    std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+    std::fs::write(record(&repo), format!("{MARK}\nsha256:{}\n", "0".repeat(64))).unwrap();
+    assert!(!f.home().join(GATE_REPOS_FILE).exists(), "no install recorded the repository");
+
+    let out = f.ok(&f.plain(), &["install", "--all", "--claude", "settings"]);
+    let want = format!("{MARK}\nsha256:{}\n", sha256_hex(&std::fs::read(binary()).unwrap()));
+    assert_eq!(std::fs::read_to_string(record(&repo)).unwrap(), want, "the old gate pins the running binary");
+    assert!(out.contains("pre-push gates: 1 refreshed, 0 skipped"), "{out}");
+    assert!(!out.contains(&format!("cd {} && rvow install", repo.display())), "a gated repository is not listed: {out}");
+    assert_eq!(f.gates(), [repo.join(".git")], "the refreshed repository is recorded");
+
+    let again = f.ok(&f.plain(), &["install", "--all", "--claude", "settings"]);
+    assert!(again.contains("pre-push gates: 1 refreshed, 0 skipped"), "the second run refreshes it from the record: {again}");
+}

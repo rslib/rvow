@@ -390,7 +390,17 @@ fn install_all_gates(r: &mut Reply, rvow: &Path) -> Result<()> {
         }
     }
     for common in store::indexed_repos(&home) {
-        if remembered.contains(&common) || install::has_gate(&common) {
+        if remembered.contains(&common) {
+            continue;
+        }
+        // A gate from an install made before the record existed is refreshed and recorded.
+        if install::has_gate(&common) {
+            if refresh_gate(r, &common, rvow)? {
+                store::remember_gate(&home, &common);
+                refreshed += 1;
+            } else {
+                skipped += 1;
+            }
             continue;
         }
         let Some(top) = install::work_tree(&common) else {
