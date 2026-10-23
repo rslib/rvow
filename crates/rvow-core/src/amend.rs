@@ -10,10 +10,10 @@ use crate::config;
 use crate::drift::{self, Item};
 use crate::error::{Error, Result};
 use crate::git;
-use crate::hook;
 use crate::id::{self, Id, Kind as IdKind};
 use crate::ledger::{self, Kind, short_hash};
 use crate::proof::{self, Active};
+use crate::protected;
 use crate::registry;
 use crate::store::Project;
 use crate::vow::sha256_hex;
@@ -191,9 +191,9 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
     let config = config::load(project, home)?;
     let unlock = match unlock {
         Some(path) => {
-            let rel = hook::rel_path(Path::new(path), cwd, &top)
+            let rel = protected::rel_path(Path::new(path), cwd, &top)
                 .ok_or_else(|| Error::new("unlock", format!("{path} is outside the repository"), "name a file in this repository"))?;
-            if !hook::protected(project, &top)?.contains(&rel) {
+            if !protected::on_branch(project, &top)?.contains(&rel) {
                 return Err(Error::new("unlock", format!("{rel} is not protected"), "edit it without an unlock"));
             }
             Some(rel)

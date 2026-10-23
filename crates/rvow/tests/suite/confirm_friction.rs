@@ -121,13 +121,13 @@ fn hook_project(name: &str) -> (Repo, rvow_core::store::Project) {
     (r, p)
 }
 
-fn bash_denial(p: &rvow_core::store::Project, cwd: &Path, cmd: &str) -> Option<rvow_core::hook::Denial> {
+fn bash_denial(p: &rvow_core::store::Project, cwd: &Path, cmd: &str) -> Option<rvow_hook::hook::Denial> {
     let input = serde_json::json!({
         "cwd": cwd.to_str().unwrap(),
         "tool_name": "Bash",
         "tool_input": {"command": cmd},
     });
-    rvow_core::hook::pre_tool_use_denial(p, &input).unwrap()
+    rvow_hook::hook::pre_tool_use_denial(p, &input).unwrap()
 }
 
 fn ledger_store(r: &Repo) -> PathBuf {
@@ -153,7 +153,7 @@ fn glob_read_write_through_ledger_glob_stays_denied() {
     let store = ledger_store(&r);
     let cmd = format!("echo x >> {}/active/CHG-a*/ledger.jsonl", store.display());
     let found = bash_denial(&p, &r.repo(), &cmd).unwrap();
-    assert_eq!(found.rule, rvow_core::hook::Rule::Ledger);
+    assert_eq!(found.rule, rvow_hook::hook::Rule::Ledger);
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn glob_read_hidden_checks_glob_stays_denied() {
         Some(v) => unsafe { std::env::set_var("RVOW_HOME", v) },
         None => unsafe { std::env::remove_var("RVOW_HOME") },
     }
-    assert_eq!(found.unwrap().rule, rvow_core::hook::Rule::HiddenChecks);
+    assert_eq!(found.unwrap().rule, rvow_hook::hook::Rule::HiddenChecks);
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn glob_read_sort_output_through_glob_is_denied() {
     let store = ledger_store(&r);
     let cmd = format!("sort -o {}/active/CHG-a*/ledger.jsonl /dev/null", store.display());
     let found = bash_denial(&p, &r.repo(), &cmd).unwrap();
-    assert_eq!(found.rule, rvow_core::hook::Rule::Ledger);
+    assert_eq!(found.rule, rvow_hook::hook::Rule::Ledger);
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn glob_read_uniq_output_through_glob_is_denied() {
     let store = ledger_store(&r);
     let cmd = format!("uniq /dev/null {}/active/CHG-a*/ledger.jsonl", store.display());
     let found = bash_denial(&p, &r.repo(), &cmd).unwrap();
-    assert_eq!(found.rule, rvow_core::hook::Rule::Ledger);
+    assert_eq!(found.rule, rvow_hook::hook::Rule::Ledger);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn glob_read_sort_output_literal_path_is_denied() {
     let store = ledger_store(&r);
     let cmd = format!("sort -o {}/active/CHG-abcdef/ledger.jsonl /dev/null", store.display());
     let found = bash_denial(&p, &r.repo(), &cmd).unwrap();
-    assert_eq!(found.rule, rvow_core::hook::Rule::Ledger);
+    assert_eq!(found.rule, rvow_hook::hook::Rule::Ledger);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn glob_read_sort_abbrev_output_through_glob_is_denied() {
     let store = ledger_store(&r);
     let cmd = format!("sort --out={}/active/CHG-a*/ledger.jsonl /dev/null", store.display());
     let found = bash_denial(&p, &r.repo(), &cmd).unwrap();
-    assert_eq!(found.rule, rvow_core::hook::Rule::Ledger);
+    assert_eq!(found.rule, rvow_hook::hook::Rule::Ledger);
 }
 
 #[test]

@@ -145,7 +145,7 @@ fn any_tool_change_a_light_call_records_no_before_tree() {
 
 #[test]
 fn any_tool_change_knows_the_tools_of_each_harness() {
-    use rvow_core::hook::{ToolKind, tool_kind};
+    use rvow_hook::hook::{ToolKind, tool_kind};
     // Claude Code, pi, OpenCode, Codex and Gemini CLI.
     for t in ["Edit", "Write", "MultiEdit", "edit", "write", "patch", "apply_patch", "write_file", "replace"] {
         assert_eq!(tool_kind(t), ToolKind::Editor, "{t}");
@@ -169,7 +169,7 @@ fn any_tool_change_a_shell_of_another_harness_gets_the_shell_rules() {
     let project = rvow_core::store::find(&r.repo, &r.home).unwrap().unwrap();
     for (tool, command) in [("bash", json!("rvow accept CHG-x")), ("shell", json!(["bash", "-lc", "rvow accept CHG-x"]))] {
         let input = json!({"cwd": r.repo, "tool_name": tool, "tool_input": {"command": command}});
-        let denial = rvow_core::hook::pre_tool_use_denial(&project, &input).unwrap();
+        let denial = rvow_hook::hook::pre_tool_use_denial(&project, &input).unwrap();
         assert!(denial.is_some(), "{tool} ran rvow accept");
     }
 }
@@ -180,7 +180,7 @@ fn any_tool_change_every_shell_name_gets_the_shell_rules() {
     let project = rvow_core::store::find(&r.repo, &r.home).unwrap().unwrap();
     for tool in ["Bash", "PowerShell", "shell", "shell_command", "local_shell", "exec_command", "run_shell_command"] {
         let input = json!({"cwd": r.repo, "tool_name": tool, "tool_input": {"command": "rvow accept CHG-x"}});
-        let denial = rvow_core::hook::pre_tool_use_denial(&project, &input).unwrap();
+        let denial = rvow_hook::hook::pre_tool_use_denial(&project, &input).unwrap();
         assert!(denial.is_some(), "{tool} ran rvow accept");
     }
 }

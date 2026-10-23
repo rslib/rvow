@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::{amend, change, config, drift, git, ledger, proof, registry, store, vow};
+use rvow_core::{amend, change, config, drift, git, ledger, mint, proof, registry, store, vow};
 use serde_json::{Map, Value, json};
 
 struct Setup {
@@ -133,7 +133,7 @@ fn legacy_amend(s: &Setup) {
 }
 
 fn minted(s: &Setup) -> String {
-    let pairs = vow::mint_active(&s.project, &s.repo, None).unwrap();
+    let pairs = mint::mint_active(&s.project, &s.repo, None).unwrap();
     pairs.iter().find(|(from, _)| from == "TSK-new8").unwrap().1.to_string()
 }
 

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::{amend, change, config, drift, git, proof, store, vow};
+use rvow_core::{amend, change, config, drift, git, mint, proof, store, vow};
 
 struct Setup {
     _tmp: crate::temp::TempDir,
@@ -163,7 +163,7 @@ fn amend_mints_ids_after_confirmed_amend_is_not_drift() {
     let pend = pending_of(&s);
     let id = pend[0].id.to_string();
     amend::confirm(&s.project, &[id[4..8].to_string()], amend::Decision::Accept, None).unwrap();
-    let minted = vow::mint_active(&s.project, &s.repo, None).unwrap();
+    let minted = mint::mint_active(&s.project, &s.repo, None).unwrap();
     assert!(minted.is_empty(), "ids mints nothing: {minted:?}");
     let st = proof::status(&s.project, &s.home, &s.repo, false).unwrap();
     assert!(st[0].drift.is_empty(), "no drift: {:?}", st[0].drift);

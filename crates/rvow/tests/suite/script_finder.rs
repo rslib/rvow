@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rvow_core::hook::script_rule;
+use rvow_hook::hook::script_rule;
 
 struct Tmp {
     dir: PathBuf,

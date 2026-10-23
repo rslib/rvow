@@ -7,13 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::hook::Rule;
 use crate::ledger::{append_line, now_ms};
 use crate::store::Project;
 
-pub const STATS_FILE: &str = "hook-stats.jsonl";
-/// Where a full stats file moves, under the local-only `hook-state/` folder.
-pub const ROTATED_FILE: &str = "hook-state/hook-stats.old.jsonl";
+use rvow_shell::rule::Rule;
+
+pub use rvow_base::layout::{ROTATED_FILE, STATS_FILE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hook {
@@ -229,8 +228,6 @@ pub fn counts(project: &Project, days: u64, now: u64) -> Counts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook;
-    use crate::proof::tests::accepted;
     use serde_json::json;
 
     fn project() -> (crate::git::testrepo::TempDir, Project) {
@@ -262,19 +259,6 @@ mod tests {
         let old = json!({"time": now_ms(), "hook": "stop", "rule": null, "outcome": "block", "session": "s1"});
         append_line(&p.root.join(STATS_FILE), &old.to_string()).unwrap();
         let want: BTreeMap<String, u64> = [("unknown".to_string(), 1)].into();
-        assert_eq!(reasons(&p), want);
-    }
-
-    #[test]
-    fn stop_reason_is_recorded_when_the_stop_hook_blocks() {
-        let (tmp, p, repo, _task) = accepted();
-        let home = tmp.0.join("home");
-        let write = json!({"file_path": repo.join("out.txt").to_str().unwrap(), "content": "no"});
-        let call = json!({"session_id": "s1", "cwd": repo.to_str().unwrap(), "tool_name": "Write", "tool_input": write});
-        assert_eq!(hook::claude_pre_tool_use(&p, &call).unwrap(), None);
-        let stop = json!({"session_id": "s1", "cwd": repo.to_str().unwrap()});
-        assert!(hook::claude_stop(&p, &home, &stop).unwrap().is_some());
-        let want: BTreeMap<String, u64> = [("no-proof".to_string(), 1)].into();
         assert_eq!(reasons(&p), want);
     }
 }

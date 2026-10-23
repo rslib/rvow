@@ -14,7 +14,8 @@ use crate::ledger::{append_line, now_ms};
 use crate::proof::{self, Now, State};
 use crate::store::Project;
 
-pub const LEASE_FILE: &str = "leases.jsonl";
+pub use rvow_base::layout::LEASE_FILE;
+pub use rvow_git::worktree::Place;
 
 /// A lease ends this long after it was issued: 4 hours.
 pub const TTL_MS: u64 = 4 * 3_600_000;
@@ -66,13 +67,6 @@ pub struct Lease {
     pub worktree: Option<PathBuf>,
     /// The branch checked out in `worktree`.
     pub branch: Option<String>,
-}
-
-/// The worktree and branch of a lease that has a worktree of its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Place {
-    pub worktree: PathBuf,
-    pub branch: String,
 }
 
 /// The task id of the first `lease: TSK-xxxxxx` line of a prompt, if any.

@@ -28,7 +28,9 @@ const MOD_MODULES: [(&str, &str); 2] = [
     ("accept.tsx", include_str!("../../../extensions/claude/hooks/accept.tsx")),
 ];
 const MOD_TYPES: &str = include_str!("../../../extensions/claude/types/index.d.ts");
-pub const MARKETPLACE_DIR: &str = "claude-plugin";
+
+pub use rvow_base::layout::MARKETPLACE_DIR;
+
 const MARK: &str = "rvow-managed sha256:";
 const PRE_PUSH_MARK: &str = "# rvow pre-push gate";
 pub(crate) const PRE_PUSH_RECORD: &str = "rvow-pre-push-installed";

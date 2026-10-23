@@ -6,9 +6,6 @@
 //! lexical protection, not a claim of semantic equivalence.
 
 use std::collections::BTreeMap;
-
-#[path = "guard_rust.rs"]
-mod rust;
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -17,6 +14,7 @@ use crate::config::Config;
 use crate::drift::{Class, Item};
 use crate::error::Result;
 use crate::fingerprint::{candidate_files, globset};
+use crate::guard_rust as rust;
 use crate::ledger::Kind;
 use crate::proof::Active;
 use crate::store::Project;
@@ -244,32 +242,7 @@ pub(crate) fn drift_with(
 mod tests {
     use super::*;
 
-    fn setup() -> (crate::git::testrepo::TempDir, Project, std::path::PathBuf, String) {
-        use crate::git::testrepo::*;
-        let tmp = TempDir::new();
-        let home = tmp.0.join("home");
-        let repo = repo_with_commit(&tmp.0, "r");
-        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
-        let c = crate::change::new(&p, "T", "main", true).unwrap();
-        std::fs::write(
-            c.path.join("tasks.md"),
-            "- TSK-new1 T\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/**, src/**\n",
-        )
-        .unwrap();
-        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
-        let task = crate::vow::commit(&p, prepared).unwrap().minted[0].1.to_string();
-        std::fs::create_dir_all(repo.join("tests")).unwrap();
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        std::fs::write(repo.join("tests/t.sh"), "check_one\ncheck_two\nexit 0\n").unwrap();
-        std::fs::write(
-            repo.join("src/lib.rs"),
-            "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert_eq!(1, 1); }\n}\n",
-        )
-        .unwrap();
-        let r = crate::proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
-        assert!(r.proved, "{:?}", r.outcome);
-        (tmp, p, repo, task)
-    }
+    use crate::testutil::setup;
 
     fn weaken(p: &Project, repo: &Path) -> Vec<String> {
         let (living, _) = crate::change::load_living(p).unwrap();
@@ -322,24 +295,6 @@ mod tests {
         let (_tmp, p, repo, _) = setup();
         let body = "    fn t() { assert_eq!(1, 1); }\n    #[test]\n    fn u() { assert_eq!(2, 2); }\n";
         assert_eq!(lib_weaken(&p, &repo, body), Vec::<String>::new());
-    }
-
-    #[test]
-    fn the_hook_protects_tests_after_their_first_proof() {
-        let (_tmp, p, repo, _) = setup();
-        let input = serde_json::json!({
-            "cwd": repo.to_str().unwrap(),
-            "tool_name": "Edit",
-            "tool_input": {"file_path": "tests/t.sh"},
-        });
-        // The rule finds it; the hook only audits this rule, and the gate catches the edit.
-        assert!(crate::hook::pre_tool_use_denial(&p, &input).unwrap().is_some());
-        let src = serde_json::json!({
-            "cwd": repo.to_str().unwrap(),
-            "tool_name": "Edit",
-            "tool_input": {"file_path": "src/lib.rs"},
-        });
-        assert_eq!(crate::hook::pre_tool_use_denial(&p, &src).unwrap(), None);
     }
 
     #[test]

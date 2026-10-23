@@ -1,0 +1,23 @@
+[package]
+name = "rvow-plan"
+description = "The plan behind a change: its files, the lint, the ledger, the vow and the runners a proof runs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hmac = "0.13.0"
+roxmltree = "0.21.1"
+rvow-base = { path = "../rvow-base" }
+rvow-git = { path = "../rvow-git" }
+rvow-store = { path = "../rvow-store" }
+rvow-syntax = { path = "../rvow-syntax" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+toml = "1.1.6"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"

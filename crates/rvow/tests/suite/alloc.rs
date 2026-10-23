@@ -330,7 +330,7 @@ const PRE_TOOL_USE_EDIT: usize = 5400; // measured 2026-10-22 on macOS: 4902; bu
 fn alloc_pre_tool_use_edit() {
     let fx = Fx::new("pre-edit");
     let input = fx.edit("PreToolUse");
-    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_core::hook::claude_pre_tool_use(project, &input));
+    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_hook::hook::claude_pre_tool_use(project, &input));
     eprintln!("alloc pre_tool_use_edit: count={count} bytes={bytes}");
     assert!(count <= PRE_TOOL_USE_EDIT, "alloc pre_tool_use_edit: count={count} bytes={bytes} over {PRE_TOOL_USE_EDIT}");
 }
@@ -349,7 +349,7 @@ fn alloc_pre_tool_use_bash() {
         "tool_use_id": "t-alloc-2",
         "tool_input": {"command": "cargo test -p rvow-core"},
     });
-    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_core::hook::claude_pre_tool_use(project, &input));
+    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_hook::hook::claude_pre_tool_use(project, &input));
     eprintln!("alloc pre_tool_use_bash: count={count} bytes={bytes}");
     assert!(count <= PRE_TOOL_USE_BASH, "alloc pre_tool_use_bash: count={count} bytes={bytes} over {PRE_TOOL_USE_BASH}");
 }
@@ -361,7 +361,7 @@ const POST_TOOL_USE: usize = 120; // measured 2026-10-22 on macOS: 103; budget +
 fn alloc_post_tool_use() {
     let fx = Fx::new("post");
     let input = fx.edit("PostToolUse");
-    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_core::hook::claude_post_tool_use(project, &input));
+    let (count, bytes) = counted(&fx, |project, _home, _cwd| rvow_hook::hook::claude_post_tool_use(project, &input));
     eprintln!("alloc post_tool_use: count={count} bytes={bytes}");
     assert!(count <= POST_TOOL_USE, "alloc post_tool_use: count={count} bytes={bytes} over {POST_TOOL_USE}");
 }
@@ -373,7 +373,7 @@ const STOP: usize = 6280; // measured 2026-10-22 on macOS: 5704; budget +10% for
 fn alloc_stop() {
     let fx = Fx::new("stop");
     let input = json!({"session_id": SESSION, "hook_event_name": "Stop", "cwd": fx.repo()});
-    let (count, bytes) = counted(&fx, |project, home, _cwd| rvow_core::hook::claude_stop(project, home, &input));
+    let (count, bytes) = counted(&fx, |project, home, _cwd| rvow_hook::hook::claude_stop(project, home, &input));
     eprintln!("alloc stop: count={count} bytes={bytes}");
     assert!(count <= STOP, "alloc stop: count={count} bytes={bytes} over {STOP}");
 }
@@ -413,7 +413,7 @@ fn alloc_session_start() {
         n += 1;
         let input =
             json!({"session_id": format!("{SESSION}-{n}"), "hook_event_name": "SessionStart", "source": "startup", "cwd": fx.repo()});
-        rvow_core::hook::claude_session_start(Some(project), home, &input, &[])
+        rvow_hook::hook::claude_session_start(Some(project), home, &input, &[])
     });
     eprintln!("alloc session_start: count={count} bytes={bytes}");
     assert!(count <= SESSION_START, "alloc session_start: count={count} bytes={bytes} over {SESSION_START}");
@@ -431,7 +431,7 @@ fn alloc_session_start_with_a_waiting_plan() {
         n += 1;
         let input =
             json!({ "session_id": format!("{SESSION}-w{n}"), "hook_event_name": "SessionStart", "source": "startup", "cwd": fx.repo() });
-        rvow_core::hook::claude_session_start(Some(project), home, &input, &[])
+        rvow_hook::hook::claude_session_start(Some(project), home, &input, &[])
     });
     eprintln!("alloc session_start_waiting: count={count} bytes={bytes}");
     assert!(count <= SESSION_START_WAITING, "alloc session_start_waiting: count={count} bytes={bytes} over {SESSION_START_WAITING}");
@@ -446,7 +446,7 @@ fn alloc_stop_with_reprove() {
     let input = json!({"session_id": SESSION, "hook_event_name": "Stop", "cwd": fx.repo()});
     let (count, bytes) = counted(&fx, |project, home, cwd| {
         let living = rvow_core::change::living(project)?;
-        let out = rvow_core::hook::claude_stop_over(project, home, &input, &living)?;
+        let out = rvow_hook::hook::claude_stop_over(project, home, &input, &living)?;
         rvow_core::reprove::ready_over(project, home, cwd, &living)?;
         Ok(out)
     });

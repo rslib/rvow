@@ -71,6 +71,20 @@ mod tests {
         assert!(skill.contains("{{cmd:guide runners}}"));
     }
 
+    /// The guides and the lint quote the same numbers.
+    #[test]
+    fn guide_numbers_match_the_lint() {
+        let cap = format!("at most {} in the change", crate::lint::MAX_CLARIFICATIONS);
+        assert!(PROPOSAL.contains(&cap), "proposal guide lacks `{cap}`");
+        let round = format!("at most {} questions per round", crate::interview::ROUND);
+        assert!(PROPOSAL.contains(&round), "proposal guide lacks `{round}`");
+        assert!(TASKS.contains("rvow takes the baseline from the code at accept"), "tasks guide lacks the baseline rule");
+        assert!(PROPOSAL.contains("- `branch:` names the git branch"), "proposal guide does not explain branch:");
+        assert!(SPEC.contains("Name the visible behavior, not files or code"), "spec guide keeps a Do-not bullet");
+        assert!(DESIGN.contains("At most 100 lines"), "design guide cap moved from 100");
+        assert!(!DESIGN.contains("300"), "design guide still says 300");
+    }
+
     #[test]
     fn every_guide_fits_the_word_budget() {
         for (name, text) in [("proposal", PROPOSAL), ("spec", SPEC), ("tasks", TASKS), ("design", DESIGN), ("judge", JUDGE)] {

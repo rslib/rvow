@@ -7,10 +7,10 @@ use rvow_core::git;
 use rvow_core::import;
 use rvow_core::interview;
 use rvow_core::lint::Finding;
+use rvow_core::mint;
 use rvow_core::plan;
 use rvow_core::show;
 use rvow_core::store;
-use rvow_core::vow;
 
 use super::{branch_label, current_branch, cwd, project};
 use crate::ViaArg;
@@ -217,7 +217,7 @@ pub fn put(target: &str, part: Option<&str>) -> Result<Reply> {
 pub fn ids(target: Option<&str>) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
-    let minted = vow::mint_active(&p, &cwd()?, target)?;
+    let minted = mint::mint_active(&p, &cwd()?, target)?;
     let mut r = Reply::new();
     let mut rows = Vec::new();
     for (from, to) in &minted {

@@ -272,9 +272,9 @@ fn plan_access_put_refuses_a_shared_requirement_id() {
     );
 }
 
-fn hook_denial(r: &Repo, project: &rvow_core::store::Project, tool: &str, input: serde_json::Value) -> Option<rvow_core::hook::Denial> {
+fn hook_denial(r: &Repo, project: &rvow_core::store::Project, tool: &str, input: serde_json::Value) -> Option<rvow_hook::hook::Denial> {
     let payload = serde_json::json!({"cwd": r.repo(), "tool_name": tool, "tool_input": input});
-    rvow_core::hook::pre_tool_use_denial(project, &payload).unwrap()
+    rvow_hook::hook::pre_tool_use_denial(project, &payload).unwrap()
 }
 
 #[test]

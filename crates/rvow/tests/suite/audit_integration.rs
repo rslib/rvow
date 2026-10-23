@@ -7,22 +7,42 @@ fn root() -> PathBuf {
 }
 
 /// Every top-level module declared in the core library must resolve to a real
-/// source file or directory. This catches the "module declared but missing"
-/// class of build breakage independent of git index state.
+/// source file or directory, in its own crate or in the crate that exports it.
+/// This catches the "module declared but missing" class of build breakage
+/// independent of git index state.
 #[test]
 fn audit_integration_declared_core_modules_resolve_to_sources() {
     let lib = std::fs::read_to_string(root().join("crates/rvow-core/src/lib.rs")).unwrap();
     let mut found = 0;
     for line in lib.lines() {
-        let Some(name) = line.trim().strip_prefix("pub mod") else { continue };
-        let name = name.trim().trim_end_matches(';').trim();
-        if name.is_empty() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("pub mod") {
+            let name = rest.trim().trim_end_matches(';').trim();
+            if name.is_empty() {
+                continue;
+            }
+            let dir = root().join("crates/rvow-core/src").join(name);
+            let as_rs = root().join(format!("crates/rvow-core/src/{name}.rs"));
+            assert!(as_rs.is_file() || dir.is_dir(), "declared module {name} has neither {name}.rs nor a {name}/ folder");
+            found += 1;
             continue;
         }
-        let dir = root().join("crates/rvow-core/src").join(name);
-        let as_rs = root().join(format!("crates/rvow-core/src/{name}.rs"));
-        assert!(as_rs.is_file() || dir.is_dir(), "declared module {name} has neither {name}.rs nor a {name}/ folder");
-        found += 1;
+        // `pub use rvow_<crate>::{a, b};` exports modules of another crate.
+        let Some(rest) = line.strip_prefix("pub use rvow_") else { continue };
+        let (crate_name, exports) = rest.split_once("::").unwrap_or((rest, ""));
+        let Some(exports) = exports.trim_end_matches(';').trim().strip_prefix('{').and_then(|e| e.strip_suffix('}')) else {
+            continue;
+        };
+        for name in exports.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            let src = root().join(format!("crates/rvow-{crate_name}/src"));
+            let dir = src.join(name);
+            let as_rs = src.join(format!("{name}.rs"));
+            assert!(
+                as_rs.is_file() || dir.is_dir(),
+                "rvow-core exports {name} from rvow-{crate_name}, which has neither {name}.rs nor a {name}/ folder"
+            );
+            found += 1;
+        }
     }
     assert!(found >= 30, "sanity: expected 30+ declared modules, found {found}");
 }

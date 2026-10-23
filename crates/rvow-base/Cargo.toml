@@ -1,0 +1,13 @@
+[package]
+name = "rvow-base"
+description = "The errors, ids, diagnostics, layout names and path helpers that every rvow crate shares."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom = "0.4.3"
+globset = "0.4.20"
+sha2 = "0.11.0"

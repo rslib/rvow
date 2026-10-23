@@ -4,12 +4,12 @@ use std::process::ExitCode;
 use rvow_core::change;
 use rvow_core::error::{Error, Result};
 use rvow_core::git;
-use rvow_core::hook as hooks;
 use rvow_core::install;
 use rvow_core::lease;
 use rvow_core::stats;
 use rvow_core::store::{self, Mode, Rebind};
 use rvow_core::view;
+use rvow_hook::hook as hooks;
 
 use super::{cwd, which};
 use crate::output::Reply;

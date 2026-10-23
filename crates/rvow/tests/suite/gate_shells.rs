@@ -1,7 +1,7 @@
 //! Shell forms that once got past the Bash rule: `-c` text in fish and ash,
 //! `rgit` in place of `git`, `git -c` config tricks and awk programs.
 
-use rvow_core::hook::{Rule, bash_rule};
+use rvow_hook::hook::{Rule, bash_rule};
 
 fn rule(cmd: &str) -> Option<Rule> {
     bash_rule(cmd).map(|d| d.rule)

@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use rvow_core::hook::{self, Denial};
 use rvow_core::store::{self, Project};
+use rvow_hook::hook::{self, Denial};
 use serde_json::json;
 
 const SCRIPT: &str = "t/deny.test.js";

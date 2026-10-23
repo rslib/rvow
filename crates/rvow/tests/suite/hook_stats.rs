@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use rvow_core::hook::{self, Denial, Rule};
 use rvow_core::store::{self, Project};
+use rvow_hook::hook::{self, Denial, Rule};
 use serde_json::json;
 
 const RVOW: &str = env!("CARGO_BIN_EXE_rvow");

@@ -1,0 +1,11 @@
+[package]
+name = "rvow-git"
+description = "The git queries and worktrees that rvow reads and makes a repository with."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rvow-base = { path = "../rvow-base" }

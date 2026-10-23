@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Format {
@@ -39,21 +39,14 @@ pub struct Verification {
     pub failures: Vec<String>,
 }
 
-/// Rejects absolute paths and parent traversal in a run's home-store locator.
-pub fn safe_ingest_project(folder: &str) -> bool {
-    safe_project(folder)
-}
-
-fn safe_project(folder: &str) -> bool {
-    !folder.is_empty() && !folder.contains('\\') && Path::new(folder).components().all(|c| matches!(c, Component::Normal(_)))
-}
+pub use rvow_plan::ledger::safe_ingest_project;
 
 /// Exports only valid, accepted branch changes. Pending decisions and drift block export.
 pub fn export(project: &store::Project, home: &Path, cwd: &Path) -> Result<Bundle> {
     let top = git::toplevel(cwd)?;
     let branch = git::branch(&top)?
         .ok_or_else(|| Error::new("detached", "cannot export a bundle from detached HEAD", "checkout the accepted branch"))?;
-    let folder = project.root.strip_prefix(home).ok().and_then(Path::to_str).filter(|s| safe_project(s)).ok_or_else(|| {
+    let folder = project.root.strip_prefix(home).ok().and_then(Path::to_str).filter(|s| safe_ingest_project(s)).ok_or_else(|| {
         Error::new(
             "bundle-mode",
             format!("{} is not a home-store project", project.root.display()),
@@ -172,7 +165,7 @@ impl Scratch {
 pub fn verify(bundle: &Bundle, cwd: &Path, echo: &mut dyn Write) -> Result<Verification> {
     let top = git::toplevel(cwd)?;
     let remote = git::origin_url(&top).and_then(|url| git::remote_path(&url));
-    if !safe_project(&bundle.project)
+    if !safe_ingest_project(&bundle.project)
         || git::is_shallow(&top)?
         || git::root_commits(&top)? != bundle.identity.roots
         || remote != bundle.identity.remote

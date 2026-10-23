@@ -162,15 +162,15 @@ fn judge_record_plain_review_is_not_a_judge() {
 
 #[test]
 fn judge_record_agent_cannot_write_a_judge_note() {
-    let denied = rvow_core::hook::bash_rule("rvow review CHG-x --record f.json --judge --harness claude --model haiku")
+    let denied = rvow_hook::hook::bash_rule("rvow review CHG-x --record f.json --judge --harness claude --model haiku")
         .expect("judge record was allowed");
-    assert_eq!(denied.rule, rvow_core::hook::Rule::OwnerCommand);
+    assert_eq!(denied.rule, rvow_hook::hook::Rule::OwnerCommand);
 }
 
 #[test]
 fn judge_record_plain_review_stays_allowed() {
-    assert_eq!(rvow_core::hook::bash_rule("rvow review CHG-x --packet"), None);
-    assert_eq!(rvow_core::hook::bash_rule("rvow review CHG-x --record f.json"), None, "a plain record must stay allowed");
+    assert_eq!(rvow_hook::hook::bash_rule("rvow review CHG-x --packet"), None);
+    assert_eq!(rvow_hook::hook::bash_rule("rvow review CHG-x --record f.json"), None, "a plain record must stay allowed");
 }
 
 #[test]

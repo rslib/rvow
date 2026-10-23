@@ -6,9 +6,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rvow_core::hook::{self, Rule};
 use rvow_core::lease;
 use rvow_core::store;
+use rvow_hook::hook::{self, Rule};
 use serde_json::{Value, json};
 
 const RVOW: &str = env!("CARGO_BIN_EXE_rvow");

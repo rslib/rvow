@@ -18,7 +18,8 @@ use crate::store::{Lock, Project};
 use crate::tasks::Task;
 use crate::vow::{sha256_hex, task_hash};
 
-pub const CACHE_FILE: &str = "rerun-cache.jsonl";
+pub use rvow_base::layout::CACHE_FILE;
+
 const KEY_FORMAT: u32 = 2;
 const CHECK_KEY_FORMAT: u32 = 1;
 const BAD_MAC: &str = "has an invalid MAC";

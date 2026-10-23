@@ -15,7 +15,6 @@ use crate::git;
 use crate::id::{self, Id, Ref};
 use crate::ledger::{self, Event, Kind};
 use crate::runner::{self, Outcome};
-use crate::spec::Requirement;
 use crate::store::Project;
 use crate::tasks::Task;
 use crate::vow::{requirement_hash, sha256_hex, task_hash};
@@ -140,28 +139,7 @@ pub fn land_branch(id: &str) -> String {
     format!("rvow/land/{id}")
 }
 
-/// The current hash of every requirement a task covers: the delta text when
-/// the change adds or changes it, else the living text.
-pub fn covered(task: &Task, loaded: &Loaded, living: &[CapSpec]) -> BTreeMap<String, String> {
-    task.covers
-        .iter()
-        .map(|r| {
-            let hash = find_requirement(r, loaded, living).map_or("missing".into(), requirement_hash);
-            (r.to_string(), hash)
-        })
-        .collect()
-}
-
-pub fn find_requirement<'a>(r: &Ref, loaded: &'a Loaded, living: &'a [CapSpec]) -> Option<&'a Requirement> {
-    loaded
-        .deltas
-        .iter()
-        .flat_map(|(_, f)| f.deltas.iter())
-        .filter(|d| d.op.has_body())
-        .map(|d| &d.req)
-        .chain(living.iter().flat_map(|(_, s)| s.requirements.iter()))
-        .find(|req| &req.id == r)
-}
+pub use rvow_plan::change::{covered, find_requirement};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
@@ -550,8 +528,8 @@ pub(crate) fn run_key(
 /// so it must still be absent at the gate.
 pub fn verify_programs(cmd: &str) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
-    for word in crate::hook::programs(cmd) {
-        if crate::hook::is_builtin(&word) {
+    for word in rvow_shell::shell::programs(cmd) {
+        if rvow_shell::shell::is_builtin(&word) {
             continue;
         }
         if let Some((path, hash)) = crate::gate::cache::tool_id(&word) {
@@ -1020,29 +998,7 @@ pub(crate) mod tests {
     use crate::store::{Mode, init};
     use crate::vow;
 
-    /// A repository with one accepted change whose single task checks that
-    /// `out.txt` holds "ok", with libtest-style output.
-    pub(crate) fn accepted() -> (TempDir, Project, PathBuf, String) {
-        let tmp = TempDir::new();
-        let home = tmp.0.join("home");
-        let repo = repo_with_commit(&tmp.0, "r");
-        let p = init(&repo, &home, Mode::Home).unwrap();
-        let c = change::new(&p, "Out", "main", false).unwrap();
-        std::fs::write(
-            c.path.join("tasks.md"),
-            "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
-        )
-        .unwrap();
-        std::fs::write(
-            c.path.join("specs/out.md"),
-            "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
-        )
-        .unwrap();
-        let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
-        let vowed = vow::commit(&p, prepared).unwrap();
-        let task = vowed.minted.iter().find(|(from, _)| from == "TSK-new1").unwrap().1.to_string();
-        (tmp, p, repo, task)
-    }
+    pub(crate) use crate::testutil::accepted;
 
     fn state_of(p: &Project, home: &Path, repo: &Path) -> String {
         let s = status(p, home, repo, false).unwrap();

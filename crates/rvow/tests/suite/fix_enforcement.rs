@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rvow_core::hook::{bash_denial, script_denial};
 use rvow_core::{gate, install, ledger, store};
+use rvow_hook::hook::{bash_denial, script_denial};
 use serde_json::{Value, json};
 
 const RVOW: &str = env!("CARGO_BIN_EXE_rvow");
@@ -312,7 +312,7 @@ fn every_deny_reason_of_the_production_functions_names_a_concrete_step() {
     for (what, file) in [("protected test", "tests/t.sh"), ("outside scope", "docs/readme.md")] {
         let project = store::find(&fx.repo(), &fx.rvow_home()).unwrap().unwrap();
         let payload = json!({"cwd": fx.repo(), "tool_name": "Write", "tool_input": {"file_path": fx.repo().join(file)}});
-        let found = rvow_core::hook::pre_tool_use_denial(&project, &payload).unwrap();
+        let found = rvow_hook::hook::pre_tool_use_denial(&project, &payload).unwrap();
         assert_eq!(fx.write(&fx.repo().join(file)), None, "{what} is audited, not denied");
         edit_reasons.push((what.to_string(), found.unwrap_or_else(|| panic!("{what} was not found")).reason));
     }

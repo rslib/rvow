@@ -99,7 +99,7 @@ fn audit_build_every_module_file_is_tracked() {
 #[test]
 fn audit_build_linux_environment_helpers_compile() {
     let scratch = Scratch::new("linux-helpers");
-    let source = std::fs::read_to_string(root().join("crates/rvow-core/src/fingerprint.rs")).unwrap();
+    let source = std::fs::read_to_string(root().join("crates/rvow-plan/src/fingerprint.rs")).unwrap();
     let mut helpers = String::new();
     for name in ["linux_cpu_model", "linux_cores", "linux_memory"] {
         let start = source.find(&format!("fn {name}(")).unwrap();
@@ -178,5 +178,62 @@ fn audit_build_release_profile_ships_dist_binaries() {
         assert!(text.contains("/dist/rvow"), "{path} does not read the dist binary:\n{text}");
         assert!(!text.contains("--release"), "{path} still builds with --release:\n{text}");
         assert!(!text.contains("/release/rvow"), "{path} still reads the release binary:\n{text}");
+    }
+}
+
+/// The workspace crates bottom up; a crate links only to crates before it. AGENTS.md maps the same order.
+const CRATE_ORDER: [&str; 9] =
+    ["rvow-base", "rvow-git", "rvow-syntax", "rvow-shell", "rvow-store", "rvow-plan", "rvow-core", "rvow-hook", "rvow"];
+
+/// The `rvow-*` and other crate names a manifest section lists, one per `name = ...` line.
+fn section_deps(manifest: &str, section: &str) -> Vec<String> {
+    let header = format!("[{section}]");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            inside = line == header;
+            continue;
+        }
+        if inside && let Some((name, _)) = line.split_once('=') {
+            out.push(name.trim().to_string());
+        }
+    }
+    out
+}
+
+fn crate_manifest(name: &str) -> String {
+    std::fs::read_to_string(root().join("crates").join(name).join("Cargo.toml")).unwrap()
+}
+
+#[test]
+fn audit_build_crates_link_only_to_the_crates_below_them() {
+    let workspace = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    for name in CRATE_ORDER {
+        assert!(workspace.contains(&format!("\"crates/{name}\"")), "{name} is a workspace member");
+    }
+    let members = workspace.matches("\"crates/").count();
+    assert_eq!(members, CRATE_ORDER.len(), "every workspace member has a place in CRATE_ORDER and in AGENTS.md");
+    for (at, name) in CRATE_ORDER.iter().enumerate() {
+        let manifest = crate_manifest(name);
+        for section in ["dependencies", "dev-dependencies"] {
+            for dep in section_deps(&manifest, section).into_iter().filter(|d| d.starts_with("rvow")) {
+                let to = CRATE_ORDER.iter().position(|c| *c == dep).unwrap_or_else(|| panic!("{name} links to unknown crate {dep}"));
+                assert!(to < at, "{name} links up to {dep} in [{section}]; a crate links only to the crates below it");
+            }
+        }
+    }
+}
+
+#[test]
+fn audit_build_crates_only_rvow_syntax_pulls_in_tree_sitter() {
+    for name in CRATE_ORDER {
+        let deps = section_deps(&crate_manifest(name), "dependencies");
+        let heavy: Vec<&String> = deps.iter().filter(|d| matches!(d.as_str(), "tree-sitter" | "ureq")).collect();
+        if name == "rvow-syntax" {
+            assert_eq!(heavy.len(), 2, "rvow-syntax holds tree-sitter and ureq");
+        } else {
+            assert!(heavy.is_empty(), "{name} names {heavy:?}; only rvow-syntax may, so the other crates build without wasmtime");
+        }
     }
 }

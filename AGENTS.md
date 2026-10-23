@@ -1,6 +1,6 @@
 # rvow
 
-Rust CLI (`crates/rvow`, library `crates/rvow-core`) that holds a coding agent to an accepted plan, plus a Claude Code mod and a pi extension in `extensions/`.
+Rust CLI (`crates/rvow`, libraries `crates/rvow-*`) that holds a coding agent to an accepted plan, plus a Claude Code mod and a pi extension in `extensions/`.
 
 ## Commands
 
@@ -68,7 +68,7 @@ evals/triggers/run.sh                                  # the full suite, capped 
 
 | Area | Home | Rule |
 |------|------|------|
-| Command logic | `crates/rvow-core/src/<topic>.rs` | The CLI owns the truth; hooks are thin adapters. |
+| Command logic | `crates/rvow-<crate>/src/<topic>.rs`, the crate the table below gives the topic | The CLI owns the truth; hooks are thin adapters. |
 | Command bodies and output | `crates/rvow/src/cmd/<topic>.rs` | `crates/rvow/src/main.rs` holds only the clap types and dispatch. |
 | Plan-writing guides | `guides/*.md` | Embedded by `crates/rvow-core/src/guide.rs`. |
 | Agent skill | `skills/rvow/SKILL.md.tmpl` | Rendered by `crates/rvow/src/skill.rs` at install. Write each command as `{{cmd:<args>}}`; a command or flag the CLI lacks fails the render and `cargo test`. |
@@ -77,6 +77,22 @@ evals/triggers/run.sh                                  # the full suite, capped 
 | Docs site | `site/` | Built from `docs/*.md`, the README and `docs/reference`; never edit the generated folders. |
 | Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. Each case keeps its eval store inside its scaffold at `.git/rvow-eval/home`, where the agent can write it. |
 | Trigger evals | `evals/triggers/` | `evals/triggers/run.sh` renders the skill into a skill-only plugin in a throwaway home; each case holds `prompt.md` and `graders/fires.md`; results stay local. |
+
+The library crates, bottom up. A crate links only to the crates above it in this table; `CRATE_ORDER` in `crates/rvow/tests/suite/audit_build.rs` holds the same order and fails on a link up or a crate it does not list.
+
+| Crate | Holds | Links to |
+|------|------|------|
+| `rvow-base` | errors, ids, diagnostics, hashing, time, the glob cache, paths and every store file name (`layout`) | nothing in rvow |
+| `rvow-git` | git queries, worktrees; `testrepo` fixtures behind the `testutil` feature | base |
+| `rvow-syntax` | tree-sitter units, grammars, queries, the Rust guard; the only crate with tree-sitter and ureq | base |
+| `rvow-shell` | the shell parser and its rules (`Rule`, `Denial`, `Mode`) | base |
+| `rvow-store` | the store, provenance snapshots, `project_home` | base, git |
+| `rvow-plan` | specs, tasks, proposals, templates, config, lint, changes, ledger, vow, seal, fingerprint, runners | base, git, syntax, store |
+| `rvow-core` | proof, gate, drift, guard, lease, amend, archive, land, install, stats, the views; re-exports the crates above so `rvow_core::<module>` paths stay | all above |
+| `rvow-hook` | the hook rules for each harness event | core and below |
+
+- A helper that two crates need goes in the lowest crate that both reach, most often `rvow-base`; never add a link up.
+- A cross-crate test fixture sits behind a `testutil` feature that only dev-dependencies turn on.
 
 Update this section in the change that moves an area.
 
@@ -96,7 +112,7 @@ Update this section in the change that moves an area.
 - Rust source is ASCII only; the hook and CI reject any other byte.
 - Add a dependency with `cargo add`.
 - A hook path (pre-tool-use, post-tool-use, stop, session-start, the view) runs on every tool call: read the store, config and leases once per call and pass them down, load specs with `change::living` (no lint), borrow `&Value` and `&str`, and make no `format!`, `clone`, `collect` or `to_string` per item in a loop over specs, tasks, records, tokens or bytes. A process-wide cache has an entry limit and a key that includes what makes it stale.
-- A git `Command` that sets or removes an env var copies the whole environment; remove a var only when it is set (`without_hook_env` in `crates/rvow-core/src/git.rs`).
+- A git `Command` that sets or removes an env var copies the whole environment; remove a var only when it is set (`without_hook_env` in `crates/rvow-git/src/git.rs`).
 
 ## Claude mod rules
 

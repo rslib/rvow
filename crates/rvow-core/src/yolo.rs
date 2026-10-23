@@ -10,7 +10,8 @@ use crate::error::{Error, Result};
 use crate::ledger::now_ms;
 use crate::store::Project;
 
-pub const YOLO_FILE: &str = "yolo.json";
+pub use rvow_base::layout::YOLO_FILE;
+
 pub const DEFAULT_FOR: Duration = Duration::from_secs(2 * 3600);
 pub const MAX_FOR: Duration = Duration::from_secs(24 * 3600);
 
@@ -66,6 +67,20 @@ pub struct On {
     pub until: u64,
     /// When the tier was switched on, or 0 when the file does not say.
     pub at: u64,
+}
+
+/// The mode a rule takes while the user has a yolo tier on. Only the switch
+/// file stays enforced in every tier, since an agent that could write it could
+/// pick its own tier. Tampering stays enforced below `bypass`.
+pub fn mode_of(rule: rvow_shell::rule::Rule, tier: Option<Tier>) -> rvow_shell::rule::Mode {
+    use rvow_shell::rule::{Mode, Rule};
+    match (rule, tier) {
+        (Rule::YoloFile, _) => Mode::Enforce,
+        (_, None) => rule.mode(),
+        (_, Some(Tier::Bypass)) => Mode::Audit,
+        (Rule::UnacceptedPlan | Rule::LeaseScope | Rule::OutsideScope | Rule::ProtectedTest, Some(_)) => Mode::Audit,
+        (_, Some(_)) => Mode::Enforce,
+    }
 }
 
 fn path(project: &Project) -> std::path::PathBuf {

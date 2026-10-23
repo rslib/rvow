@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use rvow_core::diag::Rule;
-use rvow_core::{hook, lint, spec};
+use rvow_core::{lint, spec};
+use rvow_hook::hook;
 
 /// The archive regressions run in the rvow-core suite; this keeps them from
 /// being deleted or turned off.
