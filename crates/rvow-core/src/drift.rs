@@ -190,10 +190,17 @@ fn hashes(snapshot: &Map<String, Value>, key: &str) -> BTreeMap<String, String> 
 }
 
 /// Whether `glob` lies inside one of `scope` by its text: the same glob, a path
-/// under a `dir/**` glob, or anything under `**`. Reading text and not files
-/// keeps `newdir/**` from looking free while it matches nothing yet.
+/// under a `dir/**` glob or a plain folder entry, or anything under `**`.
+/// Reading text and not files keeps `newdir/**` from looking free while it
+/// matches nothing yet.
 pub fn inside(glob: &str, scope: &[String]) -> bool {
-    scope.iter().any(|s| s == glob || s == "**" || s.strip_suffix("/**").is_some_and(|dir| glob.starts_with(&format!("{dir}/"))))
+    let under = |dir: &str| glob.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'));
+    scope.iter().any(|s| {
+        s == glob
+            || s == "**"
+            || s.strip_suffix("/**").is_some_and(under)
+            || (!s.contains(['*', '?', '[', '{']) && under(s.trim_end_matches('/')))
+    })
 }
 
 fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
@@ -704,6 +711,17 @@ mod tests {
         assert!(!inside("newdir/**", &scope));
         assert!(!inside("**", &scope));
         assert!(inside("anything", &["**".to_string()]));
+    }
+
+    #[test]
+    fn inside_plain_folder_covers_paths_under_it() {
+        let scope = vec!["crates/a".to_string()];
+        assert!(inside("crates/a", &scope));
+        assert!(inside("crates/a/src/x.rs", &scope));
+        assert!(inside("crates/a/src/**", &scope));
+        assert!(!inside("crates/ab/x.rs", &scope));
+        assert!(!inside("crates/**", &scope));
+        assert!(!inside("src/a.rs/b", &["src/*.rs".to_string()]), "a glob entry gets no folder rule");
     }
 
     #[test]

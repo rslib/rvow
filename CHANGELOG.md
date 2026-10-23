@@ -238,6 +238,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix a task whose `files:` names a folder, such as `files: crates/a`, so the gate counts the files in that folder as in scope and a change to one of them makes the proof stale.
 - Fix `rvow status`, `rvow prove` and the hooks failing with an io error when a protected test file that git tracks is deleted from the disk.
   The deletion now counts as weaken drift, `protected file <path> removed`.
 - Fix `rvow prove --stale` stopping at the first task that rvow refuses to run. It now proves every stale task, reports each refusal and exits non-zero.

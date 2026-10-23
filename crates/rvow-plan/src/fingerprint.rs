@@ -360,6 +360,24 @@ mod tests {
     }
 
     #[test]
+    fn folder_entry_hashes_the_files_under_it() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("crates/a/src")).unwrap();
+        std::fs::create_dir_all(repo.join("crates/ab")).unwrap();
+        std::fs::write(repo.join("crates/a/src/x.rs"), "x").unwrap();
+        std::fs::write(repo.join("crates/ab/y.rs"), "y").unwrap();
+        let globs = vec!["crates/a".to_string()];
+
+        let before = inputs(&repo, &globs).unwrap();
+        assert_eq!(before.files, 1, "the file in the folder counts and the sibling does not");
+        std::fs::write(repo.join("crates/ab/y.rs"), "z").unwrap();
+        assert_eq!(inputs(&repo, &globs).unwrap(), before, "a sibling change leaves the proof fresh");
+        std::fs::write(repo.join("crates/a/src/x.rs"), "changed").unwrap();
+        assert_ne!(inputs(&repo, &globs).unwrap().hash, before.hash, "a change in the folder makes the proof stale");
+    }
+
+    #[test]
     fn worktree_changes_when_a_new_file_is_staged() {
         let tmp = TempDir::new();
         let repo = repo_with_commit(&tmp.0, "r");
