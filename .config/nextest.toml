@@ -14,12 +14,12 @@ slow-timeout = { period = "15s", terminate-after = 1 }
 [test-groups]
 serial = { max-threads = 1 }
 
-# The modules that set a process env var. Under `cargo test` they share one
-# process and hold crate::env_lock; under nextest this group keeps them apart
-# from each other too.
+# The modules that set a process env var, matched in any test binary: under
+# `cargo test` they share one process and hold crate::env_lock, and this group
+# keeps them apart from each other too.
 [[profile.default.overrides]]
 filter = """
-binary_id(rvow::main) and (
+(
     test(/^alloc::/)
   | test(/^confirm_friction::/)
   | test(/^syntax_drift::/)

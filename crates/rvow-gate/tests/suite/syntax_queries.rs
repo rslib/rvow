@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::store::{self, Project};
-use rvow_core::syntax::grammar;
-use rvow_core::{change, config, drift, git, plan, proof, vow};
+use rvow_gate::store::{self, Project};
+use rvow_gate::syntax::grammar;
+use rvow_gate::{change, config, drift, git, plan, proof, vow};
 
 fn fixtures() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grammars").display().to_string()
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow/tests/fixtures/grammars").display().to_string()
 }
 
 struct Setup {

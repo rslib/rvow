@@ -10,9 +10,13 @@ publish.workspace = true
 [dependencies]
 globset = "0.4.20"
 rvow-base = { path = "../rvow-base" }
-rvow-core = { path = "../rvow-core" }
+rvow-gate = { path = "../rvow-gate" }
 rvow-git = { path = "../rvow-git" }
 rvow-plan = { path = "../rvow-plan" }
+rvow-repo = { path = "../rvow-repo" }
 rvow-shell = { path = "../rvow-shell" }
 rvow-store = { path = "../rvow-store" }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+
+[dev-dependencies]
+rvow-syntax = { path = "../rvow-syntax" }

@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use rvow_core::syntax::canonical::canonical;
-use rvow_core::syntax::grammar;
+use rvow_syntax::syntax::canonical::canonical;
+use rvow_syntax::syntax::grammar;
 
 struct Home(PathBuf);
 
@@ -25,7 +25,7 @@ impl Home {
 }
 
 fn fixtures() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grammars").display().to_string()
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow/tests/fixtures/grammars").display().to_string()
 }
 
 fn form(home: &Home, name: &str, text: &str) -> Option<String> {

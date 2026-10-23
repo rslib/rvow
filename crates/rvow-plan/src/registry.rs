@@ -83,7 +83,7 @@ pub fn mint(project: &Project, _lock: &Lock, kind: Kind, change: Option<&Id>) ->
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
-    use crate::store::{Mode, init};
+    use rvow_repo::store::{Mode, init};
 
     #[test]
     fn minted_ids_are_recorded_and_never_repeat() {

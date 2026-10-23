@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rvow_core::runner::{mask, run};
+use rvow_plan::runner::{mask, run};
 
 fn tests_run(script: &str) -> Option<u64> {
     run(script, &std::env::temp_dir(), &[], Duration::from_secs(10), &mut std::io::sink()).unwrap().tests_run

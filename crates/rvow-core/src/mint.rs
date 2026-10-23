@@ -48,8 +48,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::config;
     use crate::git::testrepo::*;
-    use crate::proof::tests::accepted;
     use crate::store::Mode;
+    use crate::testutil::accepted;
     use crate::vow::{commit, prepare};
 
     /// A repository at `main` with one change in backlog whose task is what the

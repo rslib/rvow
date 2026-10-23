@@ -182,8 +182,19 @@ fn audit_build_release_profile_ships_dist_binaries() {
 }
 
 /// The workspace crates bottom up; a crate links only to crates before it. AGENTS.md maps the same order.
-const CRATE_ORDER: [&str; 9] =
-    ["rvow-base", "rvow-git", "rvow-syntax", "rvow-shell", "rvow-store", "rvow-plan", "rvow-core", "rvow-hook", "rvow"];
+const CRATE_ORDER: [&str; 11] = [
+    "rvow-base",
+    "rvow-git",
+    "rvow-syntax",
+    "rvow-shell",
+    "rvow-store",
+    "rvow-repo",
+    "rvow-plan",
+    "rvow-gate",
+    "rvow-core",
+    "rvow-hook",
+    "rvow",
+];
 
 /// The `rvow-*` and other crate names a manifest section lists, one per `name = ...` line.
 fn section_deps(manifest: &str, section: &str) -> Vec<String> {
@@ -221,6 +232,20 @@ fn audit_build_crates_link_only_to_the_crates_below_them() {
                 let to = CRATE_ORDER.iter().position(|c| *c == dep).unwrap_or_else(|| panic!("{name} links to unknown crate {dep}"));
                 assert!(to < at, "{name} links up to {dep} in [{section}]; a crate links only to the crates below it");
             }
+        }
+    }
+}
+
+/// The links that would put the crates back in one long chain.
+#[test]
+fn audit_build_crates_keep_the_graph_wide() {
+    for (name, banned) in [("rvow-hook", "rvow-core"), ("rvow-store", "rvow-git")] {
+        let manifest = crate_manifest(name);
+        for section in ["dependencies", "dev-dependencies"] {
+            assert!(
+                !section_deps(&manifest, section).iter().any(|d| d == banned),
+                "{name} links {banned} in [{section}]; move what it needs below {banned} instead"
+            );
         }
     }
 }

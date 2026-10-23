@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::{change, proof, store, vow};
+use rvow_gate::{change, proof, store, vow};
 
 fn git_cmd(repo: &Path, args: &[&str]) {
     let ok = Command::new("git")

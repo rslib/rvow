@@ -422,7 +422,7 @@ pub fn find_requirement<'a>(r: &Ref, loaded: &'a Loaded, living: &'a [CapSpec]) 
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
-    use crate::store::{Mode, init};
+    use rvow_repo::store::{Mode, init};
 
     #[test]
     fn dir_names() {

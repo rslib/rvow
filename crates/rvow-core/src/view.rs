@@ -226,7 +226,7 @@ fn change_json(project: &Project, home: &Path, now: &Now, c: &proof::Active) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proof::tests::accepted;
+    use crate::testutil::accepted;
 
     #[test]
     fn view_of_an_active_change_and_a_waiting_plan() {

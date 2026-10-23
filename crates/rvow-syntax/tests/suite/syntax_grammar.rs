@@ -5,8 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use rvow_core::syntax::grammar;
-use rvow_core::vow::sha256_hex;
+use rvow_base::hash::sha256_hex;
+use rvow_syntax::syntax::grammar;
 
 struct Home(PathBuf);
 
@@ -30,7 +30,7 @@ impl Home {
 }
 
 fn base() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("grammars")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow/tests/fixtures/grammars")
 }
 
 fn base_str() -> String {

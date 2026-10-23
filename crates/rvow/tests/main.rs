@@ -6,10 +6,6 @@ mod accept_speed;
 mod agent_mode;
 #[path = "suite/alloc.rs"]
 mod alloc;
-#[path = "suite/amend_baseline.rs"]
-mod amend_baseline;
-#[path = "suite/amend_fixes.rs"]
-mod amend_fixes;
 #[path = "suite/any_tool_change.rs"]
 mod any_tool_change;
 #[path = "suite/archive_reprove.rs"]
@@ -34,12 +30,8 @@ mod audit_gate;
 mod audit_hardening;
 #[path = "suite/audit_hook_ci.rs"]
 mod audit_hook_ci;
-#[path = "suite/audit_import.rs"]
-mod audit_import;
 #[path = "suite/audit_integration.rs"]
 mod audit_integration;
-#[path = "suite/audit_integrity.rs"]
-mod audit_integrity;
 #[path = "suite/audit_modules.rs"]
 mod audit_modules;
 #[path = "suite/audit_nextest.rs"]
@@ -86,8 +78,6 @@ mod diff_mutants;
 mod docs_reference;
 #[path = "suite/done_scope.rs"]
 mod done_scope;
-#[path = "suite/drift_fixes.rs"]
-mod drift_fixes;
 #[path = "suite/editor_snapshot.rs"]
 mod editor_snapshot;
 #[path = "suite/first_edit_notice.rs"]
@@ -98,20 +88,14 @@ mod fix_enforcement;
 mod fix_export;
 #[path = "suite/fix_gate.rs"]
 mod fix_gate;
-#[path = "suite/fix_runner.rs"]
-mod fix_runner;
 #[path = "suite/fix_strings.rs"]
 mod fix_strings;
 #[path = "suite/fix_text.rs"]
 mod fix_text;
-#[path = "suite/flaky_tree.rs"]
-mod flaky_tree;
 #[path = "suite/gate_failure.rs"]
 mod gate_failure;
 #[path = "suite/gate_lock.rs"]
 mod gate_lock;
-#[path = "suite/gate_shells.rs"]
-mod gate_shells;
 #[path = "suite/gate_speed.rs"]
 mod gate_speed;
 #[path = "suite/gate_tools.rs"]
@@ -152,10 +136,6 @@ mod lease_worktree_rules;
 mod literal_paths;
 #[path = "suite/plan_access.rs"]
 mod plan_access;
-#[path = "suite/project_index.rs"]
-mod project_index;
-#[path = "suite/protected_growth.rs"]
-mod protected_growth;
 #[path = "suite/prove_stale.rs"]
 mod prove_stale;
 #[path = "suite/provenance.rs"]
@@ -172,26 +152,14 @@ mod rerun_depends;
 mod rerun_scope;
 #[path = "suite/revalidate.rs"]
 mod revalidate;
-#[path = "suite/script_finder.rs"]
-mod script_finder;
 #[path = "suite/sealed_proofs.rs"]
 mod sealed_proofs;
 #[path = "suite/stacked_gate.rs"]
 mod stacked_gate;
 #[path = "suite/stop_scope.rs"]
 mod stop_scope;
-#[path = "suite/syntax_canonical.rs"]
-mod syntax_canonical;
 #[path = "suite/syntax_cli.rs"]
 mod syntax_cli;
-#[path = "suite/syntax_drift.rs"]
-mod syntax_drift;
-#[path = "suite/syntax_grammar.rs"]
-mod syntax_grammar;
-#[path = "suite/syntax_queries.rs"]
-mod syntax_queries;
-#[path = "suite/syntax_units.rs"]
-mod syntax_units;
 #[path = "suite/tamper_holes.rs"]
 mod tamper_holes;
 #[path = "suite/temp.rs"]
@@ -204,14 +172,7 @@ mod worktrees;
 mod yolo;
 
 /// Tests in this binary share the process env, so every one that sets an
-/// env var holds this lock: syntax_units sets RVOW_GRAMMAR_OFFLINE and
-/// syntax_drift sets RVOW_GRAMMAR_URL.
+/// env var holds this lock: alloc sets HOME and RVOW_HOME.
 pub(crate) mod env_lock {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    static ENV: OnceLock<Mutex<()>> = OnceLock::new();
-
-    pub fn lock() -> MutexGuard<'static, ()> {
-        ENV.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-    }
+    pub use rvow_core::git::testrepo::env_lock as lock;
 }

@@ -21,3 +21,6 @@ toml = "1.1.6"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"
+
+[dev-dependencies]
+rvow-repo = { path = "../rvow-repo" }

@@ -12,7 +12,7 @@ fn grammar_hint(lang: &str) -> String {
     )
 }
 
-use rvow_core::{change, config, drift, git, proof, store, vow};
+use rvow_gate::{change, config, drift, git, proof, store, vow};
 
 struct Setup {
     _tmp: crate::temp::TempDir,

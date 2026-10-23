@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::{amend, change, config, drift, git, proof, store, vow};
+use rvow_gate::{amend, change, config, drift, git, proof, store, vow};
 
 struct Setup {
     _tmp: crate::temp::TempDir,
@@ -15,7 +15,7 @@ struct Setup {
     repo: PathBuf,
     project: store::Project,
     /// Placeholder to real id, in mint order.
-    minted: Vec<(String, rvow_core::id::Id)>,
+    minted: Vec<(String, rvow_gate::id::Id)>,
 }
 
 fn git_cmd(repo: &Path, args: &[&str]) {

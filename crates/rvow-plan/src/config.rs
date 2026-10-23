@@ -410,7 +410,7 @@ impl Config {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
-    use crate::store::init;
+    use rvow_repo::store::init;
 
     #[test]
     fn project_wins_and_lists_replace() {

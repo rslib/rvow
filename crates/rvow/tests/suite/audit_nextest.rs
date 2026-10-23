@@ -11,23 +11,45 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
-/// The suite modules whose source sets a process env var.
+/// The test modules of every crate whose source sets a process env var.
 fn env_setters() -> Vec<(String, String)> {
-    let dir = root().join("crates/rvow/tests/suite");
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
-        let source = std::fs::read_to_string(&path).unwrap();
+    for dir in test_dirs() {
+        collect_setters(&dir, &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// Every `tests` folder under `crates/`, one per crate.
+fn test_dirs() -> Vec<PathBuf> {
+    let crates = root().join("crates");
+    let mut out: Vec<PathBuf> =
+        std::fs::read_dir(&crates).unwrap().map(|entry| entry.unwrap().path().join("tests")).filter(|dir| dir.is_dir()).collect();
+    out.sort();
+    out
+}
+
+fn collect_setters(dir: &Path, out: &mut Vec<(String, String)>) {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_setters(&path, out);
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
         if path.file_name().is_some_and(|n| n == "audit_nextest.rs") {
             continue;
         }
+        let source = std::fs::read_to_string(&path).unwrap();
         if source.contains("set_var(") || source.contains("remove_var(") {
             let module = path.file_stem().unwrap().to_str().unwrap().to_string();
             out.push((module, source));
         }
     }
-    out.sort();
-    out
 }
 
 #[test]

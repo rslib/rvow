@@ -12,7 +12,24 @@ fn root() -> PathBuf {
 /// independent of git index state.
 #[test]
 fn audit_integration_declared_core_modules_resolve_to_sources() {
-    let lib = std::fs::read_to_string(root().join("crates/rvow-core/src/lib.rs")).unwrap();
+    let found = declared_modules_resolve("rvow-core");
+    assert!(found >= 30, "sanity: expected 30+ declared modules, found {found}");
+}
+
+/// The same check for every other library crate, so a module that rvow-gate
+/// or rvow-repo declares or re-exports resolves too.
+#[test]
+fn audit_integration_declared_modules_of_every_library_resolve_to_sources() {
+    for entry in std::fs::read_dir(root().join("crates")).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if name != "rvow-core" && root().join("crates").join(&name).join("src/lib.rs").is_file() {
+            assert!(declared_modules_resolve(&name) > 0, "{name} declares or exports no module");
+        }
+    }
+}
+
+fn declared_modules_resolve(krate: &str) -> usize {
+    let lib = std::fs::read_to_string(root().join(format!("crates/{krate}/src/lib.rs"))).unwrap();
     let mut found = 0;
     for line in lib.lines() {
         let line = line.trim();
@@ -21,9 +38,9 @@ fn audit_integration_declared_core_modules_resolve_to_sources() {
             if name.is_empty() {
                 continue;
             }
-            let dir = root().join("crates/rvow-core/src").join(name);
-            let as_rs = root().join(format!("crates/rvow-core/src/{name}.rs"));
-            assert!(as_rs.is_file() || dir.is_dir(), "declared module {name} has neither {name}.rs nor a {name}/ folder");
+            let dir = root().join(format!("crates/{krate}/src")).join(name);
+            let as_rs = root().join(format!("crates/{krate}/src/{name}.rs"));
+            assert!(as_rs.is_file() || dir.is_dir(), "{krate} declares module {name}, which has neither {name}.rs nor a {name}/ folder");
             found += 1;
             continue;
         }
@@ -39,12 +56,12 @@ fn audit_integration_declared_core_modules_resolve_to_sources() {
             let as_rs = src.join(format!("{name}.rs"));
             assert!(
                 as_rs.is_file() || dir.is_dir(),
-                "rvow-core exports {name} from rvow-{crate_name}, which has neither {name}.rs nor a {name}/ folder"
+                "{krate} exports {name} from rvow-{crate_name}, which has neither {name}.rs nor a {name}/ folder"
             );
             found += 1;
         }
     }
-    assert!(found >= 30, "sanity: expected 30+ declared modules, found {found}");
+    found
 }
 
 /// The pi runtime modules that the typecheck and typed-tool tests import must

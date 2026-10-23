@@ -48,7 +48,7 @@ pub fn save(project: &Project, _lock: &Lock, record: &Record) -> Result<()> {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
-    use crate::store::{Mode, init};
+    use rvow_repo::store::{Mode, init};
 
     #[test]
     fn round_trip_and_missing_file() {

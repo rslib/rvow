@@ -145,7 +145,7 @@ mod tests {
         assert!(skill.len() < 4000, "skill has {} chars", skill.len());
         let description = skill.lines().find(|l| l.starts_with("description: ")).unwrap();
         assert!(description.len() < 600, "description has {} chars", description.len());
-        // The brief cap itself is asserted by `fits` in rvow-core/src/brief.rs;
+        // The brief cap itself is asserted by `fits` in rvow-gate/src/brief.rs;
         // here the worst-case constants are checked against the plan (W10).
         assert!(skill.contains("rvow block"), "the skill lost the legal exit");
     }

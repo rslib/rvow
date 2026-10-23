@@ -1059,8 +1059,28 @@ dependencies = [
  "globset",
  "libc",
  "rvow-base",
+ "rvow-gate",
  "rvow-git",
  "rvow-plan",
+ "rvow-repo",
+ "rvow-shell",
+ "rvow-store",
+ "rvow-syntax",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "rvow-gate"
+version = "0.0.0"
+dependencies = [
+ "globset",
+ "libc",
+ "rvow-base",
+ "rvow-git",
+ "rvow-plan",
+ "rvow-repo",
  "rvow-shell",
  "rvow-store",
  "rvow-syntax",
@@ -1082,11 +1102,13 @@ version = "0.0.0"
 dependencies = [
  "globset",
  "rvow-base",
- "rvow-core",
+ "rvow-gate",
  "rvow-git",
  "rvow-plan",
+ "rvow-repo",
  "rvow-shell",
  "rvow-store",
+ "rvow-syntax",
  "serde_json",
 ]
 
@@ -1099,11 +1121,24 @@ dependencies = [
  "roxmltree",
  "rvow-base",
  "rvow-git",
+ "rvow-repo",
  "rvow-store",
  "rvow-syntax",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "toml",
+]
+
+[[package]]
+name = "rvow-repo"
+version = "0.0.0"
+dependencies = [
+ "rvow-base",
+ "rvow-git",
+ "rvow-store",
+ "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -1120,7 +1155,6 @@ name = "rvow-store"
 version = "0.0.0"
 dependencies = [
  "rvow-base",
- "rvow-git",
  "serde",
  "serde_json",
  "toml",

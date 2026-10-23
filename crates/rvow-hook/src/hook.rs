@@ -508,7 +508,7 @@ fn unaccepted_plan(call: &Call, top: &Path) -> Result<Option<crate::id::Id>> {
 /// The protected paths of the active changes on the branch of `top`.
 fn protected_in(call: &Call, top: &Path) -> Result<BTreeSet<String>> {
     let branch = git::branch(top)?.unwrap_or_default();
-    Ok(rvow_core::protected::of(call.project, &call.vowed_on(&branch)?))
+    Ok(rvow_gate::protected::of(call.project, &call.vowed_on(&branch)?))
 }
 
 /// Why `file` must not be read or written: it is inside the hidden checks.
@@ -1391,7 +1391,7 @@ fn stop_reason_over(
         }
         let guarded = match &protected_files {
             Some(set) => set,
-            None => protected_files.insert(rvow_core::protected::on_branch(project, &top)?),
+            None => protected_files.insert(rvow_gate::protected::on_branch(project, &top)?),
         };
         let own = touched.iter().any(|f| {
             f == session_files::ANY
@@ -1544,7 +1544,7 @@ fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change
 mod tests {
     use std::collections::BTreeMap;
 
-    use rvow_core::testutil::{accepted, setup};
+    use rvow_gate::testutil::{accepted, setup};
 
     use super::*;
 

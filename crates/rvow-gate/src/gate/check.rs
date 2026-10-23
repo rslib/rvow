@@ -31,7 +31,7 @@ pub(super) fn list(items: &[String]) -> String {
 
 /// A change outside active/ whose ledger does not hold the event that moves it
 /// there was moved by hand.
-pub(crate) fn check_lifecycle(project: &Project, r: &mut Report) -> Result<()> {
+pub fn check_lifecycle(project: &Project, r: &mut Report) -> Result<()> {
     let (all, _) = change::list(project)?;
     for c in all.iter().filter(|c| c.stage != Stage::Active) {
         let (events, _) = ledger::read(&c.path.join(LEDGER))?;
@@ -52,7 +52,7 @@ pub(crate) fn check_lifecycle(project: &Project, r: &mut Report) -> Result<()> {
 
 /// Every living requirement matches the hash in spec-record.json. A project
 /// from before the record existed has none, and the check waits for one.
-pub(crate) fn check_record(project: &Project, living: &[CapSpec], r: &mut Report) -> Result<()> {
+pub fn check_record(project: &Project, living: &[CapSpec], r: &mut Report) -> Result<()> {
     let mut record = record::load(project)?;
     if record.is_empty() {
         return Ok(());
@@ -74,7 +74,7 @@ pub(crate) fn check_record(project: &Project, living: &[CapSpec], r: &mut Report
     Ok(())
 }
 
-pub(crate) fn check_change(project: &Project, c: &Active, now: &Now, opts: &Options, r: &mut Report) -> Result<()> {
+pub fn check_change(project: &Project, c: &Active, now: &Now, opts: &Options, r: &mut Report) -> Result<()> {
     check_change_only(project, c, now, opts, None, r)
 }
 

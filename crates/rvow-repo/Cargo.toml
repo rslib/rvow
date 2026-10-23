@@ -1,0 +1,16 @@
+[package]
+name = "rvow-repo"
+description = "How a repository finds its rvow tree, and the blob provenance its hooks record."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rvow-base = { path = "../rvow-base" }
+rvow-git = { path = "../rvow-git" }
+rvow-store = { path = "../rvow-store" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+toml = "1.1.6"

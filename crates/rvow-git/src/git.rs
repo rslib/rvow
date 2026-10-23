@@ -465,8 +465,11 @@ pub mod testrepo {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+    static NAMED_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static ENV: OnceLock<Mutex<()>> = OnceLock::new();
 
     /// A fresh directory under the system temp dir, removed on drop.
     pub struct TempDir(pub PathBuf);
@@ -491,6 +494,34 @@ pub mod testrepo {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A temp folder that is removed when the guard drops, so a test never leaves one behind.
+    pub struct NamedTempDir(PathBuf);
+
+    impl NamedTempDir {
+        pub fn new(name: &str) -> NamedTempDir {
+            let n = NAMED_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("rvow-{name}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            NamedTempDir(dir.canonicalize().unwrap())
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for NamedTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The one lock every test that sets a process env var holds, so they never overlap.
+    pub fn env_lock() -> MutexGuard<'static, ()> {
+        ENV.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Runs git with the user's global and system config ignored, so fixture
@@ -740,5 +771,22 @@ mod tests {
 
         git(&repo, &["checkout", "-q", "--detach"]);
         assert_eq!(branch(&repo).unwrap(), None);
+    }
+
+    #[test]
+    fn testrepo_named_temp_dir_is_removed_on_drop() {
+        let tmp = NamedTempDir::new("named-drop");
+        let path = tmp.path().to_path_buf();
+        assert!(path.is_dir(), "{} is not a folder", path.display());
+        drop(tmp);
+        assert!(!path.exists(), "{} survived the drop", path.display());
+    }
+
+    #[test]
+    fn testrepo_env_lock_can_be_taken_twice_in_a_row() {
+        let first = env_lock();
+        drop(first);
+        let second = env_lock();
+        drop(second);
     }
 }

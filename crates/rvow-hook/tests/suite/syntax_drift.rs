@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::MutexGuard;
 
-use rvow_core::store::{self, Project};
-use rvow_core::syntax::canonical::{self, Compare};
-use rvow_core::syntax::grammar;
-use rvow_core::{change, config, drift, git, proof, vow};
 use rvow_hook::hook;
+use rvow_hook::store::{self, Project};
+use rvow_hook::{change, config, drift, git, proof, vow};
+use rvow_syntax::syntax::canonical::{self, Compare};
+use rvow_syntax::syntax::grammar;
 
 fn fixtures() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grammars").display().to_string()
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow/tests/fixtures/grammars").display().to_string()
 }
 
 /// Tests in this binary share the process env, so every one that sets

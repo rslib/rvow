@@ -31,6 +31,6 @@ List the tasks in work order. Pipe the whole file to `rvow put <change> tasks`, 
 
 - TSK-new1 Store the output tail in the proof event
   covers: REQ-new1
-  verify: cargo test -p rvow-core output_tail
-  files: crates/rvow-core/src/proof.rs
+  verify: cargo test -p rvow-gate output_tail
+  files: crates/rvow-gate/src/proof.rs
 <!-- /example -->

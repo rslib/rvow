@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::store::{self, INDEX_FILE, Mode};
+use rvow_repo::store::{self, INDEX_FILE, Mode};
 use serde_json::{Value, json};
 
 struct TempDir(PathBuf);

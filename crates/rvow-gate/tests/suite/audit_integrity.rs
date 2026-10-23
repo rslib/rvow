@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rvow_core::{change, gate, guard, ledger, proof, store, vow};
+use rvow_gate::{change, gate, guard, ledger, proof, store, vow};
 use serde_json::json;
 
 struct Fixture {
@@ -77,7 +77,7 @@ fn audit_integrity_missing_default_installed_hook_is_a_failure() {
     let bin = f.root.join("rvow");
     std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
     executable(&bin);
-    rvow_core::install::pre_push(&f.repo, &bin).unwrap();
+    rvow_gate::install::pre_push(&f.repo, &bin).unwrap();
     std::fs::remove_file(f.repo.join(".git/hooks/pre-push")).unwrap();
     assert!(!f.hook_failures().is_empty(), "deleting the installed default hook bypassed the gate");
 }
@@ -176,7 +176,7 @@ fn audit_integrity_installed_hook_and_manager_line() {
     let bin = f.root.join("rvow");
     std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
     executable(&bin);
-    rvow_core::install::pre_push(&f.repo, &bin).unwrap();
+    rvow_gate::install::pre_push(&f.repo, &bin).unwrap();
     assert!(f.hook_failures().is_empty());
     let hook = f.repo.join(".git/hooks/pre-push");
     let original = std::fs::read_to_string(&hook).unwrap();

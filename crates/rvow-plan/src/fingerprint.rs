@@ -381,7 +381,7 @@ mod tests {
     fn worktree_changes_when_a_new_file_is_staged() {
         let tmp = TempDir::new();
         let repo = repo_with_commit(&tmp.0, "r");
-        let p = crate::store::init(&repo, &tmp.0.join("home"), crate::store::Mode::Home).unwrap();
+        let p = rvow_repo::store::init(&repo, &tmp.0.join("home"), crate::store::Mode::Home).unwrap();
         std::fs::write(repo.join("new.rs"), "new").unwrap();
         let untracked = worktree(&repo, &p).unwrap();
         git(&repo, &["add", "new.rs"]);

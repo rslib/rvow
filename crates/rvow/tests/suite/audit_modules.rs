@@ -4,11 +4,11 @@ use rvow_core::diag::Rule;
 use rvow_core::{lint, spec};
 use rvow_hook::hook;
 
-/// The archive regressions run in the rvow-core suite; this keeps them from
+/// The archive regressions run in the rvow-gate suite; this keeps them from
 /// being deleted or turned off.
 #[test]
 fn audit_modules_archive_runs_merge_and_lifecycle_regressions() {
-    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow-core/src/archive.rs")).unwrap();
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../rvow-gate/src/archive.rs")).unwrap();
     for test in [
         "archive_merges_every_op_in_place",
         "a_second_change_on_a_requirement_conflicts_until_rebased",

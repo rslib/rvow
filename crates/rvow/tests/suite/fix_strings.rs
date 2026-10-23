@@ -84,8 +84,12 @@ fn starts_an_action(fix: &str) -> bool {
 fn every_error_fix_names_an_action() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
-    sources(&root.join("rvow-core/src"), &mut files);
-    sources(&root.join("rvow/src"), &mut files);
+    for entry in std::fs::read_dir(&root).unwrap().flatten() {
+        let src = entry.path().join("src");
+        if src.is_dir() {
+            sources(&src, &mut files);
+        }
+    }
     let (mut seen, mut bad) = (0, Vec::new());
     for file in files {
         let text = std::fs::read_to_string(&file).unwrap();

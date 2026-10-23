@@ -34,7 +34,7 @@ use crate::vow::requirement_hash;
 #[path = "gate_hook.rs"]
 mod hook_integrity;
 
-pub(crate) use check::{check_change, check_lifecycle, check_record};
+pub use check::{check_change, check_lifecycle, check_record};
 pub use signature::{bound_confirm_payload, confirm_payload, sign};
 
 #[derive(Debug, Default)]

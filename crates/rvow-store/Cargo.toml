@@ -1,6 +1,6 @@
 [package]
 name = "rvow-store"
-description = "The rvow tree of a project, the blob provenance the hooks record, and the home that a project derives."
+description = "The rvow tree of a project and the home that a project's metadata derives."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 rvow-base = { path = "../rvow-base" }
-rvow-git = { path = "../rvow-git" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 toml = "1.1.6"

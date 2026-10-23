@@ -72,8 +72,8 @@ evals/triggers/run.sh                                  # the full suite, capped 
 | Command bodies and output | `crates/rvow/src/cmd/<topic>.rs` | `crates/rvow/src/main.rs` holds only the clap types and dispatch. |
 | Plan-writing guides | `guides/*.md` | Embedded by `crates/rvow-core/src/guide.rs`. |
 | Agent skill | `skills/rvow/SKILL.md.tmpl` | Rendered by `crates/rvow/src/skill.rs` at install. Write each command as `{{cmd:<args>}}`; a command or flag the CLI lacks fails the render and `cargo test`. |
-| Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-core/src/install.rs`. |
-| pi extension | `extensions/pi/rvow/*.ts` (`extensions/pi/rvow.ts` only re-exports it) | `extensions/pi/rvow/index.ts` is `PI_EXTENSION`; every other file is in `PI_MODULES` of `crates/rvow-core/src/install.rs`. |
+| Claude mod | `extensions/claude/hooks/` | Embedded by `crates/rvow-gate/src/install.rs`. |
+| pi extension | `extensions/pi/rvow/*.ts` (`extensions/pi/rvow.ts` only re-exports it) | `extensions/pi/rvow/index.ts` is `PI_EXTENSION`; every other file is in `PI_MODULES` of `crates/rvow-gate/src/install.rs`. |
 | Docs site | `site/` | Built from `docs/*.md`, the README and `docs/reference`; never edit the generated folders. |
 | Agent evals | `evals/agent/` | `evals/agent/run.sh` installs the mod into a throwaway home; each case holds `case.yaml`, `prompt.md`, `setup.sh` and `graders/`; `lib.sh` holds the shared setup helpers. Each case keeps its eval store inside its scaffold at `.git/rvow-eval/home`, where the agent can write it. |
 | Trigger evals | `evals/triggers/` | `evals/triggers/run.sh` renders the skill into a skill-only plugin in a throwaway home; each case holds `prompt.md` and `graders/fires.md`; results stay local. |
@@ -83,24 +83,27 @@ The library crates, bottom up. A crate links only to the crates above it in this
 | Crate | Holds | Links to |
 |------|------|------|
 | `rvow-base` | errors, ids, diagnostics, hashing, time, the glob cache, paths and every store file name (`layout`) | nothing in rvow |
-| `rvow-git` | git queries, worktrees; `testrepo` fixtures behind the `testutil` feature | base |
+| `rvow-git` | git queries, worktrees; the `testrepo` test fixtures (`TempDir`, `NamedTempDir`, `env_lock`) | base |
 | `rvow-syntax` | tree-sitter units, grammars, queries, the Rust guard; the only crate with tree-sitter and ureq | base |
 | `rvow-shell` | the shell parser and its rules (`Rule`, `Denial`, `Mode`) | base |
-| `rvow-store` | the store, provenance snapshots, `project_home` | base, git |
-| `rvow-plan` | specs, tasks, proposals, templates, config, lint, changes, ledger, vow, seal, fingerprint, runners | base, git, syntax, store |
-| `rvow-core` | proof, gate, drift, guard, lease, amend, archive, land, install, stats, the views; re-exports the crates above so `rvow_core::<module>` paths stay | all above |
-| `rvow-hook` | the hook rules for each harness event | core and below |
+| `rvow-store` | the store types, file names, lock, project index and gate record, `project_home`; no git | base |
+| `rvow-repo` | how a repository finds its store (`store::find`, `init`, `rebind`; its `store` module re-exports rvow-store's) and the provenance snapshots | base, git, store |
+| `rvow-plan` | specs, tasks, proposals, templates, config, lint, changes, ledger, vow, seal, fingerprint, runners | base, git, syntax, store; repo for tests only |
+| `rvow-gate` | proof, gate, drift, guard, lease, amend, brief, archive, install, stats, yolo, review: the code the hooks need | all above |
+| `rvow-core` | land, import, export, bundle, attest, guide, interview, notes, put, mint, show, view; re-exports the crates above so `rvow_core::<module>` paths stay | all above |
+| `rvow-hook` | the hook rules for each harness event | gate and below, never core |
 
 - A helper that two crates need goes in the lowest crate that both reach, most often `rvow-base`; never add a link up.
-- A cross-crate test fixture sits behind a `testutil` feature that only dev-dependencies turn on.
+- A cross-crate test fixture goes in `rvow_git::git::testrepo`, or in `testutil` of the lowest crate that has what it needs; both are always built, marked `#[doc(hidden)]`.
+- Keep `rvow-hook` off `rvow-core`: code the hooks call goes in `rvow-gate` or below, so an edit in the views or the import does not rebuild the hooks.
 
 Update this section in the change that moves an area.
 
 ## Contracts across layers
 
 - The version lives once, in `[workspace.package]` of `Cargo.toml`. Both crates use `version.workspace = true`.
-- Every file the installer writes is embedded with `include_str!`. A new module under `extensions/claude/hooks/` needs one entry in `MOD_MODULES` in `crates/rvow-core/src/install.rs`; the install test fails when one is missing.
-- Every file under `extensions/pi/rvow/` other than `extensions/pi/rvow/index.ts` needs one entry in `PI_MODULES` in `crates/rvow-core/src/install.rs`, like `MOD_MODULES`; a file that is missing fails at pi load on an installed copy.
+- Every file the installer writes is embedded with `include_str!`. A new module under `extensions/claude/hooks/` needs one entry in `MOD_MODULES` in `crates/rvow-gate/src/install.rs`; the install test fails when one is missing.
+- Every file under `extensions/pi/rvow/` other than `extensions/pi/rvow/index.ts` needs one entry in `PI_MODULES` in `crates/rvow-gate/src/install.rs`, like `MOD_MODULES`; a file that is missing fails at pi load on an installed copy.
 - The `'__RVOW_BIN__'` placeholder stays in `extensions/claude/hooks/register.tsx`, where the installer replaces it.
 - The `version` in `extensions/claude/.claude-plugin/plugin.json` is overwritten at install.
 
@@ -126,7 +129,8 @@ Update this section in the change that moves an area.
 
 - A bug fix adds a test that fails without the fix.
 - `crates/rvow/tests/suite/alloc.rs` holds an allocation budget per hook, counted in process on a fixed fixture store. A hook change that raises a count past its budget fails; lower a budget when a change cuts the count, and never raise one to make a test pass.
-- The integration tests build as one binary, `crates/rvow/tests/main.rs`, with one `#[path]` module per file in `crates/rvow/tests/suite/`. A new test file needs a `mod` entry there. A test that sets an env var holds `crate::env_lock::lock()` and its module joins the `serial` group in `.config/nextest.toml`; `audit_nextest` fails when either is missing.
+- A test that starts the rvow binary, or reads the whole repository (the `audit_*` files), goes in `crates/rvow/tests/suite/`. Any other integration test goes in `crates/<crate>/tests/suite/` of the lowest crate that has everything it uses, so `cargo nextest run --locked -p <crate>` runs it without building the crates above.
+- Each crate's integration tests build as one binary, `crates/<crate>/tests/main.rs`, with one `#[path]` module per file in `crates/<crate>/tests/suite/`. A new test file needs a `mod` entry there. A test that sets an env var holds `crate::env_lock::lock()` and its module joins the `serial` group in `.config/nextest.toml`; `audit_nextest` fails when either is missing.
 - CLI behavior tests live in `crates/rvow/tests/suite/cli.rs`. They run in temporary git repositories, so the git hook must not leak `GIT_*` variables into them (see `.pre-commit-config.yaml`).
 - The native pi codemode proof is skipped unless `RVOW_NATIVE_SDK` is set. From `extensions/`, with a built binary: `RVOW_NATIVE_SDK=$PWD/node_modules/@earendil-works/pi-coding-agent RVOW_NATIVE_BIN=<repo>/target/debug/rvow node --test pi/native-codemode.test.ts`.
 - A change under `extensions/claude` is proven by `npm --prefix extensions run typecheck:claude` and `npm --prefix extensions run test:claude` together.

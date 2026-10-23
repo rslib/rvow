@@ -612,7 +612,7 @@ pub fn claim(project: &Project, cwd: &Path, input: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::git::testrepo::*;
-    use crate::store::{Mode, init};
+    use rvow_repo::store::{Mode, init};
 
     #[test]
     fn claim_moves_a_backlog_plan_to_this_branch() {

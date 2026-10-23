@@ -85,7 +85,8 @@ mod tests {
     use crate::amend::{self, Decision};
     use crate::config;
     use crate::fingerprint;
-    use crate::proof::{Now, State, tests::accepted};
+    use crate::proof::{Now, State};
+    use crate::testutil::accepted;
 
     fn task_state(p: &Project, home: &Path, repo: &Path) -> State {
         let (living, _) = change::load_living(p).unwrap();
