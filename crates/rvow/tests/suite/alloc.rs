@@ -198,18 +198,22 @@ impl Fx {
         self.put(&["put", &id, "tasks"], &tasks());
     }
 
-    /// Points this process's env at the fixture, as the CLI that runs the hooks has it.
+    /// Points this process's env at the fixture, as the CLI that runs the hooks
+    /// has it, and clears every other var: a git child with env vars of its own
+    /// gets a copy of the whole env, so each var of the machine adds to a count.
     fn set_env(&self) {
         unsafe {
+            for (key, _) in std::env::vars_os() {
+                if key != "TMPDIR" {
+                    std::env::remove_var(key);
+                }
+            }
             std::env::set_var("HOME", self.root.join("home"));
             std::env::set_var("RVOW_HOME", self.home());
             std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
             std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("XDG_DATA_HOME");
-            std::env::remove_var("CLAUDE_CONFIG_DIR");
-            std::env::remove_var("PI_CODING_AGENT_DIR");
+            std::env::set_var("RVOW_GRAMMAR_OFFLINE", "1");
         }
     }
 
@@ -297,11 +301,23 @@ fn requirement_text(req: usize, cap: usize) -> String {
 /// The allocations and bytes of a second, identical hook call with `store::find`
 /// in the same count, after one warm-up call with the same session. That is the
 /// steady state of an agent session.
-fn counted<F>(fx: &Fx, mut hook: F) -> (usize, usize)
+fn counted<F>(fx: &Fx, hook: F) -> (usize, usize)
+where
+    F: FnMut(&Project, &Path, &Path) -> Result<Option<Value>>,
+{
+    counted_under(fx, &[], hook)
+}
+
+/// The same count, with `extra` set in the process env first, as a machine
+/// with more env vars has them.
+fn counted_under<F>(fx: &Fx, extra: &[(String, String)], mut hook: F) -> (usize, usize)
 where
     F: FnMut(&Project, &Path, &Path) -> Result<Option<Value>>,
 {
     let _guard = crate::env_lock::lock();
+    for (key, value) in extra {
+        unsafe { std::env::set_var(key, value) };
+    }
     fx.set_env();
     let mut once = || {
         let project = rvow_core::store::find(&fx.repo(), &fx.home()).unwrap().expect("the fixture has an rvow project");
@@ -321,6 +337,30 @@ fn alloc_harness_counts_a_known_allocation() {
     assert!(count >= 1, "count={count}");
     assert!(bytes >= 100, "bytes={bytes}");
     assert_eq!(buf.capacity(), 100);
+}
+
+/// A count holds on every machine: a CI runner has many more env vars than a
+/// local shell, and the provenance snapshot gives git a copy of the whole env.
+#[test]
+fn alloc_count_does_not_depend_on_the_process_env() {
+    let input = |fx: &Fx| {
+        json!({
+            "session_id": SESSION,
+            "hook_event_name": "PreToolUse",
+            "cwd": fx.repo(),
+            "tool_name": "Bash",
+            "tool_use_id": "t-alloc-env",
+            "tool_input": {"command": "cargo test -p rvow-core"},
+        })
+    };
+    let plain = Fx::new("env-a");
+    let call = input(&plain);
+    let (alone, _) = counted(&plain, |project, _home, _cwd| rvow_hook::hook::claude_pre_tool_use(project, &call));
+    let crowded = Fx::new("env-b");
+    let call = input(&crowded);
+    let extra: Vec<(String, String)> = (0..100).map(|i| (format!("RVOW_ALLOC_EXTRA_{i}"), "v".to_string())).collect();
+    let (among, _) = counted_under(&crowded, &extra, |project, _home, _cwd| rvow_hook::hook::claude_pre_tool_use(project, &call));
+    assert_eq!(alone, among, "100 more env vars changed the count from {alone} to {among}");
 }
 
 /// The steady-state count of one PreToolUse Edit call.
