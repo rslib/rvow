@@ -28,7 +28,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        rvow_core::git::testrepo::remove_tree(&self.dir);
     }
 }
 
@@ -340,7 +340,7 @@ struct Fx {
 
 impl Drop for Fx {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        rvow_core::git::testrepo::remove_tree(&self.root);
     }
 }
 
@@ -457,7 +457,7 @@ struct Gx {
 
 impl Drop for Gx {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        rvow_core::git::testrepo::remove_tree(&self.root);
     }
 }
 

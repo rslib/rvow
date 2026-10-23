@@ -11,7 +11,7 @@ struct Home(PathBuf);
 
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        rvow_core::git::testrepo::remove_tree(&self.0);
     }
 }
 

@@ -116,3 +116,28 @@ fn audit_nextest_main_binaries_leave_path_and_home_alone() {
     }
     assert!(checked > 100, "only {checked} test modules found");
 }
+
+/// A test here can run the Stop hook, which starts `rvow reprove` in the
+/// background; a plain removal races it, and CI fails on the folder it leaves.
+#[test]
+fn audit_nextest_fixtures_remove_their_folder_after_the_background_reprove() {
+    let suite = root().join("crates/rvow/tests/suite");
+    let mut drops = 0;
+    for entry in std::fs::read_dir(&suite).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "rs") || path.file_name().is_some_and(|n| n == "audit_nextest.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        for (at, _) in source.match_indices("fn drop(&mut self)") {
+            let body: String = source[at..].lines().take_while(|l| *l != "    }").collect::<Vec<_>>().join("\n");
+            assert!(
+                !body.contains("std::fs::remove_dir_all"),
+                "{} removes its fixture with remove_dir_all; use rvow_core::git::testrepo::remove_tree",
+                path.display()
+            );
+            drops += 1;
+        }
+    }
+    assert!(drops > 50, "only {drops} fixture drops found");
+}

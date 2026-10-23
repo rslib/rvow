@@ -17,7 +17,7 @@ struct Fx {
 impl Drop for Fx {
     fn drop(&mut self) {
         let _ = Command::new("git").args(["worktree", "prune"]).current_dir(&self.repo).output();
-        let _ = std::fs::remove_dir_all(&self.root);
+        rvow_core::git::testrepo::remove_tree(&self.root);
     }
 }
 

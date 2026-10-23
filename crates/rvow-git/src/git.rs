@@ -492,7 +492,7 @@ pub mod testrepo {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            remove_tree(&self.0);
         }
     }
 
@@ -515,7 +515,42 @@ pub mod testrepo {
 
     impl Drop for NamedTempDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            remove_tree(&self.0);
+        }
+    }
+
+    /// Removes a fixture folder once each background `rvow reprove` under it
+    /// has ended: the Stop hook starts one, and it writes into the folder while
+    /// it runs, so a plain removal can leave the folder behind.
+    pub fn remove_tree(root: &Path) {
+        wait_for_reproves(root, std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The hook writes `reprove.log` before it starts the child, and the child
+    /// then writes its pid into `reprove.pid` and locks it until it ends. So a
+    /// pid file older than the log belongs to a child that has not started yet.
+    fn wait_for_reproves(dir: &Path, deadline: std::time::Instant) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                wait_for_reproves(&path, deadline);
+                continue;
+            }
+            if path.file_name().is_none_or(|n| n != "reprove.log") {
+                continue;
+            }
+            let pid = path.with_file_name("reprove.pid");
+            let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            let started = modified(&path);
+            let claimed = || modified(&pid) >= started && std::fs::metadata(&pid).is_ok_and(|m| m.len() > 0);
+            while !claimed() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if let Ok(file) = std::fs::File::open(&pid) {
+                let _ = file.lock_shared();
+            }
         }
     }
 
@@ -780,6 +815,31 @@ mod tests {
         assert!(path.is_dir(), "{} is not a folder", path.display());
         drop(tmp);
         assert!(!path.exists(), "{} survived the drop", path.display());
+    }
+
+    /// The Stop hook creates the log, then starts the re-prove, which takes the
+    /// lock a moment later and writes into the folder until it ends.
+    #[test]
+    fn testrepo_remove_tree_waits_for_a_late_background_reprove() {
+        let root = std::env::temp_dir().join(format!("rvow-remove-tree-{}", std::process::id()));
+        let state = root.join("rh/project/hook-state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("reprove.log"), "").unwrap();
+        let reprove = {
+            let (root, state) = (root.clone(), state.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let mut pid = std::fs::File::create(state.join("reprove.pid")).unwrap();
+                pid.lock().unwrap();
+                std::io::Write::write_all(&mut pid, b"1").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::fs::create_dir_all(root.join("repo")).unwrap();
+                std::fs::write(root.join("repo/late.txt"), "x").unwrap();
+            })
+        };
+        remove_tree(&root);
+        reprove.join().unwrap();
+        assert!(!root.exists(), "{} survived: the re-prove wrote into it after the removal", root.display());
     }
 
     #[test]

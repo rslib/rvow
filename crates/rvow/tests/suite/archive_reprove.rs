@@ -11,7 +11,7 @@ struct Repo {
 
 impl Drop for Repo {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        rvow_core::git::testrepo::remove_tree(&self.root);
     }
 }
 

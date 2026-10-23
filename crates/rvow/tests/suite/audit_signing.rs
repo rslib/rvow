@@ -16,7 +16,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.temp);
+        rvow_core::git::testrepo::remove_tree(&self.temp);
     }
 }
 
