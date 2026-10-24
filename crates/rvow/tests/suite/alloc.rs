@@ -407,7 +407,7 @@ fn alloc_post_tool_use() {
 }
 
 /// The steady-state count of one Stop call.
-const STOP: usize = 6280; // measured 2026-10-22 on macOS: 5704; budget +10% for other platforms; trunk d05d6ee: 66025
+const STOP: usize = 5440; // measured 2026-10-24 on macOS: 4948; budget +10% for other platforms; before: 5704; trunk d05d6ee: 66025
 
 #[test]
 fn alloc_stop() {
@@ -478,7 +478,7 @@ fn alloc_session_start_with_a_waiting_plan() {
 }
 
 /// The steady-state count of one Stop call followed by its background re-prove check.
-const STOP_WITH_REPROVE: usize = 6750; // measured 2026-10-22 on macOS: 6136; budget +10% for other platforms; before: 9153
+const STOP_WITH_REPROVE: usize = 6035; // measured 2026-10-24 on macOS: 5486; budget +10% for other platforms; before: 6136
 
 #[test]
 fn alloc_stop_with_reprove() {

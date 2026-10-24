@@ -252,8 +252,9 @@ A session is held only for a task or drift item whose file it changed.
 - It is held for drift when it changed a file that a drift item names or a protected file.
 
 A session that changed no file, one that only read, a subagent and a call with no session id are never held.
-A session held for more than one item gets one block that lists every open item: at most 3, then `and N more`.
-The same block is given once to a session.
+A session held for more than one item gets one block that lists every open item it was not told yet: at most 3, then `and N more`.
+Each item is given once to a session, so a later stop holds only for an item the session was not told yet.
+An item that is fixed and comes back later is given again, and a drift item that several active changes name is listed once.
 
 > [!NOTE]
 > A session is not held for a task while the task has a live lease that another worker holds, or that no worker took yet.

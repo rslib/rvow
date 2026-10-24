@@ -1399,17 +1399,33 @@ pub struct StopHold {
     pub text: String,
 }
 
-/// One reason of the session's stop block, with the kind that the stats count.
+/// One reason of the session's stop block, with the kind that the stats count and
+/// the keys that say which entries the reason names, so one entry is given once.
 struct OpenItem {
     kind: StopReason,
     text: String,
+    /// The stable key of every entry of the item: each `what` of a drift item, or
+    /// `no-proof <task id>` for a task without a proof.
+    keys: Vec<String>,
+}
+
+impl OpenItem {
+    /// The words of the reason for the new keys `fresh`: a drift item names only the
+    /// `what` entries that are new, and any other item is one key with one text.
+    fn words(&self, fresh: &[&str]) -> String {
+        if self.kind == StopReason::Drift {
+            let whats: Vec<String> = fresh.iter().map(|what| (*what).to_string()).collect();
+            return unamended_text(&whats);
+        }
+        self.text.clone()
+    }
 }
 
 const MAX_STOP_ITEMS: usize = 3;
 
 /// One block reason for every open item: a single item keeps its own text, and more are listed
 /// up to `MAX_STOP_ITEMS` and then counted.
-fn stop_hold(items: Vec<OpenItem>) -> Option<StopHold> {
+fn stop_hold(items: impl IntoIterator<Item = OpenItem>) -> Option<StopHold> {
     let mut items = items.into_iter();
     let first = items.next()?;
     let rest: Vec<OpenItem> = items.collect();
@@ -1460,28 +1476,23 @@ fn drift_that_holds(
 /// nothing, since only the user can decide it.
 pub fn stop_reason(project: &Project, home: &Path, cwd: &Path, session: Option<&str>) -> Result<Option<StopHold>> {
     let living = change::living(project)?;
-    stop_reason_over(project, home, cwd, session, &living)
+    Ok(stop_hold(open_items(project, home, cwd, session, &living)?))
 }
 
-/// Like `stop_reason`, with the living specs a caller already loaded.
-fn stop_reason_over(
-    project: &Project,
-    home: &Path,
-    cwd: &Path,
-    session: Option<&str>,
-    living: &[change::CapSpec],
-) -> Result<Option<StopHold>> {
+/// Every item that is open for the session, each with its keys. `stop_reason` words
+/// and counts them; the stop decision tells each new one once.
+fn open_items(project: &Project, home: &Path, cwd: &Path, session: Option<&str>, living: &[change::CapSpec]) -> Result<Vec<OpenItem>> {
     let top = git::toplevel(cwd)?;
     let Some(branch) = git::branch(&top)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     if git_operation_running(&top) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let changes = proof::active(project, living)?;
     let queue = proof::on_branch(&changes, &branch);
     if queue.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let pending = amend::pending(&changes);
     let config = config::load(project, home)?;
@@ -1500,7 +1511,8 @@ fn stop_reason_over(
         },
         None => BTreeSet::new(),
     };
-    let mut items: Vec<OpenItem> = Vec::new();
+    let mut drift_whats: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut protected_files = None;
     for c in &queue {
         if pending.iter().any(|p| p.change == c.dir.id) {
@@ -1529,10 +1541,18 @@ fn stop_reason_over(
         }
         // A relaxed task does not stop the agent for a path that only it covers.
         let blocking = drift_that_holds(c, blocking, &touched, guarded)?;
-        if blocking.is_empty() {
-            continue;
+        for what in blocking {
+            if seen.insert(what.clone()) {
+                drift_whats.push(what);
+            }
         }
-        items.push(OpenItem { kind: StopReason::Drift, text: unamended_text(&blocking) });
+    }
+    // One drift item for every change of the queue, so a `what` that three changes
+    // share is held, and told, once.
+    let mut items: Vec<OpenItem> = Vec::new();
+    if !drift_whats.is_empty() {
+        let text = unamended_text(&drift_whats);
+        items.push(OpenItem { kind: StopReason::Drift, text, keys: drift_whats });
     }
     let now = Now::cached(&top, &config, fingerprint::check_env(&top, &config)?, living);
     let leases = lease::leases(project)?;
@@ -1561,10 +1581,10 @@ fn stop_reason_over(
                 continue;
             }
             let text = format!("{id} has no proof: run rvow prove {id}, or rvow block {id} --reason \"...\" if it cannot pass as written");
-            items.push(OpenItem { kind: StopReason::NoProof, text });
+            items.push(OpenItem { kind: StopReason::NoProof, text, keys: vec![format!("no-proof {id}")] });
         }
     }
-    Ok(stop_hold(items))
+    Ok(items)
 }
 
 /// One line for a status bar: proved tasks, drift and pending amendments of
@@ -1658,16 +1678,47 @@ fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change
     if let (Some(s), Ok(top)) = (session, git::toplevel(&cwd)) {
         crate::provenance::catch_up_at_stop(project, &top, s, None);
     }
-    let Some(hold) = stop_reason_over(project, home, &cwd, session, living)? else {
+    let items = open_items(project, home, &cwd, session, living)?;
+    if items.is_empty() {
         if let Some(s) = session {
             stop_state::clear(project, s);
         }
         return Ok(None);
-    };
-    if session.is_some_and(|s| stop_state::already_given(project, s, &hold.text)) {
-        return Ok(None);
     }
-    Ok(Some((json!({"decision": "block", "reason": format!("rvow: {}", hold.text)}), hold.kind)))
+    let Some(session) = session else {
+        return Ok(stop_hold(items).map(|h| (blocked_reason(&h.text), h.kind)));
+    };
+    // The keys of every item that is open now, and the ones of those that this
+    // session was not told yet: only a new one holds the stop back.
+    let told = stop_state::told(project, session);
+    let mut open: Vec<String> = Vec::with_capacity(items.len());
+    let mut fresh: Vec<(&OpenItem, Vec<&str>)> = Vec::new();
+    for item in &items {
+        let mut new: Vec<&str> = Vec::new();
+        for key in &item.keys {
+            let digest = stop_state::digest(key);
+            if !told.contains(&digest) {
+                new.push(key);
+            }
+            open.push(digest);
+        }
+        if !new.is_empty() {
+            fresh.push((item, new));
+        }
+    }
+    // Everything open now is told now, so a key that is no longer open drops out,
+    // and an item that is fixed and comes back is told again.
+    stop_state::keep(project, session, &open);
+    let kept = fresh.iter().map(|(item, new)| OpenItem { kind: item.kind, text: item.words(new), keys: Vec::new() });
+    let Some(hold) = stop_hold(kept) else {
+        return Ok(None);
+    };
+    Ok(Some((blocked_reason(&hold.text), hold.kind)))
+}
+
+/// The block response of one reason.
+fn blocked_reason(text: &str) -> Value {
+    json!({"decision": "block", "reason": format!("rvow: {text}")})
 }
 
 #[cfg(test)]
@@ -2742,6 +2793,133 @@ mod tests {
         assert!(claude_stop(&p, &home, &stop).unwrap().is_some());
         let want: BTreeMap<String, u64> = [("no-proof".to_string(), 1)].into();
         assert_eq!(stats::recent(&p, 1).stop_reasons, want);
+    }
+
+    /// The minted task ids of the branch's active changes, in `tasks.md` order.
+    fn task_ids(p: &Project) -> Vec<String> {
+        let living = change::living(p).unwrap();
+        proof::active(p, &living).unwrap().iter().flat_map(|c| c.loaded.tasks.iter().map(|t| t.id.to_string())).collect()
+    }
+
+    /// Two active changes on `main` that both vow `tests/t.sh` as a protected file:
+    /// (tmp, project, repo).
+    fn two_changes_over_the_same_test() -> (crate::git::testrepo::TempDir, Project, PathBuf) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.sh"), "check_one\ncheck_two\nexit 0\n").unwrap();
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        for title in ["One", "Two"] {
+            let c = change::new(&p, title, "main", true).unwrap();
+            std::fs::write(c.path.join("tasks.md"), TESTS_TASK).unwrap();
+            let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+            let vowed = crate::vow::commit(&p, prepared).unwrap();
+            for (_, id) in &vowed.minted {
+                let r = proof::prove(&p, &home, &repo, &id.to_string(), &mut std::io::sink()).unwrap();
+                assert!(r.proved, "{:?}", r.outcome);
+            }
+        }
+        (tmp, p, repo)
+    }
+
+    #[test]
+    fn stop_once_alternating_items_are_each_given_once() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        session_files::record(&p, "s1", &["out.txt".to_string()]);
+        let first = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the missing proof holds the stop"));
+        assert!(first.contains(&task), "{first}");
+
+        // The plan's proposal changes: a drift item joins the open one, and only it is new.
+        let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+        let proposal = dir.join("proposal.md");
+        let text = std::fs::read_to_string(&proposal).unwrap();
+        std::fs::write(&proposal, format!("{text}\nOne more thing.\n")).unwrap();
+        session_files::record(&p, "s1", &[session_files::PLAN.to_string()]);
+        let second = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the drift holds the stop"));
+        assert!(second.contains("amend"), "{second}");
+        assert!(!second.contains(&task), "the item already given is not named again: {second}");
+
+        // Both items are open, and both were given: the stop passes.
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+    }
+
+    #[test]
+    fn stop_once_a_count_change_gives_nothing_new() {
+        let (tmp, p, repo, first) = leased_fixture(false);
+        let home = tmp.0.join("home");
+        session_files::record(&p, "s1", &["out.txt".to_string(), "more.txt".to_string()]);
+        let both = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("both missing proofs hold the stop"));
+        assert!(both.contains("2 open items:"), "{both}");
+
+        // One item is fixed: the count drops, and the one that is left was given already.
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        proof::prove(&p, &home, &repo, &first, &mut std::io::sink()).unwrap();
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+    }
+
+    #[test]
+    fn stop_once_a_new_item_is_named_alone() {
+        let (tmp, p, repo, first) = leased_fixture(false);
+        let home = tmp.0.join("home");
+        let second = task_ids(&p).into_iter().find(|id| *id != first).unwrap();
+        session_files::record(&p, "s1", &["out.txt".to_string()]);
+        let told = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the missing proof holds the stop"));
+        assert!(told.contains(&first) && !told.contains(&second), "{told}");
+
+        session_files::record(&p, "s1", &["more.txt".to_string()]);
+        let held = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the new item holds the stop"));
+        assert!(held.contains(&second), "{held}");
+        assert!(!held.contains(&first), "the item already given is not named again: {held}");
+    }
+
+    #[test]
+    fn stop_once_a_shared_drift_item_is_named_once() {
+        // One change that drifts: the words of its own drift item.
+        let (tmp, one, repo) = drift_fixture(TESTS_TASK);
+        let home = tmp.0.join("home");
+        breaks_the_test(&one, &repo);
+        let single = hold(&one, &home, &repo, "s1").unwrap_or_else(|| panic!("the drift holds the stop"));
+
+        // Two changes name the same protected file drift: one item with each `what` once.
+        let (tmp, two, repo) = two_changes_over_the_same_test();
+        breaks_the_test(&two, &repo);
+        let reason = stop_of(&two, &tmp.0.join("home"), &repo, "s1").unwrap_or_else(|| panic!("the drift holds the stop"));
+        assert_eq!(reason, format!("rvow: {single}"), "two changes name the shared drift once");
+    }
+
+    #[test]
+    fn stop_once_a_fixed_item_that_returns_is_given_again() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        session_files::record(&p, "s1", &["out.txt".to_string()]);
+        let first = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the missing proof holds the stop"));
+        assert!(first.contains(&task), "{first}");
+
+        // Another worker holds the task, so nothing is open and the stop is let through.
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert!(lease::bind(&p, &task, "w1").unwrap());
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None);
+
+        // The lease ends: the item is open again, and is given again.
+        lease::end(&p, "w1").unwrap();
+        let again = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the item that came back holds the stop"));
+        assert!(again.contains(&task), "{again}");
+    }
+
+    #[test]
+    fn stop_once_another_session_is_told_again() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        session_files::record(&p, "s1", &["out.txt".to_string()]);
+        session_files::record(&p, "s2", &["out.txt".to_string()]);
+        let first = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("the missing proof holds the stop"));
+        assert!(first.contains(&task), "{first}");
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "the same session is not told twice");
+
+        let other = stop_of(&p, &home, &repo, "s2").unwrap_or_else(|| panic!("the other session is told again"));
+        assert!(other.contains(&task), "{other}");
     }
 
     #[test]

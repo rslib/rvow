@@ -1,32 +1,53 @@
-//! What each session has already been told at a stop, so one reason is given once.
+//! Which open items each session has already been told at a stop, so one item is
+//! given once: the file holds one sha256 hex per line, so it carries no path of a
+//! reason and stays small.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use crate::store::Project;
 use crate::vow::sha256_hex;
 
-fn file(project: &Project, session: &str) -> Option<std::path::PathBuf> {
+fn file(project: &Project, session: &str) -> Option<PathBuf> {
     let name: String = session.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect();
     (!name.is_empty()).then(|| project.root.join("hook-state").join(format!("stop-{name}")))
 }
 
-/// True when `session` already got `reason` as its latest stop reason; otherwise records it.
-pub(super) fn already_given(project: &Project, session: &str, reason: &str) -> bool {
+/// The sha256 hex of one item key, the form the session's record holds it in.
+pub(super) fn digest(key: &str) -> String {
+    sha256_hex(key.as_bytes())
+}
+
+/// The item keys this session was told at an earlier stop, in the form of `digest`;
+/// empty for a session with no record.
+pub(super) fn told(project: &Project, session: &str) -> BTreeSet<String> {
     let Some(file) = file(project, session) else {
-        return false;
+        return BTreeSet::new();
     };
-    let digest = sha256_hex(reason.as_bytes());
-    if std::fs::read_to_string(&file).is_ok_and(|s| s.trim() == digest) {
-        return true;
+    std::fs::read_to_string(file).unwrap_or_default().lines().filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+/// Remembers the `digests` of the items that are open now: a key that is no longer
+/// open drops out, so an item that is fixed and comes back is told again.
+pub(super) fn keep(project: &Project, session: &str, digests: &[String]) {
+    let Some(file) = file(project, session) else {
+        return;
+    };
+    let mut sorted: Vec<&String> = digests.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    let mut text = String::with_capacity(sorted.len() * 65);
+    for digest in sorted {
+        text.push_str(digest);
+        text.push('\n');
     }
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&file, digest);
-    false
+    let _ = std::fs::write(&file, text);
 }
 
-/// Forgets the session's last reason, so the same reason is given again if it returns.
+/// Forgets the session's items, so each one is given again if it comes back.
 pub(super) fn clear(project: &Project, session: &str) {
     if let Some(file) = file(project, session) {
         let _ = std::fs::remove_file(Path::new(&file));
