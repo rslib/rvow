@@ -131,6 +131,24 @@ function normalize(out: HookOutput | undefined): View | undefined {
   };
 }
 
+/** How much of a bash command's output the post-tool-use payload carries. */
+const OUTPUT_TAIL = 16_000;
+
+/**
+ * What a bash call adds to the post-tool-use payload, so rvow judges the command by its outcome:
+ * whether it succeeded and the tail of what it printed. Nothing when the result printed nothing.
+ */
+function bashOutcome(event: {
+  content?: readonly { type: string; text?: string }[];
+  isError?: boolean;
+}): { exit_ok?: boolean; output_tail?: string } {
+  const printed = (event.content ?? [])
+    .flatMap((c) => (c.type === "text" && typeof c.text === "string" ? [c.text] : []))
+    .join("\n");
+  if (!printed) return {};
+  return { exit_ok: event.isError !== true, output_tail: printed.slice(-OUTPUT_TAIL) };
+}
+
 const CLAUDE_NAMES: Record<string, string> = { bash: "Bash", edit: "Edit", write: "Write" };
 // Tools that cannot write: a failed pre-tool-use hook still lets these through.
 const READ_ONLY = new Set(["read", "grep", "find", "ls", "rvow_view"]);
@@ -151,11 +169,68 @@ type Sel = { plan?: Plan; change?: Change; v?: View };
 
 type Option = { label: string; description?: string };
 type Ask = { ref: string; question: string; header?: string; options: Option[] };
+/** A stale relaxed task from `rvow decide --list`: it waits for the user's pick. */
+type Undecided = { id: string; title: string };
 
 const OTHER = "Other (type your own answer)";
 const EDIT_HINT = "Edit the text each answer changes.";
 
 const ASK_CAP = 200;
+/** How many tasks one round asks about, so a long queue never fills the dialog. */
+const DECIDE_ROUND = 3;
+const DECIDE_LABELS = ["Re-prove now", "Re-prove at archive", "Keep the pass"];
+/** The `rvow decide` pick behind each label; an answer it does not hold records nothing. */
+const DECIDE_PICKS: Record<string, string | undefined> = {
+  "Re-prove now": "now",
+  "Re-prove at archive": "archive",
+  "Keep the pass": "keep",
+};
+const DECIDE_QUESTION =
+  "Its files changed since its proof, which still passes: re-prove it now, re-prove it at archive, or keep the pass?";
+
+/** The rows of the TOON table `key[n]{column,...}:` in `out`, none when `out` holds no such table. */
+function toonTable(out: string, key: string): Record<string, string>[] {
+  const lines = out.split("\n");
+  const head = lines.findIndex((l) => l.startsWith(`${key}[`));
+  const m = head < 0 ? null : /^([A-Za-z_]\w*)\[(\d+)\]\{([^}]*)\}:$/.exec(lines[head] ?? "");
+  if (!m || m[1] !== key) return [];
+  const cols = (m[3] ?? "").split(",");
+  return lines.slice(head + 1, head + 1 + Number(m[2])).map((line) => {
+    const cells = toonCells(line.trim());
+    return Object.fromEntries(cols.map((c, i) => [c, cells[i] ?? ""]));
+  });
+}
+
+/** The cells of one TOON table row: split on the commas no quotes hold. */
+function toonCells(line: string): string[] {
+  const out: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line.charAt(i);
+    if (quoted && c === "\\") {
+      const escaped = line.charAt(i + 1);
+      cell += escaped === "n" ? "\n" : escaped === "r" ? "\r" : escaped === "t" ? "\t" : escaped;
+      i += 1;
+    } else if (c === '"') quoted = !quoted;
+    else if (c === "," && !quoted) {
+      out.push(cell);
+      cell = "";
+    } else cell += c;
+  }
+  out.push(cell);
+  return out;
+}
+
+/** The tasks `rvow decide --list` names: none when rvow cannot say, as an older binary cannot. */
+async function undecided(cwd: string): Promise<Undecided[]> {
+  const r = await run(["decide", "--list"], cwd, "", SLOW_MS);
+  if (r?.code !== 0) return [];
+  return toonTable(r.out, "undecided").flatMap((row) => {
+    const id = row.id ?? "";
+    return id ? [{ id, title: row.title ?? "" }] : [];
+  });
+}
 
 function asked(a: Ask): string {
   const opts = a.options.map(
@@ -176,35 +251,73 @@ async function ask(ctx: ExtensionContext, change?: string): Promise<string> {
     return "cannot read the open questions: rvow printed no JSON";
   }
   const qs = round.questions ?? [];
-  if (qs.length === 0) return "no open questions";
-  if (!ctx.hasUI) {
-    return [
-      "No dialog here. Ask the user these in chat, then record each answer with",
-      '`rvow answer <ref> "<choice>" --via chat`.',
-      "",
-      ...qs.map(asked),
-      "",
-      `${round.remaining ?? 0} more after this round. ${EDIT_HINT}`,
-    ].join("\n");
-  }
+  const all = await undecided(ctx.cwd);
+  const waiting = all.slice(0, DECIDE_ROUND);
+  if (qs.length === 0 && waiting.length === 0) return "no open questions";
   const done: string[] = [];
   const open = (from: number) => qs.slice(from).map((q) => q.ref);
-  for (const [i, q] of qs.entries()) {
-    const shown = new Map(
-      q.options.map((o) => [o.description ? `${o.label} - ${o.description}` : o.label, o.label]),
-    );
-    const title = `${q.header ? `${q.header}: ` : ""}${q.question}`;
-    let choice = await ctx.ui.select(title, [...shown.keys(), OTHER]);
-    if (choice === OTHER) choice = await ctx.ui.input(title, "your answer");
-    else if (choice !== undefined) choice = shown.get(choice);
-    if (!choice?.trim())
-      return [...done, `cancelled; still open: ${open(i).join(", ")}`].join("\n");
-    const a = await run(["answer", q.ref, choice, "--via", "dialog"], ctx.cwd, "", SLOW_MS);
-    if (a?.code !== 0)
-      return [...done, `cannot record ${q.ref}; still open: ${open(i).join(", ")}`].join("\n");
-    done.push(`${q.ref} ${cut(q.question, ASK_CAP)} -> ${choice}`);
+  if (qs.length > 0) {
+    if (!ctx.hasUI) {
+      return [
+        "No dialog here. Ask the user these in chat, then record each answer with",
+        '`rvow answer <ref> "<choice>" --via chat`.',
+        "",
+        ...qs.map(asked),
+        ...(waiting.length > 0 ? ["", ...waiting.map(decideAsked)] : []),
+        "",
+        `${round.remaining ?? 0} more after this round. ${EDIT_HINT}`,
+      ].join("\n");
+    }
+    for (const [i, q] of qs.entries()) {
+      const shown = new Map(
+        q.options.map((o) => [o.description ? `${o.label} - ${o.description}` : o.label, o.label]),
+      );
+      const title = `${q.header ? `${q.header}: ` : ""}${q.question}`;
+      let choice = await ctx.ui.select(title, [...shown.keys(), OTHER]);
+      if (choice === OTHER) choice = await ctx.ui.input(title, "your answer");
+      else if (choice !== undefined) choice = shown.get(choice);
+      if (!choice?.trim())
+        return [...done, `cancelled; still open: ${open(i).join(", ")}`].join("\n");
+      const a = await run(["answer", q.ref, choice, "--via", "dialog"], ctx.cwd, "", SLOW_MS);
+      if (a?.code !== 0)
+        return [...done, `cannot record ${q.ref}; still open: ${open(i).join(", ")}`].join("\n");
+      done.push(`${q.ref} ${cut(q.question, ASK_CAP)} -> ${choice}`);
+    }
+    done.push(`${round.remaining ?? 0} questions remain.`, EDIT_HINT);
   }
-  return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join("\n");
+  // Then the user picks what to do with each stale relaxed task; a closed dialog decides none.
+  const stillWaiting = (from: number) =>
+    `the user did not decide; still waiting: ${waiting
+      .slice(from)
+      .map((t) => t.id)
+      .join(", ")}`;
+  for (const [i, t] of waiting.entries()) {
+    const stay = () => stillWaiting(i);
+    if (!ctx.hasUI) {
+      done.push(...waiting.slice(i).map(decideAsked));
+      break;
+    }
+    const choice = await ctx.ui.select(`${t.id} ${t.title}: ${DECIDE_QUESTION}`, [
+      ...DECIDE_LABELS,
+    ]);
+    const pick = choice === undefined ? undefined : DECIDE_PICKS[choice];
+    if (pick === undefined) return [...done, stay()].join("\n");
+    const d = await run(["decide", t.id, pick], ctx.cwd, "", SLOW_MS);
+    if (d?.code !== 0) return [...done, `cannot record ${t.id}; ${stay()}`].join("\n");
+    done.push(
+      pick === "now"
+        ? `${t.id} ${cut(t.title, ASK_CAP)} -> Re-prove now. Run \`rvow prove ${t.id}\` to prove it again.`
+        : `${t.id} ${cut(t.title, ASK_CAP)} -> ${choice}`,
+    );
+  }
+  if (all.length > waiting.length)
+    done.push(`${all.length - waiting.length} more wait for a decision; run this tool again.`);
+  return done.join("\n");
+}
+
+/** The line that names a stale relaxed task to ask about in chat. */
+function decideAsked(t: Undecided): string {
+  return `${t.id} ${cut(t.title, ASK_CAP)}: ${DECIDE_QUESTION} Then run \`rvow decide ${t.id} now|archive|keep\`.`;
 }
 
 async function showText(cwd: string, d: Pick<Detail, "kind" | "id">) {
@@ -1154,6 +1267,7 @@ export default function (pi: ExtensionAPI) {
         session_id: ctx.sessionManager?.getSessionId?.(),
         agent_id: leaseAgent,
         tool_use_id: event.toolCallId,
+        ...(event.toolName === "bash" ? bashOutcome(event) : {}),
       },
       FAST_MS,
       false,
@@ -1517,7 +1631,7 @@ export default function (pi: ExtensionAPI) {
     name: "rvow_ask",
     label: "rvow ask",
     description:
-      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.",
+      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. It then asks the user to decide each stale relaxed task, at most 3, and records each pick with rvow decide <task> now|archive|keep. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.",
     parameters: {
       type: "object",
       properties: { change: { type: "string", pattern: "^CHG-[a-z0-9]+$" } },

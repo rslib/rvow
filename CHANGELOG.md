@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Cut each task title that `rvow status` prints to 120 characters, and print it whole with `rvow status --full`.
+- Cut each task title in the `rvow show <change>` outline to 120 characters, and print it whole with `rvow show <change> --full`.
+- Make the `rvow delegate` help say that the brief holds the task, its files and its verify, so the agent does not paste them into the subagent prompt again.
 - Take the snapshot lock of the worktree in the hooks instead of the project lock, so a prove, a lease or an agent in another worktree never makes a writing call wait or fail as busy.
 - Hash only the files that an editor call names in its snapshots; a change from a background job now counts at the next shell call or at stop.
 - Run the real git behind the macOS `/usr/bin/git` shim, and start fewer git processes for one Edit call.
@@ -121,6 +124,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add a `mode:` task field with two modes, `strict` and `relaxed`, and a task without one is strict.
+  A stale relaxed task is not proved again in the background, and `rvow status` shows it as `stale (inputs-changed, user-decides)`.
+  Changing the mode of an accepted task is drift, where strict to relaxed is weaken and the user confirms it, and relaxed to strict is free.
+- Add a proposal `mode:` line that sets the mode of each task without its own, and a `task_mode` setting that `rvow new` writes into each new proposal.
+- Log, not deny, an edit in the main session to a protected test that only relaxed tasks cover, and an edit outside every task's files while the branch has a relaxed task.
+  Each outside file shows as `outside-scope file <path>` drift, the archive dialog lists it once, and the gate counts a confirmed file as in scope.
+- Add `rvow decide <task> now|archive|keep`, which records what the user chose for a stale relaxed task, and `rvow decide --list`, which names the tasks that wait.
+  The `rvow_ask` tool offers `"Re-prove now"`, `"Re-prove at archive"` and `"Keep the pass"` to the user, and the hooks deny `rvow decide` to an agent.
+  A kept pass counts as proved in `rvow status`, `rvow gate --strict` and `rvow archive` until a file in the task's scope changes again.
+- Add an observed proof, so a run the agent makes of a relaxed task's exact verify command in Bash is recorded as that task's proof when it passes with at least one test and no scope file changed during the run.
+  The agent then need not run that check again with `rvow prove`.
 - Add `rvow install --all`, which installs the user-level parts once and refreshes the pre-push gate of every repository where `rvow install` wrote one, so an upgrade needs one command.
   It names each repository it skips and why, and lists known rvow repositories that have no gate with the command to add one.
   The hooks deny `rvow install` in any form to agents, since it re-pins the gate to the binary on PATH.
@@ -238,6 +252,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Deny `rvow hook` to an agent also when inline script code, a script file or an unknown variable runs it, so an agent cannot fake an observed proof.
 - Fix a task whose `files:` names a folder, such as `files: crates/a`, so the gate counts the files in that folder as in scope and a change to one of them makes the proof stale.
 - Fix `rvow status`, `rvow prove` and the hooks failing with an io error when a protected test file that git tracks is deleted from the disk.
   The deletion now counts as weaken drift, `protected file <path> removed`.

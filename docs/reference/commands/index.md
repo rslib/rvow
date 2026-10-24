@@ -38,6 +38,7 @@ Every rvow command. Each page comes from `rvow docs`, so it matches `rvow <comma
 | [`note`](note.md) | Append a decision, surprise or handoff note to this branch's change |
 | [`amend`](amend.md) | Record the current plan edits as an amendment for the user to confirm |
 | [`confirm`](confirm.md) | List pending amendments, or accept or reject them (user only) |
+| [`decide`](decide.md) | Record the user's decision about a stale relaxed task (user only) |
 | [`prove`](prove.md) | Run a task's stored verify command and record the proof |
 | [`land`](land.md) | Land the proved task branches of a change onto its branch |
 | [`status`](status.md) | Show the state of each task on this branch |

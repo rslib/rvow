@@ -15,7 +15,7 @@ use rvow_core::view;
 
 use super::{branch_label, cwd, project};
 use crate::output::Reply;
-use crate::toon::Node;
+use crate::toon::{Node, Obj};
 use crate::{Artifact, DESCRIPTION};
 
 /// The path with the home directory written as `~`.
@@ -193,7 +193,7 @@ pub fn path(id: &str) -> Result<Reply> {
 pub fn show(id: &str, full: bool) -> Result<Reply> {
     let home = store::home_dir()?;
     let cwd = cwd()?;
-    Ok(Reply::long(show::show_full(&project(&home)?, &home, &cwd, id)?, full, &format!("rvow show {id}")))
+    Ok(Reply::long(show::show_full(&project(&home)?, &home, &cwd, id, full)?, full, &format!("rvow show {id}")))
 }
 
 /// The full text of one part of a change, or a usage error on exit 2.
@@ -313,18 +313,43 @@ pub fn next() -> Result<Reply> {
     Ok(r)
 }
 
-fn status_change(r: &mut Reply, c: &proof::ChangeStatus) -> (Node, usize) {
-    r.line(format!("{} on {}", c.id, c.branch));
-    let mut rows = Vec::new();
-    for t in &c.tasks {
-        let state = match &t.state {
-            State::Stale(why) => format!("stale ({})", why.join(", ")),
-            s => s.name().to_string(),
-        };
-        r.line(format!("  {:<10} {:<20} {}", t.task, state, t.title));
-        rows.push(obj! { "id" => t.task.to_string(), "state" => state, "title" => t.title });
+/// One task as `rvow status` prints it, apart from the store.
+struct TaskRow<'a> {
+    task: String,
+    state: String,
+    title: &'a str,
+}
+
+/// The state as the task line shows it, with the reasons of a stale task.
+fn state_text(state: &State) -> String {
+    match state {
+        State::Stale(why) => format!("stale ({})", why.join(", ")),
+        s => s.name().to_string(),
     }
-    let tasks = rows.len();
+}
+
+/// The text of one change block: the header, then one line per task.
+fn block_lines(id: &str, branch: &str, tasks: &[TaskRow<'_>], full: bool) -> Vec<String> {
+    let mut lines = vec![format!("{id} on {branch}")];
+    for t in tasks {
+        lines.push(format!("  {:<10} {:<20} {}", t.task, t.state, show::cut_title(t.title, full)));
+    }
+    lines
+}
+
+/// The TOON rows of those tasks, with the same titles as `block_lines`.
+fn block_rows(tasks: &[TaskRow<'_>], full: bool) -> Vec<Obj> {
+    tasks.iter().map(|t| obj! { "id" => t.task.clone(), "state" => t.state.clone(), "title" => show::cut_title(t.title, full) }).collect()
+}
+
+fn status_change(r: &mut Reply, c: &proof::ChangeStatus, full: bool) -> (Node, usize) {
+    let tasks: Vec<TaskRow<'_>> =
+        c.tasks.iter().map(|t| TaskRow { task: t.task.to_string(), state: state_text(&t.state), title: &t.title }).collect();
+    for line in block_lines(&c.id.to_string(), &c.branch, &tasks, full) {
+        r.line(line);
+    }
+    let rows = block_rows(&tasks, full);
+    let count = rows.len();
     let mut item = obj! { "id" => c.id.to_string(), "branch" => c.branch };
     item.push(("tasks".to_owned(), Node::from(rows.into_iter().map(Node::Obj).collect::<Vec<_>>())));
     for problem in &c.problems {
@@ -349,10 +374,10 @@ fn status_change(r: &mut Reply, c: &proof::ChangeStatus) -> (Node, usize) {
     if !rows.is_empty() {
         item.push(("pending".to_owned(), Node::List(rows)));
     }
-    (Node::Obj(item), tasks)
+    (Node::Obj(item), count)
 }
 
-pub fn status(all: bool, json: bool) -> Result<Reply> {
+pub fn status(all: bool, json: bool, full: bool) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
     let mut r = Reply::new();
@@ -373,7 +398,7 @@ pub fn status(all: bool, json: bool) -> Result<Reply> {
     let mut tasks = 0;
     let (mut drift, mut pending) = (false, false);
     for c in &changes {
-        let (item, n) = status_change(&mut r, c);
+        let (item, n) = status_change(&mut r, c, full);
         tasks += n;
         drift |= !c.drift.is_empty();
         pending |= !c.pending.is_empty();
@@ -418,4 +443,66 @@ pub fn trace(id: &str) -> Result<Reply> {
     }
     r.table("changes", rows, format!("0 touched {id}"));
     Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(title: &str) -> [TaskRow<'_>; 1] {
+        [TaskRow { task: "TSK-k3f9m2".to_owned(), state: "missing".to_owned(), title }]
+    }
+
+    fn kept(title: &str) -> String {
+        title.chars().take(show::TITLE_CHARS).collect()
+    }
+
+    #[test]
+    fn status_title_long_title_is_120_chars_and_dots() {
+        let title = "a".repeat(300);
+        let cut = show::cut_title(&title, false);
+        assert_eq!(cut, format!("{}...", kept(&title)));
+        assert_eq!(cut.chars().count(), 123);
+    }
+
+    #[test]
+    fn status_title_120_chars_is_unchanged() {
+        let title = "a".repeat(120);
+        assert_eq!(show::cut_title(&title, false), title);
+        assert_eq!(show::cut_title("short", false), "short");
+    }
+
+    #[test]
+    fn status_title_multibyte_is_cut_on_a_char_boundary() {
+        let title = "tache \u{e9}largie ".repeat(20);
+        assert!(title.chars().count() > show::TITLE_CHARS);
+        let cut = show::cut_title(&title, false);
+        let body = &cut[..cut.len() - 3];
+        assert_eq!(body, kept(&title));
+        assert!(cut.ends_with("..."));
+        assert_eq!(cut.chars().count(), show::TITLE_CHARS + 3);
+    }
+
+    #[test]
+    fn status_title_text_and_rows_cut_the_title_unless_full() {
+        let title = "b".repeat(300);
+        let tasks = row(&title);
+        let cut = show::cut_title(&title, false);
+        let lines = block_lines("CHG-k3f9m2", "main", &tasks, false);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "CHG-k3f9m2 on main");
+        assert!(lines[1].ends_with(&cut));
+        let rows = block_rows(&tasks, false);
+        let Node::Str(shown) = &rows[0].iter().find(|(k, _)| k == "title").expect("a title row").1 else {
+            panic!("the title is not a string")
+        };
+        assert_eq!(shown, &cut);
+        let whole = block_lines("CHG-k3f9m2", "main", &tasks, true);
+        assert!(whole[1].ends_with(&title));
+        let rows = block_rows(&tasks, true);
+        let Node::Str(shown) = &rows[0].iter().find(|(k, _)| k == "title").expect("a title row").1 else {
+            panic!("the title is not a string")
+        };
+        assert_eq!(shown, &title);
+    }
 }

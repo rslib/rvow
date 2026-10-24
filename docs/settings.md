@@ -63,6 +63,7 @@ checks = ["cargo test --locked"]
 | `cache_with_links` | Keep the rerun cache on when `rerun_links` is set; default false | no |
 | `env` / `env_vars` | Extra commands and variables captured in the proof environment | no |
 | `interview_cap` | The most questions one clarify round asks, 1 to 3, default 3 | no |
+| `task_mode` | The `mode:` line that `rvow new` writes into a new proposal, `strict` or `relaxed`; default none | no |
 | `require_signature` | When true, a confirm only decides when its ssh signature is valid | no |
 | `allowed_signers` | The allowed-signers file for signed confirmations | no |
 | `context` | Project context text the `rvow guide` command appends | no |
@@ -219,6 +220,34 @@ An entry in the gate cache stops answering for a task after `max_age`, which a t
 A task without one uses `rerun_cache`, and a project without that uses 168 hours.
 Set `rerun_cache = "off"` to run every task each time.
 `max_age`, `rerun_cache` and `cache_with_links` tune the cache, so changing them is not drift.
+
+## The mode of a task
+
+A task block takes a `mode:` line, `strict` or `relaxed`, and a task without one is strict.
+A `mode:` line in the proposal header, under `branch:`, sets the mode of each task that has no `mode:` line of its own.
+The project setting `task_mode` writes that line into each new proposal, and it changes no plan that already exists.
+
+Strict is for a performance, memory, benchmark, timing or parity task, and for any task whose check must run on the final code.
+Relaxed is for a feature, a refactor, a test cleanup or docs, where a later edit rarely breaks the earlier check.
+Changing the mode of an accepted task, by its own line or by the proposal's, is drift, where strict to relaxed is weaken and the user confirms it, and relaxed to strict is free.
+
+A stale relaxed task is not proved again in the background.
+`rvow status` shows it as `stale (inputs-changed, user-decides)`, and `rvow decide --list` names the tasks that wait.
+The `rvow_ask` tool offers `"Re-prove now"`, `"Re-prove at archive"` and `"Keep the pass"` to the user, and the mod records the pick with `rvow decide <task> now|archive|keep`.
+The hooks deny `rvow decide` to an agent, since the choice belongs to the user.
+
+A kept pass counts as proved in `rvow status`, `rvow gate --strict` and `rvow archive` until a file in the task's scope changes again.
+A relaxed task that waits with no decision is proved again by `rvow archive`.
+
+Drift that names only files in relaxed scopes does not hold the stop, and the archive dialog lists it instead.
+A subagent that holds a relaxed task's lease may edit outside its files, and the edit is counted as a `lease-scope` audit.
+
+In the main session, an edit of a protected test that only relaxed tasks cover is counted as a `protected-test` audit and needs no unlock.
+While the branch has a relaxed task, an edit outside every task's files is counted as an `outside-scope` audit.
+Each such file shows as `outside-scope file <path>` drift, the archive dialog lists it once, and the gate counts a confirmed file as in scope.
+
+When the agent runs the exact verify command of a relaxed task in Bash and it passes with at least one test and with no scope file changed during the run, the Claude mod and rvow record an observed proof.
+The agent then need not run that check again with `rvow prove`.
 
 ## Linked build output and the cache
 

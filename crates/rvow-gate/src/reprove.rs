@@ -10,8 +10,9 @@ use crate::config;
 use crate::error::{Error, Result};
 use crate::fingerprint;
 use crate::git;
-use crate::proof::{self, Now, State};
+use crate::proof::{self, Now, Pick, State};
 use crate::store::Project;
+use crate::tasks::Mode;
 
 /// The file that the running background re-prove locks, holding its pid.
 /// It lives in the ignored `hook-state/`, like the other machine-local files.
@@ -20,7 +21,9 @@ const PID_FILE: &str = "hook-state/reprove.pid";
 const LOG_FILE: &str = "hook-state/reprove.log";
 
 /// The changes on the branch at `cwd` whose tasks are all proved or stale,
-/// with at least one stale: the work is done and only the proofs are old.
+/// with at least one stale that this re-prove may run: a strict task, or a
+/// relaxed task the user chose to prove `now`. The work is done and only the
+/// proofs are old.
 pub fn ready(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> {
     let living = change::living(project)?;
     ready_over(project, home, cwd, &living)
@@ -42,7 +45,14 @@ pub fn ready_over(project: &Project, home: &Path, cwd: &Path, living: &[change::
         for t in &c.loaded.tasks {
             match proof::state_for(project, home, c, t, &now)? {
                 State::Proved => {}
-                State::Stale(_) => stale = true,
+                State::Stale(_) => {
+                    // A stale relaxed task waits for the user's decision, so it
+                    // counts as done here; only a `now` decision sends it on.
+                    if t.mode == Mode::Relaxed && proof::decision(c, t, &now)? != Some(Pick::Now) {
+                        continue;
+                    }
+                    stale = true;
+                }
                 _ => done = false,
             }
         }
@@ -109,7 +119,57 @@ pub fn log_path(project: &Project) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::testrepo::*;
     use crate::proof::tests::accepted;
+    use crate::store::{Mode as StoreMode, init};
+
+    /// A change with a relaxed task on `out.txt` and a strict task on
+    /// `more.txt`, neither proved yet: (tmp, project, repo, relaxed, strict).
+    fn pair() -> (TempDir, Project, PathBuf, String, String) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, StoreMode::Home).unwrap();
+        let c = crate::change::new(&p, "Out", "main", false).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 Write ok\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n  mode: relaxed\n- TSK-new2 Write more\n  verify: grep -q ok more.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: more.txt\n",
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = crate::vow::commit(&p, prepared).unwrap();
+        let minted = |from: &str| vowed.minted.iter().find(|(f, _)| f == from).unwrap().1.to_string();
+        (tmp, p, repo, minted("TSK-new1"), minted("TSK-new2"))
+    }
+
+    #[test]
+    fn relaxed_stale_background_skips_relaxed_tasks() {
+        let (tmp, p, repo, relaxed, strict) = pair();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        std::fs::write(repo.join("more.txt"), "ok").unwrap();
+        for t in [&relaxed, &strict] {
+            assert!(crate::proof::prove(&p, &home, &repo, t, &mut std::io::sink()).unwrap().proved);
+        }
+        assert!(ready(&p, &home, &repo).unwrap().is_empty(), "nothing is stale");
+
+        std::fs::write(repo.join("out.txt"), "ok\nmore").unwrap();
+        assert!(ready(&p, &home, &repo).unwrap().is_empty(), "a stale relaxed task waits for the user");
+
+        // A strict task that went stale is the background's work.
+        std::fs::write(repo.join("more.txt"), "ok\nmore").unwrap();
+        let id = {
+            let (dirs, _) = crate::change::list(&p).unwrap();
+            dirs.iter().find(|d| d.stage == crate::change::Stage::Active).unwrap().id.to_string()
+        };
+        assert_eq!(ready(&p, &home, &repo).unwrap(), [id]);
+        assert!(crate::proof::prove(&p, &home, &repo, &strict, &mut std::io::sink()).unwrap().proved);
+        assert!(ready(&p, &home, &repo).unwrap().is_empty());
+
+        // The user's `now` sends the relaxed task to the background too.
+        crate::proof::decide(&p, &home, &repo, &relaxed, Pick::Now).unwrap();
+        assert_eq!(ready(&p, &home, &repo).unwrap().len(), 1);
+    }
 
     /// Whether `ok` holds within 2 s. A child that another test thread forks
     /// before its exec holds a copy of each open lock fd, so a lock frees only

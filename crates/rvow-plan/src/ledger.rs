@@ -28,6 +28,9 @@ pub enum Kind {
     Confirm,
     Block,
     Note,
+    /// The user's decision about a stale relaxed task: `now`, `archive` or
+    /// `keep`, recorded with the task's input hash at the time.
+    Decide,
     Archive,
     Drop,
     Supersede,
@@ -357,6 +360,27 @@ mod tests {
         let texts: Vec<&Value> = events.iter().map(|e| &e.data["text"]).collect();
         assert_eq!(texts, ["a", "b"]);
         assert_eq!(events[1].hash, b.hash);
+    }
+
+    #[test]
+    fn relaxed_stale_decide_event_is_written_as_decide() {
+        let tmp = TempDir::new();
+        let p = project(&tmp.0);
+        let path = tmp.0.join("ledger.jsonl");
+        let lock = p.lock().unwrap();
+        let mut m = Map::new();
+        m.insert("task".into(), "TSK-x7k2q4".into());
+        m.insert("choice".into(), "keep".into());
+        m.insert("inputs".into(), "abc".into());
+        append(&path, &lock, Kind::Decide, m).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""kind":"decide""#), "{text}");
+        let (events, diags) = read(&path).unwrap();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(events[0].kind, Kind::Decide);
+        assert_eq!(events[0].data["task"], serde_json::json!("TSK-x7k2q4"));
+        assert_eq!(events[0].data["choice"], serde_json::json!("keep"));
+        assert_eq!(events[0].data["inputs"], serde_json::json!("abc"));
     }
 
     #[test]

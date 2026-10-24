@@ -508,6 +508,106 @@ const backlogTry = () => ({ ...READY, plans: [TRY_PLAN], backlog: [TRY_PLAN] })
 const real = (stage: string) => ({ ...SHOWS, 'CHG-2q8jsb': SHOWS[`CHG-2q8jsb ${stage}`] ?? '' })
 const shown = (calls: string[][]) => calls.filter((c) => c[1] === 'show').map((c) => c[2])
 
+/** Real `rvow decide --list` output from a scratch repo: one stale relaxed task waits. */
+const DECIDE_LIST =
+  'undecided[1]{id,title}:\n  TSK-k8ergv,Write ok\nhelp[1]:\n  Ask the user with the rvow_ask tool; each answer runs rvow decide <task> now|archive|keep'
+const NO_QUESTIONS = '{"questions":[],"remaining":0}'
+
+/** Fakes rvow for the ask tool: the decide list, no plan question; records every argv. */
+function fakeAsk(on: On, list: string) {
+  const calls: string[][] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
+    calls.push(argv)
+    return {
+      value: procResult(0, argv.slice(1).join(' ') === 'decide --list' ? list : NO_QUESTIONS),
+    }
+  })
+  return calls
+}
+
+/** The `rvow decide <task> <pick>` runs in `calls`, without the read-only list. */
+const picks = (calls: string[][]) =>
+  calls.filter((c) => c[1] === 'decide' && c[2] !== '--list').map((c) => c.slice(1).join(' '))
+
+test('rvow_ask asks the user to decide each stale task and records the pick', async ($, on) => {
+  const calls = fakeAsk(on, DECIDE_LIST)
+  const asked: { question: string; options: string[] }[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+    const q = e.questions[0]
+    asked.push({ question: q?.question ?? '', options: (q?.options ?? []).map((o) => o.label) })
+    return { result: { questions: e.questions, answers: { [q?.question ?? '']: 'Keep the pass' } } }
+  })
+  const out = JSON.stringify(await $.tool.call({ tool: 'mcp__rvow__rvow_ask' }))
+  expect(asked).toHaveLength(1)
+  expect(asked[0]?.question).toContain('TSK-k8ergv')
+  expect(asked[0]?.question).toContain('Write ok')
+  expect(asked[0]?.options).toEqual(['Re-prove now', 'Re-prove at archive', 'Keep the pass'])
+  expect(out).toContain('TSK-k8ergv Write ok -> Keep the pass')
+  expect(picks(calls)).toEqual(['decide TSK-k8ergv keep'])
+})
+
+test('a decide answer of re-prove now tells the agent to run rvow prove', async ($, on) => {
+  const calls = fakeAsk(on, DECIDE_LIST)
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => ({
+    result: {
+      questions: e.questions,
+      answers: { [e.questions[0]?.question ?? '']: 'Re-prove now' },
+    },
+  }))
+  const out = JSON.stringify(await $.tool.call({ tool: 'mcp__rvow__rvow_ask' }))
+  expect(out).toContain('Run `rvow prove TSK-k8ergv`')
+  expect(picks(calls)).toEqual(['decide TSK-k8ergv now'])
+})
+
+test('a closed decide dialog records no decision', async ($, on) => {
+  const calls = fakeAsk(on, DECIDE_LIST)
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => ({ deny: 'the user closed the dialog' }))
+  const out = JSON.stringify(await $.tool.call({ tool: 'mcp__rvow__rvow_ask' }))
+  expect(picks(calls)).toEqual([])
+  expect(out).toContain('still waiting: TSK-k8ergv')
+})
+
+test('rvow_ask says there is nothing to ask when no question and no task wait', async ($, on) => {
+  fakeAsk(
+    on,
+    'undecided: 0 tasks wait for a decision\nhelp[1]:\n  Ask the user with the rvow_ask tool',
+  )
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => {
+    throw new Error('nothing to ask, so no dialog')
+  })
+  const out = JSON.stringify(await $.tool.call({ tool: 'mcp__rvow__rvow_ask' }))
+  expect(out).toContain('no open questions')
+})
+
+test('a Bash post-tool-use payload carries exit_ok and the output tail', async ($, on) => {
+  const post: Record<string, unknown>[] = []
+  on('session.cwd', async () => ({ value: '/tmp' }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('process.run', async (_$, e) => {
+    if ((e.argv[3] ?? '') === 'post-tool-use' && e.init?.stdin) post.push(JSON.parse(e.init.stdin))
+    return { value: procResult(0, '') }
+  })
+  on('tool.call', { tool: 'Bash' }, async (_$, e) => {
+    if ((e as { command?: string }).command === 'false') throw new Error('boom')
+    return { result: { stdout: `${'o'.repeat(16_000)}tail`, stderr: 'warn\n', interrupted: false } }
+  })
+  await $.tool.call({ tool: 'Bash', command: 'sh check.sh', tool_use_id: 't1use' } as never)
+  await $.tool
+    .call({ tool: 'Bash', command: 'false', tool_use_id: 't2use' } as never)
+    .catch(() => undefined)
+  expect(post).toHaveLength(2)
+  const ok = post[0]
+  expect(ok).toMatchObject({ tool_use_id: 't1use', exit_ok: true })
+  const tail = String(ok?.output_tail)
+  expect(tail).toHaveLength(16_000)
+  expect(tail.endsWith('tail\nwarn\n')).toBe(true)
+  // A result that carries no output at all is unreadable, so it adds nothing.
+  expect(post[1]).not.toHaveProperty('exit_ok')
+})
+
 test('the pane opens without focus, size or closeOnEscape', async ($, on) => {
   const calls = await seed($, on, READY)
   const open = JSON.parse(calls.find((c) => c[0] === '@open')?.[1] ?? '{}')

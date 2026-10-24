@@ -68,6 +68,8 @@ mod cli;
 mod committed_tests;
 #[path = "suite/confirm_friction.rs"]
 mod confirm_friction;
+#[path = "suite/decide.rs"]
+mod decide;
 #[path = "suite/delegate_worktree.rs"]
 mod delegate_worktree;
 #[path = "suite/diff_mutants.rs"]
@@ -132,6 +134,8 @@ mod lease_worktree;
 mod lease_worktree_rules;
 #[path = "suite/literal_paths.rs"]
 mod literal_paths;
+#[path = "suite/observed.rs"]
+mod observed;
 #[path = "suite/plan_access.rs"]
 mod plan_access;
 #[path = "suite/prove_stale.rs"]

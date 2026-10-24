@@ -10,6 +10,7 @@ pub mod guard;
 pub mod hardening;
 pub mod install;
 pub mod lease;
+pub mod observed;
 pub mod proof;
 pub mod protected;
 pub mod reprove;

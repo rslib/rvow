@@ -6,20 +6,20 @@ description: Load before you plan, propose, spec, accept or prove an accepted ch
 # rvow
 
 The user and you agreed on a plan, and rvow holds you to it with checks outside the model.
-Words: the plan is the files; the change is the folder; the vow is the accepted plan with its hashes. The parts of a plan are `proposal`, `tasks`, a `spec:<name>` per capability and an optional `design`.
-The brief at session start names the next task. {{cmd:brief}} prints it again.
+Words: the plan is the files; the change is the folder; the vow is the accepted plan with its hashes. A plan has `proposal`, `tasks`, a `spec:<name>` per capability and an optional `design`.
+The session-start brief names the next task. {{cmd:brief}} prints it again.
 
 ## Work
 
 - Write the test first, then do the work and run {{cmd:prove <task>}}; rvow runs the stored verify command, and a pass with 0 tests run is not a proof. Never run the check yourself and claim it passed.
-- {{cmd:status}} shows each task and any drift. {{cmd:prove --stale}} re-proves stale tasks, but a stale proof needs no re-prove after each edit: {{cmd:archive}} re-proves stale tasks.
+- {{cmd:status}} shows each task and drift. A stale task marked `user-decides` waits for the user: ask with `rvow_ask`, never run {{cmd:decide}}. {{cmd:prove --stale}} re-proves stale tasks, but a stale proof needs no re-prove after each edit: {{cmd:archive}} re-proves stale tasks.
 - Stay inside each task's `files:` scope. The gate fails on files outside it.
-- The store is read and written only through rvow: the hooks deny a direct path into it. {{cmd:show <change>}} prints the outline; {{cmd:show <change> proposal}} prints one part in full (`proposal`, `tasks`, `design` or `spec:<name>`); pipe a part to {{cmd:put <change> proposal}}, or one task or requirement block to {{cmd:put <task or requirement id>}}, and rvow prints `ok` or the check findings.
+- The store is read and written only through rvow: the hooks deny a direct path into it. {{cmd:show <change>}} prints the outline; {{cmd:show <change> proposal}} prints one part in full; pipe a part to {{cmd:put <change> proposal}}, or one task or requirement block to {{cmd:put <task or requirement id>}}; rvow prints `ok` or the check findings.
 
 ## Before accept
 
-- A new plan starts with {{cmd:new "<title>"}}, and {{cmd:new --spec "<title>"}} when the change alters behavior. {{cmd:guide design}} allows a `design` only for the changes it lists; put a technical decision there only then, otherwise the reason goes in the task. Before you write tasks, run {{cmd:guide tasks}}: one target per task, the full suite in one last gate task. For stale proofs, run {{cmd:guide runners}}.
-- While a plan waits for accept, code edits are denied. Before accept, {{cmd:put}} alone changes the plan; {{cmd:amend}} is only for an accepted plan. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}. The `rvow_ask` tool takes an optional `change` for the questions of another change.
+- A new plan starts with {{cmd:new "<title>"}}, and {{cmd:new --spec "<title>"}} when the change alters behavior. {{cmd:guide design}} allows a `design` only for the changes it lists; put a technical decision there only then, otherwise the reason goes in the task. Before writing tasks, run {{cmd:guide tasks}}: one target per task, the full suite in one last gate task. For stale proofs, run {{cmd:guide runners}}.
+- While a plan waits for accept, code edits are denied. Before accept, {{cmd:put}} alone changes the plan; {{cmd:amend}} is only for an accepted plan. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}. `rvow_ask` takes an optional `change` for another change's questions.
 - Then run {{cmd:check}} and call the `rvow_accept` tool: the user answers in a dialog, and a failure comes back to you. Without the tool, ask the user to run `/rvow-accept <id>`.
 
 ## When the plan must change
@@ -36,4 +36,4 @@ When a task cannot pass as written, run {{cmd:block <task> --reason "..."}} and 
 ## Notes
 
 - {{cmd:note decision "..."}} records a choice the next session needs, and {{cmd:note handoff "..."}} leaves at most 5 lines for it.
-- {{cmd:delegate <task>}} leases a task to a subagent. Start the subagent's prompt with its output, first line unchanged.
+- {{cmd:delegate <task>}} leases a task to a subagent. Start the subagent's prompt with its output, first line unchanged; it holds the task, so do not repeat it.

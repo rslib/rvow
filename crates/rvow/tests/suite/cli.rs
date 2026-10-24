@@ -221,6 +221,22 @@ fn accept_output_is_short() {
 }
 
 #[test]
+fn mode_default_new_writes_the_project_mode() {
+    let r = Repo::new("taskmode");
+    let root = PathBuf::from(field(&r.ok(&["init"]), "created"));
+    std::fs::write(root.join("config.toml"), "task_mode = \"relaxed\"\n").unwrap();
+    let out = r.ok(&["new", "Small"]);
+    let proposal = std::fs::read_to_string(Path::new(field(&out, "path")).join("proposal.md")).unwrap();
+    assert!(proposal.lines().next().is_some_and(|l| l.starts_with("branch: ")), "{proposal}");
+    assert_eq!(proposal.lines().nth(1), Some("mode: relaxed"), "{proposal}");
+
+    std::fs::write(root.join("config.toml"), "").unwrap();
+    let out = r.ok(&["new", "Plain"]);
+    let proposal = std::fs::read_to_string(Path::new(field(&out, "path")).join("proposal.md")).unwrap();
+    assert!(!proposal.contains("mode:"), "{proposal}");
+}
+
+#[test]
 fn decisions_end_with_next() {
     let (r, root, id) = accepted("nextline");
     let brief = r.ok(&["brief"]);
@@ -376,7 +392,7 @@ fn errors_are_records_on_stdout() {
     let (out, code) = r.rvow(&["status", "--bogus"]);
     assert_eq!(code, 2);
     assert!(out.starts_with("error: unexpected argument '--bogus' found\ncode: usage\nhelp[2]:\n"), "{out}");
-    assert!(out.contains("valid flags for `rvow status`: --all, --json;"), "{out}");
+    assert!(out.contains("valid flags for `rvow status`: --all, --json, --full;"), "{out}");
     let (out, code) = r.rvow(&["--human", "accept"]);
     assert_eq!(code, 2);
     assert!(out.contains("valid flags for `rvow accept`: --yes;"), "{out}");

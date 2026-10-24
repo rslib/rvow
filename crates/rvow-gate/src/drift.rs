@@ -12,8 +12,9 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::fingerprint::globset;
 use crate::proof::Active;
+use crate::proposal::parse_proposal;
 use crate::spec::{DeltaOp, parse_deltas};
-use crate::store::Project;
+use crate::store::{Mode, Project, REPO_DIR};
 use crate::tasks::{Task, parse_tasks};
 use crate::vow::{self, protected_files, requirement_hash, sha256_hex};
 
@@ -250,6 +251,11 @@ fn task_items(before: &[Task], after: &[Task], out: &mut Vec<Item>) {
                 out.push(item(Class::Free, format!("{id} baseline pass removed")));
             }
         }
+        if old.mode != new.mode {
+            // A relaxed task skips checks that a strict one runs; the way back only adds them.
+            let class = if new.mode == crate::tasks::Mode::Relaxed { Class::Weaken } else { Class::Free };
+            out.push(item(class, format!("{id} mode made {}", new.mode.name())));
+        }
         if old.timeout != new.timeout {
             // A timeout only bounds the run; it never changes what passes.
             out.push(item(Class::Free, format!("{id} timeout changed")));
@@ -383,9 +389,9 @@ fn delta_items(before: &BTreeMap<String, String>, after: &BTreeMap<String, Strin
     }
 }
 
-/// The baseline's tasks.md and delta files. A placeholder that `rvow ids`
-/// replaced with an id minted for this change reads as that id, when the
-/// minted item has the same content; any other difference stays drift.
+/// The baseline's tasks.md, proposal and delta files. A placeholder that
+/// `rvow ids` replaced with an id minted for this change reads as that id,
+/// when the minted item has the same content; any other difference stays drift.
 fn baseline_texts(project: &Project, change: &Active) -> Result<BTreeMap<String, String>> {
     let Some(base) = change.baseline() else {
         return Ok(BTreeMap::new());
@@ -393,7 +399,7 @@ fn baseline_texts(project: &Project, change: &Active) -> Result<BTreeMap<String,
     let prefix = format!("{DELTAS}/");
     let mut texts = BTreeMap::new();
     for (rel, h) in hashes(base, "files") {
-        if rel == TASKS || rel.starts_with(&prefix) {
+        if rel == TASKS || rel == PROPOSAL || rel.starts_with(&prefix) {
             let text = object(project, &h)?;
             texts.insert(rel, text);
         }
@@ -410,7 +416,8 @@ fn baseline_texts(project: &Project, change: &Active) -> Result<BTreeMap<String,
     let reqs = renames(&delta_map(&deltas_of(&texts)), &delta_map(&deltas_of(&now)), &minted);
     rename(&mut texts, &reqs);
     let task_map = |tasks: &[Task]| -> BTreeMap<String, String> { tasks.iter().map(|t| (t.id.to_string(), vow::task_hash(t))).collect() };
-    let before = texts.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default();
+    let mut before = texts.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default();
+    crate::tasks::apply_default(&mut before, baseline_mode(&texts));
     let tasks = renames(&task_map(&before), &task_map(&change.loaded.tasks), &minted);
     rename(&mut texts, &tasks);
     Ok(texts)
@@ -449,6 +456,12 @@ fn rename(texts: &mut BTreeMap<String, String>, pairs: &[(String, String)]) {
     }
 }
 
+/// The mode the baseline proposal gives each task that has no `mode:` line of
+/// its own; `None` when the baseline holds no proposal.
+fn baseline_mode(texts: &BTreeMap<String, String>) -> Option<crate::tasks::Mode> {
+    parse_proposal(texts.get(PROPOSAL)?).0.mode
+}
+
 /// Whether a config value differs that the user's files set now or set at the
 /// baseline. A value that only a newer rvow default changed is not drift. A
 /// baseline from before `config_keys` was recorded does not say what the user
@@ -465,6 +478,54 @@ fn user_config_changed(config: &Config, base: &Map<String, Value>, before: &str,
         let old = before.get(k);
         old != now.get(k) && (keys.contains(k) || (recorded.is_none() && !old.is_some_and(|v| crate::config::earlier_default(k, v))))
     })
+}
+
+/// The change's paths that a baseline already took in: a changed file outside
+/// every task's file, confirmed once by the user.
+pub(crate) fn outside_of(base: Option<&Map<String, Value>>) -> Vec<String> {
+    base.and_then(|b| b.get("outside"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// The opening words of the drift item that names a changed file outside every
+/// task's files.
+pub const OUTSIDE: &str = "outside-scope file ";
+
+/// The changed files outside every task's files, for a change with a relaxed
+/// task: the task may reach past its plan, so the file is logged and confirmed
+/// once instead of failing the gate. A change of strict tasks has none.
+pub(crate) fn outside_paths(
+    project: &Project,
+    top: &Path,
+    config: &Config,
+    change: &Active,
+    living: &[crate::change::CapSpec],
+) -> Result<Vec<String>> {
+    if !change.loaded.tasks.iter().any(|t| t.mode == crate::tasks::Mode::Relaxed) {
+        return Ok(Vec::new());
+    }
+    let Some(base_ref) = crate::git::base_ref(top, &config.base) else {
+        return Ok(Vec::new());
+    };
+    let mb = crate::git::run(top, &["merge-base", "HEAD", &base_ref])?;
+    let repo_dir = format!("{REPO_DIR}/");
+    let taken = outside_of(change.baseline());
+    let own = globset(&change.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()).collect::<Vec<_>>())?;
+    let mut outside: Vec<String> = crate::gate::rerun::changed_files(top, &mb)?
+        .into_iter()
+        .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
+        .filter(|f| !own.is_match(f))
+        .filter(|f| !taken.iter().any(|path| path == f))
+        .collect();
+    // The scan of every change in the store runs only when a file is left.
+    if !outside.is_empty() {
+        let scope = crate::gate::check::scope_globs(project, top, &change.loaded.proposal.branch, living, &[change], &mb)?;
+        let set = globset(&scope)?;
+        outside.retain(|f| !set.is_match(f));
+    }
+    Ok(outside)
 }
 
 /// Every difference between the change's files and its baseline, weaken first.
@@ -510,7 +571,8 @@ pub fn drift_over(
     }
 
     let old_texts = baseline_texts(project, change)?;
-    let old_tasks = old_texts.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default();
+    let mut old_tasks = old_texts.get(TASKS).map(|text| parse_tasks(text).0).unwrap_or_default();
+    crate::tasks::apply_default(&mut old_tasks, baseline_mode(&old_texts));
     task_items(&old_tasks, &loaded.tasks, &mut out);
     out.extend(runner_items(project, base, &loaded.tasks));
 
@@ -527,6 +589,10 @@ pub fn drift_over(
             }
         };
         out.push(item(Class::Confirm, what));
+    }
+
+    for path in outside_paths(project, top, config, change, living)? {
+        out.push(item(Class::Confirm, format!("{OUTSIDE}{path}")));
     }
 
     let canonical = config.canonical()?;
@@ -679,6 +745,25 @@ mod tests {
         assert_eq!(items.iter().map(|i| i.class).collect::<Vec<_>>(), [Class::Weaken], "{items:?}");
     }
 
+    /// The `accepted` change, with `mode: relaxed` in its proposal before the
+    /// vow, so every task without a `mode:` line of its own is relaxed.
+    fn accepted_with_proposal_mode() -> (crate::git::testrepo::TempDir, Project, std::path::PathBuf) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "Out", "main", false).unwrap();
+        edit(&c.path.join(PROPOSAL), "branch: main", "branch: main\nmode: relaxed");
+        std::fs::write(
+            c.path.join(TASKS),
+            "- TSK-new1 Write ok\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n",
+        )
+        .unwrap();
+        let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        vow::commit(&p, prepared).unwrap();
+        (tmp, p, repo)
+    }
+
     fn home_of(p: &Project) -> &Path {
         p.root.parent().unwrap().parent().unwrap()
     }
@@ -702,6 +787,56 @@ mod tests {
     }
 
     #[test]
+    fn relaxed_outside_file_is_confirm_drift() {
+        let (_tmp, p, repo, _task) = crate::proof::tests::accepted_relaxed();
+        std::fs::write(repo.join("stray.txt"), "x").unwrap();
+        let got = drift_of(&p, home_of(&p), &repo);
+        assert_eq!(got, [(Class::Confirm, "outside-scope file stray.txt".to_string())]);
+    }
+
+    #[test]
+    fn relaxed_outside_sibling_change_files_are_in_scope() {
+        let (tmp, p, repo, task) = crate::proof::tests::accepted_relaxed();
+        let home = tmp.0.join("home");
+        let other = change::new(&p, "Other", "main", true).unwrap();
+        std::fs::write(
+            other.path.join(TASKS),
+            "- TSK-new1 Write other\n  verify: grep -q ok other.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: other.txt\n",
+        )
+        .unwrap();
+        let prepared = vow::prepare(&p, &home, other, &repo, &mut std::io::sink()).unwrap();
+        vow::commit(&p, prepared).unwrap();
+        std::fs::write(repo.join("other.txt"), "ok").unwrap();
+        let (living, _) = change::load_living(&p).unwrap();
+        let changes = proof::active(&p, &living).unwrap();
+        let relaxed = changes.iter().find(|c| c.loaded.tasks.iter().any(|t| t.id.to_string() == task)).unwrap();
+        let top = git::toplevel(&repo).unwrap();
+        let items = drift_with_home(&p, Some(&home), &top, &config::load(&p, &home).unwrap(), relaxed).unwrap();
+        assert!(!items.iter().any(|i| i.what.starts_with(OUTSIDE)), "{items:?}");
+    }
+
+    #[test]
+    fn relaxed_outside_strict_change_has_no_outside_item() {
+        let (_tmp, p, repo, _task) = accepted();
+        std::fs::write(repo.join("stray.txt"), "x").unwrap();
+        let got = drift_of(&p, home_of(&p), &repo);
+        assert!(!got.iter().any(|(_, what)| what.starts_with(OUTSIDE)), "{got:?}");
+    }
+
+    #[test]
+    fn relaxed_outside_confirmed_amendment_clears_the_item() {
+        let (tmp, p, repo, _task) = crate::proof::tests::accepted_relaxed();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("stray.txt"), "x").unwrap();
+        assert!(drift_of(&p, &home, &repo).contains(&(Class::Confirm, "outside-scope file stray.txt".to_string())));
+        let amended = crate::amend::amend(&p, &home, &repo, None, "take in stray.txt", None).unwrap();
+        assert_eq!(amended.len(), 1);
+        crate::amend::confirm(&p, &[amended[0].id.to_string()], crate::amend::Decision::Accept, None).unwrap();
+        let got = drift_of(&p, &home, &repo);
+        assert!(!got.iter().any(|(_, what)| what.contains("stray.txt")), "{got:?}");
+    }
+
+    #[test]
     fn globs_inside_by_text() {
         let scope = vec!["src/**".to_string(), "out.txt".to_string()];
         assert!(inside("src/a.rs", &scope));
@@ -722,6 +857,34 @@ mod tests {
         assert!(!inside("crates/ab/x.rs", &scope));
         assert!(!inside("crates/**", &scope));
         assert!(!inside("src/a.rs/b", &["src/*.rs".to_string()]), "a glob entry gets no folder rule");
+    }
+
+    #[test]
+    fn task_mode_change_after_accept_is_drift() {
+        let parse = |mode: &str| crate::tasks::parse_tasks(&format!("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n{mode}")).0;
+        let (strict, relaxed) = (parse(""), parse("  mode: relaxed\n"));
+        let mut out = Vec::new();
+        task_items(&strict, &relaxed, &mut out);
+        assert_eq!(out.iter().map(|i| (i.class, i.what.as_str())).collect::<Vec<_>>(), [(Class::Weaken, "TSK-x7k2q4 mode made relaxed")]);
+        out.clear();
+        task_items(&relaxed, &strict, &mut out);
+        assert_eq!(out.iter().map(|i| (i.class, i.what.as_str())).collect::<Vec<_>>(), [(Class::Free, "TSK-x7k2q4 mode made strict")]);
+    }
+
+    #[test]
+    fn mode_default_proposal_relaxes_a_task_is_weaken() {
+        let (_tmp, p, repo, task) = accepted();
+        edit(&active_dir(&p).join(PROPOSAL), "branch: main", "branch: main\nmode: relaxed");
+        let got = drift_of(&p, home_of(&p), &repo);
+        assert!(got.contains(&(Class::Weaken, format!("{task} mode made relaxed"))), "{got:?}");
+    }
+
+    #[test]
+    fn mode_default_unchanged_proposal_has_no_mode_drift() {
+        let (_tmp, p, repo) = accepted_with_proposal_mode();
+        let got = drift_of(&p, home_of(&p), &repo);
+        assert!(!got.iter().any(|(_, what)| what.contains("mode made")), "{got:?}");
+        assert_eq!(got, []);
     }
 
     #[test]

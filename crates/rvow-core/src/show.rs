@@ -33,23 +33,38 @@ pub fn overview(living: &[CapSpec]) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// The longest task title that an outline prints whole, in chars.
+pub const TITLE_CHARS: usize = 120;
+
+/// The title as an outline prints it: whole when it fits in `TITLE_CHARS`
+/// chars or `full` is given, else its first `TITLE_CHARS` chars and `...`.
+pub fn cut_title(title: &str, full: bool) -> String {
+    if full || title.chars().count() <= TITLE_CHARS {
+        return title.to_owned();
+    }
+    let mut cut: String = title.chars().take(TITLE_CHARS).collect();
+    cut.push_str("...");
+    cut
+}
+
 /// One requirement, task or change, found by a unique id prefix. A change
 /// prints as an outline whose tasks carry no state; the CLI uses `show_full`.
 pub fn show(project: &Project, input: &str) -> Result<String> {
-    render(project, None, input, false)
+    render(project, None, input, false, true)
 }
 
-/// `rvow show <change>`: like `show`, but each task of a change carries its state.
-pub fn show_full(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<String> {
-    render(project, Some((home, cwd)), input, false)
+/// `rvow show <change>`: like `show`, but each task of a change carries its
+/// state, and a task title longer than `TITLE_CHARS` is cut unless `full`.
+pub fn show_full(project: &Project, home: &Path, cwd: &Path, input: &str, full: bool) -> Result<String> {
+    render(project, Some((home, cwd)), input, false, full)
 }
 
 /// Like `show`, but a change lists the check fields of each task.
 pub fn review(project: &Project, input: &str) -> Result<String> {
-    render(project, None, input, true)
+    render(project, None, input, true, true)
 }
 
-fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks: bool) -> Result<String> {
+fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks: bool, full: bool) -> Result<String> {
     if input.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("AMD-")) {
         return show_amendment(project, input);
     }
@@ -58,7 +73,7 @@ fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks
     let (dirs, _) = change::list(project)?;
     if id.kind() == Kind::Chg {
         let dir = dirs.iter().find(|c| c.id == id).ok_or_else(|| not_listed(&id))?;
-        return show_change(project, states, dir, &living, checks);
+        return show_change(project, states, dir, &living, checks, full);
     }
     let mut open = Vec::new();
     for dir in dirs.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active)) {
@@ -382,7 +397,14 @@ pub fn change_part(project: &Project, change: &ChangeDir, part: &str) -> Result<
     Ok(text.clone())
 }
 
-fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDir, living: &[CapSpec], checks: bool) -> Result<String> {
+fn show_change(
+    project: &Project,
+    states: Option<(&Path, &Path)>,
+    dir: &ChangeDir,
+    living: &[CapSpec],
+    checks: bool,
+    full: bool,
+) -> Result<String> {
     let loaded = change::load(&dir.path, living)?;
     let (events, diags) = ledger::read(&dir.path.join(change::LEDGER))?;
     let top = match states {
@@ -422,7 +444,7 @@ fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDi
         out.push_str("tasks:\n");
         let runners = crate::config::runners(project).unwrap_or_default();
         for t in &loaded.tasks {
-            let _ = writeln!(out, "  {} {}", t.id, t.title);
+            let _ = writeln!(out, "  {} {}", t.id, cut_title(&t.title, full));
             if let (Some(now), Some((home, _))) = (&now, states) {
                 let state = proof::state_for(project, home, &active, t, now)?;
                 let _ = writeln!(out, "    state: {}", state.name());
@@ -431,6 +453,7 @@ fn show_change(project: &Project, states: Option<(&Path, &Path)>, dir: &ChangeDi
                 for line in task_fields(t, &runners).lines() {
                     let _ = writeln!(out, "  {line}");
                 }
+                let _ = writeln!(out, "    mode: {}", t.mode.name());
             }
         }
     }
@@ -480,7 +503,19 @@ mod tests {
 
     /// `show` with the fixture's home and repository.
     fn s(t: &TempDir, p: &Project, input: &str) -> Result<String> {
-        show_full(p, &t.0.join("home"), &t.0.join("r"), input)
+        show_full(p, &t.0.join("home"), &t.0.join("r"), input, true)
+    }
+
+    /// `show` with the fixture's home and repository, without `--full`.
+    fn s_cut(t: &TempDir, p: &Project, input: &str) -> Result<String> {
+        show_full(p, &t.0.join("home"), &t.0.join("r"), input, false)
+    }
+
+    /// A fixture whose only task has the 300 char title `a` repeated.
+    fn long_title(c: &ChangeDir) -> String {
+        let title = "a".repeat(300);
+        std::fs::write(c.path.join("tasks.md"), format!("# Tasks\n\n- TSK-x7k2q4 {title}\n  verify: true\n  files: a\n")).unwrap();
+        title
     }
 
     #[test]
@@ -546,6 +581,46 @@ mod tests {
         std::fs::write(c.path.join("tasks.md"), "- TSK-x7k2q4 Plain\n  verify: true\n  files: a\n").unwrap();
         let out = s(&_t, &p, "x7k").unwrap();
         assert_eq!(out, format!("- TSK-x7k2q4 Plain\n  verify: true\n  files: a\nchange: {}\nproof runs: none yet\n", c.id));
+    }
+
+    #[test]
+    fn task_mode_review_names_each_mode() {
+        let (_t, p, c) = fixture();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-x7k2q4 Strict one\n  verify: true\n  files: a\n- TSK-p3x8a1 Relaxed one\n  verify: true\n  files: a\n  mode: relaxed\n",
+        )
+        .unwrap();
+        let out = review(&p, &c.id.to_string()).unwrap();
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{needle:?} is missing from {out}"));
+        assert!(at("TSK-x7k2q4 Strict one") < at("  mode: strict\n"), "{out}");
+        assert!(at("  mode: strict\n") < at("TSK-p3x8a1 Relaxed one"), "{out}");
+        assert!(at("TSK-p3x8a1 Relaxed one") < at("  mode: relaxed\n"), "{out}");
+    }
+
+    #[test]
+    fn show_title_outline_cuts_a_long_title() {
+        let (_t, p, c) = fixture();
+        let title = long_title(&c);
+        let out = s_cut(&_t, &p, &c.id.to_string()).unwrap();
+        assert!(out.contains(&format!("  TSK-x7k2q4 {}\n", cut_title(&title, false))), "{out}");
+        assert!(!out.contains(&title), "{out}");
+    }
+
+    #[test]
+    fn show_title_outline_full_keeps_the_title() {
+        let (_t, p, c) = fixture();
+        let title = long_title(&c);
+        let out = s(&_t, &p, &c.id.to_string()).unwrap();
+        assert!(out.contains(&format!("  TSK-x7k2q4 {title}\n")), "{out}");
+    }
+
+    #[test]
+    fn show_title_review_keeps_the_title() {
+        let (_t, p, c) = fixture();
+        let title = long_title(&c);
+        let out = review(&p, &c.id.to_string()).unwrap();
+        assert!(out.contains(&format!("  TSK-x7k2q4 {title}\n")), "{out}");
     }
 
     #[test]

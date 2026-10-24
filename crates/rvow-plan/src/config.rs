@@ -100,6 +100,8 @@ pub struct File {
     pub agent: Option<String>,
     pub context: Option<String>,
     pub rules: Option<Rules>,
+    /// The mode a new change's tasks take: `strict` or `relaxed`.
+    pub task_mode: Option<crate::tasks::Mode>,
     /// The `[runners.<name>]` templates a task verify can name with `@<name>`.
     pub runners: Option<BTreeMap<String, crate::template::Runner>>,
     /// Per language, a repo-relative path to a tree-sitter query file that
@@ -139,6 +141,11 @@ pub struct Config {
     pub context: String,
     #[serde(default, skip_serializing_if = "Rules::is_empty")]
     pub rules: Rules,
+    /// The mode `rvow new` writes into a new proposal; `None` writes none. It
+    /// only seeds new plans, so it stays out of the canonical form and a change
+    /// of it is no config drift.
+    #[serde(skip)]
+    pub task_mode: Option<crate::tasks::Mode>,
     /// Per language, a repo-relative path to a tree-sitter query file that
     /// marks test units and names them, added to the shipped query.
     pub test_queries: BTreeMap<String, String>,
@@ -275,6 +282,7 @@ pub fn load(project: &Project, home: &Path) -> Result<Config> {
         agent,
         context,
         rules,
+        task_mode: pick!(task_mode),
         user_keys: user_keys(project, home)?,
     })
 }
@@ -439,6 +447,23 @@ mod tests {
         let c = load(&p, &home).unwrap();
         assert_eq!(c.base, "main");
         assert_eq!(c.machine.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn mode_default_task_mode_is_read_and_stays_out_of_the_canonical_form() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let unset = load(&p, &home).unwrap().canonical().unwrap();
+        assert_eq!(load(&p, &home).unwrap().task_mode, None);
+        assert!(!unset.contains("task_mode"), "{unset}");
+        std::fs::write(p.root.join(CONFIG_FILE), "task_mode = \"relaxed\"\n").unwrap();
+        let c = load(&p, &home).unwrap();
+        assert_eq!(c.task_mode, Some(crate::tasks::Mode::Relaxed));
+        assert_eq!(c.canonical().unwrap(), unset, "task_mode only seeds rvow new");
+        std::fs::write(p.root.join(CONFIG_FILE), "task_mode = \"loose\"\n").unwrap();
+        assert_eq!(load(&p, &home).unwrap_err().code, "config");
     }
 
     #[test]

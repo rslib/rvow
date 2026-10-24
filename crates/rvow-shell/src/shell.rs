@@ -417,7 +417,9 @@ fn parsed(cmd: &str, env: bool) -> std::rc::Rc<Shell> {
     sh
 }
 
-fn mentions_accept(code: &str) -> bool {
+/// The owned subcommand that the text of a script names along with `rvow`, or
+/// `None`. The words may be far apart, since code can keep `rvow` in a variable.
+fn owned_in_code(code: &str) -> Option<&'static str> {
     // A slash command name such as `/rvow-accept` cannot run from a script,
     // so every `/rvow-` word is dropped before the token check.
     let mut kept = String::with_capacity(code.len());
@@ -434,36 +436,35 @@ fn mentions_accept(code: &str) -> bool {
         }
     }
     kept.push_str(rest);
-    let tokens: Vec<&str> = kept.split(|c: char| !c.is_alphanumeric()).collect();
-    tokens.contains(&"rvow") && tokens.iter().any(|t| matches!(*t, "accept" | "confirm"))
+    let mut found: Option<&'static str> = None;
+    let mut rvow = false;
+    for token in kept.split(|c: char| !c.is_alphanumeric()) {
+        match token {
+            "rvow" => rvow = true,
+            _ if found.is_some() => {}
+            "accept" => found = Some("accept"),
+            "confirm" => found = Some("confirm"),
+            "decide" => found = Some("decide"),
+            "hook" => found = Some("hook"),
+            _ => {}
+        }
+    }
+    found.filter(|_| rvow)
 }
 
 fn owner_command(sub: &str) -> String {
     format!("rvow {sub} belongs to the user; the hooks deny it for agents. Ask the user to run /rvow-{sub} <id>, or to type ! rvow {sub}")
 }
 
-/// The subcommand of an `rvow` or `cargo run` call that the user owns.
-fn rvow_denial(inv: &[String]) -> Option<Denial> {
-    let name = base_name(&inv[0]);
-    let args: &[String] = if name == "rvow" {
-        &inv[1..]
-    } else if name == "cargo" {
-        let run = inv.iter().position(|w| w == "run")?;
-        &inv[run + 1..]
-    } else if inv[0].starts_with('$') {
-        // A command named by a variable that is not known here.
-        return inv[1..]
-            .iter()
-            .any(|w| matches!(w.as_str(), "accept" | "confirm"))
-            .then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") });
-    } else if is_interpreter(name) || AWKS.contains(&name) {
-        return inv[1..].iter().any(|w| mentions_accept(w)).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") });
-    } else {
-        return None;
-    };
-    let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
-    match sub.as_str() {
+/// The denial for one `rvow` subcommand the user owns, with the words after it.
+fn sub_denial(sub: &str, args: &[String]) -> Option<Denial> {
+    match sub {
         "accept" | "confirm" => denial(Rule::OwnerCommand, owner_command(sub)),
+        // The user decides a stale relaxed task; `--list` only reads the queue and stays allowed.
+        "decide" if !args.iter().any(|w| matches!(w.as_str(), "--list" | "--help" | "-h")) => denial(
+            Rule::OwnerCommand,
+            "rvow decide records the user's choice about a stale task and belongs to the user; the hooks deny it for agents. Ask the user with the rvow_ask tool, then run rvow decide <task> now|archive|keep with their answer".into(),
+        ),
         // Install re-pins the pre-push gate to the binary on PATH, which an agent may have rebuilt.
         "install" if !args.iter().any(|w| w == "--help" || w == "-h") => denial(
             Rule::OwnerCommand,
@@ -488,6 +489,28 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
         ),
         _ => None,
     }
+}
+
+/// The subcommand of an `rvow` or `cargo run` call that the user owns.
+fn rvow_denial(inv: &[String]) -> Option<Denial> {
+    let name = base_name(&inv[0]);
+    let args: &[String] = if name == "rvow" {
+        &inv[1..]
+    } else if name == "cargo" {
+        let run = inv.iter().position(|w| w == "run")?;
+        &inv[run + 1..]
+    } else if inv[0].starts_with('$') {
+        // A command named by a variable that is not known here.
+        let sub = inv[1..].iter().find(|w| matches!(w.as_str(), "accept" | "confirm" | "decide" | "hook"))?;
+        return sub_denial(sub, &[]);
+    } else if is_interpreter(name) || AWKS.contains(&name) {
+        let sub = inv[1..].iter().find_map(|w| owned_in_code(w))?;
+        return sub_denial(sub, &[]);
+    } else {
+        return None;
+    };
+    let sub = args.iter().find(|x| !x.starts_with('-') && *x != "rvow")?;
+    sub_denial(sub, args)
 }
 
 /// `-n` of a `git commit`, also inside a cluster such as `-qn` or `-anm`.
@@ -1017,8 +1040,8 @@ fn interpreter_script<'a>(name: &str, args: &'a [String]) -> Option<&'a String> 
 }
 
 /// Why running a script that `cmd` names must not happen: the file holds an
-/// `rvow accept` or `rvow confirm`, which belong to the user. A script that the
-/// same command writes first cannot be read yet; that stays a known gap.
+/// `rvow accept`, `confirm` or `hook`, which belong to the user. A script that
+/// the same command writes first cannot be read yet; that stays a known gap.
 pub fn script_rule(cmd: &str, cwd: &Path) -> Option<Denial> {
     // No repository context here, so every script keeps the whole-file check.
     script_rule_committed(cmd, cwd, &|p| std::fs::read_to_string(p).ok())
@@ -1070,11 +1093,7 @@ pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) ->
 /// The denial for the text of a script that runs, or `None`.
 fn check_text(name: &str, first: &str, text: &str, file: &str) -> Option<Option<Denial>> {
     let foreign = is_interpreter(name) || INTERPRETERS.iter().any(|i| first.starts_with("#!") && first.contains(i));
-    let inner = if foreign {
-        mentions_accept(text).then(|| Denial { rule: Rule::OwnerCommand, reason: owner_command("accept") })
-    } else {
-        bash_rule(text)
-    };
+    let inner = if foreign { owned_in_code(text).and_then(|sub| sub_denial(sub, &[])) } else { bash_rule(text) };
     inner.map(|d| denial(d.rule, format!("{file} holds a command the user owns, so it does not run from here: {}", d.reason)))
 }
 
@@ -1315,5 +1334,76 @@ mod tests {
         for cmd in ["rvow install --help", "rvow install -h"] {
             assert_eq!(rule_of(cmd), None, "{cmd}");
         }
+    }
+
+    #[test]
+    fn decide_pick_is_denied_to_agents() {
+        for cmd in [
+            "rvow decide TSK-x keep",
+            "rvow decide TSK-x now",
+            "rvow decide TSK-x archive",
+            "cd /tmp && rvow decide TSK-x keep",
+            "rvow --human decide TSK-x keep",
+            "cargo run -- decide TSK-x keep",
+            "python3 -c \"import os; os.system('rvow decide TSK-x keep')\"",
+            "$RVOW decide TSK-x keep",
+        ] {
+            assert_eq!(rule_of(cmd), Some(Rule::OwnerCommand), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn decide_list_and_help_are_allowed() {
+        for cmd in ["rvow decide --list", "rvow decide --help", "rvow decide -h"] {
+            assert_eq!(rule_of(cmd), None, "{cmd}");
+        }
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> TempDir {
+            let dir = std::env::temp_dir().join(format!("rvow-shell-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn hook_in_script_inline_code_is_denied() {
+        for cmd in [
+            "python3 -c \"import os; os.system('rvow hook post-tool-use')\"",
+            "node -e \"require('child_process').execSync('rvow hook pre-tool-use')\"",
+            "$RVOW hook post-tool-use",
+            "python3 -c \"import subprocess; subprocess.run(['rvow', 'hook', 'stop'])\"",
+            "python3 -c \"import subprocess; b='rvow'; subprocess.run([b, 'hook', 'stop'])\"",
+            "python3 -c \"import os, subprocess; r=os.environ.get('RVOW_BIN', 'rvow'); subprocess.run([r, '--toon', '--human', 'hook'])\"",
+            "python3 -c \"import subprocess; a=['hook', 'stop']; subprocess.run(['rvow'] + a)\"",
+        ] {
+            assert_eq!(rule_of(cmd), Some(Rule::WitnessFile), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn hook_in_script_prose_and_other_programs_are_allowed() {
+        for cmd in ["python3 -c \"print('rvow hooks')\"", "python3 -c \"print('a pre-push hook')\"", "git hook run pre-push"] {
+            assert_eq!(rule_of(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn hook_in_script_file_is_denied() {
+        let dir = TempDir::new("hook-file");
+        std::fs::write(dir.0.join("probe.py"), "import os\nos.system(\"rvow hook stop\")\n").unwrap();
+        let d = script_rule("python3 probe.py", &dir.0).expect("python3 probe.py");
+        assert_eq!(d.rule, Rule::WitnessFile);
+        assert!(d.reason.starts_with("probe.py holds a command the user owns"), "{}", d.reason);
     }
 }

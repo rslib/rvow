@@ -1,4 +1,5 @@
 use crate::diag::{Diagnostic, Rule};
+use crate::tasks::Mode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
@@ -7,6 +8,9 @@ pub struct Proposal {
     pub sections: Vec<String>,
     /// Changes that must be archived before this one, from `after: CHG-a, CHG-b`.
     pub after: Vec<String>,
+    /// The mode every task without a `mode:` line of its own takes, from
+    /// `mode: strict` or `mode: relaxed`.
+    pub mode: Option<Mode>,
 }
 
 const REQUIRED: [&str; 3] = ["Why", "What changes", "Out of scope"];
@@ -18,9 +22,10 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
     let mut title = String::new();
     let mut sections = Vec::new();
     let mut after = Vec::new();
+    let mut mode = None;
     let mut words = 0;
     for (i, line) in src.lines().enumerate() {
-        if !line.starts_with('#') && !line.starts_with("branch:") && !line.starts_with("after:") {
+        if !line.starts_with('#') && !line.starts_with("branch:") && !line.starts_with("after:") && !line.starts_with("mode:") {
             words += line.split_whitespace().count();
         }
         if let Some(b) = line.strip_prefix("branch:") {
@@ -28,6 +33,16 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
                 diags.push(Diagnostic::new(Rule::Structure, i + 1, "branch: goes once, above the first section"));
             }
             branch = b.trim().to_string();
+        } else if let Some(m) = line.strip_prefix("mode:") {
+            if mode.is_some() || !sections.is_empty() {
+                diags.push(Diagnostic::new(Rule::Structure, i + 1, "mode: goes once, above the first section"));
+            }
+            let m = m.trim();
+            match m {
+                "strict" => mode = Some(Mode::Strict),
+                "relaxed" => mode = Some(Mode::Relaxed),
+                _ => diags.push(Diagnostic::new(Rule::Structure, i + 1, format!("mode: {m:?} takes only the values strict or relaxed"))),
+            }
         } else if let Some(a) = line.strip_prefix("after:") {
             after.extend(a.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from));
         } else if let Some(t) = line.strip_prefix("# ") {
@@ -53,7 +68,7 @@ pub fn parse_proposal(src: &str) -> (Proposal, Vec<Diagnostic>) {
             diags.push(Diagnostic::new(Rule::Structure, 1, format!("proposal needs a `## {name}` section")));
         }
     }
-    (Proposal { branch, title, sections, after }, diags)
+    (Proposal { branch, title, sections, after, mode }, diags)
 }
 
 #[cfg(test)]
@@ -81,6 +96,26 @@ mod tests {
         assert_eq!(p.title, "Output tail");
         let (p, _) = parse_proposal("branch: b\n## Why\n");
         assert_eq!(p.title, "");
+    }
+
+    #[test]
+    fn mode_default_proposal_line_is_read() {
+        let sections = "## Why\n## What changes\n## Out of scope\n";
+        for (line, want) in [("mode: relaxed", Some(Mode::Relaxed)), ("mode: strict", Some(Mode::Strict)), ("", None)] {
+            let src = format!("branch: b\n{line}\n{sections}");
+            let (p, diags) = parse_proposal(&src);
+            assert_eq!(p.mode, want, "{line:?}: {diags:?}");
+            assert!(diags.is_empty(), "{line:?}: {diags:?}");
+        }
+    }
+
+    #[test]
+    fn mode_default_bad_value_is_a_diagnostic() {
+        let (p, diags) = parse_proposal("branch: b\nmode: relaxed-ish\n## Why\n## What changes\n## Out of scope\n");
+        assert_eq!(p.mode, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].line, 2);
+        assert_eq!(diags[0].message, "mode: \"relaxed-ish\" takes only the values strict or relaxed");
     }
 
     #[test]

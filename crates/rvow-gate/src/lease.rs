@@ -313,6 +313,20 @@ pub fn leased_away_in(all: &[Lease], task: &str, session: Option<&str>, now: u64
     all.iter().any(|l| l.task == task && l.live(now) && (session.is_none() || l.agent_id.as_deref() != session))
 }
 
+/// Whether `lease` holds a relaxed task of `active`, the active changes a
+/// caller already loaded: a relaxed task audits an edit outside its files
+/// instead of denying it. A change or task that is gone counts as strict.
+pub fn relaxed(active: &[proof::Active], lease: &Lease) -> bool {
+    let (Ok(change), Ok(task)) = (lease.change.parse::<crate::id::Id>(), lease.task.parse::<crate::id::Ref>()) else {
+        return false;
+    };
+    active
+        .iter()
+        .filter(|c| c.dir.id == change)
+        .flat_map(|c| c.loaded.tasks.iter())
+        .any(|t| t.id == task && t.mode == crate::tasks::Mode::Relaxed)
+}
+
 /// The lease that `agent_id` bound last, live or not.
 fn bound_last<'a>(all: &'a [Lease], agent_id: &str) -> Option<&'a Lease> {
     all.iter().filter(|l| l.agent_id.as_deref() == Some(agent_id)).max_by_key(|l| l.bound)

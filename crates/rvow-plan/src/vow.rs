@@ -19,7 +19,7 @@ use crate::lint::{Finding, clarifications};
 use crate::registry;
 use crate::spec::{DeltaOp, Requirement, Spec, StepKind};
 use crate::store::{Lock, Project};
-use crate::tasks::Task;
+use crate::tasks::{Mode, Task};
 
 pub use rvow_base::hash::sha256_hex;
 pub use rvow_base::paths::query_key;
@@ -48,6 +48,10 @@ pub fn task_hash(t: &Task) -> String {
     });
     if let Some(command) = &t.mutants {
         v["mutants"] = command.clone().into();
+    }
+    // A strict task keeps the hash it had before the field existed, so an old proof stays valid.
+    if t.mode == Mode::Relaxed {
+        v["mode"] = "relaxed".into();
     }
     sha256_hex(v.to_string().as_bytes())
 }
@@ -479,6 +483,42 @@ mod tests {
         git(&repo, &["checkout", "-q", "-b", "other"]);
         let err = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap_err();
         assert_eq!(err.code, "branch");
+    }
+
+    #[test]
+    fn task_mode_strict_keeps_the_old_hash() {
+        let (tasks, diags) = crate::tasks::parse_tasks("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let before = task_hash(&tasks[0]);
+        // The hash a task written before the field existed has.
+        let legacy = json!({
+            "title": "Tail",
+            "verify": "true",
+            "covers": [],
+            "files": ["a"],
+            "baseline_pass": false,
+            "timeout_secs": null,
+        });
+        assert_eq!(before, sha256_hex(legacy.to_string().as_bytes()));
+        let mut strict = tasks[0].clone();
+        strict.mode = crate::tasks::Mode::Strict;
+        assert_eq!(task_hash(&strict), before);
+        let mut relaxed = tasks[0].clone();
+        relaxed.mode = crate::tasks::Mode::Relaxed;
+        assert_ne!(task_hash(&relaxed), before);
+    }
+
+    #[test]
+    fn task_mode_relaxed_changes_the_hash() {
+        let (tasks, diags) = crate::tasks::parse_tasks("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let strict = &tasks[0];
+        let (tasks, diags) = crate::tasks::parse_tasks("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n  mode: relaxed\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let relaxed = &tasks[0];
+        assert_eq!(relaxed.mode, crate::tasks::Mode::Relaxed);
+        assert_eq!(strict.mode, crate::tasks::Mode::Strict);
+        assert_ne!(task_hash(strict), task_hash(relaxed));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::record::{self, Record};
 use crate::registry;
 use crate::spec::{DeltaFile, DeltaOp, Requirement, Spec, parse_deltas, parse_spec};
 use crate::store::Project;
-use crate::tasks::{Task, parse_tasks};
+use crate::tasks::{Mode, Task, apply_default, parse_tasks};
 
 pub use rvow_base::layout::{DELTAS, DESIGN, LEDGER, PROPOSAL, TASKS};
 
@@ -213,12 +213,18 @@ pub fn slugify(title: &str) -> String {
     slug
 }
 
-fn proposal_template(branch: &str, title: &str) -> String {
-    format!("branch: {branch}\n\n# {title}\n\n## Why\n\n## What changes\n\n## Out of scope\n\n## Assumptions\n")
+fn proposal_template(branch: &str, title: &str, mode: Option<Mode>) -> String {
+    let mode = mode.map(|m| format!("mode: {}\n", m.name())).unwrap_or_default();
+    format!("branch: {branch}\n{mode}\n# {title}\n\n## Why\n\n## What changes\n\n## Out of scope\n\n## Assumptions\n")
 }
 
 /// Creates a change in `backlog/`. A small change has no `specs/` folder.
 pub fn new(project: &Project, title: &str, branch: &str, small: bool) -> Result<ChangeDir> {
+    new_with_mode(project, title, branch, small, None)
+}
+
+/// Like `new`, with the change-level task mode written into the proposal.
+pub fn new_with_mode(project: &Project, title: &str, branch: &str, small: bool, mode: Option<Mode>) -> Result<ChangeDir> {
     let slug = slugify(title);
     if slug.is_empty() {
         return Err(Error::new("title", "the title has no letters or digits", "give the change a title in words"));
@@ -233,7 +239,7 @@ pub fn new(project: &Project, title: &str, branch: &str, small: bool) -> Result<
     for d in &dirs {
         std::fs::create_dir_all(d).map_err(|e| Error::io(d, e))?;
     }
-    for (name, body) in [(PROPOSAL, proposal_template(branch, title)), (TASKS, "# Tasks\n".to_string())] {
+    for (name, body) in [(PROPOSAL, proposal_template(branch, title, mode)), (TASKS, "# Tasks\n".to_string())] {
         let p = path.join(name);
         std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
     }
@@ -363,7 +369,8 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
     findings.extend(tag(PROPOSAL, diags));
     texts.push((PROPOSAL.to_string(), proposal_text));
     let tasks_text = read(&dir.join(TASKS))?;
-    let (tasks, diags) = parse_tasks(&tasks_text);
+    let (mut tasks, diags) = parse_tasks(&tasks_text);
+    apply_default(&mut tasks, proposal.mode);
     findings.extend(tag(TASKS, diags));
     texts.push((TASKS.to_string(), tasks_text));
     if let Ok(design) = std::fs::read_to_string(dir.join(DESIGN)) {

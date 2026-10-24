@@ -16,7 +16,7 @@ use crate::id::{self, Id, Ref};
 use crate::ledger::{self, Event, Kind};
 use crate::runner::{self, Outcome};
 use crate::store::Project;
-use crate::tasks::Task;
+use crate::tasks::{Mode, Task};
 use crate::vow::{requirement_hash, sha256_hex, task_hash};
 
 /// Loops: this many failed runs in a row with the same output suggest a block.
@@ -34,9 +34,32 @@ pub struct Active {
     pub lease_branches: Vec<String>,
 }
 
+fn vow_of(events: &[Event]) -> Option<&Event> {
+    events.iter().find(|e| e.kind == Kind::Vow)
+}
+
+/// The snapshot that drift is measured against: the snapshot of the accepted
+/// amendment recorded last, else the vow. The order of the confirm events does
+/// not count, since one confirm can accept several at once. An unlock is
+/// skipped: its snapshot is a copy from when it was recorded and would undo a
+/// plan edit accepted in the same round.
+pub(crate) fn baseline_of(events: &[Event]) -> Option<&Map<String, Value>> {
+    let mut base = vow_of(events).map(|e| &e.data);
+    for a in events.iter().filter(|e| e.kind == Kind::Amend && !e.data.contains_key("unlock")) {
+        let id = a.data.get("amendment");
+        let accepted = events.iter().any(|e| {
+            e.kind == Kind::Confirm && e.data.get("amendment") == id && e.data.get("decision").and_then(Value::as_str) == Some("accept")
+        });
+        if let (true, Some(snapshot)) = (accepted, a.data.get("snapshot").and_then(Value::as_object)) {
+            base = Some(snapshot);
+        }
+    }
+    base
+}
+
 impl Active {
     pub fn vow(&self) -> Option<&Event> {
-        self.events.iter().find(|e| e.kind == Kind::Vow)
+        vow_of(&self.events)
     }
 
     pub fn base_commit(&self) -> Option<&str> {
@@ -54,23 +77,8 @@ impl Active {
         })
     }
 
-    /// The snapshot that drift is measured against: the snapshot of the
-    /// accepted amendment recorded last, else the vow. The order of the confirm
-    /// events does not count, since one confirm can accept several at once. An
-    /// unlock is skipped: its snapshot is a copy from when it was recorded and
-    /// would undo a plan edit accepted in the same round.
     pub fn baseline(&self) -> Option<&Map<String, Value>> {
-        let mut base = self.vow().map(|e| &e.data);
-        for a in self.events.iter().filter(|e| e.kind == Kind::Amend && !e.data.contains_key("unlock")) {
-            let id = a.data.get("amendment");
-            let accepted = self.events.iter().any(|e| {
-                e.kind == Kind::Confirm && e.data.get("amendment") == id && e.data.get("decision").and_then(Value::as_str) == Some("accept")
-            });
-            if let (true, Some(snapshot)) = (accepted, a.data.get("snapshot").and_then(Value::as_object)) {
-                base = Some(snapshot);
-            }
-        }
-        base
+        baseline_of(&self.events)
     }
 
     /// The base hashes of the effective baseline. An amendment from before
@@ -218,6 +226,27 @@ fn is_proved(e: &Event) -> bool {
     e.data.get("proved").and_then(Value::as_bool) == Some(true)
 }
 
+/// The newest proof attempt of `task` in `change`, with its line in the ledger.
+fn last_run<'a>(change: &'a Active, task: &Task) -> Option<(usize, &'a Event)> {
+    let id = task.id.to_string();
+    change
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id)
+        .max_by_key(|(i, e)| (started(e), *i))
+}
+
+/// The decision that counts for a relaxed task: the newest decide event of
+/// `id` after the ledger line `after`, while the inputs it recorded are the
+/// task's current ones. A decision from before a proof, or one about other
+/// inputs, no longer counts.
+fn decision_at(change: &Active, id: &str, after: usize, inputs: &str) -> Option<Pick> {
+    let (_, e) = change.events.iter().enumerate().skip(after + 1).rev().find(|(_, e)| e.kind == Kind::Decide && str_of(e, "task") == id)?;
+    let pick = Pick::parse(str_of(e, "choice"))?;
+    (str_of(e, "inputs") == inputs).then_some(pick)
+}
+
 /// Compatibility state lookup using the project that owns the change path.
 /// Home-mode metadata determines the store home without environment lookup.
 /// Synthetic changes without metadata have no private policy. Repo-mode library
@@ -238,9 +267,7 @@ pub fn state_for(project: &Project, home: &Path, change: &Active, task: &Task, n
 
 fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&str>, runner: Option<&str>) -> Result<State> {
     let id = task.id.to_string();
-    let mine: Vec<&Event> =
-        change.events.iter().filter(|e| matches!(e.kind, Kind::Prove | Kind::Block) && str_of(e, "task") == id).collect();
-    let Some(last) = mine.iter().enumerate().max_by_key(|(i, e)| (started(e), *i)).map(|(_, e)| *e) else {
+    let Some((last_at, last)) = last_run(change, task) else {
         return Ok(State::Missing);
     };
     if last.kind == Kind::Block {
@@ -263,8 +290,9 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     let key = str_of(last, "key");
     let last_tree = last.data.get("worktree").and_then(Value::as_str).unwrap_or("");
     let flaky = !last_tree.is_empty()
-        && mine.iter().any(|e| {
+        && change.events.iter().any(|e| {
             e.kind == Kind::Prove
+                && str_of(e, "task") == id
                 && str_of(e, "key") == key
                 && !is_proved(e)
                 && e.data.get("worktree").and_then(Value::as_str) == Some(last_tree)
@@ -278,7 +306,8 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     if reqs != covered(task, &change.loaded, now.living) {
         reasons.push("requirement-changed");
     }
-    if str_of(last, "inputs") != now.inputs(task)?.hash {
+    let inputs = now.inputs(task)?.hash;
+    if str_of(last, "inputs") != inputs {
         reasons.push("inputs-changed");
     }
     if last.data.get("private_policy").and_then(Value::as_str) != policy {
@@ -292,6 +321,15 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     }
     if dependency_changed(change, task, last, now) {
         reasons.push("dependency-changed");
+    }
+    // A relaxed task whose proof still passed lets the user decide whether it
+    // stands: `keep` makes it proved, and with no decision it waits for them.
+    if task.mode == Mode::Relaxed && !reasons.is_empty() && reasons.iter().all(|r| matches!(*r, "inputs-changed" | "dependency-changed")) {
+        match decision_at(change, &id, last_at, &inputs) {
+            Some(Pick::Keep) => return Ok(State::Proved),
+            Some(_) => {}
+            None => reasons.push("user-decides"),
+        }
     }
     Ok(if !reasons.is_empty() {
         State::Stale(reasons)
@@ -564,6 +602,86 @@ fn dependency_changed(change: &Active, task: &Task, last: &Event, now: &Now) -> 
     task.depends_on.iter().any(|d| recorded.get(&d.to_string()) != current.get(&d.to_string()))
 }
 
+/// The facts one finished run gives a proof event: the command that ran, the
+/// inputs it stands for, and the worktree it ran in.
+pub struct Run<'a> {
+    pub project: &'a Project,
+    pub change: &'a Active,
+    pub task: &'a Task,
+    pub config: &'a Config,
+    pub now: &'a Now<'a>,
+    pub inputs: &'a fingerprint::Inputs,
+    /// The command that ran, every placeholder filled.
+    pub cmd: &'a str,
+    /// The name and hash of the runner the verify named, when it named one.
+    pub runner: Option<String>,
+    /// The private policy digest the run stands for.
+    pub policy: Option<String>,
+    /// The worktree hash the run stands for.
+    pub tree: String,
+    /// The runner's plan, for the artifacts a passing run of a build leaves.
+    pub plan: Option<&'a crate::template::Plan>,
+    pub started: u64,
+}
+
+/// The fields of the proof event of one finished run. `proved` is the caller's
+/// verdict on the run, and it also decides whether the guarded test texts and
+/// the artifacts of a build runner are captured. The caller seals the map, so a
+/// run rvow made and a run the agent made carry the same fields.
+pub fn run_data(run: &Run, outcome: &Outcome, proved: bool) -> Result<Map<String, Value>> {
+    let task = run.task;
+    let thash = task_hash(task);
+    let reqs = covered(task, &run.change.loaded, run.now.living);
+    let env_key = run.now.env.key();
+    let key = run_key(&thash, &reqs, &run.inputs.hash, &env_key, run.policy.as_deref(), run.runner.as_deref());
+    let mut data = Map::new();
+    data.insert("task".into(), task.id.to_string().into());
+    data.insert("task_hash".into(), thash.into());
+    data.insert("requirements".into(), json!(reqs));
+    data.insert("verify".into(), run.cmd.into());
+    data.insert("runner".into(), json!(run.runner));
+    data.insert("proved".into(), proved.into());
+    data.insert("exit".into(), json!(outcome.exit));
+    data.insert("timed_out".into(), outcome.timed_out.into());
+    data.insert("tests_run".into(), json!(outcome.tests_run));
+    data.insert("started".into(), run.started.into());
+    data.insert("duration_ms".into(), outcome.duration_ms.into());
+    data.insert("tail".into(), json!(outcome.tail));
+    data.insert("inputs".into(), run.inputs.hash.clone().into());
+    data.insert("input_files".into(), run.inputs.files.into());
+    data.insert("worktree".into(), run.tree.clone().into());
+    data.insert("depends".into(), json!(dependency_inputs(&run.change.loaded.tasks, task, run.now)));
+    data.insert("env".into(), json!(&run.now.env));
+    data.insert("env_key".into(), env_key.into());
+    data.insert("key".into(), key.into());
+    data.insert("programs".into(), json!(verify_programs(run.cmd)));
+    if proved {
+        data.insert("tests".into(), Value::Object(crate::guard::capture(run.project, run.now.top, run.config, task)?));
+        if let Some(plan) = run.plan
+            && plan.build.is_some()
+            && let Some(hashes) = artifact_hashes(run.now.top, &plan.artifacts)
+        {
+            data.insert("artifacts".into(), json!(hashes));
+        }
+    }
+    data.insert("run".into(), run_tool(run)?);
+    Ok(data)
+}
+
+/// The tool and the machine a run happened on.
+fn run_tool(run: &Run) -> Result<Value> {
+    let top = run.now.top;
+    Ok(json!({
+        "invocation": invocation_id()?,
+        "rvow": env!("CARGO_PKG_VERSION"),
+        "machine": machine(run.config),
+        "agent": agent(run.config),
+        "head": git::run(top, &["rev-parse", "HEAD"]).unwrap_or_default(),
+        "branch": git::branch(top).ok().flatten(),
+        "ci": fingerprint::ci(),
+    }))
+}
+
 /// Runs a task's stored verify command and records the proof.
 pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut dyn Write) -> Result<Proved> {
     let top = git::toplevel(cwd)?;
@@ -593,7 +711,6 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     }
     let cmd = plan.command.clone();
     let id = task.id.to_string();
-    let thash = task_hash(task);
     let started = ledger::now_ms();
     let mut watch = Watch { inner: echo, reconfigured: false };
     let outcome = runner::run(&cmd, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut watch)?;
@@ -638,17 +755,21 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         && private_check.as_ref().is_none_or(|c| c.passed)
         && junit.as_ref().is_none_or(|c| *c == crate::junit::Check::Passed);
 
-    let reqs = covered(task, &change.loaded, &living);
-    let env_key = now.env.key();
-    let stamp = runner_stamp(&runners, task);
-    let key = run_key(&thash, &reqs, &inputs.hash, &env_key, private_policy.as_deref(), stamp.as_deref());
-    let mut data = Map::new();
-    data.insert("task".into(), task.id.to_string().into());
-    data.insert("task_hash".into(), thash.into());
-    data.insert("requirements".into(), json!(reqs));
-    data.insert("verify".into(), cmd.clone().into());
-    data.insert("runner".into(), json!(stamp));
-    data.insert("proved".into(), proved.into());
+    let run = Run {
+        project,
+        change,
+        task,
+        config: &config,
+        now: &now,
+        inputs: &inputs,
+        cmd: &cmd,
+        runner: runner_stamp(&runners, task),
+        policy: private_policy.clone(),
+        tree,
+        plan: Some(&plan),
+        started,
+    };
+    let mut data = run_data(&run, &outcome, proved)?;
     if let Some(check) = &mutants {
         let mut value = json!(check);
         value["passed"] = check.passed().into();
@@ -662,9 +783,6 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         data.insert("private_check".into(), json!(check));
         data.insert("private_policy".into(), json!(private_policy));
     }
-    data.insert("exit".into(), json!(outcome.exit));
-    data.insert("timed_out".into(), outcome.timed_out.into());
-    data.insert("tests_run".into(), json!(outcome.tests_run));
     if let Some(check) = &junit {
         let (passed, reason) = match check {
             crate::junit::Check::Passed => (true, None),
@@ -672,37 +790,6 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         };
         data.insert("junit".into(), json!({ "recorded": recorded, "passed": passed, "reason": reason }));
     }
-    data.insert("started".into(), started.into());
-    data.insert("duration_ms".into(), outcome.duration_ms.into());
-    data.insert("tail".into(), json!(outcome.tail));
-    data.insert("inputs".into(), inputs.hash.clone().into());
-    data.insert("input_files".into(), inputs.files.into());
-    data.insert("worktree".into(), tree.into());
-    data.insert("depends".into(), json!(dependency_inputs(&change.loaded.tasks, task, &now)));
-    data.insert("env".into(), json!(now.env));
-    data.insert("env_key".into(), env_key.into());
-    data.insert("key".into(), key.into());
-    data.insert("programs".into(), json!(verify_programs(&cmd)));
-    if proved {
-        data.insert("tests".into(), Value::Object(crate::guard::capture(project, &top, &config, task)?));
-        if plan.build.is_some()
-            && let Some(hashes) = artifact_hashes(&top, &plan.artifacts)
-        {
-            data.insert("artifacts".into(), json!(hashes));
-        }
-    }
-    data.insert(
-        "run".into(),
-        json!({
-            "invocation": invocation_id()?,
-            "rvow": env!("CARGO_PKG_VERSION"),
-            "machine": machine(&config),
-            "agent": agent(&config),
-            "head": git::run(&top, &["rev-parse", "HEAD"]).unwrap_or_default(),
-            "branch": git::branch(&top).ok().flatten(),
-            "ci": fingerprint::ci(),
-        }),
-    );
     let ledger_path = change.dir.path.join(LEDGER);
     let event = {
         let lock = project.lock()?;
@@ -871,6 +958,104 @@ pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo:
     Ok(Some(event.hash))
 }
 
+/// What the user decided about a stale relaxed task: prove it now, let the
+/// archive prove it, or keep the proof it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    Now,
+    Archive,
+    Keep,
+}
+
+impl Pick {
+    pub fn name(self) -> &'static str {
+        match self {
+            Pick::Now => "now",
+            Pick::Archive => "archive",
+            Pick::Keep => "keep",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Pick> {
+        match text {
+            "now" => Some(Pick::Now),
+            "archive" => Some(Pick::Archive),
+            "keep" => Some(Pick::Keep),
+            _ => None,
+        }
+    }
+}
+
+/// The decision that counts for `task` now: its newest decide event after its
+/// last proof, while the inputs it recorded are the task's current ones. A
+/// strict task takes no decision, so it has none.
+pub fn decision(change: &Active, task: &Task, now: &Now) -> Result<Option<Pick>> {
+    if task.mode != Mode::Relaxed {
+        return Ok(None);
+    }
+    let Some((last_at, _)) = last_run(change, task) else {
+        return Ok(None);
+    };
+    Ok(decision_at(change, &task.id.to_string(), last_at, &now.inputs(task)?.hash))
+}
+
+/// Records the user's decision about the stale relaxed task `input` and returns
+/// its id. A strict task takes no decision: its proof must be current.
+pub fn decide(project: &Project, home: &Path, cwd: &Path, input: &str, pick: Pick) -> Result<String> {
+    let top = git::toplevel(cwd)?;
+    let (living, _) = change::load_living(project)?;
+    let changes = active(project, &living)?;
+    let (change, task) = find_task(&changes, input)?;
+    let id = task.id.to_string();
+    if task.mode != Mode::Relaxed {
+        return Err(Error::new(
+            "decide",
+            format!("{id} is strict; only a relaxed task takes a decision"),
+            format!("run rvow prove {id} once its files are final"),
+        ));
+    }
+    let config = config::load(project, home)?;
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    if !matches!(state_for(project, home, change, task, &now)?, State::Stale(_)) {
+        return Err(Error::new(
+            "decide",
+            format!("{id} is not stale, so it takes no decision"),
+            format!("run rvow status to see what {id} needs"),
+        ));
+    }
+    let inputs = now.inputs(task)?.hash;
+    let mut data = Map::new();
+    data.insert("task".into(), id.clone().into());
+    data.insert("choice".into(), pick.name().into());
+    data.insert("inputs".into(), inputs.into());
+    let lock = project.lock()?;
+    let key = crate::seal::key(home)?;
+    ledger::append_sealed(&change.dir.path.join(LEDGER), &lock, Kind::Decide, data, Some(&key))?;
+    Ok(id)
+}
+
+/// The relaxed tasks of the active changes on the current branch whose proof is
+/// stale and waits for the user's decision, as (task id, title).
+pub fn undecided(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<(String, String)>> {
+    let top = git::toplevel(cwd)?;
+    let (living, _) = change::load_living(project)?;
+    let changes = active(project, &living)?;
+    let config = config::load(project, home)?;
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let branch = git::branch(&top)?.unwrap_or_default();
+    let mut out = Vec::new();
+    for c in on_branch(&changes, &branch) {
+        for t in &c.loaded.tasks {
+            if let State::Stale(reasons) = state_for(project, home, c, t, &now)?
+                && reasons.contains(&"user-decides")
+            {
+                out.push((t.id.to_string(), t.title.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Streams a verify run to `inner` and watches the output for a CMake
 /// reconfigure, so the result can tell the user why the build was cold.
 struct Watch<'a> {
@@ -974,6 +1159,17 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
 /// The ids of the tasks on the current branch whose proof is stale, in queue
 /// order.
 pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> {
+    stale_over(project, home, cwd, false)
+}
+
+/// The ids of the stale tasks the background re-prove runs for: a strict task,
+/// and a relaxed task the user chose to prove `now`. A stale relaxed task with
+/// no decision waits for the user, so the background leaves it alone.
+pub fn background_stale(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<String>> {
+    stale_over(project, home, cwd, true)
+}
+
+fn stale_over(project: &Project, home: &Path, cwd: &Path, background: bool) -> Result<Vec<String>> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
@@ -983,9 +1179,13 @@ pub fn stale_tasks(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<Str
     let mut out = Vec::new();
     for c in on_branch(&changes, &branch) {
         for t in &c.loaded.tasks {
-            if matches!(state_for(project, home, c, t, &now)?, State::Stale(_)) {
-                out.push(t.id.to_string());
+            if !matches!(state_for(project, home, c, t, &now)?, State::Stale(_)) {
+                continue;
             }
+            if background && t.mode == Mode::Relaxed && decision(c, t, &now)? != Some(Pick::Now) {
+                continue;
+            }
+            out.push(t.id.to_string());
         }
     }
     Ok(out)
@@ -1303,5 +1503,121 @@ pub(crate) mod tests {
             last = Some(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap());
         }
         assert!(last.unwrap().looping);
+    }
+
+    /// `accepted`, with the task marked `mode: relaxed` before its vow.
+    pub(crate) fn accepted_relaxed() -> (TempDir, Project, PathBuf, String) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let c = change::new(&p, "Out", "main", false).unwrap();
+        std::fs::write(
+            c.path.join("tasks.md"),
+            "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n  mode: relaxed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c.path.join("specs/out.md"),
+            "## ADD REQ-new1 Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n",
+        )
+        .unwrap();
+        let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = vow::commit(&p, prepared).unwrap();
+        let task = vowed.minted.iter().find(|(from, _)| from == "TSK-new1").unwrap().1.to_string();
+        (tmp, p, repo, task)
+    }
+
+    /// `accepted_relaxed` or `accepted`, proved once, then `out.txt` changes, so
+    /// the task is stale with its inputs changed.
+    fn proved_then_stale(relaxed: bool) -> (TempDir, Project, PathBuf, String) {
+        let (tmp, p, repo, task) = if relaxed { accepted_relaxed() } else { accepted() };
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(repo.join("out.txt"), "ok\nmore").unwrap();
+        (tmp, p, repo, task)
+    }
+
+    #[test]
+    fn relaxed_stale_without_decision_waits_for_the_user() {
+        assert_eq!([Pick::Now, Pick::Archive, Pick::Keep].map(Pick::name), ["now", "archive", "keep"]);
+        assert_eq!(Pick::parse("keep"), Some(Pick::Keep));
+        assert_eq!(Pick::parse("later"), None);
+
+        let (tmp, p, repo, task) = proved_then_stale(true);
+        let home = tmp.0.join("home");
+        let s = status(&p, &home, &repo, false).unwrap();
+        assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed", "user-decides"]));
+        assert_eq!(undecided(&p, &home, &repo).unwrap(), [(task.clone(), "Write ok".to_string())]);
+        assert!(crate::reprove::ready(&p, &home, &repo).unwrap().is_empty(), "the background leaves it to the user");
+
+        // Proving the task itself clears the decision.
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert_eq!(state_of(&p, &home, &repo), "proved");
+        assert!(undecided(&p, &home, &repo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn relaxed_stale_keep_counts_as_proved() {
+        let (tmp, p, repo, task) = proved_then_stale(true);
+        let home = tmp.0.join("home");
+        assert_eq!(decide(&p, &home, &repo, &task, Pick::Keep).unwrap(), task);
+        assert_eq!(state_of(&p, &home, &repo), "proved");
+        assert!(undecided(&p, &home, &repo).unwrap().is_empty());
+        let opts = crate::gate::Options { strict: true, rerun: false, out: None };
+        let r = crate::gate::gate(&p, &home, &repo, opts, &mut std::io::sink()).unwrap();
+        assert!(r.passed(), "a kept proof passes the strict gate with no verify run: {r:?}");
+    }
+
+    #[test]
+    fn relaxed_stale_keep_ends_when_inputs_change_again() {
+        let (tmp, p, repo, task) = proved_then_stale(true);
+        let home = tmp.0.join("home");
+        assert_eq!(decide(&p, &home, &repo, &task, Pick::Keep).unwrap(), task);
+        assert_eq!(state_of(&p, &home, &repo), "proved");
+        std::fs::write(repo.join("out.txt"), "ok\nagain").unwrap();
+        let s = status(&p, &home, &repo, false).unwrap();
+        assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed", "user-decides"]));
+        assert_eq!(undecided(&p, &home, &repo).unwrap(), [(task, "Write ok".to_string())]);
+    }
+
+    #[test]
+    fn relaxed_stale_now_and_archive_leave_the_reasons() {
+        for pick in [Pick::Now, Pick::Archive] {
+            let (tmp, p, repo, task) = proved_then_stale(true);
+            let home = tmp.0.join("home");
+            assert_eq!(decide(&p, &home, &repo, &task, pick).unwrap(), task);
+            let s = status(&p, &home, &repo, false).unwrap();
+            assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed"]), "{} keeps it stale", pick.name());
+            assert!(undecided(&p, &home, &repo).unwrap().is_empty(), "{} is a decision", pick.name());
+        }
+    }
+
+    #[test]
+    fn relaxed_stale_strict_task_is_unchanged() {
+        let (tmp, p, repo, _task) = proved_then_stale(false);
+        let home = tmp.0.join("home");
+        let s = status(&p, &home, &repo, false).unwrap();
+        assert_eq!(s[0].tasks[0].state, State::Stale(vec!["inputs-changed"]));
+        assert!(undecided(&p, &home, &repo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn relaxed_stale_decide_refuses_a_strict_task() {
+        let (tmp, p, repo, task) = proved_then_stale(false);
+        let home = tmp.0.join("home");
+        let e = decide(&p, &home, &repo, &task, Pick::Keep).unwrap_err();
+        assert_eq!(e.code, "decide");
+        assert_eq!(e.message, format!("{task} is strict; only a relaxed task takes a decision"));
+
+        // A relaxed task that is not stale takes no decision either.
+        let (tmp, p, repo, task) = accepted_relaxed();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        let e = decide(&p, &home, &repo, &task, Pick::Now).unwrap_err();
+        assert_eq!(e.code, "decide");
+        assert!(e.message.contains("is not stale"), "{e}");
     }
 }

@@ -38,7 +38,9 @@ pub fn delegate(task: &str, worktree: Option<Option<PathBuf>>) -> Result<Reply> 
     if let Some(b) = &d.lease.branch {
         r.set("branch", b.as_str());
     }
-    r.help("Put this brief at the start of the subagent's prompt, with its first line unchanged");
+    r.help(
+        "Put this brief at the start of the subagent's prompt, with its first line unchanged; it holds the task, its files and its verify, so do not repeat them",
+    );
     Ok(r)
 }
 

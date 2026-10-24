@@ -191,7 +191,7 @@ impl<'a> Lazy<'a> {
 
 /// Files that differ from `mb` in the worktree, plus untracked files git does
 /// not ignore.
-pub(super) fn changed_files(top: &Path, mb: &str) -> Result<Vec<String>> {
+pub(crate) fn changed_files(top: &Path, mb: &str) -> Result<Vec<String>> {
     let mut files: Vec<String> = git::run(top, &["diff", "--name-only", mb])?.lines().map(String::from).collect();
     files.extend(git::run(top, &["ls-files", "-o", "--exclude-standard"])?.lines().map(String::from));
     files.sort();

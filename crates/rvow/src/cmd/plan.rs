@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use rvow_core::change::{self, Stage};
+use rvow_core::config;
 use rvow_core::diag::{Rule, Severity};
 use rvow_core::error::Result;
 use rvow_core::git;
@@ -36,7 +37,7 @@ pub fn new(title: &str, small: bool) -> Result<Reply> {
     let busy = changes.iter().filter(|c| c.stage == Stage::Active).any(|c| {
         std::fs::read_to_string(c.path.join(change::PROPOSAL)).is_ok_and(|t| t.lines().any(|l| l.trim() == format!("branch: {branch}")))
     });
-    let c = change::new(&p, title, &branch, small)?;
+    let c = change::new_with_mode(&p, title, &branch, small, config::load(&p, &home)?.task_mode)?;
     let mut r = Reply::new();
     r.line(format!("created {} at {}", c.id, c.path.display()));
     r.set("created", c.id.to_string());

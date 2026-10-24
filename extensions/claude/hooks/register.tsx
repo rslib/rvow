@@ -1,4 +1,4 @@
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, ToolCallResult } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
 import { ACCEPT_MS, declinedAcceptReason, repeatAcceptResult, shortReview } from './accept'
@@ -222,6 +222,26 @@ async function hook(
   const r = await runHook($, event, input)
   if (r.error !== undefined) warnBroken($, r.error)
   return r.out
+}
+
+/** How much of a command's output the post-tool-use payload carries. */
+const OUTPUT_TAIL = 16_000
+
+/**
+ * What a Bash call adds to the post-tool-use payload, so rvow judges the command by its outcome:
+ * whether it succeeded and the tail of what it printed. Nothing when the result carries neither.
+ */
+function bashOutcome(
+  tool: unknown,
+  result: ToolCallResult | undefined,
+): { exit_ok?: boolean; output_tail?: string } {
+  if (tool !== 'Bash' || !result || result.deny !== undefined) return {}
+  const record = result.result as { stdout?: unknown; stderr?: unknown } | undefined
+  const parts = [record?.stdout, record?.stderr].filter((p): p is string => typeof p === 'string')
+  // Bash's own record is the command's output; what the model read stands in when it is empty.
+  const printed = parts.length > 0 ? parts.join('\n') : result.text
+  if (!printed) return {}
+  return { exit_ok: result.isError !== true, output_tail: printed.slice(-OUTPUT_TAIL) }
 }
 
 async function refreshStatus($: EngineInterface) {
@@ -775,7 +795,70 @@ async function judgeOnce(
   }
 }
 
-/** One interview round: `$.ui.ask` per question, `rvow answer` per answer. */
+/** A stale relaxed task from `rvow decide --list`: it waits for the user's pick. */
+type Undecided = { id: string; title: string }
+/** How many tasks one round asks about, so a long queue never fills the dialog. */
+const DECIDE_ROUND = 3
+const DECIDE_LABELS = ['Re-prove now', 'Re-prove at archive', 'Keep the pass'] as const
+/** The `rvow decide` pick behind each label; an answer it does not hold records nothing. */
+const DECIDE_PICKS: Record<string, string | undefined> = {
+  'Re-prove now': 'now',
+  'Re-prove at archive': 'archive',
+  'Keep the pass': 'keep',
+}
+const DECIDE_QUESTION =
+  'Its files changed since its proof, which still passes: re-prove it now, re-prove it at archive, or keep the pass?'
+
+/** The rows of the TOON table `key[n]{column,...}:` in `out`, none when `out` holds no such table. */
+function toonTable(out: string, key: string): Record<string, string>[] {
+  const lines = out.split('\n')
+  const head = lines.findIndex((l) => l.startsWith(`${key}[`))
+  const m = head < 0 ? null : /^([A-Za-z_]\w*)\[(\d+)\]\{([^}]*)\}:$/.exec(lines[head] ?? '')
+  if (!m || m[1] !== key) return []
+  const cols = (m[3] ?? '').split(',')
+  return lines.slice(head + 1, head + 1 + Number(m[2])).map((line) => {
+    const cells = toonCells(line.trim())
+    return Object.fromEntries(cols.map((c, i) => [c, cells[i] ?? '']))
+  })
+}
+
+/** The cells of one TOON table row: split on the commas no quotes hold. */
+function toonCells(line: string): string[] {
+  const out: string[] = []
+  let cell = ''
+  let quoted = false
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line.charAt(i)
+    if (quoted && c === '\\') {
+      const escaped = line.charAt(i + 1)
+      cell += escaped === 'n' ? '\n' : escaped === 'r' ? '\r' : escaped === 't' ? '\t' : escaped
+      i += 1
+    } else if (c === '"') quoted = !quoted
+    else if (c === ',' && !quoted) {
+      out.push(cell)
+      cell = ''
+    } else cell += c
+  }
+  out.push(cell)
+  return out
+}
+
+/** The tasks `rvow decide --list` names: none when rvow cannot say, as an older binary cannot. */
+async function undecided(
+  run: (argv: string[]) => Promise<{ exitCode: number; stdout: string }>,
+): Promise<Undecided[]> {
+  const r = await run(['decide', '--list']).catch(() => undefined)
+  if (r?.exitCode !== 0) return []
+  return toonTable(r.stdout, 'undecided').flatMap((row) => {
+    const id = row.id ?? ''
+    return id ? [{ id, title: row.title ?? '' }] : []
+  })
+}
+
+/**
+ * One interview round: `$.ui.ask` per question, `rvow answer` per answer; then the user decides
+ * each stale relaxed task, one `rvow decide <task> now|archive|keep` per pick.
+ */
 async function ask($: EngineInterface, change?: string, forModel = false): Promise<string> {
   const cwd = await $.session.cwd()
   const run = (argv: string[]) => $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
@@ -786,7 +869,9 @@ async function ask($: EngineInterface, change?: string, forModel = false): Promi
     return `cannot read the open questions from ${BIN}: ${String(err)}`
   }
   const qs = round.questions ?? []
-  if (qs.length === 0) return 'no open questions'
+  const all = await undecided(run)
+  const waiting = all.slice(0, DECIDE_ROUND)
+  if (qs.length === 0 && waiting.length === 0) return 'no open questions'
   const done: string[] = []
   for (const [i, q] of qs.entries()) {
     const detail = q.options.filter((o) => o.description).map((o) => `${o.label}: ${o.description}`)
@@ -810,7 +895,38 @@ async function ask($: EngineInterface, change?: string, forModel = false): Promi
         : `${q.ref} ${q.question} -> ${choice}`,
     )
   }
-  return [...done, `${round.remaining ?? 0} questions remain.`, EDIT_HINT].join('\n')
+  if (qs.length > 0) done.push(`${round.remaining ?? 0} questions remain.`, EDIT_HINT)
+  // Then the user picks what to do with each stale relaxed task; a closed dialog decides none.
+  const stillWaiting = (from: number) =>
+    `the user did not decide; still waiting: ${waiting
+      .slice(from)
+      .map((t) => t.id)
+      .join(', ')}`
+  for (const [i, t] of waiting.entries()) {
+    const stay = () => stillWaiting(i)
+    let answer: string
+    try {
+      answer = await $.ui.ask(`${t.id} ${t.title}\n${DECIDE_QUESTION}`, {
+        header: 'Stale proof',
+        options: DECIDE_LABELS,
+      })
+    } catch {
+      return [...done, stay()].join('\n')
+    }
+    const pick = DECIDE_PICKS[answer]
+    if (pick === undefined) return [...done, stay()].join('\n')
+    const r = await run(['decide', t.id, pick]).catch(() => undefined)
+    if (r?.exitCode !== 0) return [...done, `cannot record ${t.id}; ${stay()}`].join('\n')
+    const who = forModel ? `${t.id} ${cut(t.title, 200)}` : `${t.id} ${t.title}`
+    done.push(
+      pick === 'now'
+        ? `${who} -> Re-prove now. Run \`rvow prove ${t.id}\` to prove it again.`
+        : `${who} -> ${answer}`,
+    )
+  }
+  if (all.length > waiting.length)
+    done.push(`${all.length - waiting.length} more wait for a decision; run this tool again.`)
+  return done.join('\n')
 }
 
 export const register: Register = (on) => {
@@ -866,7 +982,7 @@ export const register: Register = (on) => {
     await $.tool.register({
       name: 'rvow_ask',
       description:
-        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.',
+        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. It then asks the user to decide each stale relaxed task, at most 3, and records each pick with rvow decide <task> now|archive|keep. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.',
       inputSchema: ASK_SCHEMA,
     })
     await $.tool.register({
@@ -1110,16 +1226,23 @@ export const register: Register = (on) => {
     // blobs the call changed. A denied call never ran, so it is not reported.
     let result: Awaited<ReturnType<typeof next>>
     let post: HookOutput | undefined
-    try {
-      result = await next(e)
-    } finally {
+    const report = async (ran: Awaited<ReturnType<typeof next>> | undefined) => {
       post = await hook($, 'post-tool-use', {
         session_id: sessionId,
         agent_id: typeof agentId === 'string' ? agentId : undefined,
         tool_use_id,
+        ...bashOutcome(tool, ran),
       })
       if (tool === 'Bash' && /\brvow\b/.test(String(args.command ?? ''))) await refresh($)
     }
+    try {
+      result = await next(e)
+    } catch (err) {
+      // A call that threw may still have changed blobs, so it is reported before the failure travels on.
+      await report(undefined).catch(() => undefined)
+      throw err
+    }
+    await report(result)
     // A notice that rvow kept for this call goes to the model after the tool's result.
     const notice = post?.hookSpecificOutput?.additionalContext
     if (typeof notice !== 'string' || !notice || result.deny !== undefined) return result

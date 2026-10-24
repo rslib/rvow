@@ -16,7 +16,7 @@ use crate::runner;
 use crate::store::Project;
 
 pub mod cache;
-mod check;
+pub(crate) mod check;
 pub(crate) mod rerun;
 mod signature;
 
@@ -780,6 +780,41 @@ mod tests {
         let r = run_gate(&p, &home, &repo, Options::default());
         assert!(r.failures.iter().all(|f| !f.contains("drift") && !f.contains("waits")), "{r:?}");
         assert!(r.failures.iter().any(|f| f.contains("is stale")) || r.warnings.iter().any(|w| w.contains("stale")), "{r:?}");
+    }
+
+    #[test]
+    fn relaxed_outside_gate_counts_a_confirmed_glob_named_file_in_scope() {
+        let (tmp, p, repo, _task) = crate::proof::tests::accepted_relaxed();
+        let home = tmp.0.join("home");
+        let outside = |r: &Report| r.failures.iter().any(|f| f.contains("changed files lie outside every task's files"));
+        std::fs::create_dir_all(repo.join("app/[id")).unwrap();
+        std::fs::write(repo.join("app/[id/page*.tsx"), "x").unwrap();
+        crate::amend::amend(&p, &home, &repo, None, "take in the page", None).unwrap();
+        let (living, _) = change::load_living(&p).unwrap();
+        let pending = crate::amend::pending(&proof::active(&p, &living).unwrap());
+        crate::amend::confirm(&p, &[], crate::amend::Decision::Accept, Some(&crate::amend::digest(&pending))).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(!outside(&r), "{r:?}");
+        std::fs::write(repo.join("app/[id/page2.tsx"), "x").unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(outside(&r), "a confirmed name is no glob for other files: {r:?}");
+    }
+
+    #[test]
+    fn relaxed_outside_gate_counts_a_confirmed_file_in_scope() {
+        let (tmp, p, repo, _task) = crate::proof::tests::accepted_relaxed();
+        let home = tmp.0.join("home");
+        let outside = |r: &Report| r.failures.iter().any(|f| f.contains("changed files lie outside every task's files"));
+        std::fs::write(repo.join("stray.txt"), "x").unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(outside(&r), "{r:?}");
+
+        crate::amend::amend(&p, &home, &repo, None, "take in stray.txt", None).unwrap();
+        let (living, _) = change::load_living(&p).unwrap();
+        let pending = crate::amend::pending(&proof::active(&p, &living).unwrap());
+        crate::amend::confirm(&p, &[], crate::amend::Decision::Accept, Some(&crate::amend::digest(&pending))).unwrap();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        assert!(!outside(&r), "{r:?}");
     }
 
     #[test]

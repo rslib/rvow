@@ -23,6 +23,9 @@ use crate::stats::{self, Hook, Outcome, STATS_FILE, StopReason};
 use crate::store::{IDS_FILE, PROJECT_FILE, Project};
 use crate::yolo::{self, Tier, YOLO_FILE};
 
+use rvow_gate::observed;
+use rvow_gate::tasks::{Mode as TaskMode, Task};
+
 mod brief_state;
 mod session_files;
 mod stop_state;
@@ -309,8 +312,10 @@ fn enforcement_paths(trust: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
-/// Why an edit of `file` must not happen, or `None`.
-fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<Denial>> {
+/// Why an edit of `file` must not happen, or `None`. A protected test of a relaxed
+/// task, or a file outside every task when the branch has a relaxed task, is a
+/// `Found` that audits the edit and lets it through.
+fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<Found>> {
     let project = call.project;
     let target = key(&real_path(Path::new(file), cwd));
     let trust = signers_path(call, top);
@@ -322,7 +327,8 @@ fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<D
                 format!(
                     "{p} enforces rvow; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
                 ),
-            ));
+            )
+            .map(Found::deny));
         }
     }
     let root = key(&real_path(&project.root, cwd));
@@ -340,32 +346,36 @@ fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<D
             format!(
                 "{name} is written only by rvow; run `rvow show <change>` to read it, or `rvow amend --reason \"...\"` to change the plan"
             ),
-        ));
+        )
+        .map(Found::deny));
     }
     if rel_under(&target, &root).is_some_and(|r| r.starts_with("archive/")) {
         return Ok(denial(
             Rule::History,
             "an archived change is history and does not change; run `rvow new \"<title>\"` to start a new change".into(),
-        ));
+        )
+        .map(Found::deny));
     }
     if rel_under(&target, &root).is_some_and(|r| r.starts_with("specs/")) {
         return Ok(denial(
             Rule::History,
             "living specs change only through a change and rvow archive; run rvow guide spec to see how".into(),
-        ));
+        )
+        .map(Found::deny));
     }
     if rel_under(&target, &top_key).is_some_and(|r| r.starts_with(".git/")) {
         return Ok(denial(
             Rule::GitHooks,
             ".git/ is not edited by hand; the hooks there run the gate. Use git commands, and run rvow install for the hooks".into(),
-        ));
+        )
+        .map(Found::deny));
     }
     let Some(rel) = rel_under(&target, &top_key) else {
         return Ok(None);
     };
     let in_store = under(&target, &root);
     if !in_store && let Some(id) = unaccepted_plan(call, top)? {
-        return Ok(unaccepted_denial(&id));
+        return Ok(unaccepted_denial(&id).map(Found::deny));
     }
     if ENFORCEMENT.iter().any(|e| key(Path::new(e)) == rel) {
         return Ok(denial(
@@ -373,15 +383,19 @@ fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<D
             format!(
                 "{rel} configures the hooks that enforce the plan; changing it is for the user, so only the user edits it. If the plan needs it, run rvow block <task> --reason \"...\""
             ),
-        ));
+        )
+        .map(Found::deny));
     }
     if protected_in(call, top)?.contains(rel) && !unlocked(call, top, rel)? {
-        return Ok(denial(
+        return edit_found(
+            call,
+            top,
+            rel,
             Rule::ProtectedTest,
             format!(
                 "{rel} is a protected test or test setup file; to change it, run rvow amend --unlock {rel} --reason \"...\" and ask the user to confirm"
             ),
-        ));
+        );
     }
     if !in_store
         && let Some(files) = active_scope(call, top)?
@@ -390,14 +404,53 @@ fn edit_rule(call: &Call, top: &Path, cwd: &Path, file: &str) -> Result<Option<D
         // magic-looking name literal while matching the same ignore rules.
         && git::run(top, &["check-ignore", "-q", "--", &format!("./{rel}")]).is_err()
     {
-        return Ok(denial(
+        return edit_found(
+            call,
+            top,
+            rel,
             Rule::OutsideScope,
             format!(
                 "{rel} is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm"
             ),
-        ));
+        );
     }
     Ok(None)
+}
+
+/// The `Found` of a denial of the edit of `rel` under `rule`, audited when a
+/// relaxed task of the branch covers it and held otherwise.
+fn edit_found(call: &Call, top: &Path, rel: &str, rule: Rule, reason: String) -> Result<Option<Found>> {
+    let Some(denial) = denial(rule, reason) else { return Ok(None) };
+    Ok(Some(Found { denial, audit: relaxed_edit(call, top, rel, rule)? }))
+}
+
+/// Whether a relaxed task of the active changes on the branch audits an edit of
+/// `rel` under `rule`: a protected test that the files of a relaxed task match and
+/// the files of no strict task do, or a file outside the files of every task when
+/// any task of the branch is relaxed. Every other rule holds in either mode.
+fn relaxed_edit(call: &Call, top: &Path, rel: &str, rule: Rule) -> Result<bool> {
+    if !matches!(rule, Rule::ProtectedTest | Rule::OutsideScope) {
+        return Ok(false);
+    }
+    let branch = git::branch(top)?.unwrap_or_default();
+    let mine = proof::on_branch(call.active()?, &branch);
+    let relaxed = mine.iter().flat_map(|c| c.loaded.tasks.iter()).any(|t| t.mode == TaskMode::Relaxed);
+    let files = |mode: TaskMode| mode_scope(mine.iter().flat_map(|c| c.loaded.tasks.iter()), mode);
+    Ok(match rule {
+        Rule::ProtectedTest => relaxed && files(TaskMode::Relaxed)?.is_match(rel) && !files(TaskMode::Strict)?.is_match(rel),
+        _ => relaxed,
+    })
+}
+
+/// The `files:` globs of `tasks` whose mode is `mode`. The edited paths arrive
+/// lowercased by `key` on macOS, so the globs must match them in the same form.
+fn mode_scope<'a>(tasks: impl Iterator<Item = &'a Task>, mode: TaskMode) -> Result<globset::GlobSet> {
+    let files: Vec<String> = tasks
+        .filter(|t| t.mode == mode)
+        .flat_map(|t| t.files.iter().cloned())
+        .map(|f| if cfg!(target_os = "macos") { f.to_lowercase() } else { f })
+        .collect();
+    fingerprint::globset(&files)
 }
 
 /// The `files:` globs of every task of the active changes on this branch, or
@@ -461,7 +514,7 @@ fn unaccepted_denial(id: &crate::id::Id) -> Option<Denial> {
 /// targets: the plan on the branch is not accepted, or a leased subagent
 /// writes outside its task. A file that a program writes without naming it,
 /// or that only script text names, is not seen here.
-fn shell_write_denial(call: &Call, cmd: &str, cwd: &Path, agent: Option<&str>) -> Result<Option<Denial>> {
+fn shell_write_denial(call: &Call, cmd: &str, cwd: &Path, agent: Option<&str>) -> Result<Option<Found>> {
     let project = call.project;
     let Ok(top) = git::toplevel(cwd) else { return Ok(None) };
     let root = key(&real_path(&project.root, cwd));
@@ -476,11 +529,11 @@ fn shell_write_denial(call: &Call, cmd: &str, cwd: &Path, agent: Option<&str>) -
         return Ok(None);
     }
     if let Some(id) = unaccepted_plan(call, &top)? {
-        return Ok(unaccepted_denial(&id));
+        return Ok(unaccepted_denial(&id).map(Found::deny));
     }
     let Some(agent) = agent else { return Ok(None) };
     for f in &files {
-        if let Some(found) = lease_denial(project, cwd, agent, &f.to_string_lossy())? {
+        if let Some(found) = lease_denial(call, cwd, agent, &f.to_string_lossy())? {
             return Ok(Some(found));
         }
     }
@@ -660,8 +713,10 @@ fn lease_holder<'a>(project: &Project, input: &'a Value) -> Option<&'a str> {
 }
 
 /// Why a subagent that holds a lease must not edit `file`: it lies outside the
-/// files of the task leased to it.
-fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Result<Option<Denial>> {
+/// files of the task leased to it. A relaxed task audits the edit instead, so
+/// its `Found` carries the audit and the call goes through.
+fn lease_denial(call: &Call, cwd: &Path, agent_id: &str, file: &str) -> Result<Option<Found>> {
+    let project = call.project;
     let Ok(home) = crate::store::home_dir() else { return Ok(None) };
     let Some(lease) = lease::holder(project, &home, cwd, agent_id, crate::ledger::now_ms())? else {
         return Ok(None);
@@ -676,6 +731,7 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
         if lease.worktree.is_none() || !in_other_worktree(&base, &target) {
             return Ok(None);
         }
+        // Another worktree stays closed in every mode.
         return Ok(denial(
             Rule::LeaseScope,
             format!(
@@ -683,19 +739,23 @@ fn lease_denial(project: &Project, cwd: &Path, agent_id: &str, file: &str) -> Re
                 worktree = base.display(),
                 task = lease.task
             ),
-        ));
+        )
+        .map(Found::deny));
     };
     if fingerprint::globset(&lease.files).is_ok_and(|set| set.is_match(rel)) {
         return Ok(None);
     }
-    Ok(denial(
+    let Some(denial) = denial(
         Rule::LeaseScope,
         format!(
             "{rel} is outside the files of {task}, the task leased to this agent; edit only {files}, or run rvow block {task} --reason \"...\" if the task needs it",
             task = lease.task,
             files = lease_files_text(&lease.files)
         ),
-    ))
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(Found { denial, audit: lease::relaxed(call.active()?, &lease) }))
 }
 
 /// Whether `target` lies in a worktree of the repository of `worktree` other
@@ -741,9 +801,24 @@ fn lease_prove_denial(project: &Project, cwd: &Path, agent_id: &str, cmd: &str) 
     ))
 }
 
+/// A denial of a tool call, and whether a relaxed lease only audits it instead
+/// of holding the call.
+struct Found {
+    denial: Denial,
+    audit: bool,
+}
+
+impl Found {
+    /// A denial that holds the call: every rule but a relaxed lease's scope.
+    fn deny(denial: Denial) -> Found {
+        Found { denial, audit: false }
+    }
+}
+
 /// The rule and the reason that deny a tool call, or `None` to allow it.
 pub fn pre_tool_use_denial(project: &Project, input: &Value) -> Result<Option<Denial>> {
-    denial_in(&Call::new(project), input)
+    // A relaxed lease audits the edit: its caller counts the audit and allows it.
+    Ok(denial_in(&Call::new(project), input)?.filter(|f| !f.audit).map(|f| f.denial))
 }
 
 /// The tool input of a call, borrowed: an Edit or Write input holds whole file texts.
@@ -752,7 +827,7 @@ fn tool_input(input: &Value) -> &Value {
     input.get("tool_input").unwrap_or(&NONE)
 }
 
-fn denial_in(call: &Call, input: &Value) -> Result<Option<Denial>> {
+fn denial_in(call: &Call, input: &Value) -> Result<Option<Found>> {
     let project = call.project;
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
@@ -773,20 +848,20 @@ fn denial_in(call: &Call, input: &Value) -> Result<Option<Denial>> {
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
         let agent = lease_holder(project, input);
         if found.is_some() {
-            return Ok(found);
+            return Ok(found.map(Found::deny));
         }
         if let Some(found) = shell_write_denial(call, c, &cwd, agent)? {
             return Ok(Some(found));
         }
         return match agent {
-            Some(agent) => lease_prove_denial(project, &cwd, agent, c),
+            Some(agent) => Ok(lease_prove_denial(project, &cwd, agent, c)?.map(Found::deny)),
             None => Ok(None),
         };
     }
     if tool.starts_with("mcp__")
         && let Some(found) = mcp_git_hooks_denial(args)
     {
-        return Ok(Some(found));
+        return Ok(Some(Found::deny(found)));
     }
     let files = file_args(args);
     // The hidden checks are closed to every tool. The plan files of the store are closed to direct
@@ -797,7 +872,7 @@ fn denial_in(call: &Call, input: &Value) -> Result<Option<Denial>> {
             .or_else(|| (!writer).then(|| store_denial(project, &cwd, f, false)).flatten())
             .or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten())
     }) {
-        return Ok(Some(found));
+        return Ok(Some(Found::deny(found)));
     }
     if !writes_files(tool) {
         return Ok(None);
@@ -809,13 +884,20 @@ fn denial_in(call: &Call, input: &Value) -> Result<Option<Denial>> {
     let top = git::toplevel(&cwd)?;
     for f in &files {
         let mut found = edit_rule(call, &top, &cwd, f)?;
+        // A lease keeps its own rule: a strict lease still holds an edit that a
+        // relaxed task of the branch only audits for the main session.
+        if let (Some(agent), Some(Found { audit: true, .. })) = (agent, &found)
+            && let Some(leased) = lease_denial(call, &cwd, agent, f)?
+        {
+            found = Some(leased);
+        }
         if found.is_none() {
-            found = store_denial(project, &cwd, f, true);
+            found = store_denial(project, &cwd, f, true).map(Found::deny);
         }
         if found.is_none()
             && let Some(agent) = agent
         {
-            found = lease_denial(project, &cwd, agent, f)?;
+            found = lease_denial(call, &cwd, agent, f)?;
         }
         if found.is_some() {
             return Ok(found);
@@ -936,20 +1018,24 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         Some(s) => unseen_denial(&call, input, s)?,
         None => None,
     };
-    let found = unseen.map_or_else(|| denial_in(&call, input), |d| Ok(Some(d)))?;
+    let found = unseen.map_or_else(|| denial_in(&call, input), |d| Ok(Some(Found::deny(d))))?;
     // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
     let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
-    let mode = |d: &Denial| {
-        if tier >= Some(Tier::Auto) && d.rule == Rule::OwnerCommand && command.is_some_and(only_accept_or_confirm) {
+    let mode = |f: &Found| {
+        let d = &f.denial;
+        if f.audit {
+            // A relaxed lease audits an edit outside its files.
+            Mode::Audit
+        } else if tier >= Some(Tier::Auto) && d.rule == Rule::OwnerCommand && command.is_some_and(only_accept_or_confirm) {
             Mode::Audit
         } else {
             yolo::mode_of(d.rule, tier)
         }
     };
-    if let Some(d) = found.as_ref().filter(|d| mode(d) == Mode::Audit) {
-        stats::record(project, Hook::PreToolUse, Outcome::Audit, Some(d.rule), session);
+    if let Some(f) = found.as_ref().filter(|f| mode(f) == Mode::Audit) {
+        stats::record(project, Hook::PreToolUse, Outcome::Audit, Some(f.denial.rule), session);
     }
-    let Some(d) = found.filter(|d| mode(d) == Mode::Enforce) else {
+    let Some(d) = found.filter(|f| mode(f) == Mode::Enforce).map(|f| f.denial) else {
         if let Some(s) = session {
             streak::reset(project, s);
             record_changes(project, s, input);
@@ -964,6 +1050,8 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
                 }})));
             }
         }
+        // A run rvow cannot note is a run it does not observe, so a failed note never denies the call.
+        let _ = observed::pre(project, call.home(), input);
         return Ok(None);
     };
     let denied = session.map(|s| streak::add(project, s));
@@ -1152,6 +1240,7 @@ pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<V
     };
     let agent = input.get("agent_id").and_then(Value::as_str);
     crate::provenance::after_call(project, &top, session, agent, id);
+    observed::post(project, input)?;
     Ok(None)
 }
 
@@ -1330,6 +1419,34 @@ fn stop_hold(items: Vec<OpenItem>) -> Option<StopHold> {
     Some(StopHold { kind: first.kind, text })
 }
 
+/// The blocking drift items that still hold the agent. An item that names a
+/// path which only the relaxed tasks of `c` cover is let through, since a
+/// relaxed task does not stop the agent for drift; an item that names no such
+/// path, such as a changed verify, keeps its hold.
+fn drift_that_holds(
+    c: &proof::Active,
+    blocking: Vec<String>,
+    touched: &BTreeSet<String>,
+    guarded: &BTreeSet<String>,
+) -> Result<Vec<String>> {
+    let relaxed = |t: &Task| t.mode == TaskMode::Relaxed;
+    if !c.loaded.tasks.iter().any(relaxed) {
+        return Ok(blocking);
+    }
+    let relaxed_scope = mode_scope(c.loaded.tasks.iter(), TaskMode::Relaxed)?;
+    let strict_scope = mode_scope(c.loaded.tasks.iter(), TaskMode::Strict)?;
+    Ok(blocking
+        .into_iter()
+        .filter(|what| {
+            !what.starts_with(drift::OUTSIDE)
+                && !touched
+                    .iter()
+                    .chain(guarded.iter())
+                    .any(|f| names_path(what, f) && relaxed_scope.is_match(f) && !strict_scope.is_match(f))
+        })
+        .collect())
+}
+
 /// Why the agent must keep working, or `None` when it may stop. Only the session that changed a
 /// file of a task, or a file that drift names, is held. A change with a pending amendment holds
 /// nothing, since only the user can decide it.
@@ -1400,6 +1517,11 @@ fn stop_reason_over(
                 || blocking.iter().any(|what| names_path(what, f))
         });
         if !own {
+            continue;
+        }
+        // A relaxed task does not stop the agent for a path that only it covers.
+        let blocking = drift_that_holds(c, blocking, &touched, guarded)?;
+        if blocking.is_empty() {
             continue;
         }
         items.push(OpenItem { kind: StopReason::Drift, text: unamended_text(&blocking) });
@@ -2077,6 +2199,85 @@ mod tests {
         retried(p, &call)
     }
 
+    const TESTS_TASK: &str = "- TSK-new1 T\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/**\n";
+    const RELAXED_TESTS_TASK: &str =
+        "- TSK-new1 T\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/**\n  mode: relaxed\n";
+    const SHARED_TESTS_TASKS: &str = "- TSK-new1 T\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/**\n  mode: relaxed\n- TSK-new2 S\n  verify: sh tests/t.sh && echo 'test result: ok. 1 passed; 0 failed;'\n  files: tests/t.sh\n";
+
+    /// A repository whose change holds `tasks`, every task proved, with a
+    /// protected test at `tests/t.sh`: a test that changes that file drifts.
+    fn drift_fixture(tasks: &str) -> (crate::git::testrepo::TempDir, Project, PathBuf) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/t.sh"), "check_one\ncheck_two\nexit 0\n").unwrap();
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        std::fs::write(c.path.join("tasks.md"), tasks).unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = crate::vow::commit(&p, prepared).unwrap();
+        for (_, id) in &vowed.minted {
+            let r = proof::prove(&p, &home, &repo, &id.to_string(), &mut std::io::sink()).unwrap();
+            assert!(r.proved, "{:?}", r.outcome);
+        }
+        (tmp, p, repo)
+    }
+
+    /// Session `s1` changes `tests/t.sh`, the protected test of the change.
+    fn breaks_the_test(p: &Project, repo: &Path) {
+        std::fs::write(repo.join("tests/t.sh"), "check_one\ncheck_two\nexit 1\n").unwrap();
+        assert_eq!(pre(p, repo, "s1", "Bash", json!({"command": "printf 'exit 1' > tests/t.sh"})), None, "the test edit is audited");
+    }
+
+    #[test]
+    fn relaxed_hook_stop_passes_for_a_protected_test_of_a_relaxed_task() {
+        let (tmp, p, repo) = drift_fixture(RELAXED_TESTS_TASK);
+        let home = tmp.0.join("home");
+        breaks_the_test(&p, &repo);
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "a relaxed task does not stop the agent for its own file");
+    }
+
+    #[test]
+    fn relaxed_hook_stop_holds_for_a_protected_test_of_a_strict_task() {
+        let (tmp, p, repo) = drift_fixture(TESTS_TASK);
+        let home = tmp.0.join("home");
+        breaks_the_test(&p, &repo);
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("a strict task holds the stop"));
+        assert!(reason.contains("tests/t.sh"), "{reason}");
+    }
+
+    #[test]
+    fn relaxed_hook_stop_holds_for_a_file_both_modes_share() {
+        let (tmp, p, repo) = drift_fixture(SHARED_TESTS_TASKS);
+        let home = tmp.0.join("home");
+        breaks_the_test(&p, &repo);
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("a strict task that also covers the file holds the stop"));
+        assert!(reason.contains("tests/t.sh"), "{reason}");
+    }
+
+    #[test]
+    fn relaxed_hook_stop_holds_for_drift_that_names_no_file() {
+        let (tmp, p, repo) = drift_fixture(RELAXED_TESTS_TASK);
+        let home = tmp.0.join("home");
+        let dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+        let tasks = std::fs::read_to_string(dir.join("tasks.md")).unwrap();
+        std::fs::write(dir.join("tasks.md"), tasks.replace("&& echo", "; echo")).unwrap();
+        session_files::record(&p, "s1", &[session_files::PLAN.to_string()]);
+        let reason = stop_of(&p, &home, &repo, "s1").unwrap_or_else(|| panic!("a changed verify names no file, so it holds"));
+        assert!(reason.contains("verify changed"), "{reason}");
+    }
+
+    #[test]
+    fn relaxed_outside_stop_does_not_hold() {
+        let (tmp, p, repo) = drift_fixture(RELAXED_TESTS_TASK);
+        let home = tmp.0.join("home");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/readme.md"), "notes").unwrap();
+        session_files::record(&p, "s1", &["docs/readme.md".to_string()]);
+        assert_eq!(stop_of(&p, &home, &repo, "s1"), None, "an outside file is logged, not held");
+    }
+
     fn pre_agent(p: &Project, repo: &Path, session: &str, agent: &str, tool: &str, input: Value) -> Option<Value> {
         let call = json!({"session_id": session, "agent_id": agent, "cwd": repo.to_str().unwrap(), "tool_name": tool, "tool_input": input});
         retried(p, &call)
@@ -2140,6 +2341,113 @@ mod tests {
         std::fs::write(repo.join("out.txt"), "no").unwrap();
         edits_out(&p, &repo, "w1");
         assert!(hold(&p, &home, &repo, "w1").is_some_and(|r| r.contains(&task)));
+    }
+
+    /// A repository with one accepted change and two tasks, one on `out.txt`
+    /// and one on `more.txt`, the first relaxed when `relaxed`:
+    /// (tmp, project, repo, the first task).
+    fn leased_fixture(relaxed: bool) -> (crate::git::testrepo::TempDir, Project, PathBuf, String) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        let mode = if relaxed { "  mode: relaxed\n" } else { "" };
+        std::fs::write(
+            c.path.join("tasks.md"),
+            format!(
+                "- TSK-new1 Write ok\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n{mode}- TSK-new2 Write more\n  verify: grep -q ok more.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: more.txt\n"
+            ),
+        )
+        .unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = crate::vow::commit(&p, prepared).unwrap();
+        let task = vowed.minted.iter().find(|(from, _)| from == "TSK-new1").unwrap().1.to_string();
+        (tmp, p, repo, task)
+    }
+
+    /// `a1` leases the first task of `leased_fixture` and writes the file of the other task.
+    fn leased_edit(p: &Project, home: &Path, repo: &Path, task: &str) -> Option<Value> {
+        lease::issue(p, home, repo, task).unwrap();
+        assert!(lease::bind(p, task, "a1").unwrap());
+        let edit = json!({"file_path": repo.join("more.txt").to_str().unwrap(), "content": "ok"});
+        pre_agent(p, repo, "s1", "a1", "Write", edit)
+    }
+
+    #[test]
+    fn relaxed_hook_lease_edit_outside_a_relaxed_task_is_audited() {
+        let (tmp, p, repo, task) = leased_fixture(true);
+        assert_eq!(leased_edit(&p, &tmp.0.join("home"), &repo, &task), None, "a relaxed lease audits an edit outside its files");
+        let text = std::fs::read_to_string(p.root.join(STATS_FILE)).unwrap();
+        let audits = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<stats::Line>(l).ok())
+            .filter(|l| l.rule.as_deref() == Some(Rule::LeaseScope.name()) && l.outcome == "audit")
+            .count();
+        assert_eq!(audits, 1, "{text}");
+    }
+
+    #[test]
+    fn relaxed_edit_strict_lease_still_holds_an_outside_edit() {
+        let (tmp, p, repo, task) = leased_fixture(false);
+        let home = tmp.0.join("home");
+        let (dirs, _) = change::list(&p).unwrap();
+        let dir = dirs.iter().find(|d| d.stage == change::Stage::Active).unwrap();
+        let tasks = std::fs::read_to_string(dir.path.join("tasks.md")).unwrap();
+        std::fs::write(dir.path.join("tasks.md"), tasks.replace("  files: more.txt\n", "  files: more.txt\n  mode: relaxed\n")).unwrap();
+        lease::issue(&p, &home, &repo, &task).unwrap();
+        assert!(lease::bind(&p, &task, "a1").unwrap());
+        let edit = json!({"file_path": repo.join("stray.txt").to_str().unwrap(), "content": "x"});
+        let out = pre_agent(&p, &repo, "s1", "a1", "Write", edit).unwrap_or_else(|| panic!("the strict lease holds the edit"));
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny", "{out}");
+        assert!(out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("outside the files of"), "{out}");
+    }
+
+    #[test]
+    fn relaxed_hook_lease_edit_outside_a_strict_task_is_denied() {
+        let (tmp, p, repo, task) = leased_fixture(false);
+        let out = leased_edit(&p, &tmp.0.join("home"), &repo, &task).unwrap_or_else(|| panic!("a strict lease denies the edit"));
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("outside the files of"), "{out}");
+    }
+
+    /// The rule that holds an Edit of `file`, or `None` when the call goes through.
+    fn edit_denial(p: &Project, repo: &Path, file: &str) -> Option<Rule> {
+        let input = json!({"cwd": repo.to_str().unwrap(), "tool_name": "Edit", "tool_input": {"file_path": file}});
+        pre_tool_use_denial(p, &input).unwrap().map(|d| d.rule)
+    }
+
+    #[test]
+    fn relaxed_edit_protected_test_of_a_relaxed_task_is_allowed() {
+        let (_tmp, p, repo) = drift_fixture(RELAXED_TESTS_TASK);
+        assert_eq!(edit_denial(&p, &repo, "tests/t.sh"), None, "a relaxed task owns the protected test");
+    }
+
+    #[test]
+    fn relaxed_edit_protected_test_shared_with_a_strict_task_is_denied() {
+        let (_tmp, p, repo) = drift_fixture(SHARED_TESTS_TASKS);
+        assert_eq!(edit_denial(&p, &repo, "tests/t.sh"), Some(Rule::ProtectedTest), "a strict task also covers the test");
+    }
+
+    #[test]
+    fn relaxed_edit_outside_scope_with_a_relaxed_task_is_allowed() {
+        let (_tmp, p, repo) = drift_fixture(RELAXED_TESTS_TASK);
+        assert_eq!(edit_denial(&p, &repo, "docs/readme.md"), None, "a relaxed task may take in a new file");
+    }
+
+    #[test]
+    fn relaxed_edit_outside_scope_with_only_strict_tasks_is_denied() {
+        let (_tmp, p, repo) = drift_fixture(TESTS_TASK);
+        assert_eq!(edit_denial(&p, &repo, "docs/readme.md"), Some(Rule::OutsideScope));
+    }
+
+    #[test]
+    fn relaxed_edit_audit_is_counted() {
+        let (_tmp, p, repo) = drift_fixture(RELAXED_TESTS_TASK);
+        assert_eq!(call(&p, &repo, "docs/readme.md", "s1"), None, "the relaxed edit goes through");
+        let c = stats::counts(&p, 1, crate::ledger::now_ms());
+        assert_eq!(c.audits.get("outside-scope"), Some(&1));
+        assert!(c.denials.is_empty(), "{c:?}");
     }
 
     #[test]

@@ -234,7 +234,16 @@ pub fn amend(project: &Project, home: &Path, cwd: &Path, target: Option<&str>, r
                 if items.is_empty() {
                     continue;
                 }
-                let snapshot = drift::snapshot_now(project, &top, &config, c)?;
+                let mut snapshot = drift::snapshot_now(project, &top, &config, c)?;
+                let mut outside = drift::outside_of(c.baseline());
+                for i in &items {
+                    if let Some(path) = i.what.strip_prefix(drift::OUTSIDE) {
+                        outside.push(path.to_string());
+                    }
+                }
+                outside.sort();
+                outside.dedup();
+                snapshot.insert("outside".into(), json!(outside));
                 data.insert("snapshot".into(), Value::Object(snapshot));
                 items
             }

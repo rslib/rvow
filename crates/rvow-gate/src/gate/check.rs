@@ -183,6 +183,45 @@ fn stacked_counts(top: &Path, other: &str, mb: &str, seen: &mut HashMap<String, 
     counts
 }
 
+/// The `files:` globs of every task in scope: the queue's tasks, the files
+/// their baseline took in, and the tasks and taken-in files of every done
+/// change whose work is not in the base yet, plus those of another branch's
+/// change stacked under this one.
+pub(crate) fn scope_globs(
+    project: &Project,
+    top: &Path,
+    branch: &str,
+    living: &[CapSpec],
+    queue: &[&Active],
+    mb: &str,
+) -> Result<Vec<String>> {
+    let mut globs: Vec<String> = queue.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())).collect();
+    for c in queue {
+        globs.extend(drift::outside_of(c.baseline()).iter().map(|p| globset::escape(p)));
+    }
+    let (all, _) = change::list(project)?;
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    for d in all.iter().filter(|d| matches!(d.stage, Stage::Done | Stage::Active)) {
+        let loaded = change::load(&d.path, living)?;
+        let counts = if loaded.proposal.branch == branch {
+            // Every active change of the branch counts, also one outside `queue`,
+            // such as a sibling of the one change whose drift asks.
+            let events = ledger::read(&d.path.join(LEDGER))?.0;
+            let counts = d.stage == Stage::Active || done_counts(top, &events, mb);
+            if counts {
+                globs.extend(drift::outside_of(proof::baseline_of(&events)).iter().map(|p| globset::escape(p)));
+            }
+            counts
+        } else {
+            stacked_counts(top, &loaded.proposal.branch, mb, &mut seen)
+        };
+        if counts {
+            globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
+        }
+    }
+    Ok(globs)
+}
+
 pub(super) fn check_scope(
     project: &Project,
     top: &Path,
@@ -206,22 +245,7 @@ pub(super) fn check_scope(
             ));
         }
     }
-    let mut globs: Vec<String> = queue.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())).collect();
-    let (all, _) = change::list(project)?;
-    let mut seen: HashMap<String, bool> = HashMap::new();
-    for d in all.iter().filter(|d| matches!(d.stage, Stage::Done | Stage::Active)) {
-        let loaded = change::load(&d.path, living)?;
-        let counts = if loaded.proposal.branch == branch {
-            // Active changes of this branch are the queue.
-            d.stage == Stage::Done && done_counts(top, &ledger::read(&d.path.join(LEDGER))?.0, &mb)
-        } else {
-            stacked_counts(top, &loaded.proposal.branch, &mb, &mut seen)
-        };
-        if counts {
-            globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
-        }
-    }
-    let set = globset(&globs)?;
+    let set = globset(&scope_globs(project, top, branch, living, queue, &mb)?)?;
     let repo_dir = format!("{REPO_DIR}/");
     let outside: Vec<String> = changed_files(top, &mb)?
         .into_iter()

@@ -19,4 +19,4 @@ rvow show [OPTIONS] <ID> [PART]
 
 | Option | Description |
 | --- | --- |
-| `--full` | Print long text in full in TOON |
+| `--full` | Print long text and task titles in full |

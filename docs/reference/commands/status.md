@@ -14,3 +14,4 @@ rvow status [OPTIONS]
 | --- | --- |
 | `--all` | Show every active change, not only this branch's |
 | `--json` | Print this branch's view as JSON, the shape the harness UIs draw |
+| `--full` | Print each task title in full |

@@ -142,7 +142,7 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
         ));
     }
     crate::reprove::wait(project, &mut std::io::stderr());
-    let reproved = reprove_stale(project, home, cwd, &dir)?;
+    let reproved = reprove_stale(project, home, cwd, &dir, Cover::All)?;
     let lock = project.lock()?;
     let texts = change::living_texts(project)?;
     let (living, findings) = change::living_from(&texts);
@@ -237,16 +237,26 @@ pub fn archive(project: &Project, home: &Path, cwd: &Path, input: &str) -> Resul
     Ok(Archived { id: dir.id, path, merged, reproved })
 }
 
+/// What a re-prove covers: every stale task, or only the ones the background
+/// re-prove runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cover {
+    /// Every stale task: `rvow archive` proves them again before its gate.
+    All,
+    /// A strict task, or a relaxed task the user chose to prove `now`.
+    Background,
+}
+
 /// Proves each stale task of `dir` again, in the worktree of its branch, and
 /// refuses with the code `gate` when one fails. It runs before archive takes
 /// the project lock, since a prove takes that lock for its ledger append.
 /// Proves the stale tasks of the change `input` again, in order, and stops at
 /// the first one that fails. Returns the tasks it proved.
 pub fn reprove(project: &Project, home: &Path, cwd: &Path, input: &str) -> Result<Vec<String>> {
-    reprove_stale(project, home, cwd, &change::resolve(project, input)?)
+    reprove_stale(project, home, cwd, &change::resolve(project, input)?, Cover::Background)
 }
 
-fn reprove_stale(project: &Project, home: &Path, cwd: &Path, dir: &ChangeDir) -> Result<Vec<String>> {
+fn reprove_stale(project: &Project, home: &Path, cwd: &Path, dir: &ChangeDir, cover: Cover) -> Result<Vec<String>> {
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
     let Some(c) = changes.iter().find(|a| a.dir.id == dir.id) else {
@@ -254,7 +264,13 @@ fn reprove_stale(project: &Project, home: &Path, cwd: &Path, dir: &ChangeDir) ->
     };
     let top = c.branch().and_then(|b| git::top_for_branch(cwd, b).ok().flatten()).unwrap_or_else(|| cwd.to_path_buf());
     let mine: BTreeSet<String> = c.loaded.tasks.iter().map(|t| t.id.to_string()).collect();
-    let stale: Vec<String> = proof::stale_tasks(project, home, &top)?.into_iter().filter(|t| mine.contains(t)).collect();
+    let stale: Vec<String> = match cover {
+        Cover::All => proof::stale_tasks(project, home, &top)?,
+        Cover::Background => proof::background_stale(project, home, &top)?,
+    }
+    .into_iter()
+    .filter(|t| mine.contains(t))
+    .collect();
     let mut echo = std::io::stderr();
     for task in &stale {
         if proof::revalidate(project, home, &top, task, &mut echo)?.is_some() {
@@ -617,6 +633,25 @@ rvow SHALL keep three.
         let archived = archive(&p, &home, &repo, &id).unwrap();
         assert_eq!(archived.merged.len(), 1);
         assert!(spec(&p, "core").contains("Late"), "{}", spec(&p, "core"));
+    }
+
+    #[test]
+    fn relaxed_stale_archive_proves_an_undecided_relaxed_task() {
+        let (tmp, p, repo, task) = crate::proof::tests::accepted_relaxed();
+        let home = tmp.0.join("home");
+        prove_ok(&p, &home, &repo, &task, "out.txt");
+        std::fs::write(repo.join("out.txt"), "ok\nmore").unwrap();
+        let (dirs, _) = change::list(&p).unwrap();
+        let id = dirs.iter().find(|d| d.stage == Stage::Active).unwrap().id.to_string();
+
+        // The background re-prove leaves a stale relaxed task to the user...
+        assert!(reprove(&p, &home, &repo, &id).unwrap().is_empty());
+        assert_eq!(crate::proof::undecided(&p, &home, &repo).unwrap(), [(task.clone(), "Write ok".to_string())]);
+
+        // ...and archive proves it again before its gate.
+        let a = archive(&p, &home, &repo, &id).unwrap();
+        assert_eq!(a.reproved, [task]);
+        assert!(a.path.starts_with(p.root.join("archive/done")));
     }
 
     #[test]

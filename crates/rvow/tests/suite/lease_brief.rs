@@ -158,6 +158,13 @@ fn lease_brief_another_session_proving_another_task_sends_nothing() {
 }
 
 #[test]
+fn lease_brief_delegate_help_says_not_to_repeat_the_task() {
+    let fx = Fx::new("repeat-task");
+    let out = fx.rvow(&["delegate", "TSK-0ne111"]);
+    assert!(out.contains("do not repeat them"), "{out}");
+}
+
+#[test]
 fn lease_brief_an_ended_lease_names_the_first_open_task() {
     let fx = Fx::new("ended");
     fx.bind("p1", "TSK-tw0222");

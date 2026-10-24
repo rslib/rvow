@@ -4,6 +4,7 @@
 
 use crate::diag::{Diagnostic, Rule};
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::id::{Kind, Ref};
@@ -19,11 +20,35 @@ pub struct Task {
     pub files: Vec<String>,
     pub baseline_pass: bool,
     pub timeout: Option<Duration>,
+    /// How strictly this task is held: `strict` unless its `mode:` line says
+    /// `relaxed`, or the proposal sets a default. Part of the vow only when relaxed.
+    pub mode: Mode,
+    /// Whether the task block had its own `mode:` line; `mode` is the effective mode.
+    pub mode_given: bool,
     /// How long a cached rerun pass of this task stays valid; not part of the vow.
     pub max_age: Option<Duration>,
     /// Tasks of the same change whose cache key is part of this task's key; not part of the vow.
     pub depends_on: Vec<Ref>,
     pub line: usize,
+}
+
+/// How strictly a task is held: the `mode:` field of a task or of the
+/// proposal above it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Strict,
+    Relaxed,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Strict => "strict",
+            Mode::Relaxed => "relaxed",
+        }
+    }
 }
 
 impl Task {
@@ -67,6 +92,8 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                         files: Vec::new(),
                         baseline_pass: false,
                         timeout: None,
+                        mode: Mode::Strict,
+                        mode_given: false,
                         max_age: None,
                         depends_on: Vec::new(),
                         line: n,
@@ -122,13 +149,23 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
                     diags.push(Diagnostic::new(Rule::TaskField, n, format!("max_age: {value:?} is not a duration such as 90s, 20m or 24h")))
                 }
             },
+            "mode" => {
+                task.mode_given = true;
+                match value {
+                    "strict" => task.mode = Mode::Strict,
+                    "relaxed" => task.mode = Mode::Relaxed,
+                    _ => {
+                        diags.push(Diagnostic::new(Rule::TaskField, n, format!("mode: {value:?} takes only the values strict or relaxed")))
+                    }
+                }
+            }
             "baseline" => diags.push(Diagnostic::new(Rule::TaskField, n, "baseline: takes only the value pass")),
             _ => {
                 diags.push(Diagnostic::new(
                     Rule::TaskField,
                     n,
                     format!(
-                        "unknown or empty field {key}:, expected covers, verify, mutants, files, baseline, timeout, max_age or depends_on"
+                        "unknown or empty field {key}:, expected covers, verify, mutants, files, baseline, timeout, max_age, mode or depends_on"
                     ),
                 ));
                 continue;
@@ -150,6 +187,17 @@ pub fn parse_tasks(src: &str) -> (Vec<Task>, Vec<Diagnostic>) {
         }
     }
     (tasks, diags)
+}
+
+/// Gives every task with no `mode:` line of its own the change-level mode, so
+/// the task holds what its proposal says.
+pub fn apply_default(tasks: &mut [Task], default: Option<Mode>) {
+    let Some(default) = default else {
+        return;
+    };
+    for task in tasks.iter_mut().filter(|t| !t.mode_given) {
+        task.mode = default;
+    }
 }
 
 /// Parses `90s`, `20m` or `1h`.
@@ -205,6 +253,49 @@ mod tests {
         assert!(t.baseline_pass);
         assert!(!tasks[1].baseline_pass);
         assert_eq!(tasks[1].timeout, Some(Duration::from_secs(1200)));
+    }
+
+    #[test]
+    fn task_mode_relaxed_is_read() {
+        let (tasks, diags) = parse_tasks("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n  mode: relaxed\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(tasks[0].mode, Mode::Relaxed);
+        assert_eq!(tasks[0].mode.name(), "relaxed");
+    }
+
+    #[test]
+    fn task_mode_absent_is_strict() {
+        let (tasks, diags) = parse_tasks("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(tasks[0].mode, Mode::Strict);
+        assert_eq!(Mode::default(), Mode::Strict);
+        assert_eq!(Mode::Strict.name(), "strict");
+    }
+
+    #[test]
+    fn task_mode_unknown_value_is_an_error() {
+        let (tasks, diags) = parse_tasks("- TSK-x7k2q4 Tail\n  verify: true\n  files: a\n  mode: loose\n");
+        assert_eq!(tasks[0].mode, Mode::Strict, "an unreadable mode leaves the default");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].rule, Rule::TaskField);
+        let message = &diags[0].message;
+        for want in ["mode", "strict", "relaxed"] {
+            assert!(message.contains(want), "{want:?} is missing from {message}");
+        }
+    }
+
+    #[test]
+    fn mode_default_change_mode_fills_tasks_without_a_line() {
+        let (mut tasks, diags) =
+            parse_tasks("- TSK-x7k2q4 Plain\n  verify: true\n  files: a\n- TSK-p3x8a1 Held\n  verify: true\n  files: a\n  mode: strict\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        apply_default(&mut tasks, Some(Mode::Relaxed));
+        assert_eq!(tasks[0].mode, Mode::Relaxed);
+        assert!(!tasks[0].mode_given);
+        assert_eq!(tasks[1].mode, Mode::Strict);
+        assert!(tasks[1].mode_given);
+        apply_default(&mut tasks, None);
+        assert_eq!(tasks[0].mode, Mode::Relaxed, "no default keeps the mode");
     }
 
     #[test]

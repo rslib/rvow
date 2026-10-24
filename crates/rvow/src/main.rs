@@ -18,6 +18,7 @@ mod w18;
 
 use cmd::{attest, export, lifecycle, plan, prove, read, setup};
 use output::Reply;
+use rvow_core::proof;
 
 const DESCRIPTION: &str = "Hold a coding agent to an accepted plan.";
 
@@ -103,7 +104,7 @@ enum Cmd {
         id: String,
         /// One part of a change: `proposal`, `tasks`, `design` or `spec:<name>`.
         part: Option<String>,
-        /// Print long text in full in TOON.
+        /// Print long text and task titles in full.
         #[arg(long)]
         full: bool,
     },
@@ -278,6 +279,18 @@ enum Cmd {
         #[arg(long, conflicts_with = "decision")]
         full: bool,
     },
+    /// Record the user's decision about a stale relaxed task (user only)
+    Decide {
+        /// The task id or a unique prefix of it.
+        #[arg(required_unless_present = "list", conflicts_with = "list")]
+        task: Option<String>,
+        /// Prove it again now, prove it again at archive, or keep the proof that stands.
+        #[arg(value_enum, required_unless_present = "list", conflicts_with = "list")]
+        pick: Option<PickArg>,
+        /// List the stale relaxed tasks that wait for the user's decision.
+        #[arg(long)]
+        list: bool,
+    },
     /// Run a task's stored verify command and record the proof.
     #[command(group(ArgGroup::new("what").required(true).args(["task", "stale"])))]
     Prove {
@@ -303,6 +316,9 @@ enum Cmd {
         /// Print this branch's view as JSON, the shape the harness UIs draw.
         #[arg(long, conflicts_with = "all")]
         json: bool,
+        /// Print each task title in full.
+        #[arg(long)]
+        full: bool,
     },
     /// Merge an active change into the living specs and move it to archive/done/.
     Archive {
@@ -564,10 +580,21 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Confirm { ids, accept, reject, all, sign, signer, full } => {
             lifecycle::confirm(&ids, accept, reject, all.as_deref(), sign, signer.as_deref(), full).map(Reply::done)
         }
+        Cmd::Decide { task, pick, list: _ } => match (task, pick) {
+            (Some(task), Some(pick)) => cmd::decide::decide(
+                &task,
+                match pick {
+                    PickArg::Now => proof::Pick::Now,
+                    PickArg::Archive => proof::Pick::Archive,
+                    PickArg::Keep => proof::Pick::Keep,
+                },
+            ),
+            _ => cmd::decide::list(),
+        },
         Cmd::Prove { task: Some(t), .. } => prove::prove(&t),
         Cmd::Prove { .. } => prove::prove_stale(),
         Cmd::Land { target, merge } => cmd::land::land(&target, merge),
-        Cmd::Status { all, json } => read::status(all, json),
+        Cmd::Status { all, json, full } => read::status(all, json, full),
         Cmd::Bundle { out } => prove::bundle(&out),
         Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
         Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
@@ -703,6 +730,16 @@ enum Harness {
     Codex,
     /// The neutral format of docs/harnesses.md.
     Json,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PickArg {
+    /// Prove the task again now.
+    Now,
+    /// Let `rvow archive` prove the task again.
+    Archive,
+    /// Keep the proof that stands until its files change again.
+    Keep,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

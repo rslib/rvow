@@ -333,6 +333,18 @@ pub fn survived(tail: &[String]) -> Option<u64> {
     out
 }
 
+/// The tests `output` reports, counted line by line the same way `run` counts
+/// them, for a command that exited 0: the summary of a run that rvow did not
+/// start itself, such as the one the agent ran in its own shell. `None` when
+/// the output holds no summary rvow can read.
+pub fn tests_in(output: &str) -> Option<u64> {
+    let mut count = TestCount::default();
+    for line in output.lines() {
+        count.feed(line);
+    }
+    count.finish("", Some(0))
+}
+
 /// Masks secrets and personal paths in one output line.
 pub fn mask(line: &str, home: Option<&str>, repo: &str) -> String {
     let mut masker = TailMask::default();

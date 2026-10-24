@@ -20,6 +20,7 @@ echo "$*" >> "$RVOW_FAKE/argv.log"
 case "$1" in
   confirm) if [ "$#" -eq 1 ] || [ "$2" = "--full" ]; then cat "$RVOW_FAKE/list.txt"; else echo "$2: decided"; fi ;;
   clarify) if [ -f "$RVOW_FAKE/clarify.json" ]; then cat "$RVOW_FAKE/clarify.json"; else echo '{"questions":[],"remaining":0}'; fi ;;
+  decide) if [ "$2" = "--list" ]; then if [ -f "$RVOW_FAKE/decide.txt" ]; then cat "$RVOW_FAKE/decide.txt"; else echo "undecided: 0 tasks wait for a decision"; fi; else echo "$2: $3"; fi ;;
   *) ;;
 esac
 `,
@@ -62,6 +63,20 @@ const argv = () => {
   }
 };
 const clear = () => writeFileSync(join(dir, "argv.log"), "");
+/** The `rvow decide` runs: the read-only list and each pick the user made. */
+const decided = () => {
+  try {
+    return readFileSync(join(dir, "argv.log"), "utf8")
+      .split("\n")
+      .filter((l) => /^decide/.test(l));
+  } catch {
+    return [];
+  }
+};
+/** Real `rvow decide --list` output: one stale relaxed task waits for the user's pick. */
+const DECIDE_LIST =
+  "undecided[1]{id,title}:\n  TSK-k8ergv,Write ok\n" +
+  "help[1]:\n  Ask the user with the rvow_ask tool; each answer runs rvow decide <task> now|archive|keep";
 
 function call(name: string, input: object, answer = true, asked: string[] = []) {
   const value = tools.get(name);
@@ -170,6 +185,54 @@ test("ask cuts long questions and options for the model, not for the dialog", as
   assert.ok(chat.includes(`${"q".repeat(200)}...`));
   assert.ok(chat.includes(`${"o".repeat(200)}...`));
   assert.ok(!chat.includes("o".repeat(201)));
+});
+
+test("ask asks the user to decide a stale task and records the pick", async () => {
+  clear();
+  writeFileSync(join(dir, "decide.txt"), DECIDE_LIST);
+  const value = tools.get("rvow_ask");
+  assert.ok(value);
+  const asks: string[] = [];
+  const ctx = {
+    cwd: dir,
+    hasUI: true,
+    ui: {
+      select: async (title: string, keys: string[]) => {
+        asks.push(`${title} | ${keys.join(",")}`);
+        return "Keep the pass";
+      },
+    },
+  } as unknown as Parameters<typeof value.execute>[4];
+  const done = await value.execute("call", {}, new AbortController().signal, undefined, ctx);
+  rmSync(join(dir, "decide.txt"));
+  assert.match(asks[0] ?? "", /TSK-k8ergv/);
+  assert.match(asks[0] ?? "", /Write ok/);
+  assert.match(asks[0] ?? "", /Re-prove now,Re-prove at archive,Keep the pass/);
+  assert.deepEqual(decided(), ["decide --list", "decide TSK-k8ergv keep"]);
+  assert.match(JSON.stringify(done.content), /TSK-k8ergv Write ok -> Keep the pass/);
+});
+
+test("a closed decide dialog records no decision", async () => {
+  clear();
+  writeFileSync(join(dir, "decide.txt"), DECIDE_LIST);
+  const value = tools.get("rvow_ask");
+  assert.ok(value);
+  const ctx = {
+    cwd: dir,
+    hasUI: true,
+    ui: { select: async () => undefined },
+  } as unknown as Parameters<typeof value.execute>[4];
+  const done = await value.execute("call", {}, new AbortController().signal, undefined, ctx);
+  rmSync(join(dir, "decide.txt"));
+  assert.deepEqual(decided(), ["decide --list"]);
+  assert.match(JSON.stringify(done.content), /still waiting: TSK-k8ergv/);
+});
+
+test("ask with no question and no stale task says there is nothing to ask", async () => {
+  clear();
+  const done = await call("rvow_ask", {});
+  assert.deepEqual(decided(), ["decide --list"]);
+  assert.match(JSON.stringify(done.content), /no open questions/);
 });
 
 test("confirm with no input runs the plain short listing", async () => {

@@ -424,6 +424,7 @@ mod tests {
             agent: None,
             context: String::new(),
             rules: Default::default(),
+            task_mode: None,
         };
         let a = env(&tmp.0, &cfg).unwrap();
         assert_eq!(a.commands["echo v1"], "v1");
@@ -456,6 +457,7 @@ mod tests {
             agent: None,
             context: String::new(),
             rules: Default::default(),
+            task_mode: None,
         };
         let e = env(&tmp.0, &cfg).unwrap();
         // The machine fields are present and differ from machine to machine,
