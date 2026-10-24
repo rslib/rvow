@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Print every error but only the warnings of the written part after `rvow put`, and count the other warnings in one line that names `rvow check <change>`.
 - Cut each task title that `rvow status` prints to 120 characters, and print it whole with `rvow status --full`.
 - Cut each task title in the `rvow show <change>` outline to 120 characters, and print it whole with `rvow show <change> --full`.
 - Make the `rvow delegate` help say that the brief holds the task, its files and its verify, so the agent does not paste them into the subagent prompt again.

@@ -28,18 +28,18 @@ pub fn stdin() -> Result<String> {
 
 /// Replaces one part of a change, or one task or requirement block, with `text`.
 pub fn put(project: &Project, cwd: &Path, target: &str, part: Option<&str>, text: &str) -> Result<Outcome> {
-    let dir = match part {
+    let (dir, written) = match part {
         Some(part) => put_part(project, target, part, text)?,
         None => put_block(project, target, text)?,
     };
-    let lines = findings(project, cwd, &dir)?;
+    let lines = findings(project, cwd, &dir, &written)?;
     let lines = if lines.is_empty() { vec!["ok".to_string()] } else { lines };
     Ok(Outcome { change: dir, lines })
 }
 
 /// One part of one change: `proposal`, `tasks`, `design` or `spec:<name>`.
 /// `design` and `spec:<name>` are created when they do not exist yet.
-fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<ChangeDir> {
+fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<(ChangeDir, String)> {
     let dir = change::resolve(project, target)?;
     if !matches!(dir.stage, Stage::Backlog | Stage::Active) {
         return Err(refused(&dir));
@@ -75,7 +75,7 @@ fn put_part(project: &Project, target: &str, part: &str, text: &str) -> Result<C
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }
     write_atomically(&path, text)?;
-    Ok(dir)
+    Ok((dir, want))
 }
 
 enum Block {
@@ -84,7 +84,7 @@ enum Block {
 }
 
 /// One task or requirement block of an open change, found by id or placeholder.
-fn put_block(project: &Project, target: &str, text: &str) -> Result<ChangeDir> {
+fn put_block(project: &Project, target: &str, text: &str) -> Result<(ChangeDir, String)> {
     let want = parse_ref(project, target)?;
     let (living, _) = change::load_living(project)?;
     let open = change::list(project)?.0.into_iter().filter(|c| matches!(c.stage, Stage::Backlog | Stage::Active));
@@ -92,16 +92,18 @@ fn put_block(project: &Project, target: &str, text: &str) -> Result<ChangeDir> {
     for dir in open {
         let loaded = change::load(&dir.path, &living)?;
         if loaded.tasks.iter().any(|t| t.id == want) {
-            let path = dir.path.join(change::TASKS);
-            holders.push((dir, path, Block::Task));
+            let rel = change::TASKS.to_string();
+            let path = dir.path.join(&rel);
+            holders.push((dir, path, rel, Block::Task));
         } else if let Some(cap) = loaded.deltas.iter().find_map(|(cap, f)| f.deltas.iter().find(|d| d.req.id == want).map(|_| cap.clone()))
         {
-            let path = dir.path.join(change::DELTAS).join(format!("{cap}.md"));
-            holders.push((dir, path, Block::Requirement));
+            let rel = format!("{}/{cap}.md", change::DELTAS);
+            let path = dir.path.join(&rel);
+            holders.push((dir, path, rel, Block::Requirement));
         }
     }
     if holders.len() > 1 {
-        let ids: Vec<String> = holders.iter().map(|(dir, _, _)| dir.id.to_string()).collect();
+        let ids: Vec<String> = holders.iter().map(|(dir, _, _, _)| dir.id.to_string()).collect();
         let first = &holders[0].0.id;
         return Err(Error::new(
             "ambiguous",
@@ -110,13 +112,13 @@ fn put_block(project: &Project, target: &str, text: &str) -> Result<ChangeDir> {
         ));
     }
     let written = match holders.pop() {
-        Some((dir, path, Block::Task)) => {
+        Some((dir, path, rel, Block::Task)) => {
             replace_task_block(&path, want, text)?;
-            Some(dir)
+            Some((dir, rel))
         }
-        Some((dir, path, Block::Requirement)) => {
+        Some((dir, path, rel, Block::Requirement)) => {
             replace_req_block(&path, want, text)?;
-            Some(dir)
+            Some((dir, rel))
         }
         None => None,
     };
@@ -229,17 +231,29 @@ fn replace_span(path: &Path, src: &str, start: usize, starts: Vec<usize>, text: 
     write_atomically(path, &out)
 }
 
-/// The check findings of the change, as one line each.
-fn findings(project: &Project, cwd: &Path, dir: &ChangeDir) -> Result<Vec<String>> {
+/// The check findings of the change, as one line each: every error and open
+/// question, the findings of `written`, and one line that counts the warnings
+/// that the other parts hold.
+fn findings(project: &Project, cwd: &Path, dir: &ChangeDir, written: &str) -> Result<Vec<String>> {
     let reports = plan::check(project, cwd, Some(&dir.id.to_string()))?;
     let Some(report) = reports.first() else { return Ok(Vec::new()) };
     let mut out = Vec::new();
+    let mut dropped = 0usize;
     for (file, d) in &report.findings {
-        let level = if d.severity() == crate::diag::Severity::Error { "error" } else { "warning" };
+        let error = d.severity() == crate::diag::Severity::Error;
+        if !error && file != written {
+            dropped += 1;
+            continue;
+        }
+        let level = if error { "error" } else { "warning" };
         out.push(format!("{file}:{}: {level}[{}]: {}", d.line, d.rule.code(), d.message));
     }
     for s in &report.slow {
-        out.push(format!("{}: warning[full-suite]: {}", s.task, s.message));
+        if written == change::TASKS {
+            out.push(format!("{}: warning[full-suite]: {}", s.task, s.message));
+        } else {
+            dropped += 1;
+        }
     }
     for (task, prog) in &report.missing {
         out.push(format!("{task}: error[missing-program]: {prog} is neither on PATH nor in the repository"));
@@ -250,5 +264,80 @@ fn findings(project: &Project, cwd: &Path, dir: &ChangeDir) -> Result<Vec<String
     if report.no_tasks {
         out.push("tasks.md: error[no-tasks]: tasks.md has no task".to_string());
     }
+    if dropped > 0 {
+        let noun = if dropped == 1 { "warning" } else { "warnings" };
+        out.push(format!("{dropped} more {noun} in other parts; run rvow check {}", dir.id));
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::git::testrepo::*;
+    use crate::store::{Mode, init};
+
+    const PROPOSAL: &str = "branch: main\n\n# Findings\n\n## Why\nIt is clear.\n\n## What changes\n- Keep the errors.\n\n## Out of scope\n- The rest.\n\n## Assumptions\n- None.\n";
+
+    const TASKS: &str = "# Tasks\n\n- TSK-new1 Do one\n  covers: REQ-new1\n  verify: cargo test --locked\n  files: a.txt\n";
+
+    const SPEC: &str = "## ADD REQ-new1 Out\n\nrvow SHALL keep the tail.\n\n### Scenario: tail\n- WHEN it runs\n- THEN the tail is kept\n";
+
+    /// A proposal of more than `proposal::MAX_WORDS` words, with every section.
+    fn long_proposal() -> String {
+        format!(
+            "branch: main\n\n# Findings\n\n## Why\n{}\n\n## What changes\n- Keep the errors.\n\n## Out of scope\n- The rest.\n\n## Assumptions\n- None.\n",
+            "word ".repeat(160)
+        )
+    }
+
+    /// A repository with one backlog change that holds a clean proposal, clean
+    /// tasks and a clean spec, plus the project home.
+    fn fixture() -> (TempDir, Project, PathBuf, ChangeDir) {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = change::new(&p, "Findings", "main", false).unwrap();
+        std::fs::write(c.path.join(change::PROPOSAL), PROPOSAL).unwrap();
+        std::fs::write(c.path.join(change::TASKS), TASKS).unwrap();
+        std::fs::write(c.path.join(change::DELTAS).join("out.md"), SPEC).unwrap();
+        (tmp, p, repo, c)
+    }
+
+    #[test]
+    fn put_findings_other_part_warning_is_one_count_line() {
+        let (_t, p, repo, c) = fixture();
+        std::fs::write(c.path.join(change::PROPOSAL), long_proposal()).unwrap();
+        let id = c.id.to_string();
+        let out = put(&p, &repo, &id, Some("tasks"), TASKS).unwrap();
+        assert_eq!(out.lines, [format!("1 more warning in other parts; run rvow check {id}")]);
+    }
+
+    #[test]
+    fn put_findings_written_part_warning_is_kept() {
+        let (_t, p, repo, c) = fixture();
+        let out = put(&p, &repo, &c.id.to_string(), Some("proposal"), &long_proposal()).unwrap();
+        assert!(out.lines.iter().any(|l| l.contains("proposal.md:") && l.contains("warning[size]")), "{:?}", out.lines);
+    }
+
+    #[test]
+    fn put_findings_error_in_another_part_is_kept() {
+        let (_t, p, repo, c) = fixture();
+        std::fs::write(c.path.join(change::TASKS), "# Tasks\n\n- TSK-new1 Do one\n  covers: REQ-new1\n  files: a.txt\n").unwrap();
+        let out = put(&p, &repo, &c.id.to_string(), Some("proposal"), PROPOSAL).unwrap();
+        assert!(
+            out.lines.iter().any(|l| l.contains("tasks.md:") && l.contains("error[task-field]") && l.contains("no verify")),
+            "{:?}",
+            out.lines
+        );
+    }
+
+    #[test]
+    fn put_findings_clean_change_is_ok() {
+        let (_t, p, repo, c) = fixture();
+        let out = put(&p, &repo, &c.id.to_string(), Some("tasks"), TASKS).unwrap();
+        assert_eq!(out.lines, ["ok"]);
+    }
 }
