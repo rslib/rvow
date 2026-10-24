@@ -34,7 +34,7 @@ case "$1 $2 $3" in
   "hook claude stop") cat > "$RVOW_FAKE/stop.in"; cat "$RVOW_FAKE/stop.json" 2>/dev/null ;;
   "hook claude lease-bind") cat > "$RVOW_FAKE/bind.in"; cat "$RVOW_FAKE/bind.json" 2>/dev/null ;;
   "hook claude lease-end") cat > "$RVOW_FAKE/end.in" ;;
-  "hook claude session-start") (cat; echo) >> "$RVOW_FAKE/start.in"; cat "$RVOW_FAKE/start.json" 2>/dev/null ;;
+  "hook claude session-start") line=$(cat); printf '%s\n' "$line" >> "$RVOW_FAKE/start.in"; cat "$RVOW_FAKE/start.json" 2>/dev/null ;;
   "hook claude "*) ;;
   *)
     case "$1" in

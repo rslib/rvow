@@ -639,6 +639,28 @@ fn respond(stream: &mut UnixStream, status: &str, body: &[u8]) {
     out.extend_from_slice(TAIL);
     out.extend_from_slice(body);
     let _ = stream.write_all(&out);
+    drain(stream);
+}
+
+/// How long and how far the engine reads past its answer before it closes.
+const DRAIN_WAIT: Duration = Duration::from_millis(50);
+const DRAIN_MAX: usize = 64 * 1024;
+
+/// Ends the answer and reads what the peer still sends, so the close is clean.
+/// Linux resets a Unix socket that is closed with unread data in it, and the
+/// peer of an early refusal (a 403 before the body, a full engine) then reads
+/// a reset instead of the answer.
+fn drain(stream: &mut UnixStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(DRAIN_WAIT));
+    let mut chunk = [0u8; 4096];
+    let mut read = 0;
+    while read < DRAIN_MAX {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => read += n,
+        }
+    }
 }
 
 /// Writes one refusal, which is one of the fixed error bodies.
