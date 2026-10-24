@@ -683,6 +683,46 @@ A branch with no active change and no backlog plan gets one line naming `rvow ne
 
 `rvow next` prints the next task of the branch with its id, title, state, verify command and files, or says that no task is next.
 
+## The engine
+
+`rvow daemon` is a long-running engine that answers hook calls on a Unix socket, so a call from the Claude mod or the pi extension needs no new process.
+The first hook of a home starts it in the background, at most once a minute, and it stops after 10 minutes with no call.
+One engine serves one rvow home, and a second start names the pid of the first and exits.
+
+### What it saves
+
+On 2026-10-24 a pre-tool-use hook took 15 to 17 ms in its own process and 11 to 13 ms through the engine.
+The engine saves the process start, finding the project and the git answers it keeps between calls.
+It loads the store on every call, which takes about 1 ms, so it never answers from an old copy.
+The work-tree snapshot still runs on each call.
+
+### Who may call it
+
+The same user id is no boundary, since an agent's shell runs as the user.
+Hook calls write state, so the engine serves them only to a harness process: the Claude Code or pi process that runs the mod or the extension.
+The in-process session-start hook records its parent, the harness, in `<rvow home>/run/harnesses`, and the engine checks the peer process id and start time of each connection against that list.
+Any other process gets 403, and `rvow hook` itself always answers in its own process.
+
+The hooks deny an agent's shell commands and file tools that reach the run folder, such as `nc -U` or `curl --unix-socket` on the socket.
+That rule is only a second line, since a script can compute the path.
+The peer check is the first line.
+
+### Questions under a host
+
+A host program such as rmaestro starts `rvow daemon --host-pipe` and holds its stdin and stdout.
+When the agent calls the accept, confirm or archive tool, the engine sends the host one `ask` line with a summary and a digest of the plan, never the plan itself.
+The host shows it, and its `answer` line must carry the same digest: an answer to a plan that changed since runs nothing, and the engine asks again.
+The socket never takes an answer, so only the host's own pipe carries one.
+
+Without a host, the tools show the harness dialog as before.
+If the host quits, an open question ends as cancelled and the next one uses the harness dialog.
+
+### Environment
+
+The engine runs in the environment of the hook that started it.
+A client sends a hash of the variables the hooks read, and an engine with another hash answers with a mismatch, so the client falls back to `rvow hook`.
+`RVOW_ENGINE=off` keeps a hook from starting an engine, and the test suite sets it.
+
 ## Measuring the hooks
 
 The hooks should help and stay quiet, so rvow counts what they do.
@@ -876,6 +916,10 @@ Each one is caught later by the gate, or needs a person.
   The user record catches an accept or yolo that gets past it in the Claude mod and pi, but a record forged in an earlier session is not caught.
   A committed test file with no change against HEAD is not read, so its text as data does not count.
   `require_signature` is the real boundary, and it is off by default.
+- **The engine socket deny reads text too.**
+  A script that builds the run folder's path at run time can reach the socket, or stop the engine and listen in its place, as a script can write store files by a built path.
+  The engine serves only recorded harness processes, and it takes answers only from its host pipe.
+  A client does not check who listens on the socket, so a same-user program that listens there first can answer it.
 - **Hardware signing keys are untested.**
   The tests sign with a software key.
   A hardware key (`ed25519-sk`) has not been used yet.

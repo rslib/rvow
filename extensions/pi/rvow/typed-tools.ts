@@ -3,6 +3,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { AskAnswer, AskKind } from "./engine.ts";
 import {
   ACCEPT_MS,
   amendmentChanges,
@@ -362,11 +363,27 @@ const outputSchema = {
   additionalProperties: false,
 };
 
-/** What the extension lends the tools: the user's record, and the hook's verdict on a shell command (the deny reason, or undefined to allow). */
+/** What the extension lends the tools: the user's record, the hook's verdict on a shell command (the deny reason, or undefined to allow), and the host program that draws rvow questions. */
 export type Gate = {
   made: UserMade;
   guard: (ctx: ExtensionContext, command: string) => Promise<string | undefined>;
+  /** Put one accept, confirm or archive question to the user; undefined means no host draws rvow questions, so the tool opens its own dialog. */
+  ask?: (kind: AskKind, change: string, ctx: ExtensionContext) => Promise<AskAnswer | undefined>;
 };
+
+/** The result of a question the host program drew: its own text, and no dialog here. */
+function hostAnswer(answer: AskAnswer) {
+  const text = answer.text.trim() || `rvow: the host answered ${answer.outcome}`;
+  return answer.outcome === "done"
+    ? {
+        content: [{ type: "text" as const, text }],
+        details: { kind: "decision" as const, code: 0, text },
+      }
+    : {
+        content: [{ type: "text" as const, text }],
+        details: { kind: "failure" as const, code: 1, error: text, stdout: "" },
+      };
+}
 
 export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate) {
   const queue = serialQueue();
@@ -455,6 +472,16 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     } as ToolDefinition["parameters"],
     execute: async (_id, params, signal, _update, ctx) => {
       const change = acceptArgs(params);
+      // A host program that draws rvow questions asks the user on its own screen, so the tool
+      // opens no dialog and returns the host's own words as the result.
+      const host = await gate?.ask?.("accept", change, ctx);
+      if (host) {
+        if (host.outcome === "done") {
+          if (gate) recordChanges(gate.made, [change]);
+          acceptMemory.forget(change);
+        }
+        return hostAnswer(host);
+      }
       if (!ctx.hasUI) throw new Error("rvow: only the user can accept, and no one is here to ask");
       const review = await queue(() => result(["review", change], ctx.cwd, signal, SLOW_MS));
       if (review.details.kind !== "decision") return review;
@@ -513,6 +540,10 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     } as ToolDefinition["parameters"],
     execute: async (_id, params, signal, _update, ctx) => {
       const change = acceptArgs(params);
+      // A host program that draws rvow questions asks the user on its own screen, so the tool
+      // opens no dialog and returns the host's own words as the result.
+      const host = await gate?.ask?.("archive", change, ctx);
+      if (host) return hostAnswer(host);
       if (!ctx.hasUI) throw new Error("rvow: only the user can archive, and no one is here to ask");
       const seen = await queue(() => result(["hook", "view"], ctx.cwd, signal, SLOW_MS));
       if (seen.details.kind !== "view") return seen;
@@ -601,6 +632,11 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
           result(named === undefined ? ["confirm"] : ["confirm", named], ctx.cwd, signal, SLOW_MS),
         );
       const list = await queue(() => result(["confirm", "--full"], ctx.cwd, signal, SLOW_MS));
+      // A host program that draws rvow questions puts them to the user on its own screen, so the
+      // tool opens no dialog and returns the host's own words as the result.
+      const change = amendmentChanges(text(list), named === undefined ? undefined : [named])[0];
+      const host = change === undefined ? undefined : await gate?.ask?.("confirm", change, ctx);
+      if (host) return hostAnswer(host);
       if (named !== undefined && decision !== undefined && list.details.kind === "decision") {
         const block = amendmentBlock(text(list), named);
         if (!block) return declined(`${named} is not pending.`);

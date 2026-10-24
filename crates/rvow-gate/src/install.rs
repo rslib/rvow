@@ -10,7 +10,7 @@ use crate::git;
 use crate::vow::sha256_hex;
 
 pub const PI_EXTENSION: &str = include_str!("../../../extensions/pi/rvow/index.ts");
-const PI_MODULES: [(&str, &str); 7] = [
+const PI_MODULES: [(&str, &str); 8] = [
     ("formats.ts", include_str!("../../../extensions/pi/rvow/formats.ts")),
     ("prompts.ts", include_str!("../../../extensions/pi/rvow/prompts.ts")),
     ("types.ts", include_str!("../../../extensions/pi/rvow/types.ts")),
@@ -18,14 +18,16 @@ const PI_MODULES: [(&str, &str); 7] = [
     ("typed-tools.ts", include_str!("../../../extensions/pi/rvow/typed-tools.ts")),
     ("refresh.ts", include_str!("../../../extensions/pi/rvow/refresh.ts")),
     ("judge.ts", include_str!("../../../extensions/pi/rvow/judge.ts")),
+    ("engine.ts", include_str!("../../../extensions/pi/rvow/engine.ts")),
 ];
 const MOD_PLUGIN_JSON: &str = include_str!("../../../extensions/claude/.claude-plugin/plugin.json");
 const MOD_HOOKS_JSON: &str = include_str!("../../../extensions/claude/hooks/hooks.json");
 const MOD_REGISTER: &str = include_str!("../../../extensions/claude/hooks/register.tsx");
 /// Modules `register.tsx` imports; the engine cannot follow `$` or an atom across an import, so these hold pure code.
-const MOD_MODULES: [(&str, &str); 2] = [
+const MOD_MODULES: [(&str, &str); 3] = [
     ("format.ts", include_str!("../../../extensions/claude/hooks/format.ts")),
     ("accept.tsx", include_str!("../../../extensions/claude/hooks/accept.tsx")),
+    ("engine.ts", include_str!("../../../extensions/claude/hooks/engine.ts")),
 ];
 const MOD_TYPES: &str = include_str!("../../../extensions/claude/types/index.d.ts");
 

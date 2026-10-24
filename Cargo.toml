@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rvow","crates/rvow-base","crates/rvow-core","crates/rvow-gate","crates/rvow-git","crates/rvow-hook","crates/rvow-plan","crates/rvow-repo","crates/rvow-shell","crates/rvow-store","crates/rvow-syntax"]
+members = ["crates/rvow","crates/rvow-base","crates/rvow-core","crates/rvow-daemon","crates/rvow-gate","crates/rvow-git","crates/rvow-hook","crates/rvow-plan","crates/rvow-proto","crates/rvow-repo","crates/rvow-shell","crates/rvow-store","crates/rvow-syntax"]
 
 [workspace.package]
 version = "0.0.0"

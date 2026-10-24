@@ -68,6 +68,16 @@ mod cli;
 mod committed_tests;
 #[path = "suite/confirm_friction.rs"]
 mod confirm_friction;
+#[path = "suite/daemon.rs"]
+mod daemon;
+#[path = "suite/daemon_answers.rs"]
+mod daemon_answers;
+#[path = "suite/daemon_fallback.rs"]
+mod daemon_fallback;
+#[path = "suite/daemon_host.rs"]
+mod daemon_host;
+#[path = "suite/daemon_trust.rs"]
+mod daemon_trust;
 #[path = "suite/decide.rs"]
 mod decide;
 #[path = "suite/delegate_worktree.rs"]

@@ -5,6 +5,7 @@ use rvow_core::git;
 use rvow_core::store::{self, Project};
 
 pub mod attest;
+pub mod daemon;
 pub mod decide;
 pub mod delegate;
 pub mod docs;

@@ -1,7 +1,20 @@
-import type { EngineInterface, Register, RenderChildren, ToolCallResult } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, Timer, ToolCallResult } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { RvowChange, RvowDetail, RvowNotice, RvowPlan, RvowTab, RvowView } from '../types'
 import { ACCEPT_MS, declinedAcceptReason, repeatAcceptResult, shortReview } from './accept'
+import {
+  ASK_ROUTE,
+  type AskKind,
+  askBody,
+  ENGINE_FAILURES,
+  ENGINE_ORIGIN,
+  type Engine,
+  HOOK_ROUTE,
+  hookBody,
+  parseHello,
+  readAskAnswer,
+  readHookAnswer,
+} from './engine'
 import {
   ACCENT,
   ACCEPT,
@@ -125,6 +138,147 @@ let sessionId: string | undefined
 /** The pending judge runs and the subagent answers on their way to them. */
 const judgePending = new JudgeInbox()
 const BRIEF_WAIT_MS = 5_000
+/** How much longer an ask waits than the engine's own wait for the host. */
+const ASK_MARGIN_MS = 30_000
+/** How long `rvow daemon --print-hello` gets: it answers one line, and no engine is also an answer. */
+const ENGINE_MS = 3_000
+/** The wait the process path gives one hook call, and so the engine's own wait for the same event. */
+const PRE_TOOL_USE_MS = 10_000
+const EVENT_MS = 60_000
+
+/** The engine of this session, once `rvow daemon --print-hello` named it; null until then. */
+let engine: Engine | null = null
+/** Whether this session asked for the engine's hello: once per session, after its session-start hook. */
+let engineAsked = false
+/** The engine's failures in a row, and whether it is retired for the rest of the session. */
+let engineFailures = 0
+let engineRetired = false
+
+/** The engine this session may use, or null when it has none or a retired one. */
+function engineReady(): Engine | null {
+  return engineRetired ? null : engine
+}
+
+/** Counts one engine failure; three in a row retire the engine for the rest of the session. */
+function engineFailed() {
+  engineFailures += 1
+  if (engineFailures >= ENGINE_FAILURES) engineRetired = true
+}
+
+/**
+ * Posts one request to the engine's socket and answers with its body, or `undefined` when it could
+ * not answer: no engine, a status that is not 2xx, a connection error, or a wait past `timeoutMs`.
+ * Every one of those is an engine failure for the call, so a broken engine is left behind.
+ */
+async function enginePost(
+  $: EngineInterface,
+  route: string,
+  body: string,
+  timeoutMs: number,
+  counted = true,
+): Promise<string | undefined> {
+  const info = engineReady()
+  if (info === null) return undefined
+  let late: Timer | undefined
+  // The engine never holds a call longer than the process path would: the same wait, then no answer.
+  const waited = new Promise<null>((resolve) => {
+    late = $.clock.after(timeoutMs, () => resolve(null))
+  })
+  try {
+    const r = await Promise.race([
+      $.http.fetch(`${ENGINE_ORIGIN}${route}`, {
+        method: 'POST',
+        body,
+        socketPath: info.socket,
+      }),
+      waited,
+    ])
+    if (r === null || !r.ok) {
+      if (counted) engineFailed()
+      return undefined
+    }
+    // An answer that worked ends the run of failures.
+    engineFailures = 0
+    return r.text
+  } catch {
+    if (counted) engineFailed()
+    return undefined
+  } finally {
+    late?.cancel()
+  }
+}
+
+/**
+ * The engine's answer for one hook call, or `undefined` when this session has no engine, the engine
+ * failed, it speaks another environment or protocol, or its answer is not the hook's own: the caller
+ * runs the process path then.
+ */
+async function engineHook(
+  $: EngineInterface,
+  event: Exclude<Event, 'session-start'>,
+  call: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<{ out?: HookOutput; error?: string } | undefined> {
+  const info = engineReady()
+  if (info === null) return undefined
+  const text = await enginePost($, HOOK_ROUTE, hookBody(info.hello, event, call), timeoutMs)
+  if (text === undefined) return undefined
+  const answer = readHookAnswer(text)
+  if (answer.kind === 'mismatch') {
+    // The engine works in another environment or speaks another protocol: `rvow hook` from here on.
+    engineRetired = true
+    return undefined
+  }
+  if (answer.kind === 'bad') {
+    engineFailed()
+    return undefined
+  }
+  return { out: answer.out }
+}
+
+/**
+ * Asks the engine of this home, once per session and after the session-start hook (that run records
+ * the harness process the engine trusts), what socket it answers on and what it is. A failure leaves
+ * the session with no engine, so every call runs `rvow hook` in this process.
+ */
+async function discoverEngine($: EngineInterface) {
+  if (engineAsked) return
+  engineAsked = true
+  try {
+    const r = await $.process.run([BIN, 'daemon', '--print-hello'], {
+      cwd: await $.session.cwd(),
+      // The daemon reads no stdin; the session id rides along like the one of every other prompt call.
+      stdin: JSON.stringify({ session_id: sessionId }),
+      timeoutMs: ENGINE_MS,
+    })
+    engine = r.exitCode === 0 ? parseHello(r.stdout) : null
+  } catch {
+    engine = null
+  }
+}
+
+/**
+ * Asks a host program, through the engine, whether it draws this rvow question on its own screen.
+ * The text of a host that asked the user, or `undefined` when no host draws rvow questions
+ * (`no-host`) or the engine could not answer: the caller shows the harness dialog then, as today.
+ */
+async function hostAsk(
+  $: EngineInterface,
+  kind: AskKind,
+  change: string,
+): Promise<string | undefined> {
+  const info = engineReady()
+  if (info === null) return undefined
+  const body = askBody(info.hello, kind, change, await $.session.cwd(), sessionId ?? null)
+  // The engine answers `waiting` when its own wait (as long as ACCEPT_MS) ends, so this wait is
+  // longer: a client that gave up first would open its dialog while the host still asks. An ask is
+  // no hook call, so its failure does not retire the engine.
+  const text = await enginePost($, ASK_ROUTE, body, ACCEPT_MS + ASK_MARGIN_MS, false)
+  if (text === undefined) return undefined
+  const answer = readAskAnswer(text)
+  if (answer === null) return undefined
+  return answer.outcome === 'no-host' ? undefined : answer.text
+}
 
 /** Runs `work` after the current event returns, so the session never waits for rvow. */
 function later($: EngineInterface, work: () => Promise<unknown>) {
@@ -162,8 +316,11 @@ function isDetail(v: unknown): v is RvowDetail {
 }
 
 /**
- * Runs `rvow hook claude <event>`: its output, or the error when it could not
- * start, exited non-zero, printed text that is not JSON or timed out.
+ * Runs one hook: through the engine of this session when it has one, else `rvow hook claude <event>` in
+ * this process. `session-start` always runs in the process, since that run records the harness process
+ * the engine trusts and starts the engine. An engine that failed, went silent, or answered with a
+ * mismatch falls back to the process path for the call, which answers its output or the error when it
+ * could not start, exited non-zero, printed text that is not JSON or timed out.
  */
 async function runHook(
   $: EngineInterface,
@@ -171,11 +328,17 @@ async function runHook(
   input: object,
 ): Promise<{ out?: HookOutput; error?: string }> {
   const cwd = await $.session.cwd()
+  const timeoutMs = event === 'pre-tool-use' ? PRE_TOOL_USE_MS : EVENT_MS
+  const call = { cwd, ...input }
+  if (event !== 'session-start') {
+    const answer = await engineHook($, event, call, timeoutMs)
+    if (answer !== undefined) return answer
+  }
   try {
     const r = await $.process.run([BIN, 'hook', 'claude', event], {
       cwd,
-      stdin: JSON.stringify({ cwd, ...input }),
-      timeoutMs: event === 'pre-tool-use' ? 10_000 : 60_000,
+      stdin: JSON.stringify(call),
+      timeoutMs,
     })
     if (r.exitCode !== 0) return { error: `exit ${r.exitCode}: ${cut(r.stderr.trim(), 80)}` }
     const out = r.stdout.trim()
@@ -944,6 +1107,11 @@ export const register: Register = (on) => {
     sessionStarted = true
     warned = false
     blocks = 0
+    // It also has no engine yet: the hello is asked for again after its session-start hook.
+    engine = null
+    engineAsked = false
+    engineFailures = 0
+    engineRetired = false
     user.since = Date.now()
     user.changes = []
     user.yolo = []
@@ -1039,13 +1207,17 @@ export const register: Register = (on) => {
     return { result: ran.stdout || ran.stderr }
   })
 
-  // These tools are the agent's way to the user's decisions. The user answers in a dialog, the tool runs
-  // the CLI itself, and the result carries the failure text, so the agent is never left guessing.
+  // These tools are the agent's way to the user's decisions. A host program that draws rvow questions
+  // is asked first, through the engine: its answer is the tool's result and no dialog opens here. When
+  // no host draws them, the user answers in a dialog, the tool runs the CLI itself, and the result
+  // carries the failure text, so the agent is never left guessing.
   on('tool.call', { tool: ACCEPT }, async ($, e) => {
     const change = (e as Record<string, unknown>).change
     if (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change)) {
       return { result: 'rvow: change must be a complete CHG id' }
     }
+    const hosted = await hostAsk($, 'accept', change)
+    if (hosted !== undefined) return { result: hosted }
     const review = await tellOut($, ['review', change])
     if (!review.ok) return { result: failedText(['review', change], review.out) }
     // A repeat while the plan is unchanged asks nothing: the earlier reason stands.
@@ -1085,6 +1257,8 @@ export const register: Register = (on) => {
     if (typeof change !== 'string' || !/^CHG-[a-z0-9]+$/.test(change)) {
       return { result: 'rvow: change must be a complete CHG id' }
     }
+    const hosted = await hostAsk($, 'archive', change)
+    if (hosted !== undefined) return { result: hosted }
     return { result: (await archiveFlow($, change)).text }
   })
 
@@ -1097,6 +1271,9 @@ export const register: Register = (on) => {
     if (named !== undefined && (typeof named !== 'string' || !/^AMD-[a-z0-9]+$/.test(named))) {
       return { result: 'rvow: id must be an AMD- id' }
     }
+    // The confirm tool names no change: the empty one lets a host answer for the branch it draws.
+    const hosted = await hostAsk($, 'confirm', '')
+    if (hosted !== undefined) return { result: hosted }
     if (decision === undefined) {
       const argv = named === undefined ? ['confirm'] : ['confirm', named]
       const shown = await tellOut($, argv)
@@ -1287,6 +1464,8 @@ export const register: Register = (on) => {
       hook($, 'session-start', { session_id: e.session_id, source }),
       $.clock.sleep(BRIEF_WAIT_MS).then(() => 'timeout' as const),
     ])
+    // Once per session, and after the session-start hook: without an engine every call stays on `rvow hook`.
+    await discoverEngine($)
     // rvow records the brief it sent before the mod gets it, so a late answer is lost: have rvow
     // forget the record and send the full brief with the next prompt.
     if (out === 'timeout') {

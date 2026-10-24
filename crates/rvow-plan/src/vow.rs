@@ -380,8 +380,33 @@ pub fn bases(loaded: &Loaded, living: &[(String, Spec)]) -> Map<String, Value> {
 
 /// Mints real ids, stores the vowed content and records the vow.
 pub fn commit(project: &Project, prepared: Prepared) -> Result<Vowed> {
+    commit_with(project, prepared, None)
+}
+
+/// Like `commit`, but only when `seen` holds for the plan as it is under the
+/// project lock: the plan a person read and answered for, checked where no
+/// writer can change it between the check and the vow.
+pub fn commit_seen(project: &Project, prepared: Prepared, seen: &dyn Fn(&Loaded) -> bool) -> Result<Vowed> {
+    commit_with(project, prepared, Some(seen))
+}
+
+fn commit_with(project: &Project, prepared: Prepared, seen: Option<&dyn Fn(&Loaded) -> bool>) -> Result<Vowed> {
     let Prepared { change, loaded, living, top, branch, base_commit, config } = prepared;
     let lock = project.lock()?;
+    let loaded = match seen {
+        None => loaded,
+        Some(seen) => {
+            let now = change::load(&change.path, &living)?;
+            if !seen(&now) {
+                return Err(Error::new(
+                    "plan-changed",
+                    format!("{}: the plan changed after the user read it, so nothing was accepted", change.id),
+                    "run the accept again so the user reads the plan as it is now",
+                ));
+            }
+            now
+        }
+    };
 
     let minted = mint_placeholders(project, &lock, &change, &loaded)?;
     let loaded = change::load(&change.path, &living)?;
@@ -445,6 +470,24 @@ mod tests {
             !protected_files(&repo, &cfg).unwrap().contains_key("tests/t.sh"),
             "a file git tracks but the disk lacks is not protected now"
         );
+    }
+
+    #[test]
+    fn commit_seen_checks_the_plan_under_the_lock() {
+        let (tmp, p, repo, c) = setup(TAIL);
+        let home = tmp.0.join("home");
+        let path = c.path.clone();
+        let prepared = prepare(&p, &home, c.clone(), &repo, &mut std::io::sink()).unwrap();
+        // The plan changes after prepare: the check sees the text as it is now.
+        std::fs::write(path.join("tasks.md"), TAIL.replace("Tail", "Changed")).unwrap();
+        let err = commit_seen(&p, prepared, &|now| now.tasks.iter().all(|t| t.title == "Tail")).unwrap_err();
+        assert_eq!(err.code, "plan-changed");
+        assert!(path.exists(), "nothing moved: the change waits in backlog/");
+        assert!(ledger::read(&path.join(LEDGER)).unwrap().0.is_empty(), "no vow recorded");
+
+        let prepared = prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let vowed = commit_seen(&p, prepared, &|now| now.tasks.iter().all(|t| t.title == "Changed")).unwrap();
+        assert!(vowed.path.starts_with(p.root.join("active")));
     }
 
     #[test]

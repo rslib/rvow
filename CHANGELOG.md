@@ -125,6 +125,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Add `rvow daemon`, an engine that answers the hooks of the Claude mod and the pi extension on a Unix socket, so a tool call needs no new rvow process.
+  The first hook starts it, it stops after 10 minutes with no call, and it serves only the harness process that a session-start hook recorded.
+  Under a host such as rmaestro, `rvow daemon --host-pipe` sends the accept, confirm and archive questions to the host, and an answer to a plan that changed since runs nothing.
 - Add a `mode:` task field with two modes, `strict` and `relaxed`, and a task without one is strict.
   A stale relaxed task is not proved again in the background, and `rvow status` shows it as `stale (inputs-changed, user-decides)`.
   Changing the mode of an accepted task is drift, where strict to relaxed is weaken and the user confirms it, and relaxed to strict is free.

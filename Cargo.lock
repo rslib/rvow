@@ -757,9 +757,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libm"
@@ -1039,7 +1039,9 @@ dependencies = [
  "clap",
  "libc",
  "rvow-core",
+ "rvow-daemon",
  "rvow-hook",
+ "rvow-proto",
  "serde_json",
 ]
 
@@ -1069,6 +1071,20 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "rvow-daemon"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "rvow-base",
+ "rvow-core",
+ "rvow-git",
+ "rvow-hook",
+ "rvow-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1131,6 +1147,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvow-proto"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rvow-repo"
 version = "0.0.0"
 dependencies = [
@@ -1148,6 +1173,7 @@ version = "0.0.0"
 dependencies = [
  "globset",
  "rvow-base",
+ "rvow-proto",
 ]
 
 [[package]]

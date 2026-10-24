@@ -27,17 +27,19 @@ use rvow_gate::observed;
 use rvow_gate::tasks::{Mode as TaskMode, Task};
 
 mod brief_state;
+mod run_guard;
 mod session_files;
 mod stop_state;
 mod store_guard;
 mod streak;
 mod witness;
 pub use rule::{Denial, Mode, Rule};
+use run_guard::run_denial;
 pub use rvow_shell::rule;
 pub use rvow_shell::shell;
 #[cfg(test)]
 use shell::bash_enforcement_denial;
-use shell::{bash_changes, bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
+use shell::{RUN_DIR, bash_changes, bash_enforcement_rule, bash_secret_rule, only_accept_or_confirm, prove_args, reads_only};
 pub use shell::{bash_denial, bash_rule, is_builtin, programs, script_denial, script_rule};
 use store_guard::{bash_store_denial, store_denial};
 use witness::WITNESS_FILE;
@@ -832,6 +834,10 @@ fn denial_in(call: &Call, input: &Value) -> Result<Option<Found>> {
     let cwd = PathBuf::from(input.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let args = tool_input(input);
+    // The run folder of the engine belongs to rvow, so neither the shell rule
+    // nor the file rule below lets a call of this session reach it. It is
+    // joined once here, since both of them read it.
+    let run = call.home().map(|home| home.join(RUN_DIR));
     if tool_kind(tool) == ToolKind::Shell {
         let Some(c) = shell_command(args) else {
             return Ok(None);
@@ -844,6 +850,7 @@ fn denial_in(call: &Call, input: &Value) -> Result<Option<Found>> {
             .or_else(|| shell::script_rule_committed(c, &cwd, &committed))
             .or_else(|| glob_denial(call, c, &cwd, top.as_deref(), trust.as_deref()))
             .or_else(|| bash_store_denial(project, &cwd, c))
+            .or_else(|| run.as_deref().and_then(|run| shell::bash_run_rule(c, &cwd, run)))
             .or_else(|| bash_secret_rule(c, &secret_paths(call)))
             .or_else(|| bash_enforcement_rule(c, &enforcement_paths(trust.as_deref())));
         let agent = lease_holder(project, input);
@@ -869,6 +876,7 @@ fn denial_in(call: &Call, input: &Value) -> Result<Option<Found>> {
     let writer = writes_files(tool);
     if let Some(found) = files.iter().find_map(|f| {
         secret_denial(call, &cwd, f)
+            .or_else(|| run.as_deref().and_then(|run| run_denial(run, &cwd, f)))
             .or_else(|| (!writer).then(|| store_denial(project, &cwd, f, false)).flatten())
             .or_else(|| writer.then(|| cache_denial(project, &cwd, f)).flatten())
     }) {

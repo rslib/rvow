@@ -1,3 +1,4 @@
+import { type AskAnswer, type AskKind, createEngineSession, readHello } from "./engine.ts";
 import {
   ACTION_KEYS,
   acceptable,
@@ -74,6 +75,12 @@ import type { Change, HookOutput, Plan, View } from "./types.ts";
 const MAX_CONTINUES = 8;
 // The context and settle handlers sit on the turn, so they get a short budget, not SLOW_MS.
 const BOUND_MS = 5_000;
+/**
+ * How long a question waits for a host program. The engine's own ask window is ten minutes (its
+ * `--ask-wait` default), so the wait outlasts it: the engine's own `waiting` answer must reach the
+ * tool before a dialog opens behind the host's back.
+ */
+const ASK_MS = ACCEPT_MS + 30_000;
 
 import type {
   ExtensionAPI,
@@ -89,34 +96,6 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-
-async function hook(
-  event: string,
-  cwd: string,
-  extra: object,
-  timeoutMs: number,
-  emptyMeansNone = false,
-  signal?: AbortSignal,
-  onFail?: (why: string) => void,
-): Promise<HookOutput | undefined> {
-  const r = await run(
-    ["hook", "claude", event],
-    cwd,
-    JSON.stringify({ cwd, ...extra }),
-    timeoutMs,
-    signal,
-  );
-  if (!r) return void onFail?.(`cannot run '${BIN}'`);
-  if (r.code !== 0) return void onFail?.(`'${BIN}' failed or timed out (exit ${r.code})`);
-  // rvow prints nothing for `view` in a project with no change and no archive at all.
-  if (!r.out.trim()) return emptyMeansNone ? { changes: [] } : undefined;
-  try {
-    const parsed: unknown = JSON.parse(r.out);
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed;
-  } catch {}
-  onFail?.(`'${BIN}' printed invalid JSON`);
-  return undefined;
-}
 
 function normalize(out: HookOutput | undefined): View | undefined {
   if (!out || !Array.isArray(out.changes)) return undefined;
@@ -152,18 +131,6 @@ function bashOutcome(event: {
 const CLAUDE_NAMES: Record<string, string> = { bash: "Bash", edit: "Edit", write: "Write" };
 // Tools that cannot write: a failed pre-tool-use hook still lets these through.
 const READ_ONLY = new Set(["read", "grep", "find", "ls", "rvow_view"]);
-
-async function brief(
-  cwd: string,
-  signal?: AbortSignal,
-  timeoutMs = SLOW_MS,
-  onFail?: (why: string) => void,
-  extra: { session_id?: string; source?: "startup" | "compact"; agent_id?: string } = {},
-): Promise<string | undefined> {
-  const text = (await hook("session-start", cwd, extra, timeoutMs, false, signal, onFail))
-    ?.hookSpecificOutput?.additionalContext;
-  return typeof text === "string" && text ? text : undefined;
-}
 
 type Sel = { plan?: Plan; change?: Change; v?: View };
 
@@ -390,6 +357,9 @@ export default function (pi: ExtensionAPI) {
   let offShown = false;
   // Why the last pre-tool-use call failed, until a later call works.
   let hookFailed: string | undefined;
+  // The engine of this session: it is kept once `rvow daemon --print-hello` names one, which the
+  // session-start hook has started by then. Every call it cannot answer runs as a process, as before.
+  const engine = createEngineSession();
   // What the user did in this session; the agent's own tool calls never add to it.
   const userMade = createUserMade();
   // Fail-open stays: a broken rvow never locks the agent out, but the user is told once per session.
@@ -413,6 +383,64 @@ export default function (pi: ExtensionAPI) {
     modal: false,
   };
   let redraw = () => {};
+
+  /** The hook's text for one call: through the engine when the session has one, else as a process. */
+  async function hook(
+    event: string,
+    cwd: string,
+    extra: object,
+    timeoutMs: number,
+    emptyMeansNone = false,
+    signal?: AbortSignal,
+    onFail?: (why: string) => void,
+  ): Promise<HookOutput | undefined> {
+    const stdin = JSON.stringify({ cwd, ...extra });
+    const deadline = Date.now() + timeoutMs;
+    // The engine prints the same text `rvow hook` prints; anything it cannot do runs the process
+    // below, on what is left of the budget, so a call never waits longer than the process path would.
+    const viaEngine = await engine.hook(event, stdin, timeoutMs, signal);
+    const r =
+      viaEngine === undefined
+        ? await run(
+            ["hook", "claude", event],
+            cwd,
+            stdin,
+            Math.max(1, deadline - Date.now()),
+            signal,
+          )
+        : { code: 0, out: viaEngine.output };
+    if (!r) return void onFail?.(`cannot run '${BIN}'`);
+    if (r.code !== 0) return void onFail?.(`'${BIN}' failed or timed out (exit ${r.code})`);
+    // rvow prints nothing for `view` in a project with no change and no archive at all.
+    if (!r.out.trim()) return emptyMeansNone ? { changes: [] } : undefined;
+    try {
+      const parsed: unknown = JSON.parse(r.out);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed;
+    } catch {}
+    onFail?.(`'${BIN}' printed invalid JSON`);
+    return undefined;
+  }
+
+  async function brief(
+    cwd: string,
+    signal?: AbortSignal,
+    timeoutMs = SLOW_MS,
+    onFail?: (why: string) => void,
+    extra: { session_id?: string; source?: "startup" | "compact"; agent_id?: string } = {},
+  ): Promise<string | undefined> {
+    const text = (await hook("session-start", cwd, extra, timeoutMs, false, signal, onFail))
+      ?.hookSpecificOutput?.additionalContext;
+    return typeof text === "string" && text ? text : undefined;
+  }
+
+  /** Ask the host program that draws rvow questions to put one to the user, or undefined when none draws it. */
+  function askHost(
+    ctx: ExtensionContext,
+    kind: AskKind,
+    change: string,
+  ): Promise<AskAnswer | undefined> {
+    return engine.ask(kind, change, ctx.cwd, ctx.sessionManager?.getSessionId?.() ?? null, ASK_MS);
+  }
 
   function refresh(ctx: ExtensionContext): Promise<void> {
     if (refreshing) return refreshing;
@@ -1178,6 +1206,8 @@ export default function (pi: ExtensionAPI) {
       acceptMemory = registerTypedTools(pi, run, {
         made: userMade,
         guard: (ctx, command) => gate(ctx, "bash", { command }),
+        // A host program that draws rvow questions asks the user itself; the tool opens no dialog.
+        ask: (kind, change, ctx) => askHost(ctx, kind, change),
       });
       toolsRegistered = true;
     }
@@ -1185,6 +1215,7 @@ export default function (pi: ExtensionAPI) {
     continues = 0;
     offShown = false;
     hookFailed = undefined;
+    engine.reset();
     if (ctx.hasUI && dockKey().invalid) ctx.ui.notify(dockKey().invalid ?? "", "warning");
     background.abort();
     background = new AbortController();
@@ -1223,6 +1254,10 @@ export default function (pi: ExtensionAPI) {
       });
       if (text && generation === epoch)
         pi.sendMessage({ customType: "rvow", content: text, display: false });
+      // The session-start hook above records the harness process and starts the engine, so the
+      // engine of this session is named here, once. Without one every hook runs as a process.
+      const found = await readHello(ctx.cwd);
+      if (found && generation === epoch) engine.use(found);
     });
     later(() => refresh(ctx));
     if (ctx.hasUI && ctx.mode === "tui")
@@ -1379,6 +1414,10 @@ export default function (pi: ExtensionAPI) {
       );
     }
     const decided: Record<"accept" | "reject", string[]> = { accept: [], reject: [] };
+    // A host program that draws rvow questions puts them to the user on its own screen, and this
+    // command then opens nothing; the host decides the pending plan edits itself.
+    const named = amendmentChanges(list.out)[0];
+    if (named && (await askHost(ctx, "confirm", named))) return;
     for (const id of ids) {
       const accept = await ctx.ui.confirm(`rvow ${id}`, `${list.out.trim()}\n\nAccept ${id}?`);
       const verb = accept ? "accept" : "reject";
@@ -1490,6 +1529,9 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`${id} is already accepted; your approval is recorded.`, "info");
       return;
     }
+    // A host program that draws rvow questions asks the user on its own screen, so nothing opens
+    // here and the host runs the accept itself.
+    if (await askHost(ctx, "accept", id)) return;
     const r = await rvow(ctx, ["review", id]);
     if (!r) return;
     if (r.code !== 0) {
@@ -1545,6 +1587,9 @@ export default function (pi: ExtensionAPI) {
 
   userCommand("rvow-archive", "Archive a finished rvow change", async (ctx, arg) => {
     if (!arg) return ctx.ui.notify("usage: /rvow-archive <CHG-id>", "info");
+    // A host program that draws rvow questions asks the user on its own screen, so nothing opens
+    // here and the host runs the archive itself.
+    if (await askHost(ctx, "archive", arg)) return;
     // Drift that no plan edit records yet is recorded here, so the one answer below covers it.
     const seen = await rvow(ctx, ["hook", "view"]);
     let amendArgs: string[] | null = null;

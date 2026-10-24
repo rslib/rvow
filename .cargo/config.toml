@@ -2,3 +2,6 @@
 # syntax-drift tests and the prove/gate children stay off the network.
 [env]
 RVOW_GRAMMAR_OFFLINE = "1"
+# A `rvow hook` a test starts answers in process and starts no engine, which
+# would outlive the test and leave its socket in the fixture behind.
+RVOW_ENGINE = "off"

@@ -1,0 +1,19 @@
+[package]
+name = "rvow-daemon"
+description = "The rvow engine: the hook dispatch that the CLI and the daemon both run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2.189"
+rvow-base = { path = "../rvow-base" }
+rvow-core = { path = "../rvow-core" }
+rvow-git = { path = "../rvow-git" }
+rvow-hook = { path = "../rvow-hook" }
+rvow-proto = { path = "../rvow-proto" }
+serde = { version = "1.0.229", features = ["derive"] }
+# `raw_value` is what `HookRequest` carries a call's input as.
+serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rvow_base::layout::{CACHE_FILE, IDS_FILE, INDEX_FILE, LEASE_FILE, LEDGER, ROTATED_FILE, STATS_FILE, WITNESS_FILE, YOLO_FILE};
-use rvow_base::paths::real_path;
+use rvow_base::paths::{at_or_under, key, real_path};
 
 use crate::rule::{Denial, Rule, denial};
 use crate::witness;
@@ -446,6 +446,7 @@ fn owned_in_code(code: &str) -> Option<&'static str> {
             "confirm" => found = Some("confirm"),
             "decide" => found = Some("decide"),
             "hook" => found = Some("hook"),
+            "daemon" => found = Some("daemon"),
             _ => {}
         }
     }
@@ -482,6 +483,12 @@ fn sub_denial(sub: &str, args: &[String]) -> Option<Denial> {
             Rule::WitnessFile,
             "rvow hook answers the harness and records what the user made; an agent does not run it. Run `rvow status` to see the plan".into(),
         ),
+        // The engine answers hooks and, with --host-pipe, takes the user's answers:
+        // an agent that ran it could serve the harness's calls and answer itself.
+        "daemon" => denial(
+            Rule::OwnerCommand,
+            "rvow daemon is the engine that answers the hooks and carries the user's answers; the hooks start it and agents do not run it. Run `rvow status` to see the plan".into(),
+        ),
         "ingest" => denial(
             Rule::OwnerCommand,
             "rvow ingest records proofs from a CI file and belongs to the user; ask the user to run `! rvow ingest <file>`, or run `rvow prove <task>` to prove it here"
@@ -501,7 +508,7 @@ fn rvow_denial(inv: &[String]) -> Option<Denial> {
         &inv[run + 1..]
     } else if inv[0].starts_with('$') {
         // A command named by a variable that is not known here.
-        let sub = inv[1..].iter().find(|w| matches!(w.as_str(), "accept" | "confirm" | "decide" | "hook"))?;
+        let sub = inv[1..].iter().find(|w| matches!(w.as_str(), "accept" | "confirm" | "decide" | "hook" | "daemon"))?;
         return sub_denial(sub, &[]);
     } else if is_interpreter(name) || AWKS.contains(&name) {
         let sub = inv[1..].iter().find_map(|w| owned_in_code(w))?;
@@ -1314,6 +1321,101 @@ pub fn bash_secret_rule(cmd: &str, paths: &[PathBuf]) -> Option<Denial> {
     )
 }
 
+pub use rvow_proto::RUN_DIR;
+
+/// The programs that open a Unix socket.
+const UNIX_CLIENTS: &[&str] = &["nc", "ncat", "netcat", "socat", "curl"];
+
+/// The `socat` addresses that hold the socket file after the colon.
+const UNIX_ADDRESSES: &[&str] = &["UNIX-CONNECT:", "UNIX-LISTEN:", "UNIX-CLIENT:"];
+
+/// The reason a denial of the engine's run folder carries, with `path` the path
+/// the call names.
+pub fn run_reason(path: &Path) -> String {
+    format!(
+        "{} reaches the rvow engine's run folder, which belongs to rvow: agents do not talk to the engine socket. Run rvow commands instead",
+        path.display()
+    )
+}
+
+/// The socket file a call of the client `name` is handed, or `None`: `nc -U
+/// PATH`, `curl --unix-socket PATH` and `socat UNIX-CONNECT:PATH`.
+fn socket_file<'a>(name: &str, args: &'a [String]) -> Option<&'a str> {
+    match name {
+        "nc" | "ncat" | "netcat" => {
+            args.iter().position(|w| w == "-U" || w == "--unixsock").and_then(|at| args.get(at + 1)).map(String::as_str)
+        }
+        "curl" => args.iter().enumerate().find_map(|(at, w)| match w.strip_prefix("--unix-socket=") {
+            Some(path) => Some(path),
+            None if w == "--unix-socket" => args.get(at + 1).map(String::as_str),
+            None => None,
+        }),
+        "socat" => args.iter().find_map(|w| UNIX_ADDRESSES.iter().find_map(|a| w.strip_prefix(a))),
+        _ => None,
+    }
+}
+
+/// Why a Bash command must not run: it names the engine's run folder at `run`,
+/// runs code that names it, or hands the socket in it to a client such as
+/// `nc -U`. The words, the redirect targets and the path words are the ones the
+/// store guard reads, so a `~` or `$HOME` form, a relative path and a glob are
+/// read the same way.
+pub fn bash_run_rule(cmd: &str, cwd: &Path, run: &Path) -> Option<Denial> {
+    // Every way in names the folder, runs a socket client, or starts inside the
+    // folder; any other command skips the parses below, which copy the env.
+    // A socket client counts only as a whole word, so `cargo run` or `rsync` is
+    // no client.
+    let words = cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '`' | '\'' | '"'));
+    let client = words.map(|w| w.rsplit('/').next().unwrap_or(w)).any(|w| UNIX_CLIENTS.contains(&w));
+    // A path into the folder has a slash beside its name, which `cargo run` has not.
+    let names_run = cmd.contains("/run") || cmd.contains("run/");
+    if !client && !names_run && !cwd.as_os_str().as_encoded_bytes().ends_with(RUN_DIR.as_bytes()) {
+        return None;
+    }
+    let run_key = key(&real_path(run, cwd));
+    let inside = at_or_under(&key(&real_path(cwd, cwd)), &run_key);
+    if !inside && !client && !names_run {
+        return None;
+    }
+    let given = run.display().to_string();
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty());
+    let tilde = home.as_deref().map(|h| given.replacen(h, "~", 1)).filter(|t| *t != given);
+    let names = |text: &str| text.contains(&given) || tilde.as_deref().is_some_and(|t| text.contains(t));
+    let sh = parsed(cmd, true);
+    // A word or a redirect target that holds the folder's path as text, such as
+    // the code of `python3 -c "... connect('<run>/engine.sock')"`.
+    if sh.words.iter().any(|w| names(w)) {
+        return denial(Rule::Store, run_reason(run));
+    }
+    // A path word at or under the folder, through `~`, `$HOME`, `.` or `..`.
+    for word in path_words(cmd) {
+        if at_or_under(&key(&real_path(Path::new(&word), cwd)), &run_key) {
+            return denial(Rule::Store, run_reason(run));
+        }
+    }
+    // A socket client handed a path in the folder, such as `nc -U engine.sock`
+    // run from inside it.
+    for seg in &sh.commands {
+        for inv in invocations(seg) {
+            let Some((program, args)) = inv.split_first() else {
+                continue;
+            };
+            let name = base_name(program);
+            if !UNIX_CLIENTS.contains(&name) {
+                continue;
+            }
+            let Some(file) = socket_file(name, args) else {
+                continue;
+            };
+            let file = expand_tilde(file, home.as_deref());
+            if at_or_under(&key(&real_path(Path::new(&file), cwd)), &run_key) {
+                return denial(Rule::Store, run_reason(run));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1395,6 +1497,75 @@ mod tests {
     fn hook_in_script_prose_and_other_programs_are_allowed() {
         for cmd in ["python3 -c \"print('rvow hooks')\"", "python3 -c \"print('a pre-push hook')\"", "git hook run pre-push"] {
             assert_eq!(rule_of(cmd), None, "{cmd}");
+        }
+    }
+
+    /// A run folder in a temp folder, with the socket and the harness list in it.
+    fn run_folder(name: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new(name);
+        let run = dir.0.join(RUN_DIR);
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("engine.sock"), "").unwrap();
+        std::fs::write(run.join("harnesses"), "").unwrap();
+        (dir, run)
+    }
+
+    #[test]
+    fn shell_engine_socket_a_command_that_names_the_run_folder_is_denied() {
+        let (dir, run) = run_folder("engine-socket");
+        let sock = run.join("engine.sock");
+        let harnesses = run.join("harnesses");
+        for cmd in [
+            format!("nc -U {}", sock.display()),
+            format!("curl --unix-socket {} http://x/v1/hook", sock.display()),
+            format!("cat {}", harnesses.display()),
+            format!("echo 1 > {}", harnesses.display()),
+            format!("python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.connect('{}')\"", sock.display()),
+        ] {
+            let d = bash_run_rule(&cmd, &dir.0, &run).unwrap_or_else(|| panic!("{cmd}"));
+            assert_eq!(d.rule, Rule::Store);
+            assert!(d.reason.contains("belongs to rvow") && d.reason.contains("engine socket"), "{}", d.reason);
+        }
+    }
+
+    #[test]
+    fn shell_engine_socket_a_relative_socket_file_is_denied() {
+        let (dir, run) = run_folder("engine-socket-rel");
+        for cmd in ["nc -U run/engine.sock", "socat UNIX-CONNECT:run/engine.sock -", "cat ./run/harnesses"] {
+            assert_eq!(bash_run_rule(cmd, &dir.0, &run).map(|d| d.rule), Some(Rule::Store), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn shell_engine_socket_a_home_form_is_denied() {
+        let Some(home) = std::env::var("HOME").ok().filter(|h| !h.is_empty()) else { return };
+        let run = std::path::PathBuf::from(&home).join(RUN_DIR);
+        let dir = TempDir::new("engine-socket-home");
+        for cmd in [format!("cat ~/{RUN_DIR}/harnesses"), format!("cat $HOME/{RUN_DIR}/engine.sock")] {
+            assert_eq!(bash_run_rule(&cmd, &dir.0, &run).map(|d| d.rule), Some(Rule::Store), "{cmd}");
+        }
+        assert_eq!(bash_run_rule("cat $HOME/other", &dir.0, &run), None);
+    }
+
+    #[test]
+    fn shell_engine_socket_another_socket_and_plain_reads_are_allowed() {
+        let (dir, run) = run_folder("engine-socket-ok");
+        for cmd in ["ls /tmp", "cat README.md", "nc -U /tmp/other.sock", "socat UNIX-CONNECT:/tmp/other.sock -"] {
+            assert_eq!(bash_run_rule(cmd, &dir.0, &run), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn daemon_is_denied_to_agents_in_every_form() {
+        for cmd in [
+            "rvow daemon",
+            "rvow daemon --host-pipe",
+            "rvow daemon --print-hello",
+            "cargo run -q -p rvow -- daemon --host-pipe",
+            "$RVOW daemon --host-pipe",
+            "python3 -c \"import subprocess; subprocess.Popen(['rvow', 'daemon', '--host-pipe'])\"",
+        ] {
+            assert_eq!(rule_of(cmd), Some(Rule::OwnerCommand), "{cmd}");
         }
     }
 

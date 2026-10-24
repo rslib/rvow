@@ -82,16 +82,18 @@ The library crates, bottom up. A crate links only to the crates above it in this
 
 | Crate | Holds | Links to |
 |------|------|------|
+| `rvow-proto` | the wire types of the engine socket: hello, hook call and reply | nothing in rvow |
 | `rvow-base` | errors, ids, diagnostics, hashing, time, the glob cache, paths and every store file name (`layout`) | nothing in rvow |
 | `rvow-git` | git queries, worktrees; the `testrepo` test fixtures (`TempDir`, `NamedTempDir`, `env_lock`) | base |
 | `rvow-syntax` | tree-sitter units, grammars, queries, the Rust guard; the only crate with tree-sitter and ureq | base |
-| `rvow-shell` | the shell parser and its rules (`Rule`, `Denial`, `Mode`) | base |
+| `rvow-shell` | the shell parser and its rules (`Rule`, `Denial`, `Mode`) | base, proto |
 | `rvow-store` | the store types, file names, lock, project index and gate record, `project_home`; no git | base |
 | `rvow-repo` | how a repository finds its store (`store::find`, `init`, `rebind`; its `store` module re-exports rvow-store's) and the provenance snapshots | base, git, store |
 | `rvow-plan` | specs, tasks, proposals, templates, config, lint, changes, ledger, vow, seal, fingerprint, runners | base, git, syntax, store; repo for tests only |
 | `rvow-gate` | proof, gate, drift, guard, lease, amend, brief, archive, install, stats, yolo, review: the code the hooks need | all above |
 | `rvow-core` | land, import, export, bundle, attest, guide, interview, notes, put, mint, show, view; re-exports the crates above so `rvow_core::<module>` paths stay | all above |
 | `rvow-hook` | the hook rules for each harness event | gate and below, never core |
+| `rvow-daemon` | the engine: the hook dispatch that both `rvow hook` and the daemon run, and the environment hash | all above |
 
 - A helper that two crates need goes in the lowest crate that both reach, most often `rvow-base`; never add a link up.
 - A cross-crate test fixture goes in `rvow_git::git::testrepo`, or in `testutil` of the lowest crate that has what it needs; both are always built, marked `#[doc(hidden)]`.

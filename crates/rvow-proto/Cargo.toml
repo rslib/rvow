@@ -1,0 +1,15 @@
+[package]
+name = "rvow-proto"
+description = "The wire types of the engine socket: hello, hook call and reply."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+# `raw_value` keeps a hook call's input as the caller's own bytes, so the
+# engine parses the body once and hands the hook a `&str` of it.
+serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }

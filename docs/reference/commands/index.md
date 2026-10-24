@@ -31,6 +31,7 @@ Every rvow command. Each page comes from `rvow docs`, so it matches `rvow <comma
 | [`clarify`](clarify.md) | List the open questions of a plan, each with its recommended answer |
 | [`answer`](answer.md) | Record the user's answer to an open question and remove its marker |
 | [`hook`](hook.md) | Answer a harness hook: reads the hook JSON on stdin, prints the response |
+| [`daemon`](daemon.md) | Serve hook calls on a local socket until idle (started by the first hook) |
 | [`stats`](stats.md) | Show how often the hooks denied or blocked in the last days |
 | [`yolo`](yolo.md) | Relax the hooks for a while: audit, auto or bypass. Without a tier it shows what is on |
 | [`delegate`](delegate.md) | Lease one task to a subagent and print the brief to give it |

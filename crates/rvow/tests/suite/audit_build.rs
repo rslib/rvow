@@ -182,7 +182,8 @@ fn audit_build_release_profile_ships_dist_binaries() {
 }
 
 /// The workspace crates bottom up; a crate links only to crates before it. AGENTS.md maps the same order.
-const CRATE_ORDER: [&str; 11] = [
+const CRATE_ORDER: [&str; 13] = [
+    "rvow-proto",
     "rvow-base",
     "rvow-git",
     "rvow-syntax",
@@ -193,6 +194,7 @@ const CRATE_ORDER: [&str; 11] = [
     "rvow-gate",
     "rvow-core",
     "rvow-hook",
+    "rvow-daemon",
     "rvow",
 ];
 

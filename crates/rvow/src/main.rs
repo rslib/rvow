@@ -12,6 +12,7 @@ mod toon;
 mod cmd;
 #[cfg(test)]
 mod doc_commands;
+mod engine_client;
 mod output;
 mod skill;
 mod w18;
@@ -194,6 +195,21 @@ enum Cmd {
         target: HookTarget,
         #[arg(value_enum)]
         event: Option<HookEvent>,
+    },
+    /// Serve hook calls on a local socket until idle (started by the first hook).
+    Daemon {
+        /// How long to wait without a call before exiting, such as 10m or 1h.
+        #[arg(long, default_value = "10m")]
+        idle: String,
+        /// Serve the host pipe: write the questions on stdout, read the answers on stdin.
+        #[arg(long)]
+        host_pipe: bool,
+        /// How long an ask waits for the host's answer before it reports waiting.
+        #[arg(long, default_value = "10m")]
+        ask_wait: String,
+        /// Print the socket and the hello a client of this environment sends, as one JSON line, and exit.
+        #[arg(long, conflicts_with_all = ["host_pipe"])]
+        print_hello: bool,
     },
     /// Prove the stale tasks of each finished change again; the Stop hook starts it in the background.
     #[command(hide = true)]
@@ -563,6 +579,8 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Claim { change } => plan::claim(&change),
         Cmd::Answer { reference, choice, via } => plan::answer(&reference, &choice.join(" "), via).map(Reply::done),
         Cmd::Reprove => prove::background(),
+        Cmd::Daemon { print_hello: true, .. } => cmd::daemon::print_hello(),
+        Cmd::Daemon { idle, host_pipe, ask_wait, print_hello: false } => cmd::daemon::daemon(&idle, host_pipe, &ask_wait),
         Cmd::Stats { days } => cmd::stats::stats(days),
         Cmd::Delegate { task, worktree } => cmd::delegate::delegate(&task, worktree),
         Cmd::Yolo { tier, length } => cmd::yolo::yolo(
@@ -804,6 +822,33 @@ enum HookEvent {
     View,
     LeaseBind,
     LeaseEnd,
+}
+
+/// The engine's own copies of the two enums, so `rvow hook` hands the call
+/// over in the shape the daemon speaks.
+impl From<Harness> for rvow_proto::Harness {
+    fn from(harness: Harness) -> Self {
+        match harness {
+            Harness::Claude => Self::Claude,
+            Harness::Codex => Self::Codex,
+            Harness::Json => Self::Json,
+        }
+    }
+}
+
+impl From<HookEvent> for rvow_proto::HookEvent {
+    fn from(event: HookEvent) -> Self {
+        match event {
+            HookEvent::PreToolUse => Self::PreToolUse,
+            HookEvent::PostToolUse => Self::PostToolUse,
+            HookEvent::SessionStart => Self::SessionStart,
+            HookEvent::Stop => Self::Stop,
+            HookEvent::Status => Self::Status,
+            HookEvent::View => Self::View,
+            HookEvent::LeaseBind => Self::LeaseBind,
+            HookEvent::LeaseEnd => Self::LeaseEnd,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]

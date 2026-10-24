@@ -3,12 +3,12 @@
 use clap::Command;
 #[cfg(test)]
 use clap::CommandFactory;
-use rvow_core::error::{Error, Result};
+use rvow_core::error::Result;
 
 #[cfg(test)]
 use crate::Cli;
 
-const TEMPLATE: &str = include_str!("../../../skills/rvow/SKILL.md.tmpl");
+use rvow_daemon::dispatch::SKILL_TEMPLATE as TEMPLATE;
 
 /// Why `rvow <args>` is not a command this CLI has, or `None` when it is one.
 #[cfg(test)]
@@ -62,24 +62,7 @@ fn problem_in(root: &Command, line: &str) -> Option<String> {
 
 /// Fills the placeholders of `template`, checking each command against `root` when it is given.
 fn render_text(template: &str, root: Option<&Command>) -> Result<String> {
-    let mut out = String::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let end = after.find("}}").ok_or_else(|| Error::internal("the skill template has an unclosed {{"))?;
-        let Some(args) = after[..end].strip_prefix("cmd:") else {
-            return Err(Error::internal(format!("the skill template has an unknown placeholder {{{{{}}}}}", &after[..end])));
-        };
-        let line = format!("rvow {args}");
-        if let Some(why) = root.and_then(|root| problem_in(root, &line)) {
-            return Err(Error::internal(format!("the skill template names a missing command: {why}")));
-        }
-        out.push_str(&format!("`{line}`"));
-        rest = &after[end + 2..];
-    }
-    out.push_str(rest);
-    Ok(out)
+    rvow_daemon::dispatch::fill_skill(template, &|line| root.and_then(|root| problem_in(root, line)))
 }
 
 /// The skill text that `rvow install` writes, with every command placeholder filled in.
