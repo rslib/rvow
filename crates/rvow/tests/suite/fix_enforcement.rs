@@ -625,7 +625,7 @@ fn install_chains_an_existing_pre_push_hook_and_the_gate_passes() {
         seen.lines().nth(1).is_some_and(|l| l.starts_with("refs/heads/main ") && l.contains(" refs/heads/main ")),
         "the previous hook gets the pushed refs: {seen}"
     );
-    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "gate --strict --rerun\n");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "gate --push\n");
 }
 
 #[test]
@@ -651,7 +651,7 @@ fn a_previous_hook_that_rewrites_the_rvow_hook_cannot_skip_the_gate() {
     assert!(matches!(install::pre_push(&fx.repo(), &bin).unwrap(), install::Outcome::Chained { .. }));
     push(&fx, &marker, &fx.root.join("prev-out"));
     assert!(std::fs::read_to_string(fx.repo().join(".git/hooks/pre-push")).unwrap().contains("exit 0\n"), "the hook was not rewritten");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap_or_default(), "gate --strict --rerun\n", "the gate did not run");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap_or_default(), "gate --push\n", "the gate did not run");
 }
 
 #[test]
@@ -753,7 +753,7 @@ fn a_binary_path_with_a_single_quote_survives_the_pre_push_script() {
     assert!(Command::new("sh").arg("-n").arg(&file).status().unwrap().success(), "{script}");
     let ran = Command::new("sh").arg(&file).env("MARKER", &marker).output().unwrap();
     assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
-    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "gate --strict --rerun");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "gate --push");
 
     fx.init();
     fx.git(&["config", "core.hooksPath", ".manager"]);
@@ -764,7 +764,7 @@ fn a_binary_path_with_a_single_quote_survives_the_pre_push_script() {
     let _ = std::fs::remove_file(&marker);
     let ran = Command::new("sh").arg("-c").arg(&rvow_line).env("MARKER", &marker).status().unwrap();
     assert!(ran.success(), "{rvow_line}");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "gate --strict --rerun");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "gate --push");
 }
 
 #[test]

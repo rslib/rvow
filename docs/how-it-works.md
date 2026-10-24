@@ -791,10 +791,21 @@ Each case under `evals/triggers/cases/` holds a prompt and a `fires.md` grader o
 
 ## The pre-push gate
 
-`rvow install` adds a pre-push hook that runs `rvow gate --strict --rerun`.
-The hook sits at the last point where the agent cannot argue.
-A push that carries stale or unproved work stops there.
+`rvow install` adds a pre-push hook that runs `rvow gate --push` with git's ref lines on its stdin.
+A push starts CI and asks for review, so it happens often, and it must take seconds.
 The hook refuses to run an rvow binary that changed after install.
+
+### What a push checks
+
+The push gate runs no verify command, no rerun and no project check.
+It fails on a broken record: a change with no vow, a ledger edited by hand, a changed enforcement file or the hook itself.
+
+Unfinished work is a task that is not proved, a plan edit that waits for the user, drift that no plan edit records or a changed file outside every task.
+A push to a land branch or a tag fails on unfinished work, and a push to any other branch lists it as warnings and goes through.
+The land branches are the `land_branches` setting, and the base branch when it is not set.
+
+rvow makes its claim at archive, which proves stale tasks again, and CI tests the code.
+`rvow gate --strict --rerun` by hand still proves every task in a clean worktree.
 
 ### A hook of another tool
 
@@ -818,11 +829,12 @@ When a tool rewrites `.git/hooks/pre-push` later, `rvow gate` and `rvow archive`
 Under `core.hooksPath` another hook manager owns the folder, so `rvow install` prints a line to add as the first command of its pre-push hook:
 
 ```sh
-'/path/to/rvow' gate --strict --rerun || exit 1
+'/path/to/rvow' gate --push || exit 1
 ```
 
 The gate accepts that hook only when the line is its first command and the hook runs as a shell script, so nothing before it can skip the gate.
 It also accepts a hook whose last command runs the gate and whose earlier lines are plain `npx`, `npm`, `pnpm` or `yarn` commands.
+A hook written by an older rvow, which runs `gate --strict --rerun`, still passes until `rvow install` writes the new one.
 
 ## One store per remote
 

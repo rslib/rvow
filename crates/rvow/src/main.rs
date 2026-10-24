@@ -388,6 +388,9 @@ enum Cmd {
         /// Execute an accepted verification bundle without accessing the home store.
         #[arg(long, value_name = "FILE", conflicts_with = "rerun")]
         bundle: Option<PathBuf>,
+        /// The pre-push hook's gate: read git's ref lines on stdin, run no task or check, and fail only on broken records or unfinished work bound for a land branch.
+        #[arg(long, conflicts_with_all = ["rerun", "no_cache", "out", "bundle", "strict"])]
+        push: bool,
     },
     /// Add proofs that a `gate --out` file carried to the ledger of the
     /// project each run names.
@@ -614,8 +617,9 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
         Cmd::Land { target, merge } => cmd::land::land(&target, merge),
         Cmd::Status { all, json, full } => read::status(all, json, full),
         Cmd::Bundle { out } => prove::bundle(&out),
-        Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle) } => prove::gate_bundle(&bundle, out.as_deref()),
-        Cmd::Gate { strict, rerun, no_cache, out, bundle: None } => prove::gate(Options { strict, rerun, out }, no_cache),
+        Cmd::Gate { push: true, .. } => prove::push_gate(),
+        Cmd::Gate { strict: _, rerun: _, no_cache: _, out, bundle: Some(bundle), .. } => prove::gate_bundle(&bundle, out.as_deref()),
+        Cmd::Gate { strict, rerun, no_cache, out, bundle: None, .. } => prove::gate(Options { strict, rerun, out }, no_cache),
         Cmd::Ingest { file } => cmd::ingest::ingest(&file),
         Cmd::Attest { change, out, sign } => attest::attest(&change, &out, sign),
         Cmd::Grammar { cmd: GrammarCmd::Fetch { langs } } => cmd::grammar::fetch(&langs),

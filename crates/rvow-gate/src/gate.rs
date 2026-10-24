@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::change;
 use crate::config;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::fingerprint;
 use crate::git;
 use crate::ledger::Run;
@@ -41,6 +41,13 @@ pub use signature::{bound_confirm_payload, confirm_payload, sign};
 pub struct Report {
     pub failures: Vec<String>,
     pub warnings: Vec<String>,
+    /// The unfinished work the report found, kept out of `failures` while
+    /// `split` is set so a share push can warn about it instead.
+    open: Vec<String>,
+    /// Whether unfinished work goes to `open` rather than to `failures`, and a
+    /// stale or flaky proof counts as work rather than as a warning. The push
+    /// gate sets it: `gate` fails on every problem it finds.
+    split: bool,
     /// Each rerun task and how long it took, so slow checks are visible.
     pub timings: Vec<(String, u64)>,
     /// The rerun results of the branch's tasks, when `--out` asked for them:
@@ -56,7 +63,19 @@ pub struct Report {
 
 impl Report {
     pub fn passed(&self) -> bool {
-        self.failures.is_empty()
+        self.failures.is_empty() && self.open.is_empty()
+    }
+
+    /// Records unfinished work: a failure here, and a warning of a share push,
+    /// which leaves it to `rvow archive`, CI and review.
+    pub(crate) fn work(&mut self, line: String) {
+        if self.split { self.open.push(line) } else { self.failures.push(line) }
+    }
+
+    /// Records a stale or a flaky proof: a warning here, and unfinished work in
+    /// a push gate, which runs no rerun to settle it.
+    pub(crate) fn soft(&mut self, line: String) {
+        if self.split { self.open.push(line) } else { self.warnings.push(line) }
     }
 }
 
@@ -103,29 +122,16 @@ fn gate_for(
     caching: Caching,
     echo: &mut dyn Write,
 ) -> Result<Report> {
-    let Reach { target, only } = reach;
+    let Reach { target, .. } = reach;
     let (use_cache, record) = (caching.use_cache, caching.record);
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = proof::active(project, &living)?;
     let mut r = Report::default();
 
-    for c in &changes {
-        if c.vow().is_none() {
-            r.failures.push(format!("{} is in active/ without a vow event; it was moved by hand", c.dir.id));
-        }
-    }
-    check_lifecycle(project, &mut r)?;
-    check_record(project, &living, &mut r)?;
-
-    if let Some(failure) = hook_integrity::failure(&top) {
-        r.failures.push(failure);
-    }
+    check_records(project, &top, &changes, &living, &mut r)?;
     let branch = git::branch(&top)?;
-    if branch.is_none() && !changes.is_empty() {
-        r.failures.push(format!("HEAD is detached while {} changes are active; check out a branch", changes.len()));
-    }
-    let queue = branch.as_deref().map_or_else(Vec::new, |branch| proof::on_branch(&changes, branch));
+    let queue = queue_of(&changes, branch.as_deref(), &mut r);
     if let Some(id) = target
         && !queue.iter().any(|change| &change.dir.id == id)
     {
@@ -136,21 +142,9 @@ fn gate_for(
     let config = config::load(project, home)?;
     let runners = config::runners(project)?;
     let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
-    for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
-        check::check_change_only(project, c, &now, &opts, only, &mut r)?;
-    }
-    for c in queue.iter().filter(|change| target.is_none_or(|id| &change.dir.id == id)) {
-        r.warnings.extend(judge_warnings(project, home, cwd, &c.dir.id.to_string()));
-    }
-    if let Some(branch) = branch.as_deref() {
-        if queue.is_empty() {
-            if target.is_none() {
-                check_backlog_scope(project, &top, &config.base, branch, &living, &mut r)?;
-            }
-        } else {
-            check_scope(project, &top, &config.base, branch, &living, &queue, &mut r)?;
-        }
-    }
+    let work =
+        Work { project, home, cwd, top: &top, branch: branch.as_deref(), queue: &queue, now: &now, opts: &opts, reach, living: &living };
+    check_work(&work, &mut r)?;
 
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
     let policy = config::cache_policy(project, home)?;
@@ -378,6 +372,77 @@ fn gate_for(
     Ok(r)
 }
 
+/// The checks that judge the record: a change with no vow, the lifecycle and
+/// ledger of every change, the spec record and the hook files. Every gate
+/// fails on these, whatever a push carries.
+fn check_records(project: &Project, top: &Path, changes: &[Active], living: &[change::CapSpec], r: &mut Report) -> Result<()> {
+    for c in changes {
+        if c.vow().is_none() {
+            r.failures.push(format!("{} is in active/ without a vow event; it was moved by hand", c.dir.id));
+        }
+    }
+    check_lifecycle(project, r)?;
+    check_record(project, living, r)?;
+    if let Some(failure) = hook_integrity::failure(top) {
+        r.failures.push(failure);
+    }
+    Ok(())
+}
+
+/// The changes of `branch`, oldest vow first. A detached HEAD with active
+/// changes is unfinished work: the branch the work belongs to is unknown.
+fn queue_of<'a>(changes: &'a [Active], branch: Option<&str>, r: &mut Report) -> Vec<&'a Active> {
+    if branch.is_none() && !changes.is_empty() {
+        r.work(format!("HEAD is detached while {} changes are active; check out a branch", changes.len()));
+    }
+    branch.map_or_else(Vec::new, |branch| proof::on_branch(changes, branch))
+}
+
+/// What the work checks read: the branch under check, the changes of its queue
+/// and the tree state they are judged against.
+struct Work<'a> {
+    project: &'a Project,
+    home: &'a Path,
+    cwd: &'a Path,
+    top: &'a Path,
+    branch: Option<&'a str>,
+    queue: &'a [&'a Active],
+    now: &'a Now<'a>,
+    opts: &'a Options,
+    reach: Reach<'a>,
+    living: &'a [change::CapSpec],
+}
+
+/// The checks that judge unfinished work: each task's state, the drift no
+/// amendment records, the amendments that wait for the user, the files outside
+/// every task and the work written before accept. `Report::work` decides
+/// whether a problem here fails or only warns.
+fn check_work(w: &Work, r: &mut Report) -> Result<()> {
+    let Work { project, home, cwd, top, branch, queue, now, opts, reach, living } = *w;
+    let Reach { target, only } = reach;
+    let selected = || queue.iter().filter(|c| target.is_none_or(|id| &c.dir.id == id));
+    for c in selected() {
+        check::check_change_only(project, c, now, opts, only, r)?;
+    }
+    // A judge note is advice, and finding one builds the whole review packet,
+    // which hashes every input of every task: a push, which must take seconds,
+    // leaves it to `rvow gate` and the archive.
+    if !r.split {
+        for c in selected() {
+            r.warnings.extend(judge_warnings(project, home, cwd, &c.dir.id.to_string()));
+        }
+    }
+    let Some(branch) = branch else { return Ok(()) };
+    if queue.is_empty() {
+        if target.is_none() {
+            check_backlog_scope(project, top, &now.config.base, branch, living, r)?;
+        }
+    } else {
+        check_scope(project, top, &now.config.base, branch, living, queue, r)?;
+    }
+    Ok(())
+}
+
 /// Whether `step`'s scope has no uncommitted change, counting new untracked
 /// files: its own `files` globs, or the whole tree for a plain check.
 fn clean_in_scope(step: &config::Step, dirty: &[String]) -> Result<bool> {
@@ -422,6 +487,123 @@ pub fn land_gate(project: &Project, home: &Path, cwd: &Path, c: &Active, tasks: 
         Caching { use_cache: true, record: false },
         echo,
     )
+}
+
+/// The gate of `rvow gate --push`, which the git pre-push hook runs: it reads
+/// git's ref lines on stdin, runs no task, no rerun and no project check, and
+/// fails only on a broken record or on work that is not finished when the push
+/// is bound for a land branch. A share push warns about that work instead and
+/// leaves it to `rvow archive`, CI and review.
+pub fn push_gate(project: &Project, home: &Path, cwd: &Path, refs: &str, echo: &mut dyn Write) -> Result<Report> {
+    // The push gate runs nothing, so it has no progress to echo: the report
+    // carries everything it found.
+    let _ = echo;
+    let top = git::toplevel(cwd)?;
+    let config = config::load(project, home)?;
+    let lines = pushed_refs(refs)?;
+    let land = lines.iter().any(|line| lands(line.remote, &config));
+    let branch = pushed_branch(&lines, git::branch(&top)?.as_deref());
+    let (living, _) = change::load_living(project)?;
+    let changes = proof::active(project, &living)?;
+    let mut r = Report { split: true, ..Report::default() };
+
+    check_records(project, &top, &changes, &living, &mut r)?;
+    let queue = queue_of(&changes, branch.as_deref(), &mut r);
+    r.changes = queue.len();
+    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let opts = Options::default();
+    let work = Work {
+        project,
+        home,
+        cwd,
+        top: &top,
+        branch: branch.as_deref(),
+        queue: &queue,
+        now: &now,
+        opts: &opts,
+        reach: Reach::default(),
+        living: &living,
+    };
+    check_work(&work, &mut r)?;
+    settle(&mut r, land, branch.as_deref());
+    Ok(r)
+}
+
+/// One line of git's pre-push stdin: the local ref and the remote ref of one
+/// ref update. The shas are read for the delete only, and the remote sha not
+/// at all.
+#[derive(Debug)]
+struct PushRef<'a> {
+    local: &'a str,
+    remote: &'a str,
+}
+
+/// The refs git writes on the pre-push hook's stdin, with a delete dropped. A
+/// line is `<local ref> <local sha> <remote ref> <remote sha>`, and a local sha
+/// of zeros is a delete, which pushes no work.
+fn pushed_refs(refs: &str) -> Result<Vec<PushRef<'_>>> {
+    let mut out = Vec::new();
+    for line in refs.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (Some(local), Some(local_sha), Some(remote)) = (fields.next(), fields.next(), fields.next()) else {
+            return Err(Error::new(
+                "push",
+                format!("{line}: not a pre-push ref line"),
+                "pass git's '<local ref> <local sha> <remote ref> <remote sha>' lines on stdin",
+            ));
+        };
+        if local_sha.bytes().all(|b| b == b'0') {
+            continue;
+        }
+        out.push(PushRef { local, remote });
+    }
+    Ok(out)
+}
+
+/// The branch a push carries: the branch of its first local branch ref, or the
+/// checked-out branch when it carries no branch ref, such as a tag or a sha.
+fn pushed_branch(lines: &[PushRef], head: Option<&str>) -> Option<String> {
+    lines.iter().find_map(|line| line.local.strip_prefix("refs/heads/")).map(str::to_string).or_else(|| head.map(str::to_string))
+}
+
+/// Whether a push to the remote ref `remote` is a land: a tag, or a branch
+/// that `land_branches` names, or the base branch when the config names none.
+fn lands(remote: &str, config: &config::Config) -> bool {
+    if remote.starts_with("refs/tags/") {
+        return true;
+    }
+    let Some(name) = remote.strip_prefix("refs/heads/") else { return false };
+    if config.land_branches.is_empty() {
+        return name == config.base;
+    }
+    config.land_branches.iter().any(|pattern| branch_matches(pattern, name))
+}
+
+/// Whether a branch `name` matches a `land_branches` entry, where a trailing
+/// `*` matches any rest.
+fn branch_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    }
+}
+
+/// The push gate's verdict: a land push fails on every open item, and a share
+/// push warns about them and counts them for `rvow archive` and CI.
+fn settle(r: &mut Report, land: bool, branch: Option<&str>) {
+    if land {
+        r.failures.extend(std::mem::take(&mut r.open));
+        return;
+    }
+    let count = r.open.len();
+    if count == 0 {
+        return;
+    }
+    r.warnings.extend(std::mem::take(&mut r.open));
+    r.warnings.push(format!("share push of {}: {count} open items stay for rvow archive and CI", branch.unwrap_or("HEAD")));
 }
 
 /// The first git-ignored file that matches `t`'s `files:` outside every
@@ -503,8 +685,57 @@ mod tests {
     use crate::proof::prove;
     use crate::proof::tests::accepted;
 
+    /// The local sha of a push, and of a delete.
+    const SHA: &str = "1234567890123456789012345678901234567890";
+    const GONE: &str = "0000000000000000000000000000000000000000";
+
     fn run_gate(p: &Project, home: &Path, repo: &Path, opts: Options) -> Report {
         gate(p, home, repo, opts, &mut std::io::sink()).unwrap()
+    }
+
+    /// A config with `land_branches` set, as the push gate reads it.
+    fn land_config(land: &[&str]) -> config::Config {
+        let value = serde_json::json!({
+            "base": "main",
+            "land_branches": land,
+            "timeout_secs": 600,
+            "inputs": [],
+            "test_globs": [],
+            "protect_infra": [],
+            "checks": [],
+            "setup": [],
+            "rerun_env": {},
+            "env": [],
+            "env_vars": [],
+            "require_signature": false,
+            "allowed_signers": "",
+            "interview_cap": 3,
+            "context": "",
+            "rules": {},
+            "test_queries": {}
+        });
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// The ref lines decide the push: a tag or a listed branch lands, the base
+    /// branch lands when no branch is listed, and a delete pushes nothing.
+    #[test]
+    fn push_refs_are_split_into_land_and_share() {
+        assert_eq!(pushed_refs("garbage\n").unwrap_err().code, "push");
+        assert!(pushed_refs(&format!("(delete) {} refs/heads/feat/x {GONE}\n", "0".repeat(40))).unwrap().is_empty(), "a delete is no push");
+        let refs = format!("refs/heads/feat/x {SHA} refs/heads/feat/x {GONE}\nrefs/tags/v1 {SHA} refs/tags/v1 {GONE}\n");
+        let lines = pushed_refs(&refs).unwrap();
+        assert_eq!(lines.len(), 2);
+        let base = land_config(&[]);
+        assert_eq!(pushed_branch(&lines, Some("other")).as_deref(), Some("feat/x"));
+        assert!(!lands(lines[0].remote, &base));
+        assert!(lands(lines[1].remote, &base), "a tag lands");
+        assert!(lands("refs/heads/main", &base));
+        assert!(!lands("refs/notes/x", &base));
+        let listed = land_config(&["trunk", "release/*"]);
+        assert!(lands("refs/heads/release/1", &listed));
+        assert!(lands("refs/heads/trunk", &listed));
+        assert!(!lands("refs/heads/main", &listed), "a listed branch replaces the base");
     }
 
     #[test]

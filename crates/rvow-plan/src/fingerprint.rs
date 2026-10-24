@@ -405,6 +405,7 @@ mod tests {
         let tmp = TempDir::new();
         let mut cfg = crate::config::Config {
             base: "main".into(),
+            land_branches: vec![],
             user_keys: Default::default(),
             timeout_secs: 60,
             inputs: vec![],
@@ -438,6 +439,7 @@ mod tests {
         let tmp = TempDir::new();
         let cfg = crate::config::Config {
             base: "main".into(),
+            land_branches: vec![],
             user_keys: Default::default(),
             timeout_secs: 60,
             inputs: vec![],

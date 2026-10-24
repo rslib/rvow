@@ -167,6 +167,21 @@ pub fn gate(opts: Options, no_cache: bool) -> Result<Reply> {
     if let Some(path) = out {
         write_runs(&path, &g.runs)?;
     }
+    Ok(report(g))
+}
+
+/// The pre-push gate: git's ref lines arrive on stdin, and it runs no task and
+/// no project check.
+pub fn push_gate() -> Result<Reply> {
+    let home = store::home_dir()?;
+    let p = project(&home)?;
+    let refs = rvow_core::put::stdin()?;
+    let g = gate::push_gate(&p, &home, &cwd()?, &refs, &mut std::io::stderr())?;
+    Ok(report(g))
+}
+
+/// Prints the report of a gate, the same way for `gate` and `gate --push`.
+fn report(g: gate::Report) -> Reply {
     let mut r = Reply::new();
     let mut rows = Vec::new();
     for (task, ms) in &g.timings {
@@ -209,7 +224,7 @@ pub fn gate(opts: Options, no_cache: bool) -> Result<Reply> {
     if !g.failures.is_empty() {
         r.set("failures", g.failures);
     }
-    Ok(r)
+    r
 }
 
 pub fn bundle(path: &std::path::Path) -> Result<Reply> {

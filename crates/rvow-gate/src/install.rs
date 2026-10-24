@@ -37,6 +37,8 @@ const MARK: &str = "rvow-managed sha256:";
 const PRE_PUSH_MARK: &str = "# rvow pre-push gate";
 pub(crate) const PRE_PUSH_RECORD: &str = "rvow-pre-push-installed";
 const PRE_PUSH_PREV_SUFFIX: &str = ".rvow-prev";
+/// Hands the ref lines git gave the hook to `rvow gate --push` on its stdin.
+pub(crate) const PRE_PUSH_REFS_REDIRECT: &str = " < \"$refs\"";
 const TOOLS: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|mcp__.*";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,15 +525,17 @@ pub fn claude_settings(path: &Path, rvow: &Path) -> Result<Outcome> {
     Ok(Outcome::Written(path.to_path_buf()))
 }
 
-/// The pre-push hook script. It first runs the hook that `rvow install` moved
-/// to `pre-push.rvow-prev`, with the same arguments and pushed refs, and stops
-/// when that hook fails. It refuses to run an rvow binary that changed since
-/// install, so a binary the agent rebuilt cannot pass the gate.
+/// The pre-push hook script. It saves the ref lines git gave it, hands them to
+/// the hook that `rvow install` moved to `pre-push.rvow-prev` and then to
+/// `rvow gate --push`, and exits with the gate's status. It refuses to run an
+/// rvow binary that changed since install, so a binary the agent rebuilt cannot
+/// pass the gate. The temp file goes away on every exit path, so a run that
+/// fails or is killed leaves nothing behind.
 pub fn pre_push_script(rvow: &Path) -> Result<String> {
     let bytes = std::fs::read(rvow).map_err(|e| Error::io(rvow, e))?;
     let bin = shell_quote(&rvow.display().to_string());
     Ok(format!(
-        "#!/bin/sh\n{PRE_PUSH_MARK}, written by rvow install\n# One group: the shell reads the whole hook before the old hook can change it.\n{{\nrvow={bin}\nwant={}\nprev=\"$0{PRE_PUSH_PREV_SUFFIX}\"\nif [ -x \"$prev\" ]; then\n  refs=$(mktemp) || exit 1\n  trap 'rm -f \"$refs\"' EXIT\n  cat > \"$refs\" || exit 1\n  \"$prev\" \"$@\" < \"$refs\" || exit $?\n  rm -f \"$refs\"\n  trap - EXIT\nfi\nhave=$(shasum -a 256 \"$rvow\" | cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then\n  echo \"rvow: $rvow changed since rvow install; run rvow install again\" >&2\n  exit 1\nfi\nexec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \"$rvow\" gate --strict --rerun\nexit 1\n}}\n",
+        "#!/bin/sh\n{PRE_PUSH_MARK}, written by rvow install\n# One group: the shell reads the whole hook before the old hook can change it.\n{{\nrvow={bin}\nwant={}\nprev=\"$0{PRE_PUSH_PREV_SUFFIX}\"\nrefs=$(mktemp) || exit 1\ntrap 'rm -f \"$refs\"' EXIT\ncat > \"$refs\" || exit 1\nif [ -x \"$prev\" ]; then\n  \"$prev\" \"$@\" < \"$refs\" || exit $?\nfi\nhave=$(shasum -a 256 \"$rvow\" | cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then\n  echo \"rvow: $rvow changed since rvow install; run rvow install again\" >&2\n  exit 1\nfi\nenv -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \"$rvow\" gate --push{PRE_PUSH_REFS_REDIRECT}\nstatus=$?\nrm -f \"$refs\"\ntrap - EXIT\nexit $status\n}}\n",
         sha256_hex(&bytes)
     ))
 }
@@ -539,7 +543,7 @@ pub fn pre_push_script(rvow: &Path) -> Result<String> {
 /// The line a user adds as the first command of a pre-push hook that another
 /// hook manager owns. A failed gate exits before the rest of the hook runs.
 pub fn pre_push_line(rvow: &Path) -> String {
-    format!("{} gate --strict --rerun || exit 1", shell_quote(&rvow.display().to_string()))
+    format!("{} gate --push || exit 1", shell_quote(&rvow.display().to_string()))
 }
 
 /// Whether the rvow gate is still at `common`: the record file `rvow install`
@@ -794,5 +798,99 @@ mod tests {
         assert!(matches!(pre_push(&repo, &bin).unwrap(), Outcome::Chained { .. }));
         git(&repo, &["config", "core.hooksPath", ".husky"]);
         assert!(matches!(pre_push(&repo, &bin).unwrap(), Outcome::AddLine { .. }));
+    }
+
+    // The pre-push hook hands git's ref lines to the gate.
+
+    /// Two ref lines, as git writes them to a pre-push hook.
+    const REFS: &str = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\nrefs/tags/v1 3333333333333333333333333333333333333333 refs/tags/v1 4444444444444444444444444444444444444444\n";
+    /// The arguments git gives a pre-push hook.
+    const HOOK_ARGS: [&str; 2] = ["origin", "git@example.com:r.git"];
+
+    fn executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// What a hook that records its work appends: its name, its arguments, then
+    /// the ref lines it got on stdin.
+    fn recorder(name: &str, log: &Path, tail: &str) -> String {
+        let log = shell_quote(&log.display().to_string());
+        format!("#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\ncat >> {log}\n{tail}")
+    }
+
+    /// Runs `hook` with `refs` on its stdin and a temp folder of its own.
+    fn run_hook(hook: &Path, refs: &str, tmp: &Path) -> std::process::Output {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .arg(hook)
+            .args(HOOK_ARGS)
+            .env("TMPDIR", tmp)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(refs.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// A hook script rvow wrote in `dir`, and the log the gate it runs writes.
+    fn hook_dir(tmp: &TempDir, gate: &str) -> (PathBuf, PathBuf) {
+        let dir = tmp.0.join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("rvow");
+        let log = tmp.0.join("hook.log");
+        std::fs::write(&bin, gate).unwrap();
+        executable(&bin);
+        let hook = dir.join("pre-push");
+        std::fs::write(&hook, pre_push_script(&bin).unwrap()).unwrap();
+        executable(&hook);
+        (hook, log)
+    }
+
+    #[test]
+    fn pre_push_hook_passes_the_refs_to_the_gate() {
+        let tmp = TempDir::new();
+        let (hook, log) = hook_dir(&tmp, &recorder("gate", &tmp.0.join("hook.log"), "exit 0\n"));
+        let scratch = tmp.0.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ran = run_hook(&hook, REFS, &scratch);
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("gate gate --push\n{REFS}"), "the gate got the ref lines");
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0, "the hook left its refs file behind");
+    }
+
+    #[test]
+    fn pre_push_hook_runs_the_older_hook_first_with_the_same_refs() {
+        let tmp = TempDir::new();
+        let log = tmp.0.join("hook.log");
+        let (hook, log) = hook_dir(&tmp, &recorder("gate", &log, "exit 0\n"));
+        let prev = hook.with_file_name("pre-push.rvow-prev");
+        std::fs::write(&prev, recorder("prev", &log, "")).unwrap();
+        executable(&prev);
+        let scratch = tmp.0.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ran = run_hook(&hook, REFS, &scratch);
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        let want = format!("prev {}\n{REFS}gate gate --push\n{REFS}", HOOK_ARGS.join(" "));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), want, "the older hook ran first, with the same refs");
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0, "the hook left its refs file behind");
+    }
+
+    #[test]
+    fn pre_push_hook_exits_with_the_gate_status() {
+        let tmp = TempDir::new();
+        let log = tmp.0.join("hook.log");
+        let (hook, log) = hook_dir(&tmp, &recorder("gate", &log, "exit 1\n"));
+        let scratch = tmp.0.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ran = run_hook(&hook, REFS, &scratch);
+        assert_eq!(ran.status.code(), Some(1), "a failed gate must fail the hook");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("gate gate --push\n{REFS}"));
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0, "the hook left its refs file behind");
     }
 }

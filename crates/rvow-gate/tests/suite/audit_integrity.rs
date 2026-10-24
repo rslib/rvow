@@ -180,7 +180,7 @@ fn audit_integrity_installed_hook_and_manager_line() {
     assert!(f.hook_failures().is_empty());
     let hook = f.repo.join(".git/hooks/pre-push");
     let original = std::fs::read_to_string(&hook).unwrap();
-    std::fs::write(&hook, original.replace("exec env", "# exec env")).unwrap();
+    std::fs::write(&hook, original.replace("env -u GIT_DIR", "# env -u GIT_DIR")).unwrap();
     assert!(!f.hook_failures().is_empty());
     std::fs::write(&hook, original).unwrap();
     std::fs::write(&bin, "changed").unwrap();

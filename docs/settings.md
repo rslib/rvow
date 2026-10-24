@@ -62,6 +62,7 @@ checks = ["cargo test --locked"]
 | `rerun_cache` | How long a cached rerun pass stays valid, such as `24h`, or `off`; default `168h` | no |
 | `cache_with_links` | Keep the rerun cache on when `rerun_links` is set; default false | no |
 | `env` / `env_vars` | Extra commands and variables captured in the proof environment | no |
+| `land_branches` | The branches a push lands on, such as `["trunk", "release/*"]`; a push there or to a tag fails on unfinished work; default the base branch | no |
 | `interview_cap` | The most questions one clarify round asks, 1 to 3, default 3 | no |
 | `task_mode` | The `mode:` line that `rvow new` writes into a new proposal, `strict` or `relaxed`; default none | no |
 | `require_signature` | When true, a confirm only decides when its ssh signature is valid | no |

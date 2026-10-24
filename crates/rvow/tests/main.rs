@@ -152,6 +152,8 @@ mod plan_access;
 mod prove_stale;
 #[path = "suite/provenance.rs"]
 mod provenance;
+#[path = "suite/push_gate.rs"]
+mod push_gate;
 #[path = "suite/quiet_hooks.rs"]
 mod quiet_hooks;
 #[path = "suite/reach.rs"]

@@ -102,14 +102,10 @@ pub(crate) fn check_change_only(
         }
     }
     for item in drift::drift(project, now.top, now.config, c)?.into_iter().filter(|i| i.class.blocks()) {
-        r.failures.push(format!(
-            "{id}: {} drift: {}; record it with rvow amend --reason and ask the user to confirm",
-            item.class.name(),
-            item.what
-        ));
+        r.work(format!("{id}: {} drift: {}; record it with rvow amend --reason and ask the user to confirm", item.class.name(), item.what));
     }
     for p in amend::pending(std::slice::from_ref(c)) {
-        r.failures.push(format!("{id}: amendment {} waits for the user's confirmation", p.id));
+        r.work(format!("{id}: amendment {} waits for the user's confirmation", p.id));
     }
     if now.config.require_signature {
         for e in c.events.iter().filter(|e| e.kind == Kind::Confirm) {
@@ -143,8 +139,8 @@ pub(crate) fn check_change_only(
         };
         match s {
             State::Proved => {}
-            State::Stale(_) | State::Flaky if !opts.strict => r.warnings.push(line),
-            _ => r.failures.push(line),
+            State::Stale(_) | State::Flaky if !opts.strict => r.soft(line),
+            _ => r.work(line),
         }
     }
     Ok(())
@@ -232,14 +228,14 @@ pub(super) fn check_scope(
     r: &mut Report,
 ) -> Result<()> {
     let Some(base_ref) = git::base_ref(top, base) else {
-        r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
+        r.work(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
     };
     let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
     for c in queue {
         let vowed = c.vow().and_then(|v| v.data.get("base_commit")).and_then(Value::as_str).unwrap_or("");
         if !vowed.is_empty() && git::run(top, &["merge-base", "--is-ancestor", vowed, &mb]).is_err() {
-            r.failures.push(format!(
+            r.work(format!(
                 "{}: the merge base with {base_ref} is not after the base recorded at accept; {base} moved backwards",
                 c.dir.id
             ));
@@ -253,7 +249,7 @@ pub(super) fn check_scope(
         .filter(|f| !set.is_match(f))
         .collect();
     if !outside.is_empty() {
-        r.failures.push(format!("{} changed files lie outside every task's files: {}", outside.len(), list(&outside)));
+        r.work(format!("{} changed files lie outside every task's files: {}", outside.len(), list(&outside)));
     }
     Ok(())
 }
@@ -295,7 +291,7 @@ pub(super) fn check_backlog_scope(
     waiting.sort();
     let plans = waiting.join(", ");
     let Some(base_ref) = git::base_ref(top, base) else {
-        r.failures.push(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
+        r.work(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
     };
     let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
@@ -323,10 +319,10 @@ pub(super) fn check_backlog_scope(
         .collect();
     differed.sort();
     for f in differed.iter().take(MAX_LISTED) {
-        r.failures.push(format!("{f} differs from {base} while {plans} waits for accept; accept the plan first, then write the code"));
+        r.work(format!("{f} differs from {base} while {plans} waits for accept; accept the plan first, then write the code"));
     }
     if differed.len() > MAX_LISTED {
-        r.failures.push(format!("and {} more files differ from {base} while {plans} waits for accept", differed.len() - MAX_LISTED));
+        r.work(format!("and {} more files differ from {base} while {plans} waits for accept", differed.len() - MAX_LISTED));
     }
     Ok(())
 }

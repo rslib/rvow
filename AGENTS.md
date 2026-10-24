@@ -47,7 +47,7 @@ node site/scripts/check.mjs guides             # also: reference, workflow, them
 `.github/scripts/quickstart.sh` runs the README quickstart and `.github/scripts/install.sh` runs `rvow install`, each against the `rvow` on `PATH`, in a throwaway repository and home.
 `.github/scripts/build-musl.sh <target> <out-dir>` builds the static Linux binary in docker, as CI and the release do; set `RUSTFLAGS="-D warnings"` to match CI.
 A release is `cargo release <level> --execute`, run by the owner only: it dates `## [Unreleased]` in `CHANGELOG.md` and pushes the `v*` tag, and `.github/workflows/release.yml` publishes the binaries with that version block as the notes.
-`prek run` runs the commit checks on staged files only; `prek run --hook-stage pre-push --all-files` runs the push checks (clippy, `cargo nextest run`, `test:pi`, `test:claude`).
+`prek run` runs the commit checks on staged files only; `prek run --hook-stage pre-push --all-files` runs clippy and the fast checks, and `prek run --hook-stage manual --all-files` runs the test suites as CI does.
 CI (`.github/workflows/ci.yml`) runs the same commands; keep the two in step.
 
 Agent evals (needs the `claude` CLI and a built binary):
@@ -141,7 +141,7 @@ Update this section in the change that moves an area.
 ## Traps
 
 - `rvow` on `PATH` is the installed copy. A CLI change reaches the hooks only after `cargo install --path crates/rvow --locked`.
-- The pre-push gate reruns tasks in a clean worktree with no `extensions/node_modules`. Each contributor sets `rerun_links = ["extensions/node_modules"]` and `cache_with_links = true` in the project `config.toml` (see `docs/settings.md` for where it lives), or the push fails and the cache stays off. The Claude version pin only warns outside CI.
+- The pre-push gate runs `rvow gate --push`, which reruns nothing. `rvow gate --strict --rerun` by hand reruns the tasks of a change in a clean worktree with no `extensions/node_modules`. Each contributor sets `rerun_links = ["extensions/node_modules"]` and `cache_with_links = true` in the project `config.toml` (see `docs/settings.md` for where it lives), or that command fails and the cache stays off. The Claude version pin only warns outside CI.
 - `PLAN.md` is git-ignored on purpose. Do not add it.
 - The global git ignore lists `AGENTS.md`, so `.gitignore` carries `!AGENTS.md`. Stage new files by name.
 

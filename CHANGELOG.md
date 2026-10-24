@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Make the pre-push hook run `rvow gate --push`, which runs no task, rerun or check and fails only on a broken record or on unfinished work bound for a land branch or a tag.
+  Run `rvow install --all` to write the new hook; a push to any other branch now lists unfinished work as warnings, and `rvow gate --strict --rerun` still proves every task by hand.
+- Add the `land_branches` setting, the branches a push lands on, by default the base branch.
 - Print every error but only the warnings of the written part after `rvow put`, and count the other warnings in one line that names `rvow check <change>`.
 - Cut each task title that `rvow status` prints to 120 characters, and print it whole with `rvow status --full`.
 - Cut each task title in the `rvow show <change>` outline to 120 characters, and print it whole with `rvow show <change> --full`.

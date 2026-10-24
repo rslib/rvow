@@ -66,6 +66,8 @@ impl Step {
 #[serde(default, deny_unknown_fields)]
 pub struct File {
     pub base: Option<String>,
+    /// Branches whose push is a land. A name may end in `*` to match a prefix.
+    pub land_branches: Option<Vec<String>>,
     pub timeout: Option<String>,
     pub inputs: Option<Vec<String>>,
     pub test_globs: Option<Vec<String>>,
@@ -114,6 +116,11 @@ pub struct File {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub base: String,
+    /// Branches whose push is a land: the full `rvow gate --push` runs on them.
+    /// A name may end in `*` to match a prefix, and an empty list means `base`
+    /// alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub land_branches: Vec<String>,
     pub timeout_secs: u64,
     pub inputs: Vec<String>,
     pub test_globs: Vec<String>,
@@ -236,6 +243,7 @@ pub fn load(project: &Project, home: &Path) -> Result<Config> {
     }
     Ok(Config {
         base: pick!(base).unwrap_or_else(|| "main".into()),
+        land_branches: pick!(land_branches).unwrap_or_default(),
         timeout_secs,
         inputs: pick!(inputs).unwrap_or_default(),
         test_globs: pick!(test_globs).unwrap_or_else(|| {
@@ -464,6 +472,21 @@ mod tests {
         assert_eq!(c.canonical().unwrap(), unset, "task_mode only seeds rvow new");
         std::fs::write(p.root.join(CONFIG_FILE), "task_mode = \"loose\"\n").unwrap();
         assert_eq!(load(&p, &home).unwrap_err().code, "config");
+    }
+
+    #[test]
+    fn land_branches_is_read_and_leaves_no_trace_when_unset() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let unset = load(&p, &home).unwrap().canonical().unwrap();
+        assert!(load(&p, &home).unwrap().land_branches.is_empty());
+        assert!(!unset.contains("land_branches"), "{unset}");
+        std::fs::write(p.root.join(CONFIG_FILE), "land_branches = [\"trunk\", \"release/*\"]\n").unwrap();
+        let c = load(&p, &home).unwrap();
+        assert_eq!(c.land_branches, ["trunk", "release/*"]);
+        assert!(c.canonical().unwrap().contains("land_branches"), "a land branch is part of the vow");
     }
 
     #[test]

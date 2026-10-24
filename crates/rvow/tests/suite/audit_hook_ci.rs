@@ -22,6 +22,10 @@ const SHARED: &[&str] = &[
 /// and the hook prints only failures.
 const ONE_SIDED: &[&str] = &["--no-fail-fast", "--run-ignored", "all", "--status-level", "fail"];
 
+/// The entries that run a test suite. They are too slow for every push: CI runs
+/// them, and `prek run --hook-stage manual --all-files` runs them by hand.
+const SUITES: &[&str] = &["cargo nextest run", "run test:pi", "run test:claude"];
+
 fn read(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)).unwrap()
 }
@@ -38,6 +42,21 @@ fn find(text: &str, check: &str, prefix: &str) -> Option<BTreeSet<String>> {
     text.lines().filter(|l| l.trim_start().starts_with(prefix)).find_map(|l| command(l, check))
 }
 
+/// The text of each hook of `.pre-commit-config.yaml`, in file order. A hook
+/// starts at its `- id:` line and runs to the line before the next one.
+fn hooks(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("- id:") {
+            out.push(String::new());
+        } else if let Some(block) = out.last_mut() {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    out
+}
+
 #[test]
 fn audit_hook_ci_shared_checks_have_the_same_flags() {
     let hook = read(".pre-commit-config.yaml");
@@ -47,6 +66,25 @@ fn audit_hook_ci_shared_checks_have_the_same_flags() {
         let in_ci = find(&ci, check, "- run:").or_else(|| find(&ci, check, "run:")).unwrap_or_else(|| panic!("CI has no `{check}`"));
         assert_eq!(in_hook, in_ci, "`{check}` differs between .pre-commit-config.yaml and .github/workflows/ci.yml");
     }
+}
+
+#[test]
+fn audit_hook_ci_push_stage_runs_no_test_suite() {
+    let hook = read(".pre-commit-config.yaml");
+    let mut seen = 0;
+    for block in hooks(&hook) {
+        let Some(entry) = block.lines().find(|l| l.trim_start().starts_with("entry:")) else { continue };
+        if !SUITES.iter().any(|check| entry.contains(check)) {
+            continue;
+        }
+        seen += 1;
+        let stages: Vec<&str> = block.lines().filter(|l| l.trim_start().starts_with("stages:")).collect();
+        assert!(
+            !stages.iter().any(|l| l.contains("pre-push")),
+            "a hook that runs a test suite is in the pre-push stage; move it to `stages: [manual]`:\n{block}"
+        );
+    }
+    assert_eq!(seen, SUITES.len(), "the hook file runs {seen} of the {} test suites", SUITES.len());
 }
 
 #[test]

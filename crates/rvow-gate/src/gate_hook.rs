@@ -64,7 +64,12 @@ fn managed(text: &str) -> bool {
         return false;
     };
     let path = PathBuf::from(&word);
-    rest.is_empty() && path.is_absolute() && executable(&path) && install::pre_push_script(&path).is_ok_and(|expected| expected == text)
+    if !rest.is_empty() || !path.is_absolute() || !executable(&path) {
+        return false;
+    }
+    // The script rvow writes, and the same script without the redirect that
+    // hands git's ref lines to `gate --push`: both are rvow's own text.
+    install::pre_push_script(&path).is_ok_and(|expected| expected == text || expected.replace(install::PRE_PUSH_REFS_REDIRECT, "") == text)
 }
 
 /// Whether the hook runs as a shell script; another interpreter can skip it.
@@ -82,8 +87,18 @@ fn shell_script(text: &str) -> bool {
     words.next().is_none() && program.is_some_and(|p| matches!(p, "sh" | "bash" | "dash" | "zsh" | "ksh"))
 }
 
-/// Whether `command` runs the trusted rvow binary with exactly `want` as its arguments.
-fn gate_command(top: &Path, command: &str, want: &str) -> bool {
+/// The gate arguments an unconditional final command may run: the form `rvow
+/// install` writes now, that form with git's ref lines redirected in, and the
+/// form an older install wrote, so a hook rvow has not refreshed yet still
+/// counts as a gate.
+const GATE_ARGS: [&str; 3] = ["gate --push", "gate --push < \"$refs\"", "gate --strict --rerun"];
+
+/// The same for the line `rvow install` prints for another hook manager, which
+/// has to leave the hook when the gate fails.
+const GATE_LINE_ARGS: [&str; 2] = ["gate --push || exit 1", "gate --strict --rerun || exit 1"];
+
+/// Whether `command` runs the trusted rvow binary with one of `want` as its arguments.
+fn gate_command(top: &Path, command: &str, want: &[&str]) -> bool {
     let (word, args) = if let Some((word, args)) = install::shell_unquote_prefix(command) {
         // Text glued to the closing quote is part of the program name.
         if !args.starts_with([' ', '\t']) {
@@ -96,7 +111,7 @@ fn gate_command(top: &Path, command: &str, want: &str) -> bool {
         };
         (word.to_string(), args.trim())
     };
-    args == want && binary(&word).is_some_and(|bin| trusted(top, &bin))
+    want.contains(&args) && binary(&word).is_some_and(|bin| trusted(top, &bin))
 }
 
 fn manager(top: &Path, text: &str) -> bool {
@@ -105,7 +120,7 @@ fn manager(top: &Path, text: &str) -> bool {
     }
     let lines: Vec<_> = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
     // The line `rvow install` prints, as the first command: nothing runs before it.
-    if lines.first().is_some_and(|first| gate_command(top, first, "gate --strict --rerun || exit 1")) {
+    if lines.first().is_some_and(|first| gate_command(top, first, &GATE_LINE_ARGS)) {
         return true;
     }
     let Some((last, prior)) = lines.split_last() else {
@@ -118,7 +133,7 @@ fn manager(top: &Path, text: &str) -> bool {
     }) {
         return false;
     }
-    gate_command(top, last.strip_prefix("exec ").unwrap_or(last), "gate --strict --rerun")
+    gate_command(top, last.strip_prefix("exec ").unwrap_or(last), &GATE_ARGS)
 }
 
 pub(super) fn failure(top: &Path) -> Option<String> {
@@ -142,4 +157,78 @@ pub(super) fn failure(top: &Path) -> Option<String> {
         ),
         None => format!("installed pre-push hook {} is missing or was changed; run rvow install again", hook.display()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testrepo::{TempDir, repo_with_commit};
+
+    fn executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// A repository whose gate `rvow install` wrote, and the binary it recorded.
+    fn installed() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new();
+        let top = repo_with_commit(&tmp.0, "r");
+        let bin = tmp.0.join("bin/rvow");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        executable(&bin);
+        crate::install::pre_push(&top, &bin).unwrap();
+        (tmp, top, bin)
+    }
+
+    #[test]
+    fn pre_push_hook_accepts_old_and_new_gate_forms() {
+        assert_eq!(GATE_ARGS[1], format!("gate --push{}", crate::install::PRE_PUSH_REFS_REDIRECT), "the refs redirect moved");
+        let (_tmp, top, bin) = installed();
+        let hook = top.join(".git/hooks/pre-push");
+        let written = std::fs::read_to_string(&hook).unwrap();
+        assert!(managed(&written), "the script rvow writes is not a gate: {written}");
+        assert!(failure(&top).is_none());
+        let without = written.replace(crate::install::PRE_PUSH_REFS_REDIRECT, "");
+        assert_ne!(without, written);
+        std::fs::write(&hook, &without).unwrap();
+        assert!(managed(&without), "the script without the refs redirect is not a gate: {without}");
+        assert!(failure(&top).is_none());
+
+        let line = crate::install::shell_quote(&bin.display().to_string());
+        for text in [
+            format!("#!/bin/sh\n{line} gate --strict --rerun\n"),
+            format!("#!/bin/sh\n{line} gate --strict --rerun || exit 1\n"),
+            format!("#!/bin/sh\n{line} gate --push\n"),
+            format!("#!/bin/sh\n{line} gate --push < \"$refs\"\n"),
+            format!("#!/bin/sh\n{line} gate --push || exit 1\n"),
+        ] {
+            std::fs::write(&hook, &text).unwrap();
+            executable(&hook);
+            assert!(manager(&top, &text), "{text}");
+            assert!(failure(&top).is_none(), "{text}");
+        }
+
+        // A binary in the repository that is not the one install recorded.
+        let elsewhere = top.join("rvow");
+        std::fs::write(&elsewhere, "#!/bin/sh\nexit 3\n").unwrap();
+        executable(&elsewhere);
+        let other = crate::install::shell_quote(&elsewhere.display().to_string());
+        for text in [
+            format!("#!/bin/sh\nif [ -n \"$1\" ]; then\n  {line} gate --push\nfi\n"),
+            format!("#!/bin/sh\necho hi\n{line} gate --push\n"),
+            format!("#!/bin/sh\nexit 0\n{line} gate --push\n"),
+            format!("#!/bin/sh\n# {line} gate --push\n"),
+            format!("#!/bin/sh\n{other} gate --push\n"),
+            format!("#!/bin/sh\n{line} gate --push --force\n"),
+        ] {
+            std::fs::write(&hook, &text).unwrap();
+            executable(&hook);
+            assert!(!manager(&top, &text), "not a gate: {text}");
+            assert!(failure(&top).is_some(), "not a gate: {text}");
+        }
+    }
 }
