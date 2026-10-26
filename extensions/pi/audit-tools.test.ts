@@ -15,9 +15,8 @@ writeFileSync(
 chmodSync(bin, 0o755);
 process.env.RVOW_BIN = bin;
 process.env.RVOW_ARGS = join(home, "args.json");
-const { viewArgs, proofArgs, serialQueue, registerTypedTools } = await import(
-  "./rvow/typed-tools.ts"
-);
+const { viewArgs, proofArgs, serialQueue, registerTypedTools, declareDialogTools, DIALOG_TOOLS } =
+  await import("./rvow/typed-tools.ts");
 const { run } = await import("./rvow/tools.ts");
 
 function registered(execute?: typeof run) {
@@ -98,6 +97,28 @@ test("proof tools serialize the entire call and recover after failure", async ()
     }),
   );
   assert.equal(await queue(async () => 42), 42);
+});
+
+test("only the dialog tools reach the model, and they wait for tool_search", () => {
+  const exposure = Object.fromEntries(
+    [...registered()].map(([name, tool]) => [name, tool.exposure]),
+  );
+  assert.deepEqual(exposure, {
+    rvow_view: "codemode",
+    rvow_prove: "codemode",
+    rvow_accept: "deferred",
+    rvow_archive: "deferred",
+    rvow_confirm: "deferred",
+    rvow_yolo: "deferred",
+  });
+  const declared = (active: string[]) => {
+    let set: string[] | undefined;
+    declareDialogTools({ getActiveTools: () => active, setActiveTools: (names) => (set = names) });
+    return set;
+  };
+  assert.deepEqual(declared(["bash"]), ["bash", ...DIALOG_TOOLS]);
+  assert.equal(declared(["bash", "tool_search"]), undefined);
+  assert.equal(declared(["bash", ...DIALOG_TOOLS]), undefined);
 });
 
 test("installed folder loads every runtime module and named prompt exports", async () => {

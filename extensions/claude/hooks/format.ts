@@ -139,7 +139,7 @@ export const JUDGE_HARNESS = 'claude'
 /** What the judge subagent may call: reads only. */
 export const JUDGE_TOOLS = ['Read', 'Grep', 'Glob'] as const
 export const JUDGE_DESCRIPTION =
-  'Run the spec conformance judge for a change: it reviews the changed code against the plan in a clean read-only session and records its findings. The mod runs the judge and records, never the agent.'
+  'Run the spec conformance judge for a change in a clean read-only session and record its findings. The mod runs it, never the agent.'
 export const JUDGE_SCHEMA = {
   type: 'object',
   properties: {
@@ -308,7 +308,7 @@ export function formatJudgeFindings(
 
 export const ARCHIVE = 'mcp__rvow__rvow_archive'
 export const ARCHIVE_DESCRIPTION =
-  'Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. When the change has pending plan edits (amendments), the same dialog lists every one, weaken first, and a yes accepts them all and then archives; a no leaves them pending. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Edits to protected files that the plan does not record yet are recorded by this tool and listed in the same dialog, so do not run rvow amend for them. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.'
+  'Ask the user in a dialog to archive a change when every task is proved or stale. Otherwise the result names what is missing. The dialog also lists the pending amendments and records unrecorded edits to protected files, so do not run rvow amend for them. Use it instead of asking the user to type /rvow-archive.'
 export const ARCHIVE_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -364,9 +364,9 @@ export function archiveAmendments(listing: string, change: string): Listed[] {
 }
 
 export const ACCEPT_DESCRIPTION =
-  'Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.'
+  'Ask the user in a dialog to accept a ready rvow plan. Run `rvow check` first. Use it instead of asking the user to type /rvow-accept.'
 export const CONFIRM_DESCRIPTION =
-  'Show the pending rvow plan edits (amendments), or ask the user to accept or reject them. With no decision it only lists them, with the item names and a note of how many diff lines are hidden; pass id to see the diff of that amendment. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. When several are pending the user answers for each one. With a decision, pass id to ask only about that amendment. The result tells you what happened, and when it failed it says why.'
+  'List the pending rvow amendments, or pass id to see the diff of one. With a decision, ask the user in a dialog to accept or reject them all, or only id. Nothing changes unless the user says yes.'
 export const ACCEPT_SCHEMA = {
   type: 'object',
   required: ['change'],
@@ -436,14 +436,11 @@ export const YOLO_TIERS = {
 } as const
 
 export const YOLO_DESCRIPTION = [
-  "Show or change rvow's yolo mode, which relaxes the hooks for a while. Call it with no tier to see what is on.",
-  'A tier needs the user to allow it in a dialog, and the user may refuse.',
-  `audit: ${YOLO_TIERS.audit}.`,
-  `auto: ${YOLO_TIERS.auto}.`,
-  `bypass: ${YOLO_TIERS.bypass}.`,
-  'off ends it at once and needs no dialog. A tier ends by itself after 2 hours, or after `for` (such as 30m or 4h, at most 24h).',
-  'The gate still checks everything at push, and tampering with the ledger, the enforcement files or the hidden checks stays denied below bypass.',
-  'Do not use it to get around one denial; run rvow block with a reason instead.',
+  "Show or change rvow's yolo mode, which relaxes the hooks for a while. With no tier it shows what is on.",
+  "A tier (audit, auto or bypass) needs the user's yes in a dialog, and off needs none.",
+  `audit: ${YOLO_TIERS.audit}. auto: ${YOLO_TIERS.auto}. bypass: ${YOLO_TIERS.bypass}.`,
+  'The gate still checks everything at push.',
+  'Do not use it to get around one denial. Run rvow block with a reason instead.',
 ].join(' ')
 
 export const YOLO_SCHEMA = {

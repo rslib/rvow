@@ -27,9 +27,9 @@ export type ArchiveInput = { change: string };
 export type ConfirmInput = { decision?: "accept" | "reject"; id?: string };
 
 export const ACCEPT_DESCRIPTION =
-  "Ask the user to accept a ready rvow plan. The user reads the review text and the checklist in a dialog and answers; the plan is accepted only when they say yes. The result tells you what happened, and when it failed it says why. Use this instead of asking the user to type /rvow-accept, and run `rvow check` first so the plan is ready.";
+  "Ask the user in a dialog to accept a ready rvow plan. Run `rvow check` first. Use it instead of asking the user to type /rvow-accept.";
 export const ARCHIVE_DESCRIPTION =
-  "Ask the user whether a finished rvow change may be archived. It is only offered when every task of the change is proved or stale; archive re-proves the stale tasks before its gate. Pending plan edits (amendments) of the change do not block it: the same dialog lists them, weaken ones first, and a yes accepts them all and then archives. Edits to protected files that the plan does not record yet are recorded by this tool and listed in the same dialog, so do not run rvow amend for them. Otherwise the result names what is missing (a missing, failed, flaky or blocked task) and nothing is asked. The user answers in a dialog and the change is archived only when they say yes. An archived change is trusted from then on: a push never reruns its tasks. Use it when the last task is proved or stale, instead of asking the user to type /rvow-archive.";
+  "Ask the user in a dialog to archive a change when every task is proved or stale. Otherwise the result names what is missing. The dialog also lists the pending amendments and records unrecorded edits to protected files, so do not run rvow amend for them. Use it instead of asking the user to type /rvow-archive.";
 
 /** The reason of an amendment that the archive tool records for drift. */
 export function driftReason(items: { what: string }[]): string {
@@ -84,7 +84,7 @@ export function archiveBlockers(
 const MODEL_TEXT_CAP = 4_000;
 
 export const CONFIRM_DESCRIPTION =
-  "Show the pending rvow plan edits (amendments), or ask the user to accept or reject all of them. With no decision it only lists them by item name; pass id to see the diff of one amendment. With a decision the user reads the list in a dialog and answers; nothing changes unless they say yes. With a decision, pass id to ask only about that one amendment. The result tells you what happened, and when it failed it says why.";
+  "List the pending rvow amendments, or pass id to see the diff of one. With a decision, ask the user in a dialog to accept or reject them all, or only id. Nothing changes unless the user says yes.";
 
 export function acceptArgs(input: unknown): string {
   const value = closed(input, ["change"]);
@@ -193,14 +193,11 @@ export const YOLO_TIERS = {
 } as const;
 
 export const YOLO_DESCRIPTION = [
-  "Show or change rvow's yolo mode, which relaxes the hooks for a while. Call it with no tier to see what is on.",
-  "A tier needs the user to allow it in a dialog, and the user may refuse.",
-  `audit: ${YOLO_TIERS.audit}.`,
-  `auto: ${YOLO_TIERS.auto}.`,
-  `bypass: ${YOLO_TIERS.bypass}.`,
-  "off ends it at once and needs no dialog. A tier ends by itself after 2 hours, or after `for` (such as 30m or 4h, at most 24h).",
-  "The gate still checks everything at push, and tampering with the ledger, the enforcement files or the hidden checks stays denied below bypass.",
-  "Do not use it to get around one denial; run rvow block with a reason instead.",
+  "Show or change rvow's yolo mode, which relaxes the hooks for a while. With no tier it shows what is on.",
+  "A tier (audit, auto or bypass) needs the user's yes in a dialog, and off needs none.",
+  `audit: ${YOLO_TIERS.audit}. auto: ${YOLO_TIERS.auto}. bypass: ${YOLO_TIERS.bypass}.`,
+  "The gate still checks everything at push.",
+  "Do not use it to get around one denial. Run rvow block with a reason instead.",
 ].join(" ");
 
 export const VIEW_KEYS = [
@@ -385,6 +382,24 @@ function hostAnswer(answer: AskAnswer) {
       };
 }
 
+/** The tools that put a decision to the user. They wait for `tool_search` while it is on. */
+export const DIALOG_TOOLS = [
+  "rvow_accept",
+  "rvow_archive",
+  "rvow_confirm",
+  "rvow_yolo",
+  "rvow_ask",
+  "rvow_judge",
+] as const;
+
+/** Declare the dialog tools to the model when no `tool_search` can load them, so they stay reachable. */
+export function declareDialogTools(pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">) {
+  const active = pi.getActiveTools();
+  if (active.includes("tool_search")) return;
+  const missing = DIALOG_TOOLS.filter((name) => !active.includes(name));
+  if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+}
+
 export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate) {
   const queue = serialQueue();
   const acceptMemory = createAcceptMemory();
@@ -412,6 +427,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   pi.registerTool({
     name: "rvow_view",
     label: "rvow view",
+    exposure: "codemode",
     outputSchema,
     description:
       "Read the branch dashboard, proof status or one plan artifact. Cannot accept or confirm.",
@@ -429,6 +445,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   pi.registerTool({
     name: "rvow_prove",
     label: "rvow prove",
+    exposure: "codemode",
     outputSchema,
     description:
       "Run one accepted task's stored verification. Proof calls run in order. Cannot accept or confirm.",
@@ -462,6 +479,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   pi.registerTool({
     name: "rvow_accept",
     label: "rvow accept",
+    exposure: "deferred",
     outputSchema,
     description: ACCEPT_DESCRIPTION,
     parameters: {
@@ -530,6 +548,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   pi.registerTool({
     name: "rvow_archive",
     label: "rvow archive",
+    exposure: "deferred",
     outputSchema,
     description: ARCHIVE_DESCRIPTION,
     parameters: {
@@ -614,6 +633,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   pi.registerTool({
     name: "rvow_confirm",
     label: "rvow confirm",
+    exposure: "deferred",
     outputSchema,
     description: CONFIRM_DESCRIPTION,
     parameters: {
@@ -681,6 +701,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   pi.registerTool({
     name: "rvow_yolo",
     label: "rvow yolo",
+    exposure: "deferred",
     outputSchema,
     description: YOLO_DESCRIPTION,
     parameters: {

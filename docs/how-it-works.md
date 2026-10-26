@@ -647,7 +647,12 @@ Both the Claude mod and the pi extension give the agent these tools:
 - `rvow_judge` runs the spec conformance judge for a change in a clean read-only session with no rvow extension, and records its findings with the model it ran on.
   In pi the judge session also starts with `--no-skills` and `--no-context-files`, so it loads no skill and no AGENTS.md or CLAUDE.md.
   Type `/rvow-judge [CHG-id] [model]` yourself instead.
-- `rvow_ask`, `rvow_view` and `rvow_prove` read the open questions, the dashboard and prove a task.
+- `rvow_ask` asks you the open questions of the plan in a dialog and records the answers.
+- In pi, `rvow_view` and `rvow_prove` read the dashboard and prove a task. They are for codemode scripts and are not declared to the model, so the agent runs `rvow status` and `rvow prove` in the shell instead.
+
+In pi the dialog tools wait for `tool_search` when it is on, so they cost no prompt tokens until the agent searches for them.
+When `tool_search` is off, pi declares them at session start, since a tool that nothing can load is out of reach.
+Claude Code defers them by itself.
 
 The tool runs the command itself, so the hook that denies `rvow accept` in a shell does not stand in its way.
 Your answer in the dialog is the decision.

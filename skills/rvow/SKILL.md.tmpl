@@ -19,14 +19,14 @@ The session-start brief names the next task. {{cmd:brief}} prints it again.
 ## Before accept
 
 - A new plan starts with {{cmd:new "<title>"}}, and {{cmd:new --spec "<title>"}} when the change alters behavior. {{cmd:guide design}} allows a `design` only for the changes it lists; put a technical decision there only then, otherwise the reason goes in the task. Before writing tasks, run {{cmd:guide tasks}}: one target per task, the full suite in one last gate task. For stale proofs, run {{cmd:guide runners}}.
-- While a plan waits for accept, code edits are denied. Before accept, {{cmd:put}} alone changes the plan; {{cmd:amend}} is only for an accepted plan. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}. `rvow_ask` takes an optional `change` for another change's questions.
+- While a plan waits for accept, code edits are denied. Before accept, {{cmd:put}} alone changes the plan; {{cmd:amend}} is only for an accepted plan. Run {{cmd:guide proposal}} and follow its interview steps. Ask the open questions of the plan with the `rvow_ask` tool, and ask in chat only when the tool is missing; record each chat answer with {{cmd:answer}}.
 - Then run {{cmd:check}} and call the `rvow_accept` tool: the user answers in a dialog, and a failure comes back to you. Without the tool, ask the user to run `/rvow-accept <id>`.
 
 ## When the plan must change
 
 - Change the plan with {{cmd:put <change> <part>}} or one block with {{cmd:put <task or requirement id>}}, record it with {{cmd:amend --reason "..."}} and keep working. The user confirms all pending amendments once, in the archive dialog.
 - To change a protected test or test setup file, run {{cmd:amend --unlock <path> --reason "..."}} first and wait for the user. Call the `rvow_confirm` tool only after an unlock, with its optional `id`.
-- You never run {{cmd:accept}} or {{cmd:confirm}} in a shell. The hooks deny them; use the tools.
+- You never run {{cmd:accept}} or {{cmd:confirm}} in a shell. The hooks deny them; use the tools, and find a missing one with tool search.
 - When every task is proved or stale, call the `rvow_archive` tool: the user answers in a dialog, and a push trusts an archived change.
 
 ## Stop and report

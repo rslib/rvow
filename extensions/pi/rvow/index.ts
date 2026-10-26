@@ -65,6 +65,7 @@ import {
 } from "./tools.ts";
 import {
   askPendingAmendments,
+  declareDialogTools,
   driftAmendArgs,
   findChange,
   registerTypedTools,
@@ -1211,6 +1212,7 @@ export default function (pi: ExtensionAPI) {
       });
       toolsRegistered = true;
     }
+    declareDialogTools(pi);
     epoch++;
     continues = 0;
     offShown = false;
@@ -1648,8 +1650,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "rvow_judge",
     label: "rvow judge",
+    exposure: "deferred",
     description:
-      "Run the spec conformance judge for a change: it reviews the changed code against the plan in a clean read-only session with no rvow extension, and records its findings. The extension runs the judge and records, never the agent.",
+      "Run the spec conformance judge for a change in a clean read-only session with no rvow extension, and record its findings. The extension runs it, never the agent.",
     parameters: {
       type: "object",
       properties: {
@@ -1675,8 +1678,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "rvow_ask",
     label: "rvow ask",
+    exposure: "deferred",
     description:
-      "Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. It then asks the user to decide each stale relaxed task, at most 3, and records each pick with rvow decide <task> now|archive|keep. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.",
+      "Ask the user the open questions of the rvow plan in a dialog, one round of at most 3, and record the answers. Then ask about each stale task that waits for the user. Pass change for the questions of another change. Ask in chat only when it is missing.",
     parameters: {
       type: "object",
       properties: { change: { type: "string", pattern: "^CHG-[a-z0-9]+$" } },

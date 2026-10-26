@@ -62,6 +62,10 @@ test("dock sees external state, configurable focus, Escape interruption and tear
       shortcuts.set(key, shortcut);
     },
     registerTool() {},
+    getActiveTools() {
+      return [];
+    },
+    setActiveTools() {},
     appendEntry() {},
     sendMessage() {},
   } as unknown as ExtensionAPI);

@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Shorten the rvow tool descriptions, and in pi let the dialog tools wait for `tool_search` when it is on, so the tools cost fewer prompt tokens.
+  In pi, `rvow_view` and `rvow_prove` are now only for codemode scripts, so the agent runs `rvow status` and `rvow prove` in the shell.
 - Make the pre-push hook run `rvow gate --push`, which runs no task, rerun or check and fails only on a broken record or on unfinished work bound for a land branch or a tag.
   Run `rvow install --all` to write the new hook; a push to any other branch now lists unfinished work as warnings, and `rvow gate --strict --rerun` still proves every task by hand.
 - Add the `land_branches` setting, the branches a push lands on, by default the base branch.

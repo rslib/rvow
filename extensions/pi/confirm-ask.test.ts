@@ -36,6 +36,8 @@ extension({
   on: (name: string, h: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, h),
   registerCommand: () => {},
   registerTool: (value: ToolDefinition) => tools.set(value.name, value),
+  getActiveTools: () => [],
+  setActiveTools: () => {},
   registerShortcut: () => {},
   sendMessage: () => {},
   sendUserMessage: () => {},

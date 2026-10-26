@@ -52,6 +52,8 @@ function setup() {
     on: (name: string, h: Handler) => handlers.set(name, h),
     registerCommand: (name: string, c: Command) => commands.set(name, c),
     registerTool: (t: Tool) => tools.set(t.name, t),
+    getActiveTools: () => [],
+    setActiveTools: () => {},
     registerShortcut: () => {},
     sendMessage: () => {},
     sendUserMessage: () => {},

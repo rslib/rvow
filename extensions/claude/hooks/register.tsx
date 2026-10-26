@@ -1150,7 +1150,7 @@ export const register: Register = (on) => {
     await $.tool.register({
       name: 'rvow_ask',
       description:
-        'Use this tool for the open questions of the rvow plan on this branch, one round of at most 3, and record the answers. It then asks the user to decide each stale relaxed task, at most 3, and records each pick with rvow decide <task> now|archive|keep. Pass change to ask the open questions of that change, whatever branch the session is on. Ask in chat only when it is missing.',
+        'Ask the user the open questions of the rvow plan in a dialog, one round of at most 3, and record the answers. Then ask about each stale task that waits for the user. Pass change for the questions of another change. Ask in chat only when it is missing.',
       inputSchema: ASK_SCHEMA,
     })
     await $.tool.register({

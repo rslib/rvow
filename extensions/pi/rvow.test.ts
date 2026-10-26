@@ -182,6 +182,8 @@ function setup(files: Files, ui: Ui = {}) {
     on: (name: string, h: Handler) => handlers.set(name, h),
     registerCommand: (name: string, c: Command) => commands.set(name, c),
     registerTool: (t: { name: string }) => tools.push(t.name),
+    getActiveTools: () => [],
+    setActiveTools: () => {},
     sendMessage: () => {},
     sendUserMessage: (...args: unknown[]) => void calls.push({ kind: "user", args }),
     registerShortcut: (key: string, o: { handler: (c: unknown) => unknown }) =>

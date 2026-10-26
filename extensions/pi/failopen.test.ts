@@ -38,6 +38,8 @@ function setup(mode: string) {
     on: (name: string, h: Handler) => handlers.set(name, h),
     registerCommand: () => {},
     registerTool: () => {},
+    getActiveTools: () => [],
+    setActiveTools: () => {},
     registerShortcut: (key: string) => void shortcuts.push(key),
     sendMessage: () => {},
     sendUserMessage: () => {},
