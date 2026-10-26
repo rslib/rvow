@@ -82,8 +82,11 @@ function setup() {
 // The brief runs after the hook returns, so the fake rvow reads its input a moment later.
 async function briefSent() {
   for (let i = 0; i < 200; i++) {
+    // The file can exist before the fake rvow finishes writing it.
     if (existsSync(join(dir, "brief.in")))
-      return JSON.parse(readFileSync(join(dir, "brief.in"), "utf8")) as Record<string, unknown>;
+      try {
+        return JSON.parse(readFileSync(join(dir, "brief.in"), "utf8")) as Record<string, unknown>;
+      } catch {}
     await new Promise((r) => setTimeout(r, 10));
   }
   throw new Error("the session-start brief never reached the fake rvow");
