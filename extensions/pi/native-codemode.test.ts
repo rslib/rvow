@@ -118,6 +118,8 @@ test("native SDK codemode tools.bash hits production rvow tool_call before execu
       timestamp: Date.now(),
     };
     // Nested tool calls (codemode's tools.bash) run against the last assistant message in the state.
+    // pi rebuilds the state from the session record when a custom message arrives, so record it too.
+    native.sessionManager.appendMessage(assistantMessage);
     agent.state.messages = [assistantMessage];
     const options = {
       tools: agent.state.tools,
