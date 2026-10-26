@@ -79,7 +79,7 @@ fn the_planning_brief_prints_only_non_zero_counters_and_planning_rules() {
     let b = brief::brief(&f.project, &f.home, &f.repo).unwrap();
     assert!(b.contains("waits for accept: 1 open question\n"), "{b}");
     assert!(!b.contains("0 checks") && !b.contains("1 open questions"), "{b}");
-    assert!(b.ends_with("rules: only the user runs rvow accept; ask with rvow_ask; write the plan files only\n"), "{b}");
+    assert!(b.ends_with("rules: only the user runs rvow accept, so call the rvow_* tools (tool search loads them when they are not listed); ask with rvow_ask; write the plan files only\n"), "{b}");
     assert!(!b.contains("stay inside files:"), "{b}");
 }
 

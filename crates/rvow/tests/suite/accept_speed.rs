@@ -135,7 +135,7 @@ fn accept_speed_check_warns_when_a_verify_chains_three_commands() {
     assert!(out.contains("warning"), "{out}");
     assert!(out.contains("chains 3 commands"), "{out}");
     assert!(out.contains("checks"), "{out}");
-    assert!(out.contains("Ask the user to run /rvow-accept"), "a warning never blocks: {out}");
+    assert!(out.contains("Call the rvow_accept tool, or ask the user to run /rvow-accept"), "a warning never blocks: {out}");
 }
 
 /// REQ-mreyxw, scenario: a configured check.
@@ -221,7 +221,7 @@ fn accept_speed_check_leaves_a_targeted_verify_alone() {
     let id = r.plan("Target", "cargo test -q --test cli one_case");
     let out = r.ok(&["check", &id]);
     assert!(!out.contains("full-suite"), "{out}");
-    assert!(out.contains("Ask the user to run /rvow-accept"), "{out}");
+    assert!(out.contains("Call the rvow_accept tool, or ask the user to run /rvow-accept"), "{out}");
 }
 
 /// REQ-mreyxw, scenario: chained commands.

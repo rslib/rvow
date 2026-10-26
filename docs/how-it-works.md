@@ -654,6 +654,9 @@ In pi the dialog tools wait for `tool_search` when it is on, so they cost no pro
 When `tool_search` is off, pi declares them at session start, since a tool that nothing can load is out of reach.
 Claude Code defers them by itself.
 
+The pi tools share the `rvow` namespace, whose text tool search ranks by, so a search such as "accept the plan" finds `rvow_accept` first.
+The brief and the hook denials name the tool for each step and say that tool search loads it, so an agent that tries `rvow accept` in the shell gets the tool name back.
+
 The tool runs the command itself, so the hook that denies `rvow accept` in a shell does not stand in its way.
 Your answer in the dialog is the decision.
 When the command fails, the tool result holds its own words, such as `code: not-ready`, so the agent knows why.

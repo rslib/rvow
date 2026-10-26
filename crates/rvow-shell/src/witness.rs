@@ -7,6 +7,6 @@ pub use rvow_base::layout::WITNESS_FILE;
 /// The text of a denial for an agent that reaches for the record.
 pub fn reason() -> String {
     format!(
-        "{WITNESS_FILE} holds what the user made and is written only by the harness; ask the user to run /rvow-accept <id> if an accept is missing"
+        "{WITNESS_FILE} holds what the user made and is written only by the harness; if an accept is missing, call the rvow_accept tool (tool search loads it when it is not listed) or ask the user to run /rvow-accept <id>"
     )
 }

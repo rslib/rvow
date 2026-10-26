@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { DIALOG_TOOLS } from "./rvow/typed-tools.ts";
 
 const sdkPath = process.env.RVOW_NATIVE_SDK;
@@ -84,6 +85,7 @@ async function declared(defaultTools: string[]) {
     return {
       declared: rvow(created.session.getActiveToolNames()),
       callable: rvow(created.session.getCallableToolNames()),
+      all: created.session.getAllTools() as ToolInfo[],
     };
   } finally {
     session?.dispose();
@@ -103,4 +105,24 @@ test("with tool_search, pi declares no rvow tool until a search loads it", { ski
   const tools = await declared(["bash", "tool_search"]);
   assert.deepEqual(tools.declared, []);
   for (const name of DIALOG_TOOLS) assert.ok(tools.callable.includes(name), name);
+});
+
+test("tool search ranks the right rvow tool first for each decision", { skip }, async () => {
+  assert.ok(sdkPath);
+  const search = await import(
+    pathToFileURL(join(sdkPath, "dist", "extensions", "tool-search", "tool.js")).href
+  );
+  const { all } = await declared(["bash", "tool_search"]);
+  const documents = all
+    .filter((tool) => tool.exposure === "deferred")
+    .map((tool) => search.createToolSearchDocument(tool, tool.namespace));
+  const ranker = new search.Bm25Ranker();
+  const first = (query: string) => ranker.rank(query, documents, 1)[0]?.name;
+  assert.equal(first("accept the plan"), "rvow_accept");
+  assert.equal(first("archive the finished change"), "rvow_archive");
+  assert.equal(first("confirm amendments"), "rvow_confirm");
+  assert.equal(first("open questions"), "rvow_ask");
+  assert.equal(first("yolo"), "rvow_yolo");
+  assert.equal(first("spec judge"), "rvow_judge");
+  assert.equal(ranker.rank("rvow", documents, 8).length, DIALOG_TOOLS.length);
 });

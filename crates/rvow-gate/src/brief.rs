@@ -17,8 +17,8 @@ use crate::tasks::Task;
 const MAX_LINES: usize = 25;
 const MAX_CHARS: usize = 1500;
 const DECISIONS: usize = 3;
-const RULES: &str = "rules: rvow accept and confirm belong to the user; stay inside files:; use rvow block if a task cannot pass.\n";
-const PLANNING_RULES: &str = "rules: only the user runs rvow accept; ask with rvow_ask; write the plan files only\n";
+const RULES: &str = "rules: rvow accept and confirm belong to the user, so call the rvow_* tools (tool search loads them when they are not listed); stay inside files:; use rvow block if a task cannot pass.\n";
+const PLANNING_RULES: &str = "rules: only the user runs rvow accept, so call the rvow_* tools (tool search loads them when they are not listed); ask with rvow_ask; write the plan files only\n";
 
 /// A planning brief starts with `plan `; no task exists there, so the task rules would mislead.
 fn rules_for(text: &str) -> &'static str {
@@ -148,7 +148,7 @@ fn planning(project: &Project, cwd: &Path, living: &[CapSpec]) -> Result<String>
         } else if r.blocking() {
             "next: run rvow check and fix what it reports"
         } else {
-            "next: ask the user to run /rvow-accept <id> (or ! rvow accept <id>); code edits wait for it"
+            "next: call the rvow_accept tool for <id>, or ask the user to run /rvow-accept <id>; code edits wait for it"
         };
         out.push_str(&next.replace("<id>", &id.to_string()));
         out.push('\n');
@@ -266,7 +266,7 @@ pub fn brief_for(project: &Project, home: &Path, cwd: &Path, agent: Option<&str>
                 t.id, c.dir.id
             ));
         }
-        None => out.push_str("next: every task on this branch is proved or blocked\n"),
+        None => out.push_str("next: every task on this branch is proved or blocked; when none is blocked, call the rvow_archive tool\n"),
     }
     Ok(bounded(out))
 }
@@ -340,9 +340,9 @@ mod tests {
         proof::prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
         let b = brief(&p, &home, &repo).unwrap();
         assert!(b.contains("1 proved"), "{b}");
-        assert!(b.contains("next: every task on this branch is proved or blocked\n"));
+        assert!(b.contains("next: every task on this branch is proved or blocked; when none is blocked, call the rvow_archive tool\n"));
         assert!(
-            b.ends_with("rules: rvow accept and confirm belong to the user; stay inside files:; use rvow block if a task cannot pass.\n")
+            b.ends_with("rules: rvow accept and confirm belong to the user, so call the rvow_* tools (tool search loads them when they are not listed); stay inside files:; use rvow block if a task cannot pass.\n")
         );
     }
 

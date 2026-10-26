@@ -507,7 +507,7 @@ fn unaccepted_denial(id: &crate::id::Id) -> Option<Denial> {
     denial(
         Rule::UnacceptedPlan,
         format!(
-            "the plan {id} is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept {id} (or ! rvow accept {id}) before you edit code"
+            "the plan {id} is not accepted yet; finish it, run rvow check, then call the rvow_accept tool (tool search loads it when it is not listed) or ask the user to run /rvow-accept {id} before you edit code"
         ),
     )
 }
@@ -1799,9 +1799,9 @@ mod tests {
             ".git/ is not edited by hand; the hooks there run the gate. Use git commands, and run rvow install for the hooks",
             "t.sh is a protected test or test setup file; to change it, run rvow amend --unlock t.sh --reason \"...\" and ask the user to confirm",
             "t.sh is outside the files: of every task in the active change; run rvow amend --reason \"...\" after adding it to a task, and ask the user to confirm",
-            "the plan CHG-x is not accepted yet; finish it, run rvow check, then ask the user to run /rvow-accept CHG-x (or ! rvow accept CHG-x) before you edit code",
+            "the plan CHG-x is not accepted yet; finish it, run rvow check, then call the rvow_accept tool (tool search loads it when it is not listed) or ask the user to run /rvow-accept CHG-x before you edit code",
             "the plan changed without an amendment (a); run rvow amend --reason \"...\"; the user confirms it when the change is archived",
-            "rvow accept belongs to the user; the hooks deny it for agents. Ask the user to run /rvow-accept <id>, or to type ! rvow accept",
+            "rvow accept belongs to the user; the hooks deny it for agents. Call the rvow_accept tool (tool search loads it when it is not listed); without it, ask the user to run /rvow-accept <id>, or to type ! rvow accept",
             "--no-verify skips the hooks that check the plan; run git commit and git push without it",
             "git commit -n skips the hooks that check the plan; run git commit without -n",
             "core.hooksPath decides which hooks run; changing it is for the user. If the plan needs it, run rvow block <task> --reason \"...\"",

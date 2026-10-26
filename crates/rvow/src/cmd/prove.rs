@@ -83,6 +83,7 @@ pub fn prove(task: &str) -> Result<Reply> {
             let done = "every task on this branch is proved or blocked";
             r.line(format!("next: {done}"));
             r.set("next", done);
+            r.help("Call the rvow_archive tool when no task is blocked");
             r.help("Run `rvow gate` to check the branch before push");
         }
     }

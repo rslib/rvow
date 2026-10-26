@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ToolDefinition,
+  ToolNamespace,
 } from "@earendil-works/pi-coding-agent";
 import type { AskAnswer, AskKind } from "./engine.ts";
 import {
@@ -382,6 +383,15 @@ function hostAnswer(answer: AskAnswer) {
       };
 }
 
+/** Tool search ranks by this text, and only codemode listings show the description. */
+export const RVOW_NAMESPACE: ToolNamespace = {
+  name: "rvow",
+  description:
+    "rvow holds the agent to the plan the user accepted. Its tools put each decision to the user in a dialog.",
+  instructions:
+    "Use the rvow tools to accept or approve a ready plan, archive a finished change, confirm or reject amendments (plan edits), ask the open questions of a plan, turn yolo mode on or off and run the spec conformance judge. The hooks deny rvow accept, rvow confirm and rvow archive in the shell, so call these tools instead.",
+};
+
 /** The tools that put a decision to the user. They wait for `tool_search` while it is on. */
 export const DIALOG_TOOLS = [
   "rvow_accept",
@@ -428,6 +438,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     name: "rvow_view",
     label: "rvow view",
     exposure: "codemode",
+    namespace: RVOW_NAMESPACE,
     outputSchema,
     description:
       "Read the branch dashboard, proof status or one plan artifact. Cannot accept or confirm.",
@@ -446,6 +457,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     name: "rvow_prove",
     label: "rvow prove",
     exposure: "codemode",
+    namespace: RVOW_NAMESPACE,
     outputSchema,
     description:
       "Run one accepted task's stored verification. Proof calls run in order. Cannot accept or confirm.",
@@ -480,6 +492,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     name: "rvow_accept",
     label: "rvow accept",
     exposure: "deferred",
+    namespace: RVOW_NAMESPACE,
     outputSchema,
     description: ACCEPT_DESCRIPTION,
     parameters: {
@@ -549,6 +562,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     name: "rvow_archive",
     label: "rvow archive",
     exposure: "deferred",
+    namespace: RVOW_NAMESPACE,
     outputSchema,
     description: ARCHIVE_DESCRIPTION,
     parameters: {
@@ -634,6 +648,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     name: "rvow_confirm",
     label: "rvow confirm",
     exposure: "deferred",
+    namespace: RVOW_NAMESPACE,
     outputSchema,
     description: CONFIRM_DESCRIPTION,
     parameters: {
@@ -702,6 +717,7 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
     name: "rvow_yolo",
     label: "rvow yolo",
     exposure: "deferred",
+    namespace: RVOW_NAMESPACE,
     outputSchema,
     description: YOLO_DESCRIPTION,
     parameters: {

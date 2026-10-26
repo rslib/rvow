@@ -68,6 +68,7 @@ import {
   declareDialogTools,
   driftAmendArgs,
   findChange,
+  RVOW_NAMESPACE,
   registerTypedTools,
   yoloArgs,
 } from "./typed-tools.ts";
@@ -1651,6 +1652,7 @@ export default function (pi: ExtensionAPI) {
     name: "rvow_judge",
     label: "rvow judge",
     exposure: "deferred",
+    namespace: RVOW_NAMESPACE,
     description:
       "Run the spec conformance judge for a change in a clean read-only session with no rvow extension, and record its findings. The extension runs it, never the agent.",
     parameters: {
@@ -1679,6 +1681,7 @@ export default function (pi: ExtensionAPI) {
     name: "rvow_ask",
     label: "rvow ask",
     exposure: "deferred",
+    namespace: RVOW_NAMESPACE,
     description:
       "Ask the user the open questions of the rvow plan in a dialog, one round of at most 3, and record the answers. Then ask about each stale task that waits for the user. Pass change for the questions of another change. Ask in chat only when it is missing.",
     parameters: {

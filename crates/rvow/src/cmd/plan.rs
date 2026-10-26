@@ -306,8 +306,10 @@ pub fn check(target: Option<&str>) -> Result<Reply> {
         }
         items.push(Node::Obj(item));
         if ready {
-            r.line(format!("  ready to accept: ask the user to run /rvow-accept {id} (or ! rvow accept {id})"));
-            r.help(format!("Ask the user to run /rvow-accept {id} (or ! rvow accept {id})"));
+            r.line(format!(
+                "  ready to accept: call the rvow_accept tool, or ask the user to run /rvow-accept {id} (or ! rvow accept {id})"
+            ));
+            r.help(format!("Call the rvow_accept tool, or ask the user to run /rvow-accept {id} (or ! rvow accept {id})"));
         } else {
             r.ok = false;
             r.line("  not ready to accept");

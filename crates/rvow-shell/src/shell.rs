@@ -454,7 +454,9 @@ fn owned_in_code(code: &str) -> Option<&'static str> {
 }
 
 fn owner_command(sub: &str) -> String {
-    format!("rvow {sub} belongs to the user; the hooks deny it for agents. Ask the user to run /rvow-{sub} <id>, or to type ! rvow {sub}")
+    format!(
+        "rvow {sub} belongs to the user; the hooks deny it for agents. Call the rvow_{sub} tool (tool search loads it when it is not listed); without it, ask the user to run /rvow-{sub} <id>, or to type ! rvow {sub}"
+    )
 }
 
 /// The denial for one `rvow` subcommand the user owns, with the words after it.
