@@ -262,6 +262,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Fix every dialog of the Claude mod, such as the one `/rvow-archive` opens, failing silently in a session that has the AskUserQuestion tool turned off.
+  The mod then asks in a pane of its own, and an open question there also offers "Answer in chat", which hands the question to the agent.
+- Fix the `/rvow-archive` question in the Claude mod, which did not end in a question mark, and say why when its dialog does not answer.
 - Fix the stop holding a session again for an item it was already told, when the reasons alternated or only their count changed, and list a drift item that several changes name once.
 - Deny `rvow hook` to an agent also when inline script code, a script file or an unknown variable runs it, so an agent cannot fake an observed proof.
 - Fix a task whose `files:` names a folder, such as `files: crates/a`, so the gate counts the files in that folder as in scope and a change to one of them makes the proof stale.

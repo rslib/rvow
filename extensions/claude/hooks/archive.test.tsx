@@ -24,7 +24,12 @@ const view = (state: string) => ({
   needs_you: NONE,
 })
 
-async function seed($: Engine, on: On, state: string): Promise<string[]> {
+async function seed(
+  $: Engine,
+  on: On,
+  state: string,
+  answer: (question: string) => string = () => 'Archive',
+): Promise<string[]> {
   const calls: string[] = []
   on('session.cwd', async () => ({ value: '/tmp' }))
   on('env.get', async () => ({ value: '/home/me' }))
@@ -42,7 +47,8 @@ async function seed($: Engine, on: On, state: string): Promise<string[]> {
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
     const question = e.questions[0]?.question ?? ''
-    return { result: { questions: e.questions, answers: { [question]: 'Archive' } } }
+    calls.push(`ask ${question}`)
+    return { result: { questions: e.questions, answers: { [question]: answer(question) } } }
   })
   await $.command.run(cmd('rvow-status', ''))
   return calls
@@ -70,4 +76,21 @@ test('/rvow-archive runs rvow archive only when the user types it', async ($, on
   const model = await $.command.run(cmd('rvow-archive', 'CHG-1', { kind: 'sdk' }))
   expect(model.text).toContain('only when you type it')
   expect(r.text).toBeDefined()
+})
+
+test('the archive question ends in a question mark', async ($, on) => {
+  const calls = await seed($, on, 'proved')
+  await $.command.run(cmd('rvow-archive', 'CHG-1'))
+  const asked = calls.filter((c) => c.startsWith('ask '))
+  expect(asked.length).toBe(1)
+  expect(asked[0]?.endsWith('?')).toBe(true)
+})
+
+test('a dialog that fails says why instead of a silent no', async ($, on) => {
+  const calls = await seed($, on, 'proved', () => {
+    throw new Error('the dialog broke')
+  })
+  const r = await $.command.run(cmd('rvow-archive', 'CHG-1'))
+  expect(calls).not.toContain('archive CHG-1')
+  expect(r.text).toContain('The dialog did not answer: ')
 })

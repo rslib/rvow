@@ -287,6 +287,95 @@ function later($: EngineInterface, work: () => Promise<unknown>) {
   })
 }
 
+/** The pane id of rvow's own dialog. */
+const DIALOG = 'rvow-dialog'
+/** The label that ends an interview so the user can answer in chat. */
+const IN_CHAT = 'Answer in chat'
+/** The open dialog: what it asks, and the named pipe its wait reads the answer from. */
+let dialogOpen: {
+  question: string
+  header?: string
+  labels: readonly string[]
+  fifo: string
+} | null = null
+
+/**
+ * Asks the user in a pane of rvow's own and resolves the label they pressed, for a session that has no
+ * AskUserQuestion tool. Rejects when the user closes the pane or it cannot open.
+ */
+async function dialog(
+  $: EngineInterface,
+  question: string,
+  header: string | undefined,
+  labels: readonly string[],
+): Promise<string> {
+  if (dialogOpen) throw new Error('another rvow dialog is open')
+  const made = await $.process.run(['mktemp', '-d'])
+  const dir = made.stdout.trim()
+  if (made.exitCode !== 0 || !dir) throw new Error('cannot make a folder for the dialog')
+  const fifo = `${dir}/answer`
+  try {
+    if ((await $.process.run(['mkfifo', fifo])).exitCode !== 0)
+      throw new Error('cannot make the dialog pipe')
+    dialogOpen = { question, header, labels, fifo }
+    const opened = await $.ui.open({
+      id: DIALOG,
+      title: header ?? 'rvow',
+      focus: true,
+      closeOnEscape: true,
+    })
+    if (!opened.isPlaced)
+      $.ui.toast('rvow asks you something: widen the terminal to see the dialog')
+    // A hook's clock stops only while a `$` call is in flight, so the wait is a child that reads the
+    // pipe until a press writes the label.
+    const child = $.process.spawn({ argv: ['cat', fifo] })
+    let answer = ''
+    let next = await child.next()
+    while (!next.done) {
+      if (next.value.stream === 'stdout') answer += next.value.text
+      next = await child.next()
+    }
+    if (!labels.includes(answer)) throw new Error('the user closed the dialog')
+    return answer
+  } finally {
+    dialogOpen = null
+    await $.ui.close({ id: DIALOG }).catch(() => undefined)
+    await $.process.run(['rm', '-rf', dir]).catch(() => undefined)
+  }
+}
+
+type AskShape = readonly string[] | { header?: string; options: readonly string[] }
+
+/**
+ * Asks with the engine's dialog, or with rvow's own pane when the session has no AskUserQuestion tool.
+ * `inChat` adds IN_CHAT to the pane, which takes no typed text; the engine's dialog has its own Other.
+ */
+async function askUser(
+  $: EngineInterface,
+  question: string,
+  options: AskShape,
+  inChat = false,
+): Promise<string> {
+  try {
+    return await $.ui.ask(question, options)
+  } catch (err) {
+    if (!/no tool named "AskUserQuestion"/.test(String(err))) throw err
+  }
+  const { header, options: labels } = Array.isArray(options)
+    ? { header: undefined, options }
+    : (options as { header?: string; options: readonly string[] })
+  return dialog($, question, header, inChat ? [...labels, IN_CHAT] : labels)
+}
+
+/** Ends the open dialog with `label`; an empty label closes it with no answer. */
+async function answerDialog($: EngineInterface, label: string) {
+  const open = dialogOpen
+  if (!open) return
+  await $.process
+    .run(['sh', '-c', 'printf %s "$1" > "$2"', 'sh', label, open.fifo], { timeoutMs: 5_000 })
+    .catch(() => undefined)
+}
+
 /** What `rvow hook claude <event>` prints; each event fills only some fields. */
 type HookOutput = {
   status?: unknown
@@ -662,9 +751,11 @@ async function confirmEach(
   const options = [EACH_LABEL[first], EACH_LABEL[second], 'Later']
   const lines: string[] = []
   for (const [i, item] of items.entries()) {
-    const answer = await $.ui
-      .ask(`${item.text}\n\n${i + 1} of ${items.length}: accept, reject, or decide later?`, options)
-      .catch(() => 'Later')
+    const answer = await askUser(
+      $,
+      `${item.text}\n\n${i + 1} of ${items.length}: accept, reject, or decide later?`,
+      options,
+    ).catch(() => 'Later')
     const verb = answer === 'Accept' ? 'accept' : answer === 'Reject' ? 'reject' : null
     lines.push(verb ? await decide(item, verb) : `${item.id} is still pending.`)
   }
@@ -698,13 +789,11 @@ async function confirmDialog($: EngineInterface, origin: { kind: string }) {
     if (prompts.length > 0) later($, async () => queue($, prompts.join(' ')))
     return { text: joinDecisions(lines) }
   }
-  const answer = await $.ui
-    .ask(`${listing.text}\n\nAccept all, reject all, or decide later?`, [
-      'Accept all',
-      'Reject all',
-      'Later',
-    ])
-    .catch(() => 'Later')
+  const answer = await askUser($, `${listing.text}\n\nAccept all, reject all, or decide later?`, [
+    'Accept all',
+    'Reject all',
+    'Later',
+  ]).catch(() => 'Later')
   if (answer !== 'Accept all' && answer !== 'Reject all') {
     return { text: 'The plan edits are still pending.' }
   }
@@ -745,9 +834,16 @@ async function archiveFlow(
   if (blocked) return { text: blocked }
   const base = `Every task of ${change} is proved or stale, and archive re-proves the stale ones.`
   const trust = 'The gate trusts an archived change and never reruns its tasks.'
-  const declined = {
-    text: `The user did not archive ${change}; it stays active and any pending plan edit stays pending. The user can run /rvow-archive ${change} to archive it.`,
-  }
+  // A dialog that rejects is not a no from the user, so its reason goes into the answer.
+  let broke = ''
+  const ask = (question: string, options: string[]) =>
+    askUser($, question, options).catch((why: unknown) => {
+      broke = why instanceof Error ? why.message : String(why)
+      return ''
+    })
+  const declined = () => ({
+    text: `The user did not archive ${change}; it stays active and any pending plan edit stays pending. The user can run /rvow-archive ${change} to archive it.${broke ? ` The dialog did not answer: ${broke}` : ''}`,
+  })
   // Drift that no plan edit records yet is recorded here, so the user's one answer below covers it.
   const drifted = unrecordedDrift(found)
   if (drifted.length > 0) {
@@ -757,10 +853,8 @@ async function archiveFlow(
   }
   const pending = (found?.pending.length ?? 0) + (drifted.length > 0 ? 1 : 0)
   if (pending === 0) {
-    const answer = await $.ui
-      .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
-      .catch(() => 'Not yet')
-    if (answer !== 'Archive') return declined
+    const answer = await ask(`${base} ${trust} Archive it?`, ['Archive', 'Not yet'])
+    if (answer !== 'Archive') return declined()
   } else {
     // The user answers for the exact set they read; a changed set is asked again, never accepted unseen.
     let ids: string[] = []
@@ -774,19 +868,15 @@ async function archiveFlow(
       const shown = /^digest (\S+)$/m.exec(listing.out)?.[1]
       const items = archiveAmendments(listing.out, change)
       if (items.length === 0) {
-        const answer = await $.ui
-          .ask(`${base} Archive it? ${trust}`, ['Archive', 'Not yet'])
-          .catch(() => 'Not yet')
-        if (answer !== 'Archive') return declined
+        const answer = await ask(`${base} ${trust} Archive it?`, ['Archive', 'Not yet'])
+        if (answer !== 'Archive') return declined()
         break
       }
-      const answer = await $.ui
-        .ask(
-          `${base} ${items.length} plan edit${items.length === 1 ? ' is' : 's are'} pending, weaken first:\n\n${items.map((i) => i.text).join('\n\n')}\n\nAccept ${items.length === 1 ? 'it' : 'all of them'} and archive ${change}? ${trust}`,
-          ['Accept and archive', 'Not yet'],
-        )
-        .catch(() => 'Not yet')
-      if (answer !== 'Accept and archive') return declined
+      const answer = await ask(
+        `${base} ${items.length} plan edit${items.length === 1 ? ' is' : 's are'} pending, weaken first:\n\n${items.map((i) => i.text).join('\n\n')}\n\n${trust} Accept ${items.length === 1 ? 'it' : 'all of them'} and archive ${change}?`,
+        ['Accept and archive', 'Not yet'],
+      )
+      if (answer !== 'Accept and archive') return declined()
       const now = await tellOut($, ['confirm', '--full'])
       if (!now.ok) return { text: failedText(['confirm', '--full'], now.out) }
       if (/^digest (\S+)$/m.exec(now.out)?.[1] !== shown) continue
@@ -1046,9 +1136,32 @@ async function ask($: EngineInterface, change?: string, forModel = false): Promi
         .join(', ')}`
     let choice: string
     try {
-      choice = await $.ui.ask(text, { header: q.header, options: q.options.map((o) => o.label) })
+      choice = await askUser(
+        $,
+        text,
+        { header: q.header, options: q.options.map((o) => o.label) },
+        true,
+      )
     } catch {
       return [...done, stay()].join('\n')
+    }
+    // The pane takes no typed text, so an answer in the user's own words goes through the agent.
+    if (choice === IN_CHAT) {
+      const record = `record it with rvow answer ${q.ref} "<the answer>"`
+      if (!forModel)
+        later($, async () =>
+          queue(
+            $,
+            `I will answer ${q.ref} (${cut(q.question, 200)}) in chat. Wait for my answer, then ${record}.`,
+          ),
+        )
+      return [
+        ...done,
+        forModel
+          ? `The user answers ${q.ref} in chat. Wait for their message, then ${record}.`
+          : `Type your answer to ${q.ref} in chat; the agent records it.`,
+        stay(),
+      ].join('\n')
     }
     const r = await run(['answer', q.ref, choice, '--via', 'dialog']).catch(() => undefined)
     if (r?.exitCode !== 0) return [...done, `cannot record ${q.ref}; ${stay()}`].join('\n')
@@ -1069,7 +1182,7 @@ async function ask($: EngineInterface, change?: string, forModel = false): Promi
     const stay = () => stillWaiting(i)
     let answer: string
     try {
-      answer = await $.ui.ask(`${t.id} ${t.title}\n${DECIDE_QUESTION}`, {
+      answer = await askUser($, `${t.id} ${t.title}\n${DECIDE_QUESTION}`, {
         header: 'Stale proof',
         options: DECIDE_LABELS,
       })
@@ -1196,7 +1309,7 @@ export const register: Register = (on) => {
     if (tier && tier !== 'off') {
       const length = argv[3] ?? '2h'
       const question = `The agent asks to turn on yolo ${tier} for ${length}: ${YOLO_TIERS[tier as keyof typeof YOLO_TIERS]}. The gate still checks at push. Allow it?`
-      const answer = await $.ui.ask(question, ['Allow', 'Deny']).catch(() => 'Deny')
+      const answer = await askUser($, question, ['Allow', 'Deny']).catch(() => 'Deny')
       if (answer !== 'Allow') return { result: 'The user declined, so yolo stays as it was.' }
     }
     const cwd = await $.session.cwd()
@@ -1224,9 +1337,10 @@ export const register: Register = (on) => {
     const remembered = ((await read($, acceptMemoryAtom)) as unknown as AcceptMemory)[change]
     if (remembered && remembered.review === review.out)
       return { result: repeatAcceptResult(remembered.reason, change) }
-    const answer = await $.ui
-      .ask(`${shortReview(review.out, change)}\n\nAccept ${change}?`, ['Accept', 'Not now'])
-      .catch(() => 'Not now')
+    const answer = await askUser($, `${shortReview(review.out, change)}\n\nAccept ${change}?`, [
+      'Accept',
+      'Not now',
+    ]).catch(() => 'Not now')
     if (answer !== 'Accept') {
       const reason = declinedAcceptReason(change)
       await update($, acceptMemoryAtom, (m) => ({
@@ -1287,12 +1401,11 @@ export const register: Register = (on) => {
     if (named !== undefined) {
       const item = splitListing(listing.out).find((i) => i.id === named)
       if (!item) return { result: `${named} is not pending.` }
-      const answer = await $.ui
-        .ask(`${item.text}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} ${named}?`, [
-          'Yes',
-          'No',
-        ])
-        .catch(() => 'No')
+      const answer = await askUser(
+        $,
+        `${item.text}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} ${named}?`,
+        ['Yes', 'No'],
+      ).catch(() => 'No')
       if (answer !== 'Yes') {
         return {
           result: `The user did not decide ${named}, so it is still pending. The user can run /rvow-confirm to decide it.`,
@@ -1313,12 +1426,11 @@ export const register: Register = (on) => {
     }
     const digest = /^digest (\S+)$/m.exec(listing.out)?.[1]
     if (!digest) return { result: listing.out || 'There are no pending plan edits.' }
-    const answer = await $.ui
-      .ask(`${listing.out}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} all of these?`, [
-        'Yes',
-        'No',
-      ])
-      .catch(() => 'No')
+    const answer = await askUser(
+      $,
+      `${listing.out}\n\n${decision === 'accept' ? 'Accept' : 'Reject'} all of these?`,
+      ['Yes', 'No'],
+    ).catch(() => 'No')
     if (answer !== 'Yes')
       return {
         result:
@@ -1394,7 +1506,7 @@ export const register: Register = (on) => {
     // After repeated denials rvow asks the user once; no answer leaves the call denied.
     if (decision?.permissionDecision === 'ask') {
       const reason = String(decision.permissionDecisionReason)
-      const answer = await $.ui.ask(reason, ['Allow', 'Deny']).catch(() => 'Deny')
+      const answer = await askUser($, reason, ['Allow', 'Deny']).catch(() => 'Deny')
       if (answer !== 'Allow') return { deny: reason }
     }
     // A read changes no blob, so its outcome is not reported: that skips one rvow start per read.
@@ -2144,6 +2256,38 @@ export const register: Register = (on) => {
         </Box>
       </Box>
     )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: DIALOG }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const open = dialogOpen
+    if (!open) return <Text dimColor>no rvow question is open</Text>
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        {open.header && <Text bold>{open.header}</Text>}
+        {open.question.split('\n').map((line) => (
+          <Text wrap="wrap">{line}</Text>
+        ))}
+        <Box flexDirection="row" gap={2} marginTop={1}>
+          {open.labels.map((label, i) => (
+            <Button
+              key={`answer:${i}`}
+              label={`${i + 1} ${label}`}
+              hotkey={String(i + 1)}
+              plain
+              variant={i === 0 ? 'primary' : 'secondary'}
+              onPress={() => void answerDialog($, label)}
+            />
+          ))}
+        </Box>
+        <Text dimColor>Press a number, or Esc to close without an answer.</Text>
+      </Box>
+    )
+  })
+
+  on('ui.close', async ($, e, next) => {
+    if (e.id === DIALOG && e.origin.kind === 'person') await answerDialog($, '')
+    return next(e)
   })
 
   // The row shows the head of a long rvow output; the model reads the stored text in full.
