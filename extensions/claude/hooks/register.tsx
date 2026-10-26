@@ -1674,13 +1674,14 @@ export const register: Register = (on) => {
     if (!id) return { text: 'usage: /rvow-archive <CHG-id>' }
     if (e.origin.kind !== 'composer')
       return { text: '/rvow-archive runs only when you type it yourself.' }
-    if (!/^CHG-[a-z0-9]+$/.test(id)) return { text: 'rvow: change must be a complete CHG id' }
+    if (!/^CHG-[a-z0-9]+$/.test(id)) return { text: 'change must be a complete CHG id' }
     const r = await archiveFlow($, id)
     await refresh($)
     // The engine refuses a submit made while this hook still holds the command.
     if (r.archived) later($, async () => queue($, `I archived ${id}. The change is closed.`))
     else if (r.failed) tellAgentOfFailure($, ['archive', id], { tone: 'fail', text: r.text })
-    return { text: r.text }
+    // The engine puts `rvow: ` before a command's text, so the shared text drops its own.
+    return { text: r.text.replace(/^rvow: /, '') }
   })
 
   on('command.run', { command: 'rvow-judge' }, async ($, e) => {

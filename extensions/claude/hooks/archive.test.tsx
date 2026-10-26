@@ -94,3 +94,9 @@ test('a dialog that fails says why instead of a silent no', async ($, on) => {
   expect(calls).not.toContain('archive CHG-1')
   expect(r.text).toContain('The dialog did not answer: ')
 })
+
+test('/rvow-archive text does not repeat the rvow: the engine puts before it', async ($, on) => {
+  await seed($, on, 'proved')
+  const r = await $.command.run(cmd('rvow-archive', 'CHG-'))
+  expect(r.text).toBe('change must be a complete CHG id')
+})
