@@ -136,6 +136,8 @@ test("installed folder loads every runtime module and named prompt exports", asy
     registerTool(tool: { name: string }) {
       tools.push(tool.name);
     },
+    getActiveTools: () => [],
+    setActiveTools() {},
   });
   const start = events.get("session_start");
   assert.ok(start);
