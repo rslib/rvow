@@ -751,6 +751,8 @@ mod tests {
             2,
             Arc::new(move |n: usize| {
                 let _ = done.send((n, std::thread::current().id()));
+                // The thread is free only after its job returns; widen that window.
+                std::thread::sleep(Duration::from_millis(2));
             }),
         );
         let mut threads = std::collections::BTreeSet::new();
@@ -759,6 +761,11 @@ mod tests {
             let (got, id) = seen.recv().unwrap();
             assert_eq!(got, n);
             threads.insert(format!("{id:?}"));
+            // A hook call comes after the last one ended, when its thread is free again.
+            let due = Instant::now() + Duration::from_secs(5);
+            while warm.idle.load(Ordering::Acquire) < 2 && Instant::now() < due {
+                std::thread::yield_now();
+            }
         }
         assert!(threads.len() <= 2, "{threads:?}");
     }
