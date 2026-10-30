@@ -166,6 +166,8 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/package-lock.json
       - run: npm ci
+      # The lockfile fixes pi for a local run; CI tests the newest pi in the range.
+      - run: npm update @earendil-works/pi-coding-agent @earendil-works/pi-tui
       - run: npm run lint
       - run: npm run typecheck:pi
       - run: mkdir -p "$RUNNER_TEMP/tests"
@@ -174,10 +176,9 @@ jobs:
           TMPDIR: ${{ runner.temp }}/tests/
       - name: The pi tests left no temp files
         run: sh ../.github/scripts/temp-left.sh "$RUNNER_TEMP/tests"
-      # The mod checks fail in CI without the claude CLI, so install the version the types are pinned to.
-      - name: Install the pinned Claude Code
-        run: npm install -g "@anthropic-ai/claude-code@$(node -p "require('./package.json').claudeCodeTypes")"
-      - run: npm run drift
+      # The mod checks fail in CI without the claude CLI. The newest one, so a host API change shows here first.
+      - name: Install the newest Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@latest"
       # Only a logged-in load writes the mod's types; without the secret the type check says so and skips.
       - run: npm run typecheck:claude
         env:

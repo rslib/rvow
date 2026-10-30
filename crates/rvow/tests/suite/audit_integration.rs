@@ -102,12 +102,18 @@ fn audit_integration_extension_check_scripts_exist() {
     let pkg = std::fs::read_to_string(root().join("extensions/package.json")).unwrap();
     let value: serde_json::Value = serde_json::from_str(&pkg).unwrap();
     let scripts = value["scripts"].as_object().expect("package.json scripts");
-    for name in ["check", "typecheck:pi", "test:pi", "typecheck:claude", "validate:claude", "test:claude", "drift", "lint"] {
+    for name in ["check", "typecheck:pi", "test:pi", "typecheck:claude", "validate:claude", "test:claude", "lint"] {
         assert!(scripts.contains_key(name), "missing npm script {name}");
     }
     let check = scripts["check"].as_str().expect("check script");
-    for step in ["drift", "lint", "typecheck:pi", "test:pi", "typecheck:claude", "validate:claude", "test:claude"] {
+    for step in ["lint", "typecheck:pi", "test:pi", "typecheck:claude", "validate:claude", "test:claude"] {
         assert!(check.contains(step), "the check script must run {step}, was: {check}");
+    }
+    // The hosts are not pinned: pi takes a range and no Claude Code version is kept.
+    assert!(!scripts.contains_key("drift") && value.get("claudeCodeTypes").is_none(), "no host version pin: {pkg}");
+    for host in ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"] {
+        let range = value["devDependencies"][host].as_str().expect("pi is a dev dependency");
+        assert!(range.starts_with('^'), "{host} takes a range, was {range}");
     }
 }
 

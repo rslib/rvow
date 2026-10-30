@@ -24,7 +24,6 @@ Extensions, from the repository root (run `npm --prefix extensions ci` once):
 
 ```sh
 npm --prefix extensions run check        # all of the below, in this order
-npm --prefix extensions run drift        # installed pi and claude versions match the pinned types
 npm --prefix extensions run lint         # biome
 npm --prefix extensions run typecheck:pi
 npm --prefix extensions run test:pi      # node --test, needs Node 22.19.0 or newer
@@ -34,7 +33,7 @@ npm --prefix extensions run test:claude  # the whole suite, there is no filter
 
 ```
 
-The claude steps skip with exit 0 when the `claude` CLI is missing, except in CI, which installs the pinned CLI and fails without it. The type check also needs the types that only a logged-in load writes, so in CI it runs only when the `ANTHROPIC_API_KEY` secret is set.
+No pi or Claude Code version is pinned: pi takes a range, and CI installs the newest Claude Code and updates pi to the newest in its range. The claude steps skip with exit 0 when the `claude` CLI is missing, except in CI, which fails without it. The type check also needs the types that only a logged-in load writes, so in CI it runs only when the `ANTHROPIC_API_KEY` secret is set.
 
 Docs site, from the repository root (run `npm --prefix site run setup` once; it fetches the theme at a pinned commit and runs `npm install`):
 
@@ -141,7 +140,7 @@ Update this section in the change that moves an area.
 ## Traps
 
 - `rvow` on `PATH` is the installed copy. A CLI change reaches the hooks only after `cargo install --path crates/rvow --locked`.
-- The pre-push gate runs `rvow gate --push`, which reruns nothing. `rvow gate --strict --rerun` by hand reruns the tasks of a change in a clean worktree with no `extensions/node_modules`. Each contributor sets `rerun_links = ["extensions/node_modules"]` and `cache_with_links = true` in the project `config.toml` (see `docs/settings.md` for where it lives), or that command fails and the cache stays off. The Claude version pin only warns outside CI.
+- The pre-push gate runs `rvow gate --push`, which reruns nothing. `rvow gate --strict --rerun` by hand reruns the tasks of a change in a clean worktree with no `extensions/node_modules`. Each contributor sets `rerun_links = ["extensions/node_modules"]` and `cache_with_links = true` in the project `config.toml` (see `docs/settings.md` for where it lives), or that command fails and the cache stays off.
 - `PLAN.md` is git-ignored on purpose. Do not add it.
 - The global git ignore lists `AGENTS.md`, so `.gitignore` carries `!AGENTS.md`. Stage new files by name.
 

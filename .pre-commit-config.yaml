@@ -37,13 +37,6 @@ repos:
         entry: sh -c 'LC_ALL=C grep -n "$(printf "[^\t -~]")" "$@"; test $? -eq 1' --
         language: system
         files: \.rs$
-      - id: ext-drift
-        name: extension version drift
-        # Installs the npm deps once.
-        entry: sh -c 'test -d extensions/node_modules || npm --prefix extensions ci; npm --prefix extensions run drift'
-        language: system
-        files: ^extensions/
-        pass_filenames: false
       - id: ext-biome
         name: biome check
         # Installs the npm deps once.

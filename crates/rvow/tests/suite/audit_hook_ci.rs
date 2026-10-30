@@ -10,7 +10,6 @@ const SHARED: &[&str] = &[
     "cargo clippy",
     "cargo nextest run",
     "run lint",
-    "run drift",
     "run typecheck:pi",
     "run test:pi",
     "run typecheck:claude",

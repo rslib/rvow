@@ -54,13 +54,14 @@ fn script_names_the_login_when_it_skips_the_type_check() {
 }
 
 #[test]
-fn workflow_installs_the_pinned_claude_and_runs_the_mod_checks() {
+fn workflow_installs_the_newest_hosts_and_runs_the_mod_checks() {
     let ci = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
-    assert!(ci.contains("@anthropic-ai/claude-code@"), "CI installs Claude Code:\n{ci}");
-    assert!(ci.contains("claudeCodeTypes"), "CI installs the version the types are pinned to:\n{ci}");
+    assert!(ci.contains("@anthropic-ai/claude-code@latest"), "CI installs the newest Claude Code:\n{ci}");
+    assert!(!ci.contains("claudeCodeTypes"), "CI pins no Claude Code version:\n{ci}");
+    assert!(ci.contains("npm update @earendil-works/pi-coding-agent @earendil-works/pi-tui"), "CI tests the newest pi:\n{ci}");
     assert!(ci.contains("secrets.ANTHROPIC_API_KEY"), "CI passes the optional key to the type check:\n{ci}");
     assert!(!ci.contains("skip themselves"), "the comment that the steps skip is gone:\n{ci}");
-    for step in ["npm run drift", "npm run typecheck:claude", "npm run validate:claude", "npm run test:claude"] {
+    for step in ["npm run typecheck:claude", "npm run validate:claude", "npm run test:claude"] {
         assert!(ci.contains(step), "CI runs `{step}`");
     }
     let agents = std::fs::read_to_string(root().join("AGENTS.md")).unwrap();
