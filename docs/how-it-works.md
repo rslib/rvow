@@ -312,6 +312,8 @@ A task is flaky only when a pass and a failure share the same run key and the sa
 Each prove event records a worktree fingerprint over tracked and untracked files that are not ignored, so a fix outside the task's files changes the fingerprint and clears the failure instead of marking it flaky.
 The fingerprint also records which files git does not track, so a failure that a `git add` fixes does not mark the task flaky.
 A failure recorded before worktree fingerprints existed has none and does not count as flaky.
+A failure that timed out before any test ran does not count as flaky either, because it shows only that the machine was stuck.
+A timeout after some tests ran still counts.
 
 ### Mutants
 

@@ -247,6 +247,12 @@ fn decision_at(change: &Active, id: &str, after: usize, inputs: &str) -> Option<
     (str_of(e, "inputs") == inputs).then_some(pick)
 }
 
+/// A run that timed out before any test ran says nothing about the tests,
+/// only that the machine was stuck, so it is no flaky signal.
+fn stuck_timeout(e: &Event) -> bool {
+    e.data.get("timed_out").and_then(Value::as_bool) == Some(true) && e.data.get("tests_run").and_then(Value::as_u64).is_none_or(|n| n == 0)
+}
+
 /// Compatibility state lookup using the project that owns the change path.
 /// Home-mode metadata determines the store home without environment lookup.
 /// Synthetic changes without metadata have no private policy. Repo-mode library
@@ -295,6 +301,7 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
                 && str_of(e, "task") == id
                 && str_of(e, "key") == key
                 && !is_proved(e)
+                && !stuck_timeout(e)
                 && e.data.get("worktree").and_then(Value::as_str) == Some(last_tree)
         });
     let mut reasons = Vec::new();

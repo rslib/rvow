@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Stop counting a proof run that timed out before any test ran as the failed half of a flaky task, so a stuck machine no longer blocks the archive.
+  A timeout after some tests ran still marks the task flaky.
 - Shorten the rvow tool descriptions, and in pi let the dialog tools wait for `tool_search` when it is on, so the tools cost fewer prompt tokens.
   In pi, `rvow_view` and `rvow_prove` are now only for codemode scripts, so the agent runs `rvow status` and `rvow prove` in the shell.
 - Make the brief, `rvow check`, `rvow prove` and the hook denials name the rvow tool for each step, such as `rvow_accept` and `rvow_archive`, and say that tool search loads it.

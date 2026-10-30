@@ -145,3 +145,41 @@ fn flaky_repo_mode_same_tree_is_flaky() {
     assert!(r.proved, "{:?}", r.outcome);
     assert_eq!(state_name(&s), "flaky", "a repo-mode fail then pass on the same tree is flaky");
 }
+
+#[test]
+fn flaky_timeout_with_no_tests_run_does_not_count() {
+    let flag_dir = crate::temp::TempDir::new("flaky-stuck");
+    let flag = flag_dir.path().join("flag");
+    let tasks = format!(
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: {{ test -f {} || sleep 30; }} && grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n  timeout: 1s\n",
+        flag.display()
+    );
+    let s = setup("stuck-timeout", &tasks);
+    std::fs::write(s.repo.join("out.txt"), "ok\n").unwrap();
+    let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
+    assert!(!r.proved);
+    assert!(r.outcome.timed_out, "{:?}", r.outcome);
+    std::fs::write(&flag, "go\n").unwrap();
+    let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
+    assert!(r.proved, "{:?}", r.outcome);
+    assert_eq!(state_name(&s), "proved", "a timeout before any test ran does not count as flaky");
+}
+
+#[test]
+fn flaky_timeout_after_tests_ran_still_counts() {
+    let flag_dir = crate::temp::TempDir::new("flaky-hang");
+    let flag = flag_dir.path().join("flag");
+    let tasks = format!(
+        "- TSK-new1 Write ok\n  covers: REQ-new1\n  verify: echo 'test result: ok. 1 passed; 0 failed;' && {{ test -f {} || sleep 30; }} && grep -q ok out.txt\n  files: out.txt\n  timeout: 1s\n",
+        flag.display()
+    );
+    let s = setup("hang-timeout", &tasks);
+    std::fs::write(s.repo.join("out.txt"), "ok\n").unwrap();
+    let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
+    assert!(!r.proved);
+    assert!(r.outcome.timed_out && r.outcome.tests_run == Some(1), "{:?}", r.outcome);
+    std::fs::write(&flag, "go\n").unwrap();
+    let r = proof::prove(&s.project, &s.home, &s.repo, &s.task, &mut std::io::sink()).unwrap();
+    assert!(r.proved, "{:?}", r.outcome);
+    assert_eq!(state_name(&s), "flaky", "a timeout after a test ran still counts as flaky");
+}
