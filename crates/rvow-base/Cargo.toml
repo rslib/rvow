@@ -9,5 +9,5 @@ publish.workspace = true
 
 [dependencies]
 getrandom = "0.4.3"
-globset = "0.4.20"
+globset = "0.4.21"
 sha2 = "0.11.0"

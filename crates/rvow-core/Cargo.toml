@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-globset = "0.4.20"
+globset = "0.4.21"
 rvow-base = { path = "../rvow-base" }
 rvow-gate = { path = "../rvow-gate" }
 rvow-git = { path = "../rvow-git" }

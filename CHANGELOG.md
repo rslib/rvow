@@ -341,4 +341,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Fix drift flagging a protected test file that only grew.
   Added tests and standalone added checks stay free, and a lost or changed line still counts.
 
+### Security
+
+- Update the bundled wasmtime to 48.0.8, which fixes a panic on typed functions with `i31` or `nullref` arguments ([RUSTSEC-2026-0422](https://rustsec.org/advisories/RUSTSEC-2026-0422)).
+
 [Unreleased]: https://github.com/rslib/rvow/commits/trunk

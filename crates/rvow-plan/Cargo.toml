@@ -9,7 +9,7 @@ publish.workspace = true
 
 [dependencies]
 hmac = "0.13.0"
-roxmltree = "0.21.1"
+roxmltree = "0.21.2"
 rvow-base = { path = "../rvow-base" }
 rvow-git = { path = "../rvow-git" }
 rvow-store = { path = "../rvow-store" }
