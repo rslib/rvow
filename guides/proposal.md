@@ -20,7 +20,7 @@ Pipe it to `rvow put <change> proposal`; the hooks deny a direct write.
 ## Interview the user
 
 - First search the code and run `rvow spec list` and `rvow show <id>`. Ask only what changes the plan and what the code cannot answer.
-- Mark each open point as `[NEEDS CLARIFICATION: question | recommended: answer | options: b; c | why: what it decides]`. Keep at most 3 in the change.
+- Mark each open point as `[NEEDS CLARIFICATION: question | recommended: answer | options: b; c | why: what it decides]`. Keep at most 3 in the change; add more after each answered round.
 - Ask a round with the `rvow_ask` tool when your harness has it: it shows the user each question and records the answer, at most 3 questions per round. Otherwise run `rvow clarify --json`, ask in chat and record each answer with `rvow answer <ref> "<choice>"`.
 - Ask scope and behavior first. After each answer, replace the block it changes with `rvow put`.
 - Stop when no open point would change the plan or the user says to use your defaults; `rvow accept` refuses while a marker remains.
