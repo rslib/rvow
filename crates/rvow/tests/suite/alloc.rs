@@ -364,7 +364,7 @@ fn alloc_count_does_not_depend_on_the_process_env() {
 }
 
 /// The steady-state count of one PreToolUse Edit call.
-const PRE_TOOL_USE_EDIT: usize = 5400; // measured 2026-10-22 on macOS: 4902; budget +10% for other platforms; trunk d05d6ee: 86090
+const PRE_TOOL_USE_EDIT: usize = 4520; // measured 2026-10-30 on macOS: 4108; budget +10% for other platforms; before: 4902; trunk d05d6ee: 86090
 
 #[test]
 fn alloc_pre_tool_use_edit() {
@@ -376,7 +376,7 @@ fn alloc_pre_tool_use_edit() {
 }
 
 /// The steady-state count of one PreToolUse Bash call.
-const PRE_TOOL_USE_BASH: usize = 1510; // measured 2026-10-22 on macOS: 1365; budget +10% for other platforms; trunk d05d6ee: 7560
+const PRE_TOOL_USE_BASH: usize = 760; // measured 2026-10-30 on macOS: 685; budget +10% for other platforms; before: 1365; trunk d05d6ee: 7560
 
 #[test]
 fn alloc_pre_tool_use_bash() {
@@ -395,7 +395,7 @@ fn alloc_pre_tool_use_bash() {
 }
 
 /// The steady-state count of one PostToolUse call.
-const POST_TOOL_USE: usize = 120; // measured 2026-10-22 on macOS: 103; budget +10% for other platforms; trunk d05d6ee: 1288
+const POST_TOOL_USE: usize = 110; // measured 2026-10-30 on macOS: 99; budget +10% for other platforms; before: 103; trunk d05d6ee: 1288
 
 #[test]
 fn alloc_post_tool_use() {
@@ -407,7 +407,7 @@ fn alloc_post_tool_use() {
 }
 
 /// The steady-state count of one Stop call.
-const STOP: usize = 5440; // measured 2026-10-24 on macOS: 4948; budget +10% for other platforms; before: 5704; trunk d05d6ee: 66025
+const STOP: usize = 5240; // measured 2026-10-30 on macOS: 4763; budget +10% for other platforms; before: 4948; trunk d05d6ee: 66025
 
 #[test]
 fn alloc_stop() {
@@ -419,7 +419,7 @@ fn alloc_stop() {
 }
 
 /// The steady-state count of one background re-prove check.
-const REPROVE_READY: usize = 4080; // measured 2026-10-22 on macOS: 3701; budget +10% for other platforms; before: 27192
+const REPROVE_READY: usize = 3960; // measured 2026-10-30 on macOS: 3591; budget +10% for other platforms; before: 3701; was: 27192
 
 #[test]
 fn alloc_reprove_ready() {
@@ -430,7 +430,7 @@ fn alloc_reprove_ready() {
 }
 
 /// The steady-state count of one load of the fixture's living specs.
-const LOAD_LIVING: usize = 5090; // measured 2026-10-22 on macOS: 4620; budget +10% for other platforms; before: 26580
+const LOAD_LIVING: usize = 5080; // measured 2026-10-30 on macOS: 4611; budget +10% for other platforms; before: 4620; was: 26580
 
 #[test]
 fn alloc_load_living() {
@@ -460,7 +460,7 @@ fn alloc_session_start() {
 }
 
 /// The steady-state count of one SessionStart call while a plan waits for accept.
-const SESSION_START_WAITING: usize = 4720; // measured 2026-10-22 on macOS: 4283; budget +10% for other platforms; before: 7300; was: 30971
+const SESSION_START_WAITING: usize = 4540; // measured 2026-10-30 on macOS: 4119; budget +10% for other platforms; before: 4283; was: 30971
 
 #[test]
 fn alloc_session_start_with_a_waiting_plan() {
@@ -478,7 +478,7 @@ fn alloc_session_start_with_a_waiting_plan() {
 }
 
 /// The steady-state count of one Stop call followed by its background re-prove check.
-const STOP_WITH_REPROVE: usize = 6035; // measured 2026-10-24 on macOS: 5486; budget +10% for other platforms; before: 6136
+const STOP_WITH_REPROVE: usize = 5810; // measured 2026-10-30 on macOS: 5276; budget +10% for other platforms; before: 5486; was: 6136
 
 #[test]
 fn alloc_stop_with_reprove() {
@@ -495,7 +495,7 @@ fn alloc_stop_with_reprove() {
 }
 
 /// The steady-state count of one view call, the status line's source.
-const VIEW: usize = 10450; // measured 2026-10-22 on macOS: 9498; budget +10% for other platforms; trunk d05d6ee: 68850
+const VIEW: usize = 10230; // measured 2026-10-30 on macOS: 9292; budget +10% for other platforms; before: 9498; trunk d05d6ee: 68850
 
 #[test]
 fn alloc_view() {

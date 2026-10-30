@@ -2,7 +2,7 @@
 
 pub use rvow_store::store::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(unix)]
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -63,7 +63,8 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
         let p = root.join(name);
         std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
     }
-    match mode {
+    let project = Project { root, meta };
+    match project.meta.mode {
         Mode::Repo => {
             add_union_merge(&top)?;
             let lines: Vec<String> = local_files().iter().map(|f| format!("{REPO_DIR}/{f}")).collect();
@@ -82,7 +83,7 @@ pub fn init(dir: &Path, home: &Path, mode: Mode) -> Result<Project> {
             add_lines(&home.join(".gitignore"), &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
         }
     }
-    Ok(Project { root, meta })
+    Ok(project)
 }
 
 /// What `rebind` did to the tree.
@@ -202,6 +203,10 @@ fn rebind_impl(dir: &Path, home: &Path, map: Option<&BTreeMap<String, String>>) 
 /// snapshot of that call starts no git process of its own.
 static GIT_DIRS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, (PathBuf, PathBuf)>>> = std::sync::OnceLock::new();
 
+/// The most folders whose git dirs this process keeps: a long-lived process
+/// with many folders would else grow the map without end.
+const DIR_LIMIT: usize = 256;
+
 /// The absolute git dir and common dir of the work tree at `dir`, when a
 /// `find` of this process already printed them.
 pub fn known_dirs(dir: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -213,6 +218,10 @@ pub fn known_dirs(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// tree root that git named for it.
 fn remember_dirs(dir: &Path, top: &Path, git_dir: &str, common: &str) {
     let Ok(mut dirs) = GIT_DIRS.get_or_init(Default::default).lock() else { return };
+    // Two keys per call, so a pair always lands in a map that has the room.
+    if dirs.len() + 2 > DIR_LIMIT {
+        dirs.clear();
+    }
     let entry = (PathBuf::from(git_dir), PathBuf::from(common));
     dirs.insert(dir.to_path_buf(), entry.clone());
     dirs.insert(top.to_path_buf(), entry);
@@ -289,10 +298,43 @@ fn index_hit(top: &Path, home: &Path, common: &str) -> Option<Project> {
     let meta = read_meta(&entry.project).ok()?;
     let shared = meta.roots.iter().find(|r| entry.roots.contains(r))?;
     // Most hooks find the commit on disk; only a miss costs a git process.
-    if !has_object(&Path::new(common).join("objects"), shared) {
-        git::run(top, &["cat-file", "-e", &format!("{shared}^{{commit}}")]).ok()?;
+    if !object_here(top, common, shared) {
+        return None;
     }
     Some(Project { root: entry.project, meta })
+}
+
+/// The object ids this process has seen in the store of a repository, by the
+/// common dir they were seen in, so a hit needs no read of the pack folder.
+static OBJECTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+
+/// The most objects this process keeps.
+const OBJECT_LIMIT: usize = 256;
+
+/// Whether the object store of the repository whose common dir is `common`
+/// holds `hex`, from the ids this process already saw there.
+fn object_here(top: &Path, common: &str, hex: &str) -> bool {
+    if let Some(objects) = OBJECTS.get_or_init(Default::default).lock().ok()
+        && objects.get(hex).is_some_and(|seen| seen == common)
+    {
+        return true;
+    }
+    let found =
+        has_object(&Path::new(common).join("objects"), hex) || git::run(top, &["cat-file", "-e", &format!("{hex}^{{commit}}")]).is_ok();
+    if found {
+        keep_object(hex, common);
+    }
+    found
+}
+
+/// Remembers an object that a repository holds, clearing the map first when it
+/// is full.
+fn keep_object(hex: &str, common: &str) {
+    let Some(mut objects) = OBJECTS.get_or_init(Default::default).lock().ok() else { return };
+    if objects.len() >= OBJECT_LIMIT {
+        objects.clear();
+    }
+    objects.insert(hex.to_string(), common.to_string());
 }
 
 /// Whether the object `hex` is in the object store at `objects`, as a loose
@@ -406,6 +448,66 @@ mod tests {
             .status()
             .unwrap()
             .success()
+    }
+
+    #[test]
+    fn scale_store_find_sees_a_tree_made_after_a_miss() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let first = repo_with_commit(&tmp.0, "one");
+        assert_eq!(find(&first, &home).unwrap(), None);
+        let p = init(&first, &home, Mode::Home).unwrap();
+        assert_eq!(find(&first, &home).unwrap(), Some(p), "the tree made after the miss is found");
+    }
+
+    #[test]
+    fn scale_store_find_sees_a_repo_tree_made_after_a_miss() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let known = repo_with_commit(&tmp.0, "known");
+        let projects = init(&known, &home, Mode::Home).unwrap();
+        assert_eq!(find(&known, &home).unwrap(), Some(projects));
+
+        let repo = repo_with_commit(&tmp.0, "r");
+        git(&repo, &["commit", "-q", "--amend", "-m", "r"]);
+        assert_eq!(find(&repo, &home).unwrap(), None);
+        // The tree of a repository is what moves when `rvow init --in-repo`
+        // writes one, so the miss goes stale with it.
+        let p = init(&repo, &home, Mode::Repo).unwrap();
+        assert_eq!(find(&repo, &home).unwrap(), Some(p), "the tree written into the repository is found");
+    }
+
+    #[test]
+    fn scale_store_find_sees_a_home_tree_made_under_an_existing_folder_after_a_miss() {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let known = repo_with_commit(&tmp.0, "known");
+        let projects = init(&known, &home, Mode::Home).unwrap();
+        assert_eq!(find(&known, &home).unwrap(), Some(projects));
+
+        // `local/` holds the known project already, so the new tree under it
+        // moves neither the home folder nor the project index.
+        let repo = repo_with_commit(&tmp.0, "r");
+        git(&repo, &["commit", "-q", "--amend", "-m", "r"]);
+        assert_eq!(find(&repo, &home).unwrap(), None);
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        assert_eq!(find(&repo, &home).unwrap(), Some(p), "a hook must never miss a tree that exists");
+    }
+
+    #[test]
+    fn scale_store_maps_stay_under_their_limits() {
+        for i in 0..DIR_LIMIT + 8 {
+            let dir = PathBuf::from(format!("/rvow-dir-{i}"));
+            remember_dirs(&dir, &dir.join("top"), "/git", "/common");
+        }
+        let kept = GIT_DIRS.get().unwrap().lock().unwrap().len();
+        assert!(kept <= DIR_LIMIT, "{kept} git dirs kept over a limit of {DIR_LIMIT}");
+
+        for i in 0..OBJECT_LIMIT + 8 {
+            keep_object(&format!("{i:040}"), "/common");
+        }
+        let kept = OBJECTS.get().unwrap().lock().unwrap().len();
+        assert!(kept <= OBJECT_LIMIT, "{kept} objects kept over a limit of {OBJECT_LIMIT}");
     }
 
     #[test]

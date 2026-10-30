@@ -32,6 +32,10 @@ use crate::trust::{self, Harnesses};
 
 /// How many connections one engine serves at once; the next one gets a 503.
 const MAX_CONNECTIONS: usize = 64;
+/// Threads that stay up between calls, so their per-thread caches stay warm.
+/// A call that finds none free gets a thread of its own, so a long ask never
+/// holds up a hook.
+const WARM_THREADS: usize = 4;
 /// The biggest body the engine reads: a hook input is far smaller.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 /// The biggest request head, headers included.
@@ -152,11 +156,15 @@ pub fn serve(home: &Path, idle: Duration, ask: Option<Duration>) -> Result<Serve
         })
     };
 
+    let warm = {
+        let state = Arc::clone(&state);
+        Warm::new(WARM_THREADS, Arc::new(move |stream| connection(stream, &state)))
+    };
     loop {
         // Read before the accept, so a call already queued is still served.
         let stopping = state.stop.load(Ordering::Acquire);
         match listener.accept() {
-            Ok((stream, _peer)) => accept(&state, stream),
+            Ok((stream, _peer)) => accept(&state, &warm, stream),
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if stopping {
                     break;
@@ -236,16 +244,65 @@ fn idle_reached(state: &State, idle: Duration) -> bool {
 }
 
 /// Serves one accepted connection, or refuses it when the engine is full.
-fn accept(state: &Arc<State>, stream: UnixStream) {
+fn accept(state: &Arc<State>, warm: &Warm<UnixStream>, stream: UnixStream) {
     if state.active.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
         state.active.fetch_sub(1, Ordering::Relaxed);
         let mut stream = stream;
         respond(&mut stream, BUSY, E_BUSY);
         return;
     }
-    let shared = Arc::clone(state);
-    if std::thread::Builder::new().spawn(move || connection(stream, &shared)).is_err() {
+    if !warm.run(stream) {
         state.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A few long-lived threads that run jobs, and a new thread per job when all
+/// of them are busy.
+struct Warm<T> {
+    jobs: std::sync::mpsc::Sender<T>,
+    idle: Arc<AtomicUsize>,
+    work: Arc<dyn Fn(T) + Send + Sync>,
+}
+
+impl<T: Send + 'static> Warm<T> {
+    fn new(threads: usize, work: Arc<dyn Fn(T) + Send + Sync>) -> Warm<T> {
+        let (jobs, rx) = std::sync::mpsc::channel::<T>();
+        let rx = Arc::new(std::sync::Mutex::new(rx));
+        let idle = Arc::new(AtomicUsize::new(0));
+        for n in 0..threads {
+            let (rx, freed, work) = (Arc::clone(&rx), Arc::clone(&idle), Arc::clone(&work));
+            let spawned = std::thread::Builder::new().name(format!("rvow-warm-{n}")).spawn(move || {
+                loop {
+                    let job = match rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(job) = job else { return };
+                    work(job);
+                    freed.fetch_add(1, Ordering::AcqRel);
+                }
+            });
+            if spawned.is_ok() {
+                idle.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        Warm { jobs, idle, work }
+    }
+
+    /// Runs `job` on a free warm thread, or else on a new one; `false` when no
+    /// thread could take it.
+    fn run(&self, job: T) -> bool {
+        let claimed = self.idle.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok();
+        let job = if claimed {
+            match self.jobs.send(job) {
+                Ok(()) => return true,
+                Err(back) => back.0,
+            }
+        } else {
+            job
+        };
+        let work = Arc::clone(&self.work);
+        std::thread::Builder::new().spawn(move || work(job)).is_ok()
     }
 }
 
@@ -686,6 +743,46 @@ fn push_number(out: &mut Vec<u8>, mut n: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_daemon_calls_reuse_warm_threads() {
+        let (done, seen) = std::sync::mpsc::channel();
+        let warm = Warm::new(
+            2,
+            Arc::new(move |n: usize| {
+                let _ = done.send((n, std::thread::current().id()));
+            }),
+        );
+        let mut threads = std::collections::BTreeSet::new();
+        for n in 0..20 {
+            assert!(warm.run(n));
+            let (got, id) = seen.recv().unwrap();
+            assert_eq!(got, n);
+            threads.insert(format!("{id:?}"));
+        }
+        assert!(threads.len() <= 2, "{threads:?}");
+    }
+
+    #[test]
+    fn scale_daemon_busy_warm_threads_do_not_block_a_call() {
+        let (hold, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Arc::new(std::sync::Mutex::new(wait));
+        let (done, seen) = std::sync::mpsc::channel();
+        let warm = Warm::new(
+            1,
+            Arc::new(move |n: usize| {
+                if n == 0 {
+                    let _ = wait.lock().unwrap().recv();
+                }
+                let _ = done.send(n);
+            }),
+        );
+        assert!(warm.run(0));
+        assert!(warm.run(1));
+        assert_eq!(seen.recv_timeout(Duration::from_secs(5)), Ok(1));
+        hold.send(()).unwrap();
+        assert_eq!(seen.recv_timeout(Duration::from_secs(5)), Ok(0));
+    }
 
     fn head(text: &str) -> std::result::Result<Head, Refusal> {
         Head::parse(text.as_bytes())

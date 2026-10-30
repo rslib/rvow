@@ -43,6 +43,9 @@ const STALE_MS: u64 = 6 * 60 * 60 * 1000;
 const KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The private object store is deleted past this size.
 const MAX_OBJECTS: u64 = 64 * 1024 * 1024;
+/// A stop appends to the records file, which only grows; past this size one
+/// rewrite keeps the records the readers still ask for.
+const RECORDS_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Exact git config overrides that make `git add` hash the work tree as it is:
 /// no racy-time reuse, no split index, no autocrlf, and no LFS smudging.
@@ -292,6 +295,37 @@ fn append(dir: &Path, records: &[Record]) -> Result<()> {
     append_to(&dir.join(RECORDS), records)
 }
 
+/// The size of the records file, or nothing when it is not there yet.
+fn records_size(dir: &Path) -> u64 {
+    std::fs::metadata(dir.join(RECORDS)).map_or(0, |m| m.len())
+}
+
+/// The records a reader still asks for: the starts, posts and afters the age
+/// limits keep, and the last `Last` of each session and agent, which is the one
+/// the readers find last in the file. A `Last` a newer one replaces is what a
+/// stop appends, and dropping it changes no answer.
+fn compacted(records: Vec<Record>, now: u64) -> Vec<Record> {
+    let keep: Vec<bool> = {
+        let mut newest = BTreeMap::new();
+        for (i, r) in records.iter().enumerate() {
+            if let Record::Last(l) = r {
+                newest.insert((l.session.as_str(), l.agent_id.as_deref()), i);
+            }
+        }
+        records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| match r {
+                Record::Start(s) => now.saturating_sub(s.start) < STALE_MS,
+                Record::Post(p) => now.saturating_sub(p.end) < KEEP_MS,
+                Record::After(a) => now.saturating_sub(a.end) < KEEP_MS,
+                Record::Last(l) => newest.get(&(l.session.as_str(), l.agent_id.as_deref())) == Some(&i),
+            })
+            .collect()
+    };
+    records.into_iter().zip(keep).filter_map(|(r, keep)| keep.then_some(r)).collect()
+}
+
 /// Replaces the records file in one rename, so a reader never sees half of it.
 fn rewrite(dir: &Path, records: &[Record]) -> Result<()> {
     let tmp = dir.join(format!("{RECORDS}.tmp"));
@@ -371,35 +405,45 @@ fn has_last(records: &[Record], session: &str, agent_id: Option<&str>) -> bool {
 /// `now`, a change that no call of the session recorded, such as one from a
 /// background job, and makes `now` the session's last tree. A write that a
 /// call of another session or agent recorded in the window is not the session's.
-fn catch_up(top: &Path, store: &Store, session: &str, agent_id: Option<&str>, now: &str, mut records: Vec<Record>) -> Result<()> {
+/// It appends those records, and compacts the file only when it is past
+/// `RECORDS_MAX_BYTES`.
+fn catch_up(top: &Path, store: &Store, session: &str, agent_id: Option<&str>, now: &str, records: Vec<Record>) -> Result<()> {
     let mine = |s: &str, a: &Option<String>| s == session && a.as_deref() == agent_id;
-    let Some(last) = records.iter().rev().find_map(|r| match r {
-        Record::Last(l) if mine(&l.session, &l.agent_id) => Some(l.clone()),
+    let Some((tree, last_end)) = records.iter().rev().find_map(|r| match r {
+        Record::Last(l) if mine(&l.session, &l.agent_id) => Some((l.tree.as_str(), l.end)),
         _ => None,
     }) else {
         return Ok(());
     };
-    if last.tree == now {
+    if tree == now {
         return Ok(());
     }
-    let theirs = recorded_by_others(&records, session, agent_id, last.end);
-    let changes = changed(top, store, &last.tree, now)?;
+    let theirs = recorded_by_others(&records, session, agent_id, last_end);
+    let changes = changed(top, store, tree, now)?;
     let end = now_ms();
-    records.retain(|r| !matches!(r, Record::Last(l) if mine(&l.session, &l.agent_id)));
-    let changes = changes.into_iter().filter(|c| !theirs.contains(c));
-    records.extend(changes.map(|(path, blob)| {
-        Record::After(After {
-            session: session.to_string(),
-            agent_id: agent_id.map(String::from),
-            tool_use_id: UNRECORDED.to_string(),
-            path,
-            blob,
-            start: last.end,
-            end,
+    let mut added: Vec<Record> = changes
+        .into_iter()
+        .filter(|c| !theirs.contains(c))
+        .map(|(path, blob)| {
+            Record::After(After {
+                session: session.to_string(),
+                agent_id: agent_id.map(String::from),
+                tool_use_id: UNRECORDED.to_string(),
+                path,
+                blob,
+                start: last_end,
+                end,
+            })
         })
-    }));
-    records.push(Record::Last(Last { session: session.to_string(), agent_id: agent_id.map(String::from), tree: now.to_string(), end }));
-    rewrite(&store.dir, &records)
+        .collect();
+    added.push(Record::Last(Last { session: session.to_string(), agent_id: agent_id.map(String::from), tree: now.to_string(), end }));
+    append(&store.dir, &added)?;
+    if records_size(&store.dir) > RECORDS_MAX_BYTES {
+        let mut all = records;
+        all.extend(added);
+        rewrite(&store.dir, &compacted(all, end))?;
+    }
+    Ok(())
 }
 
 /// The Stop hook's catch-up: records the changes since the session's last
@@ -962,5 +1006,82 @@ mod tests {
         assert!(!text.contains("old.txt"), "a record past the keep window is dropped: {text}");
         assert!(text.contains("out.txt"), "{text}");
         assert!(!big.exists(), "a stale call does not hold the prune");
+    }
+
+    /// A records file of `n` old records of other sessions, with this session's
+    /// last tree among them, and one file the stop finds changed: the sizes of
+    /// the file before and after that stop.
+    fn stop_sizes(n: usize) -> (u64, u64) {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        let path = dir(&p, &repo).join(RECORDS);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        for i in 0..n {
+            text.push_str(&format!(
+                "{{\"kind\":\"after\",\"session\":\"s{i}\",\"tool_use_id\":\"c\",\"path\":\"p{i}.txt\",\"blob\":\"b\",\"start\":1,\"end\":1}}\n"
+            ));
+        }
+        std::fs::write(&path, &text).unwrap();
+        std::fs::write(repo.join("bg.txt"), "from a background job").unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+        catch_up_at_stop(&p, &repo, "s1", None);
+        let after = std::fs::read_to_string(&path).unwrap();
+        eprintln!("scale_provenance_stop_appends_only: {n} records, {before} bytes -> {} bytes", after.len());
+        assert!(
+            after.starts_with(&text),
+            "a stop rewrote the {n} records that were there instead of appending to them: {before} bytes -> {} bytes",
+            after.len()
+        );
+        (before, after.len() as u64)
+    }
+
+    /// A stop appends its own records and leaves the file alone: on 100 old
+    /// records the file grew by 269 bytes and on 200 by 269 as well, where a
+    /// stop rewrote all of it before (10009 bytes -> 10177, 19909 -> 20077).
+    #[test]
+    fn scale_provenance_stop_appends_only() {
+        let (small_before, small_after) = stop_sizes(100);
+        let (big_before, big_after) = stop_sizes(200);
+        let (small, big) = (small_after - small_before, big_after - big_before);
+        eprintln!("scale_provenance_stop_appends_only: 100 records -> {small_before} + {small}, 200 -> {big_before} + {big}");
+        assert_eq!(small, big, "a stop on 100 old records appended {small} bytes, on 200 it appended {big}");
+    }
+
+    /// A records file past the limit, of records the age limits no longer keep.
+    fn oversize(path: &Path) {
+        let mut text = std::fs::read_to_string(path).unwrap();
+        let old = now_ms() - KEEP_MS - 1_000;
+        let mut i = 0;
+        while (text.len() as u64) <= RECORDS_MAX_BYTES {
+            text.push_str(&format!(
+                "{{\"kind\":\"after\",\"session\":\"s-old\",\"tool_use_id\":\"c\",\"path\":\"p{i}.txt\",\"blob\":\"b\",\"start\":{old},\"end\":{old}}}\n"
+            ));
+            i += 1;
+        }
+        std::fs::write(path, &text).unwrap();
+    }
+
+    /// Past the limit a stop compacts the file, which keeps the newest last tree
+    /// of the session and the records the ownership judge reads: 1 MiB of
+    /// records the age limits no longer keep left 497 bytes, where the stop left
+    /// all 1_048_762 of them before.
+    #[test]
+    fn scale_provenance_past_the_limit_compacts_and_keeps_the_last_tree() {
+        let (_tmp, p, repo) = setup();
+        run_call(&p, &repo, "s1", None, "c1", || std::fs::write(repo.join("a.txt"), "first").unwrap());
+        let d = dir(&p, &repo);
+        oversize(&d.join(RECORDS));
+        std::fs::write(repo.join("bg.txt"), "from a background job").unwrap();
+        catch_up_at_stop(&p, &repo, "s1", None);
+        let len = std::fs::metadata(d.join(RECORDS)).unwrap().len();
+        eprintln!("scale_provenance_past_the_limit: {RECORDS_MAX_BYTES} limit -> {len} bytes");
+        assert!(len < 4096, "a file past the limit is compacted: {len} bytes left");
+        let now = tree(&repo, &locate(&p, &repo).unwrap(), &[]).unwrap();
+        let last = load(&d).into_iter().rev().find_map(|r| match r {
+            Record::Last(l) if l.session == "s1" => Some(l.tree),
+            _ => None,
+        });
+        assert_eq!(last, Some(now), "the session's last tree is still found after the compaction");
+        assert_eq!(owned(&p, &repo, "s1").unwrap().unwrap(), set(&["a.txt", "bg.txt"]), "ownership survives the compaction");
     }
 }

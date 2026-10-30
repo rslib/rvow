@@ -309,12 +309,10 @@ pub fn living_from(texts: &[(String, String)]) -> (Vec<CapSpec>, Vec<Finding>) {
     (specs, findings)
 }
 
-/// The living specs, keyed by capability, parsed without the lint: for a
-/// caller that needs the requirements and not their findings, such as a hook.
+/// The living specs, keyed by capability, parsed without the lint or the
+/// record: for a caller that needs the requirements and not their findings,
+/// such as a hook.
 pub fn living(project: &Project) -> Result<Vec<CapSpec>> {
-    // The record is read only to fail as `load_living` does: a corrupt record
-    // must keep a hook failing closed.
-    record::load(project)?;
     Ok(living_texts(project)?.into_iter().map(|(cap, text)| (cap, parse_spec(&text).0)).collect())
 }
 
@@ -356,36 +354,85 @@ impl Loaded {
     }
 }
 
+/// One change, parsed without its texts or its lint: what a caller that reads
+/// the tasks or the proposal only, such as a hook, needs.
+#[derive(Debug, Clone)]
+pub struct Parsed {
+    pub proposal: Proposal,
+    pub tasks: Vec<Task>,
+    pub deltas: Vec<(String, DeltaFile)>,
+}
+
 fn tag(file: &str, diags: Vec<Diagnostic>) -> impl Iterator<Item = Finding> + '_ {
     diags.into_iter().map(move |d| (file.to_string(), d))
+}
+
+/// What a parse keeps for its caller: `load` keeps every text and finding, a
+/// hook keeps neither, and so copies nothing and reads no unused file.
+enum Sink<'a> {
+    All { texts: &'a mut Vec<(String, String)>, findings: &'a mut Vec<Finding> },
+    None,
+}
+
+impl Sink<'_> {
+    /// Whether the caller wants what the parse finds, texts and all.
+    fn open(&self) -> bool {
+        matches!(self, Sink::All { .. })
+    }
+
+    fn text(&mut self, name: &str, text: String) {
+        if let Sink::All { texts, .. } = self {
+            texts.push((name.to_string(), text));
+        }
+    }
+
+    fn diags(&mut self, file: &str, diags: Vec<Diagnostic>) {
+        if let Sink::All { findings, .. } = self {
+            findings.extend(tag(file, diags));
+        }
+    }
 }
 
 /// Parses and checks one change against the living specs.
 pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
     let mut texts = Vec::new();
     let mut findings = Vec::new();
+    let parsed = parse(dir, &mut Sink::All { texts: &mut texts, findings: &mut findings })?;
+    findings.extend(lint::Change { tasks: &parsed.tasks, deltas: &parsed.deltas, texts: &texts }.lint(&Living { specs: living }));
+    Ok(Loaded { proposal: parsed.proposal, tasks: parsed.tasks, deltas: parsed.deltas, texts, findings })
+}
+
+/// Parses one change with no lint and no text copies: the hook path reads the
+/// tasks and the proposal, never the findings.
+pub fn parsed(dir: &Path) -> Result<Parsed> {
+    parse(dir, &mut Sink::None)
+}
+
+fn parse(dir: &Path, sink: &mut Sink) -> Result<Parsed> {
     let proposal_text = read(&dir.join(PROPOSAL))?;
     let (proposal, diags) = parse_proposal(&proposal_text);
-    findings.extend(tag(PROPOSAL, diags));
-    texts.push((PROPOSAL.to_string(), proposal_text));
+    sink.diags(PROPOSAL, diags);
+    sink.text(PROPOSAL, proposal_text);
     let tasks_text = read(&dir.join(TASKS))?;
     let (mut tasks, diags) = parse_tasks(&tasks_text);
     apply_default(&mut tasks, proposal.mode);
-    findings.extend(tag(TASKS, diags));
-    texts.push((TASKS.to_string(), tasks_text));
-    if let Ok(design) = std::fs::read_to_string(dir.join(DESIGN)) {
+    sink.diags(TASKS, diags);
+    sink.text(TASKS, tasks_text);
+    if sink.open()
+        && let Ok(design) = std::fs::read_to_string(dir.join(DESIGN))
+    {
         let lines = design.lines().count();
         if lines > MAX_DESIGN_LINES {
-            findings.push((
-                DESIGN.to_string(),
-                Diagnostic::new(
+            sink.diags(
+                DESIGN,
+                vec![Diagnostic::new(
                     crate::diag::Rule::Size,
                     1,
                     format!("design.md has {lines} lines, more than {MAX_DESIGN_LINES}; keep only decisions, constraints and reasons"),
-                ),
-            ));
+                )],
+            );
         }
-        texts.push((DESIGN.to_string(), design));
+        sink.text(DESIGN, design);
     }
     let mut deltas = Vec::new();
     for path in md_files(&dir.join(DELTAS))? {
@@ -394,12 +441,11 @@ pub fn load(dir: &Path, living: &[(String, Spec)]) -> Result<Loaded> {
         let text = read(&path)?;
         let (file, diags) = parse_deltas(&text);
         let rel = format!("{DELTAS}/{cap}.md");
-        findings.extend(tag(&rel, diags));
-        texts.push((rel, text));
+        sink.diags(&rel, diags);
+        sink.text(&rel, text);
         deltas.push((cap, file));
     }
-    findings.extend(lint::Change { tasks: &tasks, deltas: &deltas, texts: &texts }.lint(&Living { specs: living }));
-    Ok(Loaded { proposal, tasks, deltas, texts, findings })
+    Ok(Parsed { proposal, tasks, deltas })
 }
 
 /// The current hash of every requirement a task covers: the delta text when
@@ -496,5 +542,47 @@ mod tests {
         assert_eq!(locate(&p, "q8w").unwrap(), format!("{}:3", spec.join("spec.md").display()));
         assert_eq!(locate(&p, "zzz").unwrap_err().code, "path");
         assert!(locate(&p, "REQ-").unwrap_err().message.contains("no id matches"));
+    }
+
+    /// The hook path parses the change `load` parses, and no more: a task that
+    /// covers a requirement no living spec holds is an error of the full load,
+    /// and `parsed` cannot find it, since it takes no specs to lint against.
+    #[test]
+    fn scale_change_parsed_matches_load_and_runs_no_lint() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let c = new(&p, "Out", "main", false).unwrap();
+        std::fs::write(c.path.join(TASKS), "# Tasks\n\n- TSK-x7k2q4 Write\n  covers: REQ-k3f9m2\n  verify: true\n  files: a\n").unwrap();
+        std::fs::write(c.path.join("specs/out.md"), "## ADD REQ-q8w2c7 Out\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n").unwrap();
+
+        let loaded = load(&c.path, &[]).unwrap();
+        let errors = loaded.errors().count();
+        assert!(errors > 0, "the fixture must fail the lint: {:?}", loaded.findings);
+        let parsed = parsed(&c.path).unwrap();
+        assert_eq!(parsed.tasks, loaded.tasks);
+        assert_eq!(parsed.proposal, loaded.proposal);
+        assert_eq!(parsed.deltas.len(), 1);
+        assert_eq!(loaded.texts.len(), 3, "the full load keeps every text");
+    }
+
+    /// `living` answers from the living specs alone, so a corrupt record costs
+    /// the hook path no parse of it at all.
+    #[test]
+    fn scale_change_living_reads_no_record() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &tmp.0.join("home"), Mode::Home).unwrap();
+        let spec = p.root.join("specs/cap");
+        std::fs::create_dir_all(&spec).unwrap();
+        std::fs::write(spec.join("spec.md"), "# Cap\n\n## REQ-q8w2c7 Old\nrvow SHALL.\n### Scenario: s\n- WHEN a\n- THEN b\n").unwrap();
+        let record = p.root.join(record::RECORD_FILE);
+        std::fs::write(&record, "{ not json").unwrap();
+        assert!(record::load(&p).is_err(), "the fixture record must be the corrupt one");
+
+        let living = living(&p).unwrap();
+        assert_eq!(living.len(), 1);
+        assert_eq!(living[0].0, "cap");
+        assert_eq!(living[0].1.requirements.len(), 1);
     }
 }

@@ -23,6 +23,11 @@ pub use rvow_base::layout::CACHE_FILE;
 const KEY_FORMAT: u32 = 2;
 const CHECK_KEY_FORMAT: u32 = 1;
 const BAD_MAC: &str = "has an invalid MAC";
+/// A cache file past this size is compacted to the newest entry per key, so a
+/// project that runs for months reads a bounded file.
+const CACHE_BYTES_LIMIT: u64 = 128 * 1024;
+/// The bytes a line adds to its body text: the MAC and the JSON around it.
+const LINE_OVERHEAD: u64 = 96;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Body {
@@ -114,6 +119,58 @@ impl Cache {
         Ok(cache)
     }
 
+    /// Whether the file has grown past the size that compacts it.
+    fn over_limit(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|m| m.len() > CACHE_BYTES_LIMIT)
+    }
+
+    /// Rewrites the file with the newest entry per `(unit, key)`, the most
+    /// recent first, up to half of `CACHE_BYTES_LIMIT`, so the next records do
+    /// not compact again at once. Keys change with each edit and commit, so the
+    /// oldest ones go; a dropped entry only reruns its task. The kept entries
+    /// chain again and are signed under the same key, so each one still verifies.
+    fn compact(&mut self, secret: &[u8]) -> Result<()> {
+        let mut newest: Vec<usize> = self.index.values().copied().collect();
+        newest.sort_unstable_by_key(|&at| std::cmp::Reverse((self.entries.get(at).map_or(0, |e| e.time), at)));
+        let mut kept = Vec::new();
+        let mut size = 0u64;
+        for at in newest {
+            let Some(entry) = self.entries.get(at) else { continue };
+            size += body_text(entry)?.len() as u64 + LINE_OVERHEAD;
+            if size > CACHE_BYTES_LIMIT / 2 {
+                break;
+            }
+            kept.push(at);
+        }
+        kept.sort_unstable();
+        let mut text = String::new();
+        let mut entries = Vec::with_capacity(kept.len());
+        let mut index = std::collections::HashMap::with_capacity(kept.len());
+        let mut last = String::new();
+        for at in kept {
+            let Some(entry) = self.entries.get(at) else { continue };
+            let mut body = entry.clone();
+            body.prev = last;
+            let mac = seal::mac(secret, &body_text(&body)?)?;
+            let line = serde_json::to_string(&Entry { body: body.clone(), mac })
+                .map_err(|e| Error::internal(format!("cache entry does not serialize: {e}")))?;
+            last = short_hash(line.as_bytes());
+            index.insert((body.unit.clone(), body.key.clone()), entries.len());
+            entries.push(body);
+            text.push_str(&line);
+            text.push('\n');
+        }
+        // A reader that does not hold the lock sees the old file or the new one,
+        // never a torn line.
+        let tmp = self.path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, &text).map_err(|e| Error::io(&tmp, e))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| Error::io(&self.path, e))?;
+        self.entries = entries;
+        self.index = index;
+        self.last = last;
+        Ok(())
+    }
+
     /// Appends one entry, which the index then names as the newest for its key.
     fn remember(&mut self, body: Body) {
         self.index.insert((body.unit.clone(), body.key.clone()), self.entries.len());
@@ -152,6 +209,8 @@ impl Cache {
             self.index.clear();
             self.warnings.clear();
             self.last.clear();
+        } else if self.over_limit() {
+            self.compact(&secret)?;
         }
         let body = Body {
             unit: unit.into(),
@@ -183,6 +242,12 @@ impl Cache {
     }
 }
 
+/// The SHA-256 of a file, read through one fixed buffer, so a large binary is
+/// never held whole. `None` when it cannot be read.
+fn file_sha256(path: &Path) -> Option<String> {
+    rvow_base::hash::sha256_file_hex(path).ok()
+}
+
 /// The resolved path and SHA-256 of an executable, found by path or on `PATH`,
 /// through symlinks.
 pub(crate) fn tool_id(name: &str) -> Option<(String, String)> {
@@ -198,7 +263,7 @@ pub(crate) fn tool_id(name: &str) -> Option<(String, String)> {
         if std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 == 0 {
             return None;
         }
-        meta.is_file().then(|| std::fs::read(&real).ok()).flatten().map(|b| (real.to_string_lossy().into_owned(), sha256_hex(&b)))
+        meta.is_file().then(|| file_sha256(&real)).flatten().map(|hash| (real.to_string_lossy().into_owned(), hash))
     })
 }
 
@@ -237,9 +302,40 @@ pub fn dirty_check_key(project: &Project, top: &Path, cmd: &str, tools: Option<&
     Ok(Some(sha256_hex(value.to_string().as_bytes())))
 }
 
+/// What every task key of one gate run shares: the HEAD listing, the tool
+/// hashes and the runner map. A run reads the tree once and each tool binary
+/// once, however many tasks it keys.
+pub struct KeyBase<'a> {
+    listing: String,
+    tools: Option<BTreeMap<String, String>>,
+    runners: &'a BTreeMap<String, crate::template::Runner>,
+}
+
+impl<'a> KeyBase<'a> {
+    pub fn new(project: &Project, home: &Path, top: &Path, runners: &'a BTreeMap<String, crate::template::Runner>) -> Result<KeyBase<'a>> {
+        Ok(KeyBase { listing: git::run(top, &["ls-tree", "-r", "-z", "HEAD"])?, tools: tool_fingerprint(project, home)?, runners })
+    }
+
+    /// The `tools` map, or `None` when a listed tool is missing, which keeps
+    /// every key of the run uncacheable.
+    pub fn tools(&self) -> Option<&BTreeMap<String, String>> {
+        self.tools.as_ref()
+    }
+
+    /// The `(mode, type, path)` triples of the listing, borrowed from it.
+    fn entries(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.listing.split('\0').filter_map(|e| {
+            let (meta, path) = e.split_once('\t')?;
+            let mut parts = meta.split(' ');
+            Some((parts.next()?, parts.nth(1)?, path))
+        })
+    }
+}
+
 /// The cache key of a task, or `None` when the task must not be cached: an
 /// `env` command failed or a listed tool is missing. The tree comes from HEAD,
-/// which the gate's clean worktree matches, so no file is read.
+/// which the gate's clean worktree matches, so no file is read. A caller with
+/// the tasks of one run builds one `KeyBase` and uses `cache_key_with`.
 pub fn cache_key(
     project: &Project,
     home: &Path,
@@ -249,22 +345,26 @@ pub fn cache_key(
     requirements: &BTreeMap<String, String>,
     env: &Env,
 ) -> Result<Option<String>> {
+    let runners = config::runners(project)?;
+    let base = KeyBase::new(project, home, top, &runners)?;
+    cache_key_with(&base, config, task, requirements, env)
+}
+
+/// `cache_key` under a key base the run already built.
+pub fn cache_key_with(
+    base: &KeyBase<'_>,
+    config: &Config,
+    task: &Task,
+    requirements: &BTreeMap<String, String>,
+    env: &Env,
+) -> Result<Option<String>> {
     if env.commands.values().any(|v| v.starts_with("failed: ")) {
         return Ok(None);
     }
-    let Some(tools) = tool_fingerprint(project, home)? else { return Ok(None) };
-    let listing = git::run(top, &["ls-tree", "-r", "-z", "HEAD"])?;
-    let tree: Vec<(&str, &str, &str)> = listing
-        .split('\0')
-        .filter_map(|e| {
-            let (meta, path) = e.split_once('\t')?;
-            let mut parts = meta.split(' ');
-            Some((parts.next()?, parts.nth(1)?, path))
-        })
-        .collect();
+    let Some(tools) = base.tools.as_ref() else { return Ok(None) };
     for glob in &task.files {
         let one = fingerprint::globset(std::slice::from_ref(glob))?;
-        if !tree.iter().any(|(_, _, path)| one.is_match(path)) {
+        if !base.entries().any(|(_, _, path)| one.is_match(path)) {
             return Err(Error::new(
                 "cache-scope",
                 format!("{}: the files glob {glob:?} matches no file at HEAD", task.id),
@@ -275,12 +375,11 @@ pub fn cache_key(
     let mut globs = task.files.clone();
     globs.extend(config.inputs.iter().cloned());
     let scope = fingerprint::globset(&globs)?;
-    let files: Vec<&(&str, &str, &str)> = tree.iter().filter(|(_, _, path)| scope.is_match(path)).collect();
+    let files: Vec<(&str, &str, &str)> = base.entries().filter(|(_, _, path)| scope.is_match(path)).collect();
     // A runner change keeps the verify text but runs a new command, so the
     // runner stamp keys the entry: the old proof's cache entry goes stale.
     // A verify that names no known runner keys on nothing, as before.
-    let runners = config::runners(project)?;
-    let runner = crate::proof::runner_stamp(&runners, task);
+    let runner = crate::proof::runner_stamp(base.runners, task);
     let value = serde_json::json!([
         KEY_FORMAT,
         env!("CARGO_PKG_VERSION"),
@@ -342,6 +441,173 @@ pub fn dependent_keys(tasks: &[Task], own: &BTreeMap<String, Option<String>>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::testrepo::*;
+    use crate::store::{Mode, init};
+
+    /// A repository with `f00.txt` and its neighbours committed, a home for the
+    /// cache key and a config that names one tool, so a key covers the tree
+    /// listing, a tool binary and the runners.
+    fn key_fixture(files: usize) -> (TempDir, Project, PathBuf, PathBuf) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        for i in 0..files {
+            std::fs::write(repo.join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "files"]);
+        std::fs::write(p.root.join(crate::store::CONFIG_FILE), "tools = [\"git\"]\n").unwrap();
+        (tmp, p, repo, home)
+    }
+
+    /// `n` tasks of one file each, as a change's `tasks.md` holds them.
+    fn tasks(n: usize) -> Vec<Task> {
+        let text: String = (0..n).map(|i| format!("- TSK-new{} T\n  verify: true\n  files: f{i:02}.txt\n", i + 1)).collect();
+        crate::tasks::parse_tasks(&text).0
+    }
+
+    fn reqs() -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
+    /// The keys of the first `n` tasks and the git processes that made them,
+    /// with the one key base a gate run builds.
+    fn keys_and_spawns(
+        n: usize,
+        p: &Project,
+        home: &Path,
+        repo: &Path,
+        config: &Config,
+        runners: &BTreeMap<String, crate::template::Runner>,
+        env: &Env,
+    ) -> (usize, Vec<String>) {
+        let before = git::spawns();
+        let base = KeyBase::new(p, home, repo, runners).unwrap();
+        let keys: Vec<String> = tasks(n).iter().map(|t| cache_key_with(&base, config, t, &reqs(), env).unwrap().unwrap()).collect();
+        (git::spawns() - before, keys)
+    }
+
+    /// The per-task key the shared base replaced: the same listing, tools and
+    /// runners, asked again for every task.
+    fn reference_key(p: &Project, home: &Path, repo: &Path, config: &Config, task: &Task, env: &Env) -> String {
+        let tools = tool_fingerprint(p, home).unwrap().unwrap();
+        let listing = git::run(repo, &["ls-tree", "-r", "-z", "HEAD"]).unwrap();
+        let tree: Vec<(&str, &str, &str)> = listing
+            .split('\0')
+            .filter_map(|e| {
+                let (meta, path) = e.split_once('\t')?;
+                let mut parts = meta.split(' ');
+                Some((parts.next()?, parts.nth(1)?, path))
+            })
+            .collect();
+        let mut globs = task.files.clone();
+        globs.extend(config.inputs.iter().cloned());
+        let scope = fingerprint::globset(&globs).unwrap();
+        let files: Vec<&(&str, &str, &str)> = tree.iter().filter(|(_, _, path)| scope.is_match(path)).collect();
+        let runners = config::runners(p).unwrap();
+        let runner = crate::proof::runner_stamp(&runners, task);
+        let value = serde_json::json!([
+            KEY_FORMAT,
+            env!("CARGO_PKG_VERSION"),
+            task_hash(task),
+            reqs(),
+            files,
+            env.os,
+            env.arch,
+            env.commands,
+            env.vars,
+            config.rerun_env,
+            tools,
+            runner,
+        ]);
+        sha256_hex(value.to_string().as_bytes())
+    }
+
+    /// One key base serves every task of a run: the keys of 8 tasks start as
+    /// many git processes as the keys of 2, and the base is the one listing.
+    #[test]
+    fn scale_cachekey_two_and_eight_tasks_start_the_same_git_processes() {
+        let (_tmp, p, repo, home) = key_fixture(8);
+        let config = crate::config::load(&p, &home).unwrap();
+        let runners = config::runners(&p).unwrap();
+        let env = crate::fingerprint::env(&repo, &config).unwrap();
+        // A warm-up key pays for the one-time git resolution.
+        let _ = keys_and_spawns(2, &p, &home, &repo, &config, &runners, &env);
+        let (two, keys2) = keys_and_spawns(2, &p, &home, &repo, &config, &runners, &env);
+        let (eight, keys8) = keys_and_spawns(8, &p, &home, &repo, &config, &runners, &env);
+        assert_eq!(keys2.len(), 2);
+        assert_eq!(keys8.len(), 8);
+        assert_eq!(two, 1, "one HEAD listing per run");
+        assert_eq!(eight, two, "the keys of 8 tasks start {eight} git processes against {two} for 2");
+    }
+
+    /// The key of a task is the one the per-task computation produced, so the
+    /// cache of an older rvow still answers.
+    #[test]
+    fn scale_cachekey_matches_the_per_task_key() {
+        let (_tmp, p, repo, home) = key_fixture(2);
+        let config = crate::config::load(&p, &home).unwrap();
+        let runners = config::runners(&p).unwrap();
+        let env = crate::fingerprint::env(&repo, &config).unwrap();
+        let base = KeyBase::new(&p, &home, &repo, &runners).unwrap();
+        for task in tasks(2) {
+            let want = reference_key(&p, &home, &repo, &config, &task, &env);
+            let got = cache_key_with(&base, &config, &task, &reqs(), &env).unwrap().unwrap();
+            assert_eq!(got, want, "{} keys on what it keyed on before", task.id);
+        }
+    }
+
+    /// A tool binary is hashed through one fixed buffer: a file larger than the
+    /// buffer hashes as the whole file does.
+    #[test]
+    fn scale_cachekey_tool_hash_reads_through_one_buffer() {
+        let tmp = TempDir::new();
+        let path = tmp.0.join("tool.bin");
+        let bytes: Vec<u8> = (0..(64 * 1024 * 3 + 7)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(file_sha256(&path).as_deref(), Some(sha256_hex(&bytes).as_str()), "3 buffers of bytes hash as one file");
+    }
+
+    /// A cache file that only grows is compacted to the newest entry per key
+    /// once it passes the limit, and the newest entry still answers.
+    #[test]
+    fn scale_cachekey_rerun_cache_compacts_past_its_limit() {
+        let (_tmp, p, repo, home) = key_fixture(1);
+        let lock = p.lock().unwrap();
+        let mut cache = Cache::open(&p, &home).unwrap();
+        for i in 0..2000u64 {
+            cache.record(&lock, "t1", "k", Some(1), i, "m").unwrap();
+            cache.record(&lock, "t2", "k", Some(1), i, "m").unwrap();
+        }
+        let size = std::fs::metadata(&cache.path).unwrap().len();
+        assert!(size <= CACHE_BYTES_LIMIT, "2000 entries left {size} bytes, over the limit of {CACHE_BYTES_LIMIT}");
+        drop(cache);
+        let _ = repo;
+        let reopened = Cache::open(&p, &home).unwrap();
+        assert!(reopened.warnings().is_empty(), "a compacted file stays trusted: {:?}", reopened.warnings());
+        assert_eq!(reopened.lookup("t1", "k", now_ms(), u64::MAX).map(|h| h.duration_ms), Some(1999), "the newest entry survives");
+        assert_eq!(reopened.lookup("t2", "k", now_ms(), u64::MAX).map(|h| h.duration_ms), Some(1999), "and so does the other key's");
+    }
+
+    #[test]
+    fn scale_cachekey_many_distinct_keys_stay_bounded_and_append() {
+        let (_tmp, p, _repo, home) = key_fixture(1);
+        let lock = p.lock().unwrap();
+        let mut cache = Cache::open(&p, &home).unwrap();
+        for i in 0..3000u64 {
+            cache.record(&lock, "t", &format!("{i:064}"), Some(1), i, "m").unwrap();
+        }
+        let size = std::fs::metadata(&cache.path).unwrap().len();
+        assert!(size <= CACHE_BYTES_LIMIT, "3000 keys left {size} bytes, over the limit of {CACHE_BYTES_LIMIT}");
+        cache.record(&lock, "t", &format!("{:064}", 3000), Some(1), 3000, "m").unwrap();
+        assert!(std::fs::metadata(&cache.path).unwrap().len() > size, "the record after a compaction appends, it does not compact again");
+        drop(cache);
+        let reopened = Cache::open(&p, &home).unwrap();
+        assert!(reopened.warnings().is_empty(), "{:?}", reopened.warnings());
+        assert!(reopened.lookup("t", &format!("{:064}", 3000), now_ms(), u64::MAX).is_some(), "the newest key is kept");
+        assert!(reopened.lookup("t", &format!("{:064}", 0), now_ms(), u64::MAX).is_none(), "the oldest key is dropped");
+    }
 
     fn body(unit: &str, key: &str, time: u64) -> Body {
         Body {

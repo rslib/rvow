@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Stop a hook from timing out on a command with a glob over a very large folder, such as a shared Cargo `deps` folder.
+  The globs of one command read at most 16,384 folder entries, and past that the folder stands for its matches.
+- Make the hooks, the gate and the daemon do work that stays the same size as the store, the ledgers and the repository grow, and start fewer git processes.
+  A ledger append, a plan check, the stop snapshot, the rerun cache and the gate cache keys no longer grow with history.
+- Show the median and 95th percentile time of each hook step, such as the store lookup, the rules and the snapshot, in `rvow stats`.
 - Stop counting a proof run that timed out before any test ran as the failed half of a flaky task, so a stuck machine no longer blocks the archive.
   A timeout after some tests ran still marks the task flaky.
 - Shorten the rvow tool descriptions, and in pi let the dialog tools wait for `tool_search` when it is on, so the tools cost fewer prompt tokens.

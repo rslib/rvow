@@ -2,6 +2,7 @@
 //! asks for the same few sets many times.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
@@ -13,20 +14,22 @@ const GLOBSETS_KEPT: usize = 32;
 /// The set `patterns` compile to. A compiled set is a pure function of its
 /// patterns, and building one compiles every regex. An entry with no glob
 /// characters names a file or a folder, so it also matches every path under it.
-pub fn globset(patterns: &[String]) -> Result<GlobSet> {
+/// A hit hands back the set itself, so the regexes are never compiled or copied
+/// again.
+pub fn globset(patterns: &[String]) -> Result<Arc<GlobSet>> {
     thread_local! {
-        static SETS: RefCell<Vec<(Vec<String>, GlobSet)>> = const { RefCell::new(Vec::new()) };
+        static SETS: RefCell<Vec<(Vec<String>, Arc<GlobSet>)>> = const { RefCell::new(Vec::new()) };
     }
-    if let Some(set) = SETS.with(|sets| sets.borrow().iter().find(|(p, _)| p == patterns).map(|(_, set)| set.clone())) {
+    if let Some(set) = SETS.with(|sets| sets.borrow().iter().find(|(p, _)| p == patterns).map(|(_, set)| Arc::clone(set))) {
         return Ok(set);
     }
-    let set = build_globset(patterns)?;
+    let set = Arc::new(build_globset(patterns)?);
     SETS.with(|sets| {
         let mut sets = sets.borrow_mut();
         if sets.len() >= GLOBSETS_KEPT {
             sets.remove(0);
         }
-        sets.push((patterns.to_vec(), set.clone()));
+        sets.push((patterns.to_vec(), Arc::clone(&set)));
     });
     Ok(set)
 }
@@ -56,8 +59,18 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
 mod tests {
     use super::*;
 
-    fn set(p: &str) -> GlobSet {
+    fn set(p: &str) -> Arc<GlobSet> {
         globset(&[p.to_string()]).unwrap()
+    }
+
+    /// A second ask for the same patterns hands back the compiled set itself.
+    #[test]
+    fn scale_globcache_hit_shares() {
+        let patterns = vec!["crates/cached".to_string()];
+        let first = globset(&patterns).unwrap();
+        let second = globset(&patterns).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "a hit returns the cached set, never a compile or a copy");
+        assert!(second.is_match("crates/cached/src/x.rs"));
     }
 
     #[test]

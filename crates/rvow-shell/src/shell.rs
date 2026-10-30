@@ -369,7 +369,16 @@ fn inline_code(inv: &[String]) -> Option<String> {
     inv.get(at + 1).cloned()
 }
 
+#[cfg(test)]
+thread_local! {
+    static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn parse(cmd: &str, depth: u8, outer: &Vars) -> Shell {
+    #[cfg(test)]
+    if depth == 0 {
+        PARSES.with(|n| n.set(n.get() + 1));
+    }
     let tokens = tokenize(&without_heredocs(cmd));
     let mut vars = outer.clone();
     for seg in &tokens.commands {
@@ -398,22 +407,22 @@ fn parse(cmd: &str, depth: u8, outer: &Vars) -> Shell {
     Shell { commands, words }
 }
 
-/// The top-level parse of `cmd`, with the process environment when `env`. A
-/// command with no `$` reads no variable, so its parse is the same either way,
-/// and the last one is kept: one hook call runs a dozen rules over one command.
+/// The top-level parse of `cmd`, with the process environment when `env`. The
+/// last parse of each kind is kept: one hook call runs a dozen rules over one
+/// command. A command with no `$` reads no variable, so either kind serves it.
 fn parsed(cmd: &str, env: bool) -> std::rc::Rc<Shell> {
     use std::rc::Rc;
+    type Slot = std::cell::RefCell<Option<(String, Rc<Shell>)>>;
     thread_local! {
-        static LAST: std::cell::RefCell<Option<(String, Rc<Shell>)>> = const { std::cell::RefCell::new(None) };
+        static LAST: [Slot; 2] = const { [std::cell::RefCell::new(None), std::cell::RefCell::new(None)] };
     }
-    if cmd.contains('$') {
-        return Rc::new(parse(cmd, 0, &if env { Vars::with_env() } else { Vars::default() }));
-    }
-    if let Some(sh) = LAST.with(|last| last.borrow().as_ref().filter(|(c, _)| c == cmd).map(|(_, sh)| Rc::clone(sh))) {
+    let env = env && cmd.contains('$');
+    let hit = |slot: &Slot| slot.borrow().as_ref().filter(|(c, _)| c == cmd).map(|(_, sh)| Rc::clone(sh));
+    if let Some(sh) = LAST.with(|last| hit(&last[usize::from(env)])) {
         return sh;
     }
-    let sh = Rc::new(parse(cmd, 0, &Vars::default()));
-    LAST.with(|last| *last.borrow_mut() = Some((cmd.to_string(), Rc::clone(&sh))));
+    let sh = Rc::new(parse(cmd, 0, &if env { Vars::with_env() } else { Vars::default() }));
+    LAST.with(|last| *last[usize::from(env)].borrow_mut() = Some((cmd.to_string(), Rc::clone(&sh))));
     sh
 }
 
@@ -777,6 +786,10 @@ pub fn bash_denial(cmd: &str) -> Option<String> {
 /// `**` cannot walk a whole tree.
 const GLOB_LIMIT: usize = 4096;
 
+/// How many folder entries the globs of one command read before they stop. The
+/// hook has 10 s, and a shared Cargo `deps` folder can hold millions of entries.
+const DIR_SCAN_LIMIT: usize = 16_384;
+
 fn has_glob(word: &str) -> bool {
     word.contains(['*', '?', '['])
 }
@@ -953,7 +966,7 @@ pub fn glob_paths(cmd: &str, cwd: &Path) -> Vec<PathBuf> {
     // the process environment, as a shell does.
     let home = std::env::var("HOME").ok();
     let sh = parsed(cmd, true);
-    let mut out = Vec::new();
+    let mut scan = Scan { out: Vec::new(), left: DIR_SCAN_LIMIT };
     for word in &sh.words {
         if !has_glob(word) {
             continue;
@@ -964,12 +977,13 @@ pub fn glob_paths(cmd: &str, cwd: &Path) -> Vec<PathBuf> {
             Ok(rest) => (PathBuf::from("/"), rest),
             Err(_) => (cwd.to_path_buf(), path),
         };
-        let components: Vec<String> = rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-        expand(base, &components, &mut out);
-        if out.len() >= GLOB_LIMIT {
+        let parts: Vec<Part> = rest.components().map(|c| Part::new(&c.as_os_str().to_string_lossy())).collect();
+        expand(base, &parts, &mut scan);
+        if scan.out.len() >= GLOB_LIMIT {
             break;
         }
     }
+    let mut out = scan.out;
     out.retain(|p| p.exists());
     out
 }
@@ -983,39 +997,87 @@ fn expand_tilde(word: &str, home: Option<&str>) -> String {
     }
 }
 
-fn expand(prefix: PathBuf, components: &[String], out: &mut Vec<PathBuf>) {
-    if out.len() >= GLOB_LIMIT {
+/// One component of a glob word, with its matcher compiled once.
+enum Part {
+    Here,
+    Up,
+    Name(String),
+    Glob(globset::GlobMatcher),
+    Invalid,
+}
+
+impl Part {
+    fn new(text: &str) -> Part {
+        match text {
+            "" | "." => Part::Here,
+            ".." => Part::Up,
+            _ if has_glob(text) => globset::Glob::new(text).map_or(Part::Invalid, |g| Part::Glob(g.compile_matcher())),
+            _ => Part::Name(text.to_string()),
+        }
+    }
+}
+
+/// The expansions so far and the folder entries the call may still read.
+struct Scan {
+    out: Vec<PathBuf>,
+    left: usize,
+}
+
+fn expand(prefix: PathBuf, parts: &[Part], scan: &mut Scan) {
+    if scan.out.len() >= GLOB_LIMIT {
         return;
     }
-    let Some((first, rest)) = components.split_first() else {
-        out.push(prefix);
+    let Some((first, rest)) = parts.split_first() else {
+        scan.out.push(prefix);
         return;
     };
-    match first.as_str() {
-        "" | "." => expand(prefix, rest, out),
-        ".." => expand(prefix.parent().map(Path::to_path_buf).unwrap_or(prefix), rest, out),
-        _ if has_glob(first) => {
-            let Ok(glob) = globset::Glob::new(first) else {
-                return;
-            };
-            let matcher = glob.compile_matcher();
+    match first {
+        Part::Here => expand(prefix, rest, scan),
+        Part::Up => expand(prefix.parent().map(Path::to_path_buf).unwrap_or(prefix), rest, scan),
+        Part::Name(name) => expand(prefix.join(name), rest, scan),
+        Part::Invalid => {}
+        Part::Glob(matcher) => {
             let Ok(entries) = std::fs::read_dir(&prefix) else {
                 return;
             };
-            let mut names: Vec<String> = entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
-            names.sort();
-            for name in names {
-                if out.len() >= GLOB_LIMIT {
+            let mut names = Vec::new();
+            for entry in entries {
+                // Out of budget: the folder stands for its matches, so a guard
+                // still sees a glob inside a protected folder.
+                if scan.left == 0 {
+                    scan.out.push(prefix);
                     return;
                 }
-                if matcher.is_match(&name) {
-                    expand(prefix.join(&name), rest, out);
+                scan.left -= 1;
+                let Ok(entry) = entry else { continue };
+                let name = entry.file_name();
+                if name.to_str().is_some_and(|n| matcher.is_match(n)) {
+                    names.push(name);
                 }
             }
+            names.sort();
+            for name in names {
+                if scan.out.len() >= GLOB_LIMIT {
+                    return;
+                }
+                expand(prefix.join(name), rest, scan);
+            }
         }
-        _ => expand(prefix.join(first), rest, out),
     }
 }
+
+/// The first line of the file at `path`, read up to `FIRST_LINE_LIMIT` bytes.
+fn first_line(path: &Path) -> String {
+    use std::io::{BufRead, Read};
+    let Ok(file) = std::fs::File::open(path) else { return String::new() };
+    let mut line = Vec::new();
+    let _ = std::io::BufReader::new(file.take(FIRST_LINE_LIMIT)).read_until(b'\n', &mut line);
+    let text = String::from_utf8_lossy(&line);
+    text.trim_end_matches(['\n', '\r']).to_string()
+}
+
+/// How much of a script `first_line` reads to find its interpreter line.
+const FIRST_LINE_LIMIT: u64 = 4096;
 
 fn reads_no_file(name: &str, arg: &str) -> bool {
     if arg == "-" {
@@ -1091,7 +1153,7 @@ pub fn script_rule_committed(cmd: &str, cwd: &Path, committed: &dyn Fn(&Path) ->
         };
         // The interpreter comes from the file's own first line, never from
         // the selected text, which may hold only the added lines.
-        let first = std::fs::read_to_string(&path).ok().and_then(|t| t.lines().next().map(str::to_string)).unwrap_or_default();
+        let first = first_line(&path);
         if let Some(inner) = check_text(name, &first, &text, file) {
             return inner;
         }
@@ -1478,6 +1540,68 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn glob_in_a_huge_folder_stands_for_the_folder() {
+        let dir = TempDir::new("huge-glob");
+        let deps = dir.0.join("deps");
+        std::fs::create_dir(&deps).unwrap();
+        for i in 0..=DIR_SCAN_LIMIT {
+            std::fs::File::create(deps.join(format!("prepare-{i}"))).unwrap();
+        }
+        assert_eq!(glob_paths("ls deps/prepare-* | head -1", &dir.0), vec![deps]);
+    }
+
+    #[test]
+    fn globs_over_many_folders_share_one_budget() {
+        let dir = TempDir::new("many-glob");
+        let per = 128;
+        for d in 0..=DIR_SCAN_LIMIT / per {
+            let sub = dir.0.join(format!("d{d:04}"));
+            std::fs::create_dir(&sub).unwrap();
+            for f in 0..per {
+                std::fs::File::create(sub.join(format!("f{f}"))).unwrap();
+            }
+        }
+        // 129 folders of 128: the budget runs out in the 127th, and it and the
+        // two folders after it stand for their matches.
+        let out = glob_paths("ls */missing-*", &dir.0);
+        let names: Vec<_> = out.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert_eq!(names, ["d0126", "d0127", "d0128"]);
+    }
+
+    #[test]
+    fn scale_shell_parse_once_with_dollar() {
+        let cmd = "cp $HOME/a.rs ./b.rs && cat ${HOME}/c";
+        let before = PARSES.with(std::cell::Cell::get);
+        for _ in 0..3 {
+            path_words(cmd);
+            glob_paths(cmd, Path::new("/"));
+            bash_rule(cmd);
+            reads_only(cmd);
+        }
+        assert_eq!(PARSES.with(std::cell::Cell::get) - before, 2, "one parse with the environment, one without");
+    }
+
+    #[test]
+    fn scale_shell_first_line_of_a_big_script() {
+        let dir = TempDir::new("first-line");
+        let script = dir.0.join("run.sh");
+        let mut text = String::from("#!/bin/bash\r\n");
+        text.push_str(&"echo x\n".repeat(100_000));
+        std::fs::write(&script, &text).unwrap();
+        assert_eq!(first_line(&script), "#!/bin/bash");
+        std::fs::write(&script, "z".repeat(10_000)).unwrap();
+        assert_eq!(first_line(&script).len(), FIRST_LINE_LIMIT as usize);
+    }
+
+    #[test]
+    fn glob_in_a_small_folder_expands() {
+        let dir = TempDir::new("small-glob");
+        std::fs::write(dir.0.join("a.rs"), "").unwrap();
+        std::fs::write(dir.0.join("b.txt"), "").unwrap();
+        assert_eq!(glob_paths("cat *.rs", &dir.0), vec![dir.0.join("a.rs")]);
     }
 
     #[test]

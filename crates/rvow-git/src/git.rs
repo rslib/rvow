@@ -160,10 +160,32 @@ fn without_hook_env(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = without_hook_env(Command::new(bin_str()).arg("-C").arg(dir).args(args))
-        .output()
-        .map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
+thread_local! {
+    /// The git processes this thread started through this module.
+    static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many git processes this thread has started through this module. A test
+/// reads it before and after a call to prove the call starts no more of them
+/// as its input grows.
+#[doc(hidden)]
+pub fn spawns() -> usize {
+    SPAWNS.with(std::cell::Cell::get)
+}
+
+/// The one place that starts git: a command in `dir`, counted, with the
+/// repository vars of a git hook removed so they cannot override `-C`.
+fn command(dir: &Path) -> Command {
+    SPAWNS.with(|n| n.set(n.get() + 1));
+    let mut cmd = Command::new(bin_str());
+    cmd.arg("-C").arg(dir);
+    without_hook_env(&mut cmd);
+    cmd
+}
+
+/// Runs a command and trims its output, naming `args` when git fails.
+fn tell(cmd: &mut Command, args: &[&str]) -> Result<String> {
+    let out = cmd.output().map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
     if !out.status.success() {
         return Err(Error::new(
             "git",
@@ -172,6 +194,10 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
+    tell(command(dir).args(args), args)
 }
 
 /// The base branch ref to measure from: the local or the remote base branch,
@@ -379,16 +405,18 @@ pub struct TaskDiff {
     pub files: Vec<String>,
 }
 
-/// The diff of every file that matches `globs` against `base`: committed
-/// changes since the base, uncommitted edits and untracked files. An
-/// untracked file shows as an added file. Files outside the globs stay out.
-/// Empty when nothing in scope changed.
 /// Splits NUL-terminated git output (`-z`) into paths. `-z` leaves paths
 /// unquoted, so a name with non-ASCII bytes still matches the task's globs.
 fn nul_paths(out: &str) -> Vec<String> {
     out.strip_suffix('\0').unwrap_or(out).split('\0').filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
+/// The diff of every file that matches `globs` against `base`: committed
+/// changes since the base, uncommitted edits and untracked files. An
+/// untracked file shows as an added file. Files outside the globs stay out.
+/// Empty when nothing in scope changed. One git call covers every tracked file
+/// and one covers every untracked file, so a task of 20 files costs the same
+/// number of processes as a task of 2.
 pub fn task_diff(top: &Path, base: &str, globs: &[String]) -> Result<TaskDiff> {
     let set = rvow_base::glob::globset(globs)?;
     let mut untracked = std::collections::HashSet::new();
@@ -400,39 +428,147 @@ pub fn task_diff(top: &Path, base: &str, globs: &[String]) -> Result<TaskDiff> {
     names.sort();
     names.dedup();
     let files: Vec<String> = names.into_iter().filter(|f| set.is_match(f)).collect();
-    let mut diff = String::new();
-    for f in &files {
-        // quotePath=false keeps non-ASCII names raw in the patch headers,
-        // so an --in-diff consumer sees the same path as RVOW_CHANGED_FILES.
-        let part = if untracked.contains(f) {
-            diff_no_index(top, f)?
-        } else {
-            run(top, &["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-renames", base, "--", f])?
-        };
-        if !part.is_empty() {
-            if !diff.is_empty() {
-                diff.push('\n');
-            }
-            diff.push_str(&part);
+    let changed: Vec<&str> = files.iter().map(String::as_str).filter(|f| !untracked.contains(*f)).collect();
+    // A folder here is a nested repository, which no diff of files can show.
+    let fresh: Vec<&str> = files.iter().map(String::as_str).filter(|f| untracked.contains(*f) && !f.ends_with('/')).collect();
+    let changed_diff = if changed.is_empty() { String::new() } else { run(top, &changed_args(base, &changed))? };
+    let fresh_diff = if fresh.is_empty() { String::new() } else { added_diffs(top, &fresh)? };
+    // Each call prints its files in path order, so the parts go back into the
+    // one order the per-file calls printed them in. A run whose output does not
+    // line up keeps the call order, which holds every part just the same.
+    let diff = match (diff_parts(&changed_diff, &changed), diff_parts(&fresh_diff, &fresh)) {
+        (Some(changed_parts), Some(fresh_parts)) => interleave(&files, &changed, &fresh, &changed_parts, &fresh_parts),
+        _ => {
+            let mut diff = String::new();
+            push_part(&mut diff, &changed_diff);
+            push_part(&mut diff, &fresh_diff);
+            diff
         }
-    }
+    };
     Ok(TaskDiff { diff, files })
 }
 
-/// `git diff --no-index /dev/null <file>`: the added-file diff of an
-/// untracked file. It exits 1 on a difference, which is the expected case.
-fn diff_no_index(top: &Path, rel: &str) -> Result<String> {
-    let mut cmd = Command::new(bin_str());
-    cmd.arg("-C").arg(top).args(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", rel]);
-    let out = without_hook_env(&mut cmd).output().map_err(|e| Error::new("git", format!("cannot run git: {e}"), "install git"))?;
-    match out.status.code() {
-        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string()),
-        _ => Err(Error::new(
-            "git",
-            format!("git diff --no-index failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
-            "run the command in a git repository",
-        )),
+/// The arguments of the `git diff` that covers the tracked files: `quotePath=false`
+/// keeps non-ASCII names raw in the patch headers, so an `--in-diff` consumer
+/// sees the same path as RVOW_CHANGED_FILES.
+fn changed_args<'a>(base: &'a str, changed: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-renames", base, "--"];
+    args.extend(changed.iter().copied());
+    args
+}
+
+/// The added-file diffs of the untracked files: one `git add -N` records them
+/// as intent to add in an index of this call, and one `diff` shows that index
+/// against the empty tree. `git diff --no-index /dev/null <file>` prints the
+/// same patch for one file, at one git process each.
+fn added_diffs(top: &Path, files: &[&str]) -> Result<String> {
+    let scratch = Scratch::new()?;
+    let mut record = vec!["--literal-pathspecs", "add", "-N", "--"];
+    record.extend(files.iter().copied());
+    tell(scratch.batch(top).args(&record), &record)?;
+    let tree = empty_tree(top)?;
+    let diff = ["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-renames", &tree];
+    tell(scratch.batch(top).args(diff), &diff)
+}
+
+/// The id of the empty tree of the repository that holds `top`: what an
+/// untracked file is diffed against. Asked each time, since it depends on the
+/// hash function of the repository.
+fn empty_tree(top: &Path) -> Result<String> {
+    run(top, &["hash-object", "-t", "tree", "/dev/null"])
+}
+
+/// The folder of one batched diff of untracked files: its own index and its
+/// own object store, so the repository is read and never written, even when
+/// git records the empty blob of an intent-to-add entry. Removed when the call
+/// ends.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Scratch> {
+        static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("rvow-diff-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // git takes an object store for a repository only with both subfolders.
+        for sub in ["objects/info", "objects/pack"] {
+            std::fs::create_dir_all(dir.join(sub)).map_err(|e| Error::io(&dir, e))?;
+        }
+        Ok(Scratch(dir))
     }
+
+    /// A git command in `top` that writes its index and its objects here.
+    fn batch(&self, top: &Path) -> Command {
+        let mut cmd = command(top);
+        cmd.env("GIT_INDEX_FILE", self.0.join("index")).env("GIT_OBJECT_DIRECTORY", self.0.join("objects"));
+        cmd
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Joins one part of a diff onto the rest, as the per-file calls did.
+fn push_part(diff: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !diff.is_empty() {
+        diff.push('\n');
+    }
+    diff.push_str(part);
+}
+
+/// Splits a batched diff into one part per file, in the order of `files`: the
+/// header at each place must name the file it belongs to. `None` when the
+/// output does not line up with the files the call was asked for.
+fn diff_parts<'a>(out: &'a str, files: &[&str]) -> Option<Vec<&'a str>> {
+    let mut parts = Vec::with_capacity(files.len());
+    let mut rest = out;
+    for f in files {
+        if !header_names(rest.split('\n').next().unwrap_or_default(), f) {
+            return None;
+        }
+        match rest.find("\ndiff --git ") {
+            Some(at) => {
+                parts.push(&rest[..at]);
+                rest = &rest[at + 1..];
+            }
+            None => {
+                parts.push(rest);
+                rest = "";
+            }
+        }
+    }
+    rest.is_empty().then_some(parts)
+}
+
+/// Whether a `diff --git` header line names `path` on both sides.
+fn header_names(head: &str, path: &str) -> bool {
+    head.strip_prefix("diff --git a/")
+        .and_then(|r| r.strip_prefix(path))
+        .and_then(|r| r.strip_prefix(" b/"))
+        .and_then(|r| r.strip_prefix(path))
+        .is_some_and(str::is_empty)
+}
+
+/// The parts of both calls, back in the sorted order of `files`.
+fn interleave(files: &[String], changed: &[&str], fresh: &[&str], changed_parts: &[&str], fresh_parts: &[&str]) -> String {
+    let mut diff = String::new();
+    let (mut c, mut f) = (0, 0);
+    for name in files {
+        if changed.get(c) == Some(&name.as_str()) {
+            push_part(&mut diff, changed_parts.get(c).copied().unwrap_or_default());
+            c += 1;
+        } else if fresh.get(f) == Some(&name.as_str()) {
+            push_part(&mut diff, fresh_parts.get(f).copied().unwrap_or_default());
+            f += 1;
+        }
+    }
+    diff
 }
 
 /// Turns a remote URL into a `host/owner/repo` path as ghq does, or `None` for a
@@ -463,7 +599,6 @@ pub fn remote_path(url: &str) -> Option<String> {
 #[doc(hidden)]
 pub mod testrepo {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -560,11 +695,10 @@ pub mod testrepo {
     }
 
     /// Runs git with the user's global and system config ignored, so fixture
-    /// repositories never depend on or sign with the user's settings.
+    /// repositories never depend on or sign with the user's settings. It starts
+    /// through the same command as every other call, so `spawns` counts it too.
     pub fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new(super::bin_str())
-            .arg("-C")
-            .arg(dir)
+        let ok = super::command(dir)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -604,6 +738,127 @@ mod tests {
         assert_eq!(get("a").as_deref(), Some("feat/x"));
         assert_eq!(get("b"), None);
         assert_eq!(get("c"), None);
+    }
+
+    /// Runs git without counting the process: the reference of the tests that
+    /// measure how many git processes a call starts.
+    fn raw(top: &Path, args: &[&str]) -> String {
+        let out = without_hook_env(Command::new(bin_str()).arg("-C").arg(top).args(args)).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    /// The diff of the per-file calls this change replaced: one `git diff` per
+    /// tracked file and one `git diff --no-index` per untracked file, in the
+    /// sorted order of the files.
+    fn per_file_diff(top: &Path, base: &str, globs: &[String]) -> TaskDiff {
+        let set = rvow_base::glob::globset(globs).unwrap();
+        let mut untracked = std::collections::HashSet::new();
+        for path in nul_paths(&raw(top, &["ls-files", "--others", "--exclude-standard", "-z"])) {
+            untracked.insert(path);
+        }
+        let mut names = nul_paths(&raw(top, &["diff", "--no-renames", "--name-only", "-z", base, "--"]));
+        names.extend(untracked.iter().cloned());
+        names.sort();
+        names.dedup();
+        let files: Vec<String> = names.into_iter().filter(|f| set.is_match(f)).collect();
+        let mut diff = String::new();
+        for f in &files {
+            let part = if untracked.contains(f) {
+                raw(top, &["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", f])
+            } else {
+                raw(top, &["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--no-renames", base, "--", f])
+            };
+            if !part.is_empty() {
+                if !diff.is_empty() {
+                    diff.push('\n');
+                }
+                diff.push_str(&part);
+            }
+        }
+        TaskDiff { diff, files }
+    }
+
+    /// One `task_diff` and the number of git processes it started.
+    fn measured(top: &Path, globs: &[String]) -> (usize, TaskDiff) {
+        let before = spawns();
+        let diff = task_diff(top, "HEAD", globs).unwrap();
+        (spawns() - before, diff)
+    }
+
+    #[test]
+    fn scale_git_spawns_counts_each_git_call_in_its_thread() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let before = spawns();
+        run(&repo, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(spawns(), before + 1, "one git call is one process");
+        is_shallow(&repo).unwrap();
+        run(&repo, &["status", "--porcelain"]).unwrap();
+        assert_eq!(spawns(), before + 3, "three git calls are three processes");
+        assert_eq!(std::thread::spawn(spawns).join().unwrap(), 0, "the count belongs to the thread that ran the calls");
+    }
+
+    #[test]
+    fn scale_git_task_diff_one_spawn() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        for i in 0..20 {
+            std::fs::write(repo.join(format!("t{i:02}.txt")), "base").unwrap();
+        }
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "files"]);
+        let edit = |n: usize| {
+            for i in 0..n {
+                std::fs::write(repo.join(format!("t{i:02}.txt")), "changed").unwrap();
+                std::fs::write(repo.join(format!("u{i:02}.txt")), "new").unwrap();
+            }
+        };
+        let globs = vec!["*".to_string()];
+        edit(2);
+        // The first call also asks git once for the id of the empty tree.
+        assert_eq!(task_diff(&repo, "HEAD", &globs).unwrap().files.len(), 4, "the warm-up call is the 2-file case");
+        let (small, files) = measured(&repo, &globs);
+        assert_eq!(files.files.len(), 4, "2 tracked and 2 untracked files");
+        edit(10);
+        let (big, files) = measured(&repo, &globs);
+        assert_eq!(files.files.len(), 20, "10 tracked and 10 untracked files");
+        assert_eq!(big, small, "the diff of 20 files starts {big} git processes against {small} for 2");
+        assert!(small <= 6, "one task diff starts {small} git processes");
+    }
+
+    #[test]
+    fn scale_git_task_diff_matches_the_per_file_diff() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::write(repo.join("b_mod.txt"), "base").unwrap();
+        std::fs::write(repo.join("c_del.txt"), "base").unwrap();
+        std::fs::write(repo.join("g_keep.txt"), "base").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "tracked"]);
+        std::fs::write(repo.join("b_mod.txt"), "changed").unwrap();
+        std::fs::remove_file(repo.join("c_del.txt")).unwrap();
+        std::fs::write(repo.join("f_staged.txt"), "staged").unwrap();
+        git(&repo, &["add", "f_staged.txt"]);
+        std::fs::write(repo.join("a_new.txt"), "new").unwrap();
+        std::fs::write(repo.join("d_bin.bin"), [0u8, 1, 2]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hosts", repo.join("e_link")).unwrap();
+
+        let globs = vec!["*".to_string()];
+        let objects = std::fs::read_dir(repo.join(".git/objects")).unwrap().count();
+        let want = per_file_diff(&repo, "HEAD", &globs);
+        assert!(want.diff.contains("a_new.txt") && want.diff.contains("b_mod.txt"), "the fixture covers both paths: {}", want.diff);
+        assert_eq!(task_diff(&repo, "HEAD", &globs).unwrap(), want, "the batched diff prints what the per-file calls printed");
+        assert!(!task_diff(&repo, "HEAD", &globs).unwrap().diff.contains("g_keep.txt"), "an unchanged file stays out");
+        assert_eq!(std::fs::read_dir(repo.join(".git/objects")).unwrap().count(), objects, "the repository is read, never written");
+        let scratch = format!("rvow-diff-{}", std::process::id());
+        let left: Vec<String> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&scratch))
+            .collect();
+        assert!(left.is_empty(), "the batched diff left {left:?} behind");
     }
 
     #[test]

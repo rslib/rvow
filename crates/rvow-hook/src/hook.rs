@@ -4,6 +4,7 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -55,6 +56,7 @@ pub(crate) use rvow_base::paths::{at_or_under, key, real_path, rel_under, under}
 pub(crate) struct Call<'a> {
     pub(crate) project: &'a Project,
     living: OnceCell<Vec<change::CapSpec>>,
+    record: OnceCell<()>,
     active: OnceCell<Vec<proof::Active>>,
     home: OnceCell<Option<PathBuf>>,
     config: OnceCell<Option<config::Config>>,
@@ -62,15 +64,36 @@ pub(crate) struct Call<'a> {
 
 impl<'a> Call<'a> {
     pub(crate) fn new(project: &'a Project) -> Call<'a> {
-        Call { project, living: OnceCell::new(), active: OnceCell::new(), home: OnceCell::new(), config: OnceCell::new() }
+        Call {
+            project,
+            living: OnceCell::new(),
+            record: OnceCell::new(),
+            active: OnceCell::new(),
+            home: OnceCell::new(),
+            config: OnceCell::new(),
+        }
     }
 
     fn living(&self) -> Result<&[change::CapSpec]> {
         if let Some(living) = self.living.get() {
             return Ok(living);
         }
-        let living = change::living(self.project)?;
+        let living = {
+            self.checked_record()?;
+            change::living(self.project)?
+        };
         Ok(self.living.get_or_init(|| living))
+    }
+
+    /// Reads spec-record.json once per call, and fails on a corrupt one: a hook
+    /// checks the store before it acts on it.
+    fn checked_record(&self) -> Result<()> {
+        if self.record.get().is_some() {
+            return Ok(());
+        }
+        crate::record::load(self.project)?;
+        self.record.set(()).ok();
+        Ok(())
     }
 
     fn active(&self) -> Result<&[proof::Active]> {
@@ -446,7 +469,7 @@ fn relaxed_edit(call: &Call, top: &Path, rel: &str, rule: Rule) -> Result<bool> 
 
 /// The `files:` globs of `tasks` whose mode is `mode`. The edited paths arrive
 /// lowercased by `key` on macOS, so the globs must match them in the same form.
-fn mode_scope<'a>(tasks: impl Iterator<Item = &'a Task>, mode: TaskMode) -> Result<globset::GlobSet> {
+fn mode_scope<'a>(tasks: impl Iterator<Item = &'a Task>, mode: TaskMode) -> Result<Arc<globset::GlobSet>> {
     let files: Vec<String> = tasks
         .filter(|t| t.mode == mode)
         .flat_map(|t| t.files.iter().cloned())
@@ -457,7 +480,7 @@ fn mode_scope<'a>(tasks: impl Iterator<Item = &'a Task>, mode: TaskMode) -> Resu
 
 /// The `files:` globs of every task of the active changes on this branch, or
 /// `None` when the branch has no active change.
-fn active_scope(call: &Call, top: &Path) -> Result<Option<globset::GlobSet>> {
+fn active_scope(call: &Call, top: &Path) -> Result<Option<Arc<globset::GlobSet>>> {
     let branch = git::branch(top)?.unwrap_or_default();
     let mine = proof::on_branch(call.active()?, &branch);
     if mine.is_empty() {
@@ -553,7 +576,7 @@ fn unaccepted_plan(call: &Call, top: &Path) -> Result<Option<crate::id::Id>> {
     }
     let (all, _) = change::list(call.project)?;
     for c in all.into_iter().filter(|c| c.stage == change::Stage::Backlog) {
-        if change::load(&c.path, call.living()?)?.proposal.branch == branch {
+        if change::parsed(&c.path)?.proposal.branch == branch {
             return Ok(Some(c.id));
         }
     }
@@ -1215,9 +1238,9 @@ fn record_before_snapshot(project: &Project, session: &str, input: &Value) -> Lo
     // other sessions are judged by it; any other writer takes one snapshot after.
     if matches!(tool_kind(tool), ToolKind::Editor | ToolKind::Shell) {
         let paths = if tool_kind(tool) == ToolKind::Editor { named_paths(&args, &cwd, &top) } else { Vec::new() };
-        crate::provenance::before_call(project, &top, session, agent, id, &paths)
+        stats::inner(stats::Step::Snapshot, || crate::provenance::before_call(project, &top, session, agent, id, &paths))
     } else {
-        crate::provenance::before_call_light(project, &top, session, agent, id)
+        stats::inner(stats::Step::Snapshot, || crate::provenance::before_call_light(project, &top, session, agent, id))
     }
 }
 
@@ -1247,7 +1270,7 @@ pub fn claude_post_tool_use(project: &Project, input: &Value) -> Result<Option<V
         return Ok(None);
     };
     let agent = input.get("agent_id").and_then(Value::as_str);
-    crate::provenance::after_call(project, &top, session, agent, id);
+    stats::inner(stats::Step::Snapshot, || crate::provenance::after_call(project, &top, session, agent, id));
     observed::post(project, input)?;
     Ok(None)
 }
@@ -1676,7 +1699,7 @@ fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change
     let session = input.get("session_id").and_then(Value::as_str);
     // A change that no call of the session recorded, such as a background job's, still counts.
     if let (Some(s), Ok(top)) = (session, git::toplevel(&cwd)) {
-        crate::provenance::catch_up_at_stop(project, &top, s, None);
+        stats::inner(stats::Step::Snapshot, || crate::provenance::catch_up_at_stop(project, &top, s, None));
     }
     let items = open_items(project, home, &cwd, session, living)?;
     if items.is_empty() {

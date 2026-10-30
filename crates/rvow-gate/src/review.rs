@@ -7,6 +7,7 @@ use crate::vow::sha256_hex;
 use crate::{fingerprint, git, ledger, proof};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::Path;
 
 pub const MAX_FINDINGS: usize = 20;
@@ -63,6 +64,8 @@ pub fn packet_for(project: &Project, home: &Path, cwd: &Path, target: &str) -> R
         text.push_str(&format!("\n--- {path} ---\n{body}\n"));
     }
     let runners = crate::config::runners(project)?;
+    // One candidate list serves every task's inputs and the evidence scan.
+    let files = fingerprint::candidate_files(&top)?;
     let mut identities = Vec::new();
     let mut globs = Vec::new();
     for task in &loaded.tasks {
@@ -70,29 +73,44 @@ pub fn packet_for(project: &Project, home: &Path, cwd: &Path, target: &str) -> R
         identities.push(json!([
             crate::vow::task_hash(task),
             proof::covered(task, &loaded, &living),
-            fingerprint::inputs(&top, &task.files)?.hash,
+            fingerprint::inputs_in(&top, &files, &task.files)?.hash,
             crate::hardening::task_policy_digest(project, home, task)?
         ]));
         globs.extend(task.files.clone());
     }
     let set = fingerprint::globset(&globs)?;
-    let mut paths = fingerprint::candidate_files(&top)?;
-    paths.extend(git::run(&top, &["diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"])?.lines().map(String::from));
-    paths.sort();
+    // One call names the changed files and one the untracked ones, then one
+    // diff covers them all: a packet over ten changed files starts as many git
+    // processes as one over two.
+    let named = git::run(&top, &["diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"])?;
+    let changed: HashSet<&str> = named.lines().collect();
+    let others = git::run(&top, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    let untracked: HashSet<&str> = others.split('\0').filter(|p| !p.is_empty()).collect();
+    let mut paths: Vec<&str> = files.iter().map(String::as_str).chain(changed.iter().copied()).collect();
+    paths.sort_unstable();
     paths.dedup();
-    let mut evidence = String::new();
-    for path in paths.into_iter().filter(|p| set.is_match(p)) {
-        let diff = git::run(&top, &["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", base, "--", &path])?;
-        if !diff.is_empty() {
-            evidence.push_str(&diff);
-        }
-        let tracked = git::run(&top, &["--literal-pathspecs", "ls-files", "--", &path])?;
+    let scoped: Vec<&str> = paths.into_iter().filter(|p| set.is_match(p)).collect();
+    let batch = {
+        let tracked: Vec<&str> = scoped.iter().copied().filter(|p| changed.contains(p) && !untracked.contains(p)).collect();
         if tracked.is_empty() {
-            let full = top.join(&path);
+            String::new()
+        } else {
+            let mut args = vec!["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", base, "--"];
+            args.extend(tracked);
+            git::run(&top, &args)?
+        }
+    };
+    let mut evidence = String::new();
+    let mut at = 0;
+    for path in &scoped {
+        if untracked.contains(path) {
+            let full = top.join(path);
             if std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
                 let bytes = std::fs::read(&full).map_err(|e| Error::io(&full, e))?;
                 evidence.push_str(&format!("\n--- untracked {path} ---\n{}\n", String::from_utf8_lossy(&bytes)));
             }
+        } else if changed.contains(path) {
+            evidence.push_str(section(&batch, &mut at).trim_end());
         }
     }
     let head = git::run(&top, &["rev-parse", "HEAD"])?;
@@ -104,6 +122,22 @@ pub fn packet_for(project: &Project, home: &Path, cwd: &Path, target: &str) -> R
         text.push_str(&format!("\nEvidence truncated: {} total bytes.\n", evidence.len()));
     }
     Ok(Packet { identity, text, evidence_bytes: evidence.len(), truncated })
+}
+
+/// The patch of one path inside a batched diff: git prints one section per
+/// path, in path order, so `at` walks them in that order. The caller trims its
+/// end, as `git::run` trimmed the diff of one path per call.
+fn section<'a>(batch: &'a str, at: &mut usize) -> &'a str {
+    let rest = &batch[*at..];
+    if rest.is_empty() {
+        return "";
+    }
+    let end = match rest[1..].find("\ndiff --git ") {
+        Some(i) => i + 2,
+        None => rest.len(),
+    };
+    *at += end;
+    &rest[..end]
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -348,4 +382,129 @@ pub fn judge_for_with(project: &Project, home: &Path, cwd: &Path, target: &str) 
         found = judge_note_from(event);
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testrepo::*;
+    use crate::store::{Mode, init};
+    use std::path::PathBuf;
+
+    /// A repository and its home, with a vowed change over `f*.txt`: the
+    /// `tracked` files are committed before the vow and changed after it, the
+    /// `fresh` ones are written after it and untracked.
+    fn fixture(tracked: &[&str], fresh: &[&str]) -> (TempDir, Project, PathBuf, PathBuf, String) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        for f in tracked {
+            std::fs::write(repo.join(f), "old\n").unwrap();
+        }
+        if !tracked.is_empty() {
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-q", "-m", "files"]);
+        }
+        let c = change::new(&p, "Rev", "main", false).unwrap();
+        std::fs::write(c.path.join("tasks.md"), "- TSK-new1 T\n  verify: true\n  files: f*.txt\n").unwrap();
+        let prepared = crate::vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let id = crate::vow::commit(&p, prepared).unwrap().id.to_string();
+        for f in tracked {
+            std::fs::write(repo.join(f), "new\n").unwrap();
+        }
+        for f in fresh {
+            std::fs::write(repo.join(f), "fresh\n").unwrap();
+        }
+        (tmp, p, repo, home, id)
+    }
+
+    /// The git processes one review packet starts, and the packet.
+    fn packet_spawns(tracked: &[&str], fresh: &[&str]) -> (usize, Packet) {
+        let (_tmp, p, repo, home, id) = fixture(tracked, fresh);
+        let before = git::spawns();
+        let packet = packet_for(&p, &home, &repo, &id).unwrap();
+        (git::spawns() - before, packet)
+    }
+
+    /// The evidence of a packet over 10 changed files starts as many git
+    /// processes as one over 2: a candidate list, the changed names, the
+    /// untracked names, one diff, HEAD and the toplevel.
+    #[test]
+    fn scale_review_two_and_ten_changed_files_start_the_same_git_processes() {
+        let (two, packet_two) = packet_spawns(&[], &["f00.txt", "f01.txt"]);
+        let (ten, packet_ten) = packet_spawns(&[], &TEN);
+        assert!(packet_two.evidence_bytes > 0 && packet_ten.evidence_bytes > packet_two.evidence_bytes, "both packets carry evidence");
+        assert_eq!(
+            two, 5,
+            "a packet starts the toplevel, the candidate list, the changed names, the untracked names and HEAD: {two} processes"
+        );
+        assert_eq!(two, ten, "a packet over 2 changed files starts {two} git processes and over 10 starts {ten}");
+        // The per-path loop this replaced asked git twice per file.
+        assert_eq!(per_path_spawns(&[], &["f00.txt", "f01.txt"]), 4, "2 files of the old loop");
+        assert_eq!(per_path_spawns(&[], &TEN), 20, "10 files of the old loop");
+    }
+
+    const TEN: [&str; 10] = ["f00.txt", "f01.txt", "f02.txt", "f03.txt", "f04.txt", "f05.txt", "f06.txt", "f07.txt", "f08.txt", "f09.txt"];
+
+    /// The git processes the per-path evidence loop of the same files started: a
+    /// diff and an `ls-files` call each.
+    fn per_path_spawns(tracked: &[&str], fresh: &[&str]) -> usize {
+        let (_tmp, _p, repo, _home, _id) = fixture(tracked, fresh);
+        let base = git::run(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let mut paths = fingerprint::candidate_files(&repo).unwrap();
+        paths.extend(
+            git::run(&repo, &["diff", "--no-ext-diff", "--no-textconv", "--name-only", &base, "--"]).unwrap().lines().map(String::from),
+        );
+        paths.sort();
+        paths.dedup();
+        let scoped: Vec<&str> = paths.iter().map(String::as_str).filter(|p| p.starts_with('f')).collect();
+        let before = git::spawns();
+        let _ = per_path_evidence(&repo, &base, &scoped);
+        git::spawns() - before
+    }
+
+    /// The evidence text is what one `git diff` and one `ls-files` per path
+    /// printed: the same patches in the same order, with the untracked block of
+    /// a path that sorts before a changed one.
+    #[test]
+    fn scale_review_evidence_is_what_the_per_path_calls_printed() {
+        let (_tmp, p, repo, home, id) = fixture(&["f10.txt"], &["f00.txt"]);
+        let packet = packet_for(&p, &home, &repo, &id).unwrap();
+        let base = git::run(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let want = per_path_evidence(&repo, &base, &["f00.txt", "f10.txt"]);
+        let got = packet.text.split("\n--- scoped changed-code evidence ---\n").nth(1).unwrap();
+        assert_eq!(got, want, "the evidence is the per-path text");
+        assert!(want.contains("--- untracked f00.txt ---") && want.contains("+++ b/f10.txt"), "both kinds are there: {want}");
+    }
+
+    #[test]
+    fn scale_review_evidence_of_two_changed_files_around_an_untracked_one() {
+        let (_tmp, p, repo, home, id) = fixture(&["f00.txt", "f20.txt"], &["f10.txt"]);
+        let packet = packet_for(&p, &home, &repo, &id).unwrap();
+        let base = git::run(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let want = per_path_evidence(&repo, &base, &["f00.txt", "f10.txt", "f20.txt"]);
+        let got = packet.text.split("\n--- scoped changed-code evidence ---\n").nth(1).unwrap();
+        assert_eq!(got, want, "the evidence is the per-path text");
+    }
+
+    /// The per-path evidence loop this change replaced.
+    fn per_path_evidence(top: &Path, base: &str, paths: &[&str]) -> String {
+        let mut evidence = String::new();
+        for path in paths {
+            let diff = git::run(top, &["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", base, "--", path]).unwrap();
+            if !diff.is_empty() {
+                evidence.push_str(&diff);
+            }
+            let tracked = git::run(top, &["--literal-pathspecs", "ls-files", "--", path]).unwrap();
+            if tracked.is_empty() {
+                let full = top.join(path);
+                if std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
+                    let bytes = std::fs::read(&full).unwrap();
+                    evidence.push_str(&format!("\n--- untracked {path} ---\n{}\n", String::from_utf8_lossy(&bytes)));
+                }
+            }
+        }
+        evidence
+    }
 }

@@ -391,7 +391,7 @@ fn hook_stats_duration_a_line_holds_no_command_text_and_no_path() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     let mut keys: Vec<&str> = lines[0].as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["duration_ms", "hook", "session", "time"], "{lines:?}");
+    assert_eq!(keys, ["duration_ms", "hook", "session", "steps", "time"], "{lines:?}");
     let text = std::fs::read_to_string(fx.project().root.join(rvow_core::stats::STATS_FILE)).unwrap();
     assert!(!text.contains("zq7secret") && !text.contains("/Users/someone") && !text.contains("cat"), "{text}");
 }

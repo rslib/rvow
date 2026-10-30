@@ -150,6 +150,7 @@ fn gate_for(
     let policy = config::cache_policy(project, home)?;
     let mut run_dir = top.clone();
     let scope;
+    let key_base;
     let _keep_tree;
     if opts.rerun {
         let links = config::rerun_links(project, home)?;
@@ -159,6 +160,12 @@ fn gate_for(
         }
         let mut cache =
             if !use_cache || opts.out.is_some() || policy.off || linked { None } else { Some(cache::Cache::open(project, home)?) };
+        // The HEAD listing, the tool hashes and the runners of this run: read
+        // once, however many tasks the loop keys.
+        key_base = cache.is_some().then(|| cache::KeyBase::new(project, home, &top, &runners)).transpose()?;
+        // No command runs between the tasks of the loop below, so one listing
+        // of the candidate files serves every `inputs` call in it.
+        let plan_now = Now::cached(&top, &config, now.env.clone(), &living);
         if let Some(cache) = &cache {
             r.warnings.extend(cache.warnings().iter().cloned());
         }
@@ -170,10 +177,10 @@ fn gate_for(
         let mut plan = Vec::new();
         for c in &queue {
             let mut own = std::collections::BTreeMap::new();
-            if cache.is_some() {
+            if let Some(base) = &key_base {
                 for t in &c.loaded.tasks {
                     let reqs = proof::covered(t, &c.loaded, &living);
-                    let key = cache::cache_key(project, home, &top, &config, t, &reqs, &now.env).unwrap_or_else(|e| {
+                    let key = cache::cache_key_with(base, &config, t, &reqs, &plan_now.env).unwrap_or_else(|e| {
                         r.warnings.push(format!("{} is not cached: {}", t.id, e.message));
                         None
                     });
@@ -195,7 +202,7 @@ fn gate_for(
                 let proven = match &uncommitted {
                     Some(dirty) => {
                         let ignored = ignored_in_scope(&top, t, &links)?;
-                        let trusted = proof::state(c, t, &now)? == proof::State::Proved
+                        let trusted = proof::state(c, t, &plan_now)? == proof::State::Proved
                             && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
                             && ignored.is_none();
                         let sealed = seal_key.as_deref().is_some_and(|key| sealed_proof(c, &t.id.to_string(), key));
@@ -217,6 +224,7 @@ fn gate_for(
         }
         let misses: Vec<&crate::tasks::Task> = plan.iter().filter(|p| p.3.is_none() && !p.4).map(|p| p.1).collect();
         scope = Scope::new(&top, &config.base, &misses)?;
+        scope.snapshot(config.setup.iter().chain(&config.checks))?;
         let mut setup = Vec::new();
         for step in &config.setup {
             if scope.wants(step)? {
@@ -326,13 +334,21 @@ fn gate_for(
         _keep_tree = Some(lazy);
     } else {
         scope = Scope::new(&top, &config.base, &[])?;
+        scope.snapshot(config.setup.iter().chain(&config.checks))?;
+        key_base = None;
         _keep_tree = None;
     }
     // The check cache shares the task cache file, so it opens after the rerun
     // block has closed its own handle. It applies only to a check that ran in
     // the repository itself, not in the clean rerun worktree.
     let check_on = use_cache && !policy.off && run_dir == top;
-    let check_tools = if check_on { cache::tool_fingerprint(project, home)? } else { None };
+    let check_tools = if !check_on {
+        None
+    } else if let Some(base) = &key_base {
+        base.tools().cloned()
+    } else {
+        cache::tool_fingerprint(project, home)?
+    };
     let mut check_cache = if check_on { Some(cache::Cache::open(project, home)?) } else { None };
     if let Some(cache) = &check_cache
         && !opts.rerun

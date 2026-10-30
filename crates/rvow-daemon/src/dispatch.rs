@@ -37,6 +37,7 @@ pub fn answer_hook_at(home: Option<&Path>, harness: Harness, event: HookEvent, t
     let mut run = || -> Result<Option<serde_json::Value>> {
         // Timed from here, so a hook's duration includes finding the project.
         let start = std::time::Instant::now();
+        let mut steps = stats::Timings::default();
         // Without a home or a working folder there is no store to find, so no project to check.
         let home = match home {
             Some(home) => home.to_path_buf(),
@@ -49,47 +50,56 @@ pub fn answer_hook_at(home: Option<&Path>, harness: Harness, event: HookEvent, t
         if matches!(event, HookEvent::SessionStart) {
             // The skill and mod warnings are about Claude Code's and pi's files.
             let warnings = if matches!(harness, Harness::Claude) { skill_warnings()? } else { Vec::new() };
-            return match store::find(&cwd, &home) {
+            return match timed(&mut steps, stats::Step::Store, || store::find(&cwd, &home)) {
                 Ok(Some(p)) => {
-                    bind_session_lease(&p, &cwd, &mut input);
-                    let out = hooks::claude_session_start(Some(&p), &home, &input, &warnings);
-                    count_duration(&p, stats::Hook::SessionStart, &input, start);
+                    timed(&mut steps, stats::Step::Lease, || bind_session_lease(&p, &cwd, &mut input));
+                    let out = timed(&mut steps, stats::Step::Brief, || hooks::claude_session_start(Some(&p), &home, &input, &warnings));
+                    count_duration(&p, stats::Hook::SessionStart, &input, start, &steps);
                     out
                 }
                 _ => hooks::claude_session_start(None, &home, &input, &warnings),
             };
         }
-        let p = match store::find(&cwd, &home) {
+        let p = match timed(&mut steps, stats::Step::Store, || store::find(&cwd, &home)) {
             Ok(Some(p)) => p,
             Ok(None) => return Ok(None),
             // Outside a git repository, or before its first commit, there is no project to check.
             Err(e) if e.code == "no-commit" || git::toplevel(&cwd).is_err() => return Ok(None),
             Err(e) => return Err(e),
         };
-        bind_session_lease(&p, &cwd, &mut input);
+        timed(&mut steps, stats::Step::Lease, || bind_session_lease(&p, &cwd, &mut input));
         let (counted, out) = match (harness, event) {
-            (_, HookEvent::PreToolUse) => (Some(stats::Hook::PreToolUse), hooks::claude_pre_tool_use(&p, &input)),
-            (_, HookEvent::PostToolUse) => (Some(stats::Hook::PostToolUse), hooks::claude_post_tool_use(&p, &input)),
+            (_, HookEvent::PreToolUse) => {
+                (Some(stats::Hook::PreToolUse), timed(&mut steps, stats::Step::Rules, || hooks::claude_pre_tool_use(&p, &input)))
+            }
+            (_, HookEvent::PostToolUse) => {
+                (Some(stats::Hook::PostToolUse), timed(&mut steps, stats::Step::Rules, || hooks::claude_post_tool_use(&p, &input)))
+            }
             (_, HookEvent::SessionStart) => (None, hooks::claude_session_start(Some(&p), &home, &input, &[])),
             (_, HookEvent::Stop) => {
                 // Both the stop answer and the re-prove read the living specs, so the hook loads them once.
-                let living = hooks::stop_needs_specs(&input).then(|| change::living(&p).ok()).flatten();
-                let out = match &living {
+                let living =
+                    if hooks::stop_needs_specs(&input) { timed(&mut steps, stats::Step::Specs, || change::living(&p).ok()) } else { None };
+                let out = timed(&mut steps, stats::Step::Rules, || match &living {
                     Some(living) => hooks::claude_stop_over(&p, &home, &input, living),
                     None => hooks::claude_stop(&p, &home, &input),
-                };
+                });
                 if matches!(out, Ok(None)) && input.get("agent_id").is_none() {
-                    start_reprove(&p, &home, &cwd, living.as_deref());
+                    timed(&mut steps, stats::Step::Reprove, || start_reprove(&p, &home, &cwd, living.as_deref()));
                 }
                 (Some(stats::Hook::Stop), out)
             }
-            (_, HookEvent::LeaseBind) => (Some(stats::Hook::LeaseBind), hooks::claude_lease_bind(&p, &input)),
-            (_, HookEvent::LeaseEnd) => (Some(stats::Hook::LeaseEnd), hooks::claude_lease_end(&p, &input)),
+            (_, HookEvent::LeaseBind) => {
+                (Some(stats::Hook::LeaseBind), timed(&mut steps, stats::Step::Rules, || hooks::claude_lease_bind(&p, &input)))
+            }
+            (_, HookEvent::LeaseEnd) => {
+                (Some(stats::Hook::LeaseEnd), timed(&mut steps, stats::Step::Rules, || hooks::claude_lease_end(&p, &input)))
+            }
             (_, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
             (_, HookEvent::Status) => (None, hooks::status_line(&p, &home, &cwd).map(|s| s.map(|s| serde_json::json!({ "status": s })))),
         };
         if let Some(hook) = counted {
-            count_duration(&p, hook, &input, start);
+            count_duration(&p, hook, &input, start, &steps);
         }
         out
     };
@@ -205,10 +215,24 @@ fn start_reprove(p: &store::Project, home: &Path, cwd: &Path, living: Option<&[c
     let _ = c.spawn();
 }
 
-/// Counts one hook call with its duration, the session id and nothing else.
-fn count_duration(p: &store::Project, hook: stats::Hook, input: &serde_json::Value, start: std::time::Instant) {
+/// Counts one hook call with its duration, the ms each step took, the session id and nothing else.
+fn count_duration(p: &store::Project, hook: stats::Hook, input: &serde_json::Value, start: std::time::Instant, steps: &stats::Timings) {
     let ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-    stats::record_duration(p, hook, input.get("session_id").and_then(|v| v.as_str()), ms);
+    stats::record_duration(p, hook, input.get("session_id").and_then(|v| v.as_str()), ms, steps);
+}
+
+/// Runs `f` and adds the ms it took to the `step` of `steps`, so a step is
+/// timed where it runs and nothing else about it changes. A step timed inside
+/// `f`, such as the snapshot, moves out of `step` into its own.
+fn timed<T>(steps: &mut stats::Timings, step: stats::Step, f: impl FnOnce() -> T) -> T {
+    let _ = stats::take_inner();
+    let start = std::time::Instant::now();
+    let out = f();
+    let ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    let inner = stats::take_inner();
+    steps.add(step, ms.saturating_sub(inner.total()));
+    steps.merge(&inner);
+    out
 }
 
 /// One warning per stale or edited file that `rvow install` manages.

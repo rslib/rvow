@@ -583,3 +583,29 @@ fn prove_records_nothing_when_the_check_changes_its_own_files() {
     assert_eq!(proved.status.code(), Some(1), "{out}");
     assert!(out.contains("changed while its check ran"), "{out}");
 }
+
+#[test]
+fn stats_step_table() {
+    let (r, root, _id) = accepted("stepstats");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let mut text = String::new();
+    for (store, rules) in [(1, 10), (2, 10), (3, 200)] {
+        let line = serde_json::json!({"time": now, "hook": "pre-tool-use", "session": "s1", "duration_ms": 12, "steps": {"store": store, "rules": rules}});
+        text.push_str(&format!("{line}\n"));
+    }
+    let old = serde_json::json!({"time": now, "hook": "stop", "session": "s1", "duration_ms": 5});
+    text.push_str(&format!("{old}\n"));
+    std::fs::write(root.join(rvow_core::stats::STATS_FILE), text).unwrap();
+
+    let out = r.ok(&["stats"]);
+    assert!(out.contains("hooks[2]{hook,calls,median_ms,p95_ms}:\n  pre-tool-use,3,12,12\n  stop,1,5,5\n"), "{out}");
+    assert!(
+        out.contains("steps[2]{hook,step,calls,median_ms,p95_ms}:\n  pre-tool-use,rules,3,10,200\n  pre-tool-use,store,3,2,3\n"),
+        "{out}"
+    );
+    let human = r.ok(&["stats", "--human"]);
+    assert!(human.contains("pre-tool-use: median 12 ms, 95th percentile 12 ms over 3 calls"), "{human}");
+    assert!(human.contains("pre-tool-use rules: median 10 ms, 95th percentile 200 ms over 3 calls"), "{human}");
+    assert!(human.contains("pre-tool-use store: median 2 ms, 95th percentile 3 ms over 3 calls"), "{human}");
+    assert!(human.contains("stop: median 5 ms"), "{human}");
+}

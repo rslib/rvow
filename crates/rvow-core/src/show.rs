@@ -88,32 +88,36 @@ fn render(project: &Project, states: Option<(&Path, &Path)>, input: &str, checks
 /// whether it is pending, accepted or rejected.
 fn show_amendment(project: &Project, input: &str) -> Result<String> {
     let (dirs, _) = change::list(project)?;
+    // Each amendment is held as the place its event was read from: the whole
+    // ledger beside every one of them would be a copy per event.
     let mut found = Vec::new();
-    for dir in &dirs {
+    for (d, dir) in dirs.iter().enumerate() {
         let (events, _) = ledger::read(&dir.path.join(change::LEDGER))?;
-        for e in events.iter().filter(|e| e.kind == ledger::Kind::Amend) {
+        for (i, e) in events.iter().enumerate().filter(|(_, e)| e.kind == ledger::Kind::Amend) {
             if let Some(id) = e.data.get("amendment").and_then(|v| v.as_str()).and_then(|a| a.parse::<Id>().ok()) {
-                found.push((id, dir.id.clone(), e.clone(), events.clone()));
+                found.push((id, d, i));
             }
         }
     }
     let id = crate::id::resolve(input, found.iter().map(|f| &f.0)).map_err(|e| {
         Error::new("path", format!("{input}: {e}"), "give more characters of the id, or run rvow status to see the pending amendments")
     })?;
-    let (_, change_id, event, events) = found.into_iter().find(|f| f.0 == id).ok_or_else(|| not_listed(&id))?;
+    let (_, dir_at, event_at) = found.into_iter().find(|f| f.0 == id).ok_or_else(|| not_listed(&id))?;
+    let dir = dirs.get(dir_at).ok_or_else(|| not_listed(&id))?;
+    let (events, _) = ledger::read(&dir.path.join(change::LEDGER))?;
+    let event = events.get(event_at).ok_or_else(|| not_listed(&id))?;
+    let want = id.to_string();
+    let reason = event.data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
     let decision = events
         .iter()
-        .rfind(|e| e.kind == ledger::Kind::Confirm && e.data.get("amendment").and_then(|v| v.as_str()) == Some(id.to_string().as_str()))
+        .rfind(|e| e.kind == ledger::Kind::Confirm && e.data.get("amendment").and_then(|v| v.as_str()) == Some(want.as_str()))
         .map(|e| match e.data.get("decision").and_then(|v| v.as_str()) {
             Some("accept") => "accepted",
             Some("reject") => "rejected",
             _ => "decided",
         })
         .unwrap_or("pending");
-    let mut out = format!(
-        "{id} for {change_id}\ndecision: {decision}\nreason: {}\n",
-        event.data.get("reason").and_then(|v| v.as_str()).unwrap_or("")
-    );
+    let mut out = format!("{id} for {}\ndecision: {decision}\nreason: {reason}\n", dir.id);
     let items = event.data.get("items").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or_default();
     let _ = writeln!(out, "items: {}", items.len());
     for i in items {
@@ -691,6 +695,45 @@ mod tests {
                 c.id
             )
         );
+        assert_eq!(s(&_t, &p, "zzzzzz").unwrap_err().code, "path");
+    }
+
+    /// Three amendments in one ledger answer as one does: each is held by the
+    /// place its event was read from, never by a copy of the ledger beside it.
+    #[test]
+    fn scale_show_amendments() {
+        let (_t, p, c) = fixture();
+        let lock = p.lock().unwrap();
+        let amds = [("AMD-7k2mq8", "accept"), ("AMD-p3x8a1", "reject"), ("AMD-q8w2c7", "pending")];
+        for (amd, decision) in amds {
+            let mut data = serde_json::Map::new();
+            data.insert("amendment".into(), amd.into());
+            data.insert("reason".into(), format!("why {amd}").into());
+            data.insert(
+                "items".into(),
+                serde_json::json!([
+                    {"class": "weaken", "what": "crates/a/tests/t.rs"},
+                    {"class": "outside", "what": "docs/a.md"}
+                ]),
+            );
+            ledger::append(&c.path.join(change::LEDGER), &lock, Ev::Amend, data).unwrap();
+            if decision != "pending" {
+                let mut confirm = serde_json::Map::new();
+                confirm.insert("amendment".into(), amd.into());
+                confirm.insert("decision".into(), decision.into());
+                ledger::append(&c.path.join(change::LEDGER), &lock, Ev::Confirm, confirm).unwrap();
+            }
+        }
+        drop(lock);
+        assert_eq!(
+            s(&_t, &p, "AMD-q8w2").unwrap(),
+            format!(
+                "AMD-q8w2c7 for {}\ndecision: pending\nreason: why AMD-q8w2c7\nitems: 2\n  weaken: crates/a/tests/t.rs\n  outside: docs/a.md\n",
+                c.id
+            )
+        );
+        assert_eq!(s(&_t, &p, "AMD-7k2").unwrap().lines().nth(1), Some("decision: accepted"));
+        assert_eq!(s(&_t, &p, "AMD-p3x").unwrap().lines().nth(1), Some("decision: rejected"));
         assert_eq!(s(&_t, &p, "zzzzzz").unwrap_err().code, "path");
     }
 }

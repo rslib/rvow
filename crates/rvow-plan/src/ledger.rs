@@ -2,12 +2,14 @@
 //! it follows by hash, so the file forms a DAG that survives git's union merge,
 //! which keeps lines in arbitrary order.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -56,13 +58,130 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// The first 16 hex characters of the SHA-256 of `bytes`.
 pub fn short_hash(bytes: &[u8]) -> String {
+    hex_str(&short_hex(bytes)).to_string()
+}
+
+/// The first 16 hex characters of the SHA-256 of `bytes`, as the bytes a
+/// caller that only compares or shows them needs.
+fn short_hex(bytes: &[u8]) -> [u8; HASH_LEN] {
     let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(HASH_LEN);
-    for b in digest.iter().take(HASH_LEN / 2) {
-        hex.push(HEX[usize::from(b >> 4)] as char);
-        hex.push(HEX[usize::from(b & 0x0f)] as char);
+    let mut hex = [0u8; HASH_LEN];
+    for (i, b) in digest.iter().take(HASH_LEN / 2).enumerate() {
+        hex[i * 2] = HEX[usize::from(b >> 4)];
+        hex[i * 2 + 1] = HEX[usize::from(b & 0x0f)];
     }
     hex
+}
+
+/// `short_hex` as text. The bytes are hex digits, so this is always valid ASCII.
+fn hex_str(hex: &[u8; HASH_LEN]) -> &str {
+    std::str::from_utf8(hex).unwrap_or_default()
+}
+
+/// The parents of most lines: so few that they live on the stack, which keeps
+/// reading one line free of heap work.
+const PARENTS_INLINE: usize = 4;
+
+/// The `parents` of one ledger line, borrowed from the text; a parent with a
+/// JSON escape cannot be borrowed and is copied, so it reads as `parse` reads it.
+struct Parents<'a> {
+    inline: [Cow<'a, str>; PARENTS_INLINE],
+    n: usize,
+    spill: Vec<Cow<'a, str>>,
+}
+
+impl Parents<'_> {
+    fn iter(&self) -> impl Iterator<Item = &str> {
+        self.inline[..self.n].iter().chain(self.spill.iter()).map(|p| p.as_ref())
+    }
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Parents<'a> {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        de.deserialize_seq(ParentsVisitor(std::marker::PhantomData))
+    }
+}
+
+/// One parent, borrowed when the text holds no escape.
+#[derive(Deserialize)]
+struct Parent<'a>(#[serde(borrow)] Cow<'a, str>);
+
+struct ParentsVisitor<'a>(std::marker::PhantomData<&'a str>);
+
+impl<'de: 'a, 'a> Visitor<'de> for ParentsVisitor<'a> {
+    type Value = Parents<'a>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a list of parent hashes")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Parents<'a>, A::Error> {
+        let mut out = Parents { inline: [const { Cow::Borrowed("") }; PARENTS_INLINE], n: 0, spill: Vec::new() };
+        while let Some(Parent(parent)) = seq.next_element::<Parent<'a>>()? {
+            if out.n < PARENTS_INLINE {
+                out.inline[out.n] = parent;
+                out.n += 1;
+            } else {
+                out.spill.push(parent);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// One ledger line as the heads read it: the fields that make it the event
+/// `parse` would build, so a line it rejects is skipped here too, with the data
+/// of the event left unread.
+#[derive(Deserialize)]
+struct Line<'a> {
+    #[serde(rename = "kind")]
+    _kind: Kind,
+    #[serde(rename = "time")]
+    _time: u64,
+    #[serde(borrow)]
+    parents: Parents<'a>,
+}
+
+/// The events of a ledger text as (line, parents), in file order, without the
+/// partial last line of a crashed write and without a repeated line. Parsing
+/// the data of each event is what this leaves out.
+fn event_lines(text: &str) -> Vec<(&str, Parents<'_>)> {
+    let complete = text.ends_with('\n');
+    let lines: Vec<&str> = text.lines().collect();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() || (i + 1 == lines.len() && !complete) {
+            continue;
+        }
+        // A repeated line holds the same hash, and `parse` keeps one event per hash.
+        if seen.insert(*line)
+            && let Ok(parsed) = serde_json::from_str::<Line>(line)
+        {
+            out.push((*line, parsed.parents));
+        }
+    }
+    out
+}
+
+/// The heads of a ledger text: the hashes of its events that no event names as
+/// a parent. `parse` and `heads` answer the same over the events.
+fn heads_of(text: &str) -> Vec<String> {
+    let events = event_lines(text);
+    let mut named: HashSet<&str> = HashSet::new();
+    for (_, parents) in &events {
+        named.extend(parents.iter());
+    }
+    let mut heads = Vec::new();
+    for (line, _) in &events {
+        let hex = short_hex(line.as_bytes());
+        if !named.contains(hex_str(&hex)) {
+            heads.push(hex_str(&hex).to_string());
+        }
+    }
+    heads.sort();
+    heads.dedup();
+    heads
 }
 
 /// Reads a ledger in event order. A missing file is an empty ledger.
@@ -99,13 +218,13 @@ fn parse(text: &str) -> (Vec<Event>, Vec<Diagnostic>) {
             diags.push(Diagnostic::new(Rule::LedgerTail, n, "the last line has no newline, a write did not finish, skipped"));
             continue;
         }
-        let hash = short_hash(line.as_bytes());
-        if !seen.insert(hash.clone()) {
+        let hex = short_hex(line.as_bytes());
+        if !seen.insert(hex) {
             continue;
         }
         match serde_json::from_str::<Event>(line) {
             Ok(mut ev) => {
-                ev.hash = hash;
+                ev.hash = hex_str(&hex).to_string();
                 ev.line = n;
                 events.push(ev);
             }
@@ -122,26 +241,29 @@ fn parse(text: &str) -> (Vec<Event>, Vec<Diagnostic>) {
 }
 
 fn order(events: Vec<Event>) -> Vec<Event> {
-    let index: HashMap<String, usize> = events.iter().enumerate().map(|(i, e)| (e.hash.clone(), i)).collect();
+    let index: HashMap<&str, usize> = events.iter().enumerate().map(|(i, e)| (e.hash.as_str(), i)).collect();
     let mut waiting = vec![0usize; events.len()];
     let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, ev) in events.iter().enumerate() {
         for p in &ev.parents {
-            if let Some(&pi) = index.get(p) {
+            if let Some(&pi) = index.get(p.as_str()) {
                 waiting[i] += 1;
                 children.entry(pi).or_default().push(i);
             }
         }
     }
-    let key = |i: usize| Reverse((events[i].time, events[i].hash.clone(), i));
-    let mut ready: BinaryHeap<_> = (0..events.len()).filter(|&i| waiting[i] == 0).map(key).collect();
     let mut out = Vec::with_capacity(events.len());
-    while let Some(Reverse((_, _, i))) = ready.pop() {
-        out.push(i);
-        for &c in children.get(&i).into_iter().flatten() {
-            waiting[c] -= 1;
-            if waiting[c] == 0 {
-                ready.push(key(c));
+    // The heap holds borrows of the events, so it is out of scope before they move.
+    {
+        let key = |i: usize| Reverse((events[i].time, events[i].hash.as_str(), i));
+        let mut ready: BinaryHeap<_> = (0..events.len()).filter(|&i| waiting[i] == 0).map(key).collect();
+        while let Some(Reverse((_, _, i))) = ready.pop() {
+            out.push(i);
+            for &c in children.get(&i).into_iter().flatten() {
+                waiting[c] -= 1;
+                if waiting[c] == 0 {
+                    ready.push(key(c));
+                }
             }
         }
     }
@@ -154,12 +276,29 @@ fn order(events: Vec<Event>) -> Vec<Event> {
 /// working on it.
 pub fn append_line(path: &Path, line: &str) -> Result<()> {
     let mut file = open_append(path)?;
+    // One byte at the end decides whether the last line finished; only a torn
+    // tail, which a crashed write leaves, needs the rest of the file.
+    if ends_with_newline(&mut file, path)? {
+        return write_line(&mut file, path, line);
+    }
     let old = std::fs::read(path).map_err(|e| Error::io(path, e))?;
     write_after(&mut file, path, line, &old)
 }
 
 fn open_append(path: &Path) -> Result<std::fs::File> {
-    std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| Error::io(path, e))
+    std::fs::OpenOptions::new().create(true).append(true).read(true).open(path).map_err(|e| Error::io(path, e))
+}
+
+/// Whether the file ends with a newline, or holds nothing at all: one byte read.
+fn ends_with_newline(file: &mut std::fs::File, path: &Path) -> Result<bool> {
+    let end = file.metadata().map_err(|e| Error::io(path, e))?.len();
+    if end == 0 {
+        return Ok(true);
+    }
+    let mut byte = [0u8; 1];
+    file.seek(SeekFrom::Start(end - 1)).map_err(|e| Error::io(path, e))?;
+    file.read_exact(&mut byte).map_err(|e| Error::io(path, e))?;
+    Ok(byte[0] == b'\n')
 }
 
 /// Removes the partial last line `old` ends with, then appends `line` and a newline.
@@ -168,6 +307,11 @@ fn write_after(file: &mut std::fs::File, path: &Path, line: &str, old: &[u8]) ->
         let keep = old.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
         file.set_len(keep as u64).map_err(|e| Error::io(path, e))?;
     }
+    write_line(file, path, line)
+}
+
+/// Appends `line` and a newline in one write.
+fn write_line(file: &mut std::fs::File, path: &Path, line: &str) -> Result<()> {
     let mut buf = Vec::with_capacity(line.len() + 1);
     buf.extend_from_slice(line.as_bytes());
     buf.push(b'\n');
@@ -313,9 +457,8 @@ pub fn append(path: &Path, lock: &Lock, kind: Kind, data: Map<String, Value>) ->
 pub fn append_sealed(path: &Path, _lock: &Lock, kind: Kind, data: Map<String, Value>, key: Option<&[u8]>) -> Result<Event> {
     // One read of the ledger: it tells the parents and the partial last line.
     let text = read_text(path)?;
-    let (events, _) = parse(&text);
     let time = now_ms();
-    let parents = heads(&events);
+    let parents = heads_of(&text);
     let mut data = data;
     if let Some(key) = key {
         let value = crate::seal::seal(key, kind, time, &parents, &data)?;
@@ -431,5 +574,42 @@ mod tests {
         let (events, diags) = read(&path).unwrap();
         assert_eq!(events.len(), 2);
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn parents_of_a_new_event_agree_with_the_parsed_heads() {
+        let tmp = TempDir::new();
+        let p = project(&tmp.0);
+        let path = tmp.0.join("ledger.jsonl");
+        let lock = p.lock().unwrap();
+        let root = append(&path, &lock, Kind::Note, data("root")).unwrap();
+        // More parents than the heads read keeps on the stack, then a line that is
+        // not json, one without parents, a repeated line and a torn tail.
+        let orphans: Vec<String> = (0..4).map(|i| format!("{i}").repeat(16)).collect();
+        let many = format!(
+            r#"{{"kind":"note","time":2,"parents":["{}",{}],"text":"many"}}"#,
+            root.hash,
+            orphans.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(",")
+        );
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&format!("{many}\nnot json\n{{\"kind\":\"note\",\"time\":3}}\n{many}\n{{\"kind\":\"note\",\"time\":4,\"te"));
+        std::fs::write(&path, &text).unwrap();
+        let (events, diags) = read(&path).unwrap();
+        assert_eq!(events.len(), 2, "a torn line, a malformed one and a repeat are out: {diags:?}");
+        assert_eq!(heads_of(&text), heads(&events));
+
+        let next = append(&path, &lock, Kind::Note, data("join")).unwrap();
+        let (events, _) = read(&path).unwrap();
+        assert_eq!(events.last().unwrap().parents, heads(&events[..events.len() - 1]), "the append wrote the parents of {next:?}");
+    }
+
+    #[test]
+    fn heads_agree_when_a_parent_holds_a_json_escape() {
+        let text = "{\"kind\":\"note\",\"time\":1,\"parents\":[],\"text\":\"a\"}\n\
+                    {\"kind\":\"note\",\"time\":2,\"parents\":[\"ab\\u0063d\"],\"text\":\"b\"}\n";
+        let (events, _) = parse(text);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].parents, ["abcd"]);
+        assert_eq!(heads_of(text), heads(&events));
     }
 }

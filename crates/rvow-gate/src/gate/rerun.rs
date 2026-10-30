@@ -1,5 +1,7 @@
+use std::cell::OnceCell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -102,21 +104,54 @@ impl Drop for Worktree {
 }
 
 /// What decides whether a scoped `setup` or `checks` entry runs: the tasks
-/// that will run, and the files that the branch changed.
-pub(crate) struct Scope {
-    head: Vec<String>,
-    tasks: Vec<globset::GlobSet>,
-    changed: Option<Vec<String>>,
+/// that will run, and the files that the branch changed. Both listings are made
+/// on the first scoped step that needs them, once per run: a gate whose entries
+/// are all plain, or one whose scoped entries answer from their task globs,
+/// starts no git process for them.
+pub(crate) struct Scope<'a> {
+    top: &'a Path,
+    base: &'a str,
+    tasks: Vec<Arc<globset::GlobSet>>,
+    head: OnceCell<Vec<String>>,
+    changed: OnceCell<Option<Vec<String>>>,
 }
 
-impl Scope {
-    pub(crate) fn new(top: &Path, base: &str, misses: &[&Task]) -> Result<Scope> {
-        let head = git::run(top, &["ls-tree", "-r", "--name-only", "HEAD"])?.lines().map(String::from).collect();
+impl<'a> Scope<'a> {
+    pub(crate) fn new(top: &'a Path, base: &'a str, misses: &[&Task]) -> Result<Scope<'a>> {
         let tasks = misses.iter().map(|t| globset(&t.files)).collect::<Result<Vec<_>>>()?;
-        let changed = git::base_ref(top, base)
-            .and_then(|b| git::run(top, &["merge-base", "HEAD", &b]).ok())
-            .and_then(|mb| changed_files(top, &mb).ok());
-        Ok(Scope { head, tasks, changed })
+        Ok(Scope { top, base, tasks, head: OnceCell::new(), changed: OnceCell::new() })
+    }
+
+    /// Reads both listings now when any of `steps` is scoped: a check that runs
+    /// before a scoped one may write files, and the scope must be the tree's
+    /// before any command ran, as the dirty list of the check cache is.
+    pub(crate) fn snapshot<'s>(&self, mut steps: impl Iterator<Item = &'s Step>) -> Result<()> {
+        if steps.any(|s| s.files().is_some()) {
+            self.head()?;
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// The files at HEAD, listed on the first ask of the run.
+    fn head(&self) -> Result<&[String]> {
+        if let Some(head) = self.head.get() {
+            return Ok(head);
+        }
+        let head: Vec<String> = git::run(self.top, &["ls-tree", "-r", "--name-only", "HEAD"])?.lines().map(String::from).collect();
+        Ok(self.head.get_or_init(|| head))
+    }
+
+    /// The files the branch changed, or `None` when the base cannot be
+    /// measured, read on the first ask of the run.
+    fn changed(&self) -> Option<&[String]> {
+        if let Some(changed) = self.changed.get() {
+            return changed.as_deref();
+        }
+        let changed = git::base_ref(self.top, self.base)
+            .and_then(|b| git::run(self.top, &["merge-base", "HEAD", &b]).ok())
+            .and_then(|mb| changed_files(self.top, &mb).ok());
+        self.changed.get_or_init(|| changed).as_deref()
     }
 
     /// A plain entry always runs. A scoped entry runs when a task that runs
@@ -125,10 +160,10 @@ impl Scope {
     pub(crate) fn wants(&self, step: &Step) -> Result<bool> {
         let Some(files) = step.files() else { return Ok(true) };
         let set = globset(files)?;
-        if self.head.iter().any(|f| set.is_match(f) && self.tasks.iter().any(|t| t.is_match(f))) {
+        if self.head()?.iter().any(|f| set.is_match(f) && self.tasks.iter().any(|t| t.is_match(f))) {
             return Ok(true);
         }
-        Ok(self.changed.as_ref().is_none_or(|changed| changed.iter().any(|f| set.is_match(f))))
+        Ok(self.changed().is_none_or(|changed| changed.iter().any(|f| set.is_match(f))))
     }
 }
 
@@ -255,4 +290,22 @@ pub(super) fn prove_data(
 
 fn invocation() -> String {
     Error::random::<8>().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testrepo::*;
+
+    #[test]
+    fn scale_listing_scope_is_the_tree_before_any_check_ran() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        let step = Step::Scoped { run: "true".into(), files: vec!["gen.txt".into()] };
+        let scope = Scope::new(&repo, "main", &[]).unwrap();
+        scope.snapshot([Step::Plain("fmt".into()), step.clone()].iter()).unwrap();
+        // An earlier check writes a file that the scoped check's globs match.
+        std::fs::write(repo.join("gen.txt"), "x").unwrap();
+        assert!(!scope.wants(&step).unwrap(), "the scope is the tree from before the first check");
+    }
 }

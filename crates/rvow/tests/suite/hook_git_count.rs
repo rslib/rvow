@@ -264,7 +264,7 @@ impl Fx {
         std::fs::read_to_string(self.count_file())
             .unwrap_or_default()
             .lines()
-            .filter(|l| l.ends_with("ls-files -co --exclude-standard"))
+            .filter(|l| l.ends_with("ls-files -co --exclude-standard") || l.ends_with("ls-files -co -t --exclude-standard"))
             .count()
     }
 }

@@ -3,13 +3,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-
 use crate::change::{self, ChangeDir, Loaded, Stage};
 use crate::config::{self, Config};
 use crate::error::Result;
 use crate::git;
-use crate::ledger::{self, Kind};
+use crate::ledger::Kind;
 use crate::lint::{Finding, Question, questions};
 use crate::store::Project;
 use crate::tasks::Task;
@@ -108,22 +106,47 @@ pub fn chained_commands(cmd: &str) -> usize {
     cmd.replace("&&", ";").split(';').filter_map(segment_program).filter(|p| !FILE_CHECKS.contains(p)).count()
 }
 
+/// One ledger line that may hold a proof run, borrowed from the text: the fields
+/// `last_runs` reads, with the rest of the event left unread.
+#[derive(serde::Deserialize)]
+struct RunLine<'a> {
+    kind: Kind,
+    time: u64,
+    #[serde(borrow)]
+    verify: Option<std::borrow::Cow<'a, str>>,
+    duration_ms: Option<u64>,
+}
+
 /// The time and duration in ms of the newest recorded proof of each verify
 /// command in this project, read once for a whole `check` call.
 fn last_runs(project: &Project) -> BTreeMap<String, (u64, u64)> {
     let mut out: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let Ok((dirs, _)) = change::list(project) else { return out };
     for d in &dirs {
-        let Ok((events, _)) = ledger::read(&d.path.join(change::LEDGER)) else { continue };
-        for e in events.iter().filter(|e| e.kind == Kind::Prove) {
-            let Some(cmd) = e.data.get("verify").and_then(Value::as_str) else { continue };
-            let Some(ms) = e.data.get("duration_ms").and_then(Value::as_u64) else { continue };
-            if out.get(cmd).is_none_or(|(time, _)| e.time > *time) {
-                out.insert(cmd.to_string(), (e.time, ms));
-            }
-        }
+        let Ok(text) = std::fs::read_to_string(d.path.join(change::LEDGER)) else { continue };
+        scan_runs(&text, &mut out);
     }
     out
+}
+
+/// Adds the proof runs of one ledger text to `out`, newest per command. The
+/// last line of a text with no final newline is a torn write and is skipped.
+fn scan_runs(text: &str, out: &mut BTreeMap<String, (u64, u64)>) {
+    let complete = text.ends_with('\n');
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if lines.peek().is_none() && !complete {
+            break;
+        }
+        let Ok(run) = serde_json::from_str::<RunLine>(line) else { continue };
+        if run.kind != Kind::Prove {
+            continue;
+        }
+        let (Some(cmd), Some(ms)) = (run.verify, run.duration_ms) else { continue };
+        if out.get(cmd.as_ref()).is_none_or(|(time, _)| run.time > *time) {
+            out.insert(cmd.into_owned(), (run.time, ms));
+        }
+    }
 }
 
 /// The duration of the newest recorded proof of `cmd` in this project, in ms.
@@ -214,26 +237,75 @@ impl Trees {
     }
 }
 
-/// A warning for each task whose scope covers a large part of the repository: its proof goes
-/// stale whenever any of those files changes, so the plan should name what the task changes.
-fn wide_scopes(trees: &mut Trees, top: &Path, tasks: &[Task]) -> Vec<Finding> {
-    let Some(listing) = trees.get(top) else {
-        return Vec::new();
-    };
-    let files: Vec<&str> = listing.lines().collect();
-    tasks
-        .iter()
-        .filter_map(|t| {
-            let set = crate::fingerprint::globset(&t.files).ok()?;
-            let n = files.iter().filter(|f| set.is_match(f)).count();
-            (n > WIDE_FILES).then(|| {
-                let message =
-                    format!("{} covers {n} tracked files ({}); its proof goes stale when any of them changes", t.id, t.files.join(", "));
-                (change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::WideScope, t.line, message))
-            })
-        })
-        .collect()
+/// The scope warnings of one change over the tracked files of one worktree: the tasks
+/// whose `files:` cover much of the repository, the pairs of tasks that share a file,
+/// and the files `HOT_TASKS` or more tasks cover. One pass matches each file against
+/// the globs of each task, which are compiled once for the whole pass; the tasks a
+/// file matches are counted into one reused buffer, not a new one per file.
+fn scope_findings(listing: &str, tasks: &[Task]) -> Vec<Finding> {
+    let sets: Vec<Option<_>> = tasks.iter().map(|t| crate::fingerprint::globset(&t.files).ok()).collect();
+    let mut wide = vec![0usize; tasks.len()];
+    let mut hits: Vec<usize> = Vec::with_capacity(tasks.len());
+    let mut hot: Vec<(usize, &str, usize)> = Vec::new();
+    let mut shared: BTreeMap<(usize, usize), (usize, Vec<&str>)> = BTreeMap::new();
+    for file in listing.lines() {
+        hits.clear();
+        hits.extend(sets.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.is_match(file))).map(|(i, _)| i));
+        for &i in &hits {
+            wide[i] += 1;
+        }
+        if hits.len() >= HOT_TASKS {
+            hot.push((hits.len(), file, hits[0]));
+        }
+        if tasks.len() >= 2 {
+            for (n, &a) in hits.iter().enumerate() {
+                for &b in &hits[n + 1..] {
+                    let pair = shared.entry((a, b)).or_insert((0, Vec::new()));
+                    pair.0 += 1;
+                    if pair.1.len() < SHARED_LISTED {
+                        pair.1.push(file);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, t) in tasks.iter().enumerate() {
+        if wide[i] > WIDE_FILES {
+            let message = format!(
+                "{} covers {} tracked files ({}); its proof goes stale when any of them changes",
+                t.id,
+                wide[i],
+                t.files.join(", ")
+            );
+            out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::WideScope, t.line, message)));
+        }
+    }
+    for ((a, b), (n, files)) in shared {
+        let listed = files.join(", ");
+        let rest = n.saturating_sub(SHARED_LISTED);
+        let more = if rest > 0 { format!(" and {rest} more") } else { String::new() };
+        let noun = if n == 1 { "file" } else { "files" };
+        let message = format!("{} and {} share {n} {noun}: {listed}{more}; their proofs go stale together", tasks[a].id, tasks[b].id);
+        out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::SharedScope, tasks[b].line, message)));
+    }
+    hot.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    if let Some(&(_, _, first)) = hot.first() {
+        let listed = hot.iter().take(SHARED_LISTED).map(|(n, f, _)| format!("{f} ({n} tasks)")).collect::<Vec<_>>().join(", ");
+        let rest = hot.len().saturating_sub(SHARED_LISTED);
+        let more = if rest > 0 { format!(" and {rest} more") } else { String::new() };
+        let noun = if hot.len() == 1 { "file is" } else { "files are" };
+        let message = format!(
+            "{} {noun} in the scope of {HOT_TASKS} or more tasks, such as {listed}{more}; one edit to one of them makes each of those proofs stale",
+            hot.len()
+        );
+        out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::HotFile, tasks[first].line, message)));
+    }
+    out
 }
+
+/// The most shared files a `shared-scope` warning lists by name.
+const SHARED_LISTED: usize = 3;
 
 /// A task title longer than this many words is a spec, not a title.
 pub const MAX_TITLE_WORDS: usize = 60;
@@ -330,75 +402,6 @@ fn depends_chains(tasks: &[Task]) -> Vec<Finding> {
         out.push((change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::DependsChain, t.line, message)));
     }
     out
-}
-
-/// One warning that names the files in the scope of `HOT_TASKS` or more tasks, most shared first.
-fn hot_files(listing: &str, tasks: &[Task]) -> Vec<Finding> {
-    let sets: Vec<_> = tasks.iter().map(|t| crate::fingerprint::globset(&t.files).ok()).collect();
-    let mut hot: Vec<(usize, &str, usize)> = Vec::new();
-    for file in listing.lines() {
-        let hits: Vec<usize> =
-            sets.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.is_match(file))).map(|(i, _)| i).collect();
-        if hits.len() >= HOT_TASKS {
-            hot.push((hits.len(), file, hits[0]));
-        }
-    }
-    hot.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-    let Some(&(_, _, first)) = hot.first() else { return Vec::new() };
-    let listed = hot.iter().take(SHARED_LISTED).map(|(n, f, _)| format!("{f} ({n} tasks)")).collect::<Vec<_>>().join(", ");
-    let rest = hot.len().saturating_sub(SHARED_LISTED);
-    let more = if rest > 0 { format!(" and {rest} more") } else { String::new() };
-    let noun = if hot.len() == 1 { "file is" } else { "files are" };
-    let message = format!(
-        "{} {noun} in the scope of {HOT_TASKS} or more tasks, such as {listed}{more}; one edit to one of them makes each of those proofs stale",
-        hot.len()
-    );
-    vec![(change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::HotFile, tasks[first].line, message))]
-}
-
-/// `hot_files` over the tracked files of `top`.
-fn hot_scopes(trees: &mut Trees, top: &Path, tasks: &[Task]) -> Vec<Finding> {
-    match trees.get(top) {
-        Some(listing) => hot_files(listing, tasks),
-        None => Vec::new(),
-    }
-}
-
-/// The most shared files a `shared-scope` warning lists by name.
-const SHARED_LISTED: usize = 3;
-
-/// A warning for each pair of tasks whose `files:` match a common tracked file: the proof
-/// of both goes stale when that file changes.
-fn shared_scopes(trees: &mut Trees, top: &Path, tasks: &[Task]) -> Vec<Finding> {
-    if tasks.len() < 2 {
-        return Vec::new();
-    }
-    let Some(listing) = trees.get(top) else {
-        return Vec::new();
-    };
-    let sets: Vec<_> = tasks.iter().map(|t| crate::fingerprint::globset(&t.files).ok()).collect();
-    let mut shared: BTreeMap<(usize, usize), Vec<&str>> = BTreeMap::new();
-    for file in listing.lines() {
-        let hits: Vec<usize> =
-            sets.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.is_match(file))).map(|(i, _)| i).collect();
-        for (n, &a) in hits.iter().enumerate() {
-            for &b in &hits[n + 1..] {
-                shared.entry((a, b)).or_default().push(file);
-            }
-        }
-    }
-    shared
-        .into_iter()
-        .map(|((a, b), files)| {
-            let listed = files.iter().take(SHARED_LISTED).copied().collect::<Vec<_>>().join(", ");
-            let rest = files.len().saturating_sub(SHARED_LISTED);
-            let more = if rest > 0 { format!(" and {rest} more") } else { String::new() };
-            let noun = if files.len() == 1 { "file" } else { "files" };
-            let message =
-                format!("{} and {} share {} {noun}: {listed}{more}; their proofs go stale together", tasks[a].id, tasks[b].id, files.len());
-            (change::TASKS.to_string(), crate::diag::Diagnostic::new(crate::diag::Rule::SharedScope, tasks[b].line, message))
-        })
-        .collect()
 }
 
 /// Shell operators that make a verify command more than one program, so the
@@ -513,9 +516,9 @@ fn report(
     findings.extend(blanks);
     findings.extend(crate::lint::runner_checks(&runners, &loaded.tasks));
     findings.extend(crate::lint::configure_warnings(&runners, &loaded.tasks));
-    findings.extend(wide_scopes(trees, top, &loaded.tasks));
-    findings.extend(shared_scopes(trees, top, &loaded.tasks));
-    findings.extend(hot_scopes(trees, top, &loaded.tasks));
+    if let Some(listing) = trees.get(top) {
+        findings.extend(scope_findings(listing, &loaded.tasks));
+    }
     findings.extend(task_sizes(&loaded.tasks, &filled));
     findings.extend(depends_chains(&loaded.tasks));
     findings.extend(weak_checks(&loaded.tasks, &filled));
@@ -611,6 +614,19 @@ pub fn claim(project: &Project, cwd: &Path, input: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_plan_last_runs_read_an_escaped_command_and_skip_a_torn_line() {
+        let mut out = BTreeMap::new();
+        let text = concat!(
+            r#"{"kind":"prove","time":5,"parents":[],"verify":"grep -q \"x\" f","duration_ms":9}"#,
+            "\n",
+            r#"{"kind":"prove","time":6,"parents":[],"verify":"cargo test","duration_ms":4}"#,
+        );
+        scan_runs(text, &mut out);
+        assert_eq!(out.get("grep -q \"x\" f"), Some(&(5, 9)));
+        assert_eq!(out.get("cargo test"), None, "a torn last line is skipped");
+    }
     use crate::git::testrepo::*;
     use rvow_repo::store::{Mode, init};
 
@@ -691,6 +707,12 @@ mod tests {
         let found = depends_chains(&four);
         assert_eq!(codes(&found), ["depends-chain"]);
         assert!(found[0].1.message.contains("TSK-new4") && found[0].1.message.contains("4 tasks"), "{}", found[0].1.message);
+    }
+
+    /// The hot-file warnings of `scope_findings`, which a check reports together
+    /// with the other two scope warnings.
+    fn hot_files(listing: &str, tasks: &[Task]) -> Vec<Finding> {
+        scope_findings(listing, tasks).into_iter().filter(|(_, d)| d.rule == crate::diag::Rule::HotFile).collect()
     }
 
     #[test]

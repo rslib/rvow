@@ -6,6 +6,12 @@ use super::project;
 use crate::output::Reply;
 use crate::toon::Obj;
 
+/// One human line for the ms a hook or one of its steps took.
+fn times(what: &str, ms: &[u64]) -> String {
+    let (median, p95) = (stats::percentile(ms, 50).unwrap_or(0), stats::percentile(ms, 95).unwrap_or(0));
+    format!("{what}: median {median} ms, 95th percentile {p95} ms over {} calls", ms.len())
+}
+
 pub fn stats(days: u64) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;
@@ -28,9 +34,25 @@ pub fn stats(days: u64) -> Result<Reply> {
             crate::obj! { "hook" => hook.as_str(), "calls" => ms.len() as u64, "median_ms" => median, "p95_ms" => p95 }
         })
         .collect();
+    let steps: Vec<Obj> = c
+        .steps
+        .iter()
+        .flat_map(|(hook, by_step)| by_step.iter().map(move |(step, ms)| (hook, step, ms)))
+        .map(|(hook, step, ms)| {
+            let (median, p95) = (stats::percentile(ms, 50).unwrap_or(0), stats::percentile(ms, 95).unwrap_or(0));
+            crate::obj! {
+                "hook" => hook.as_str(), "step" => step.as_str(), "calls" => ms.len() as u64,
+                "median_ms" => median, "p95_ms" => p95
+            }
+        })
+        .collect();
     for (hook, ms) in &c.durations {
-        let (median, p95) = (stats::percentile(ms, 50).unwrap_or(0), stats::percentile(ms, 95).unwrap_or(0));
-        r.line(format!("{hook}: median {median} ms, 95th percentile {p95} ms over {} calls", ms.len()));
+        r.line(times(hook, ms));
+    }
+    for (hook, by_step) in &c.steps {
+        for (step, ms) in by_step {
+            r.line(times(&format!("{hook} {step}"), ms));
+        }
     }
     let mut rows: Vec<(&String, &u64)> = c.denials.iter().collect();
     rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -60,6 +82,7 @@ pub fn stats(days: u64) -> Result<Reply> {
     r.table("audits", audits, "no audits");
     r.set("asks", c.asks);
     r.table("hooks", hooks, "no hook durations");
+    r.table("steps", steps, "no step times");
     let reasons: Vec<Obj> = c.stop_reasons.iter().map(|(reason, n)| crate::obj! { "reason" => reason.as_str(), "count" => *n }).collect();
     r.table("stop_reasons", reasons, "no stop blocks");
     Ok(r)
