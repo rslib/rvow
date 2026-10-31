@@ -11,6 +11,13 @@ fn doc(path: &str) -> String {
     std::fs::read_to_string(root().join(path)).unwrap()
 }
 
+/// Every version block, so an entry still counts after a release moves it out of Unreleased.
+fn changelog_entries() -> String {
+    let log = doc("CHANGELOG.md");
+    let entries = log.split_once("## [Unreleased]").unwrap().1;
+    entries.split_once("\n[Unreleased]: ").map_or(entries, |(blocks, _)| blocks).to_string()
+}
+
 fn toml_example(path: &str) -> String {
     doc(path).split_once("```toml\n").unwrap().1.split_once("```").unwrap().0.to_string()
 }
@@ -136,9 +143,8 @@ fn docs_name_the_archive_confirm() {
         "how-it-works lacks the archive confirm"
     );
     assert!(how.contains("`rvow amend --unlock`") && how.contains("its own confirm"), "how-it-works lacks the unlock exception");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("archive dialog"), "the Unreleased changelog lacks the archive confirm");
+    let entries = changelog_entries();
+    assert!(entries.contains("archive dialog"), "the changelog lacks the archive confirm");
 }
 
 #[test]
@@ -146,9 +152,8 @@ fn docs_name_the_brief_once_rule() {
     let how = doc("docs/how-it-works.md");
     assert!(how.contains("sends the same brief once per session"), "how-it-works lacks the brief once rule");
     assert!(how.contains("`compact`") && how.contains("`clear`"), "how-it-works lacks the compact and clear rule");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("brief once per session"), "the Unreleased changelog lacks the brief rule");
+    let entries = changelog_entries();
+    assert!(entries.contains("brief once per session"), "the changelog lacks the brief rule");
 }
 
 #[test]
@@ -158,10 +163,9 @@ fn docs_name_the_quiet_brief() {
     assert!(how.contains("only the brief from the `next:` line"), "how-it-works lacks the next task rule");
     assert!(how.contains("names its leased task as `next:`"), "how-it-works lacks the leased brief");
     assert!(how.contains("one block that lists every open item"), "how-it-works lacks the one stop block");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("only the count of tasks changed"), "the Unreleased changelog lacks the quiet brief");
-    assert!(unreleased.contains("one stop block"), "the Unreleased changelog lacks the one stop block");
+    let entries = changelog_entries();
+    assert!(entries.contains("only the count of tasks changed"), "the changelog lacks the quiet brief");
+    assert!(entries.contains("one stop block"), "the changelog lacks the one stop block");
 }
 
 #[test]
@@ -171,9 +175,8 @@ fn docs_name_the_snapshot_lock() {
     assert!(how.contains("names its files hashes only those files"), "how-it-works lacks the named-file snapshot");
     let settings = doc("docs/settings.md");
     assert!(settings.contains("`xcrun --find git`"), "settings lacks the real git");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("snapshot lock of the worktree"), "the Unreleased changelog lacks the snapshot lock");
+    let entries = changelog_entries();
+    assert!(entries.contains("snapshot lock of the worktree"), "the changelog lacks the snapshot lock");
 }
 
 #[test]
@@ -182,9 +185,8 @@ fn docs_name_the_worktree_lease() {
     assert!(how.contains("`rvow delegate <task> --worktree`"), "how-it-works lacks the worktree flag");
     assert!(how.contains("binds the session to the lease by its session id"), "how-it-works lacks the worktree bind");
     assert!(how.contains("A worktree lease has no time limit"), "how-it-works lacks the worktree lease life");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("--worktree [path]"), "the Unreleased changelog lacks the worktree flag");
+    let entries = changelog_entries();
+    assert!(entries.contains("--worktree [path]"), "the changelog lacks the worktree flag");
 }
 
 #[test]
@@ -193,9 +195,8 @@ fn docs_name_the_land() {
     assert!(how.contains("`rvow land <change>`"), "how-it-works lacks rvow land");
     assert!(how.contains("`--merge` makes one merge commit per task"), "how-it-works lacks the merge mode");
     assert!(how.contains("When the gate fails, it moves nothing"), "how-it-works lacks the gate rule");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(unreleased.contains("`rvow land <change or task>`"), "the Unreleased changelog lacks rvow land");
+    let entries = changelog_entries();
+    assert!(entries.contains("`rvow land <change or task>`"), "the changelog lacks rvow land");
 }
 
 #[test]
@@ -205,13 +206,9 @@ fn docs_name_the_automatic_baseline() {
     assert!(!how.contains("baseline-first") && !how.contains("baseline pending"), "how-it-works still names the removed rule");
     let settings = doc("docs/settings.md");
     assert!(!settings.contains("warm worktree"), "settings still names the warm worktree");
-    let log = doc("CHANGELOG.md");
-    let unreleased = log.split("## [").nth(1).unwrap_or_default();
-    assert!(
-        unreleased.contains("Take the baseline of a task from the code at accept"),
-        "the Unreleased changelog lacks the baseline entry"
-    );
-    assert!(!unreleased.contains("`baseline-first`"), "the Unreleased changelog still names the removed rule");
+    let entries = changelog_entries();
+    assert!(entries.contains("Take the baseline of a task from the code at accept"), "the changelog lacks the baseline entry");
+    assert!(!entries.contains("`baseline-first`"), "the changelog still names the removed rule");
 }
 
 #[test]
