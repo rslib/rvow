@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-10-31
+
 ### Changed
 
 - Stop a hook from timing out on a command with a glob over a very large folder, such as a shared Cargo `deps` folder.
@@ -345,4 +347,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 - Update the bundled wasmtime to 48.0.8, which fixes a panic on typed functions with `i31` or `nullref` arguments ([RUSTSEC-2026-0422](https://rustsec.org/advisories/RUSTSEC-2026-0422)).
 
-[Unreleased]: https://github.com/rslib/rvow/commits/trunk
+[Unreleased]: https://github.com/rslib/rvow/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/rslib/rvow/releases/tag/v0.0.1

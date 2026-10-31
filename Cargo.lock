@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "rvow"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "libc",
@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-base"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "getrandom 0.4.3",
  "globset",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "globset",
  "libc",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-daemon"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "rvow-base",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-gate"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "globset",
  "libc",
@@ -1107,14 +1107,14 @@ dependencies = [
 
 [[package]]
 name = "rvow-git"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "rvow-base",
 ]
 
 [[package]]
 name = "rvow-hook"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "globset",
  "rvow-base",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-plan"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "hmac",
  "libc",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-proto"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "serde",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-repo"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "rvow-base",
  "rvow-git",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-shell"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "globset",
  "rvow-base",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-store"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "rvow-base",
  "serde",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "rvow-syntax"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "rvow-base",
  "rvow-git",

@@ -10,4 +10,4 @@ publish.workspace = true
 [dependencies]
 globset = "0.4.21"
 rvow-base = { path = "../rvow-base" }
-rvow-proto = { version = "0.0.0", path = "../rvow-proto" }
+rvow-proto = { version = "0.0.1", path = "../rvow-proto" }
