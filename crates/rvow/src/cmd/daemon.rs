@@ -15,7 +15,9 @@ pub fn print_hello() -> Result<Reply> {
     let hello = Hello {
         proto_major: PROTO_MAJOR,
         proto_minor: PROTO_MINOR,
-        build: env!("CARGO_PKG_VERSION").to_owned(),
+        // The same stamp the engine takes of its own file, so a client of this
+        // binary agrees with an engine running from it.
+        build: rvow_daemon::context::build_id_here(),
         env: rvow_daemon::context::env_hash(),
         ui: Ui::Pane,
         harness_pid: None,

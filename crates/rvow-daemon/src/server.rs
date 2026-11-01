@@ -45,6 +45,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// The idle watcher's step, and how long the accept loop waits in `poll(2)`
 /// before it looks at the stop flag again; a connection wakes it at once.
 const POLL: Duration = Duration::from_millis(50);
+/// How long a stopping engine waits for the calls it already took, so a call in
+/// flight when a changed binary stops it still gets its answer.
+const DRAIN: Duration = Duration::from_secs(5);
 /// How many bytes one read takes from the socket.
 const CHUNK: usize = 8 * 1024;
 
@@ -120,6 +123,12 @@ pub fn serve(home: &Path, idle: Duration, ask: Option<Duration>) -> Result<Serve
         None => None,
     };
 
+    // The executable this engine runs, and the stamp it has now: a call that
+    // finds another stamp afterwards is answered as a mismatch and stops the
+    // engine, so the next one starts from the new binary.
+    let exe = std::env::current_exe().ok();
+    let exe_stamp = exe.as_deref().and_then(context::stamp);
+    let build = exe.as_deref().map_or_else(|| context::VERSION.to_owned(), context::build_id);
     let (listener, dev, ino) = bind(&sock)?;
     let state = Arc::new(State {
         home: home.to_path_buf(),
@@ -127,11 +136,13 @@ pub fn serve(home: &Path, idle: Duration, ask: Option<Duration>) -> Result<Serve
         hello: HelloReply {
             proto_major: PROTO_MAJOR,
             proto_minor: PROTO_MINOR,
-            build: env!("CARGO_PKG_VERSION").to_owned(),
+            build,
             // Computed once: every call of this engine is answered in this environment.
             env: context::env_hash(),
             pid: std::process::id(),
         },
+        exe,
+        exe_stamp,
         host,
         start: Instant::now(),
         last: AtomicU64::new(0),
@@ -139,7 +150,9 @@ pub fn serve(home: &Path, idle: Duration, ask: Option<Duration>) -> Result<Serve
         active: AtomicUsize::new(0),
     });
 
-    // The idle watcher is the only writer of `stop` before the loop below ends.
+    // The idle watcher sets `stop` when no call came for the idle window, and a
+    // hook that finds the binary changed sets it too; the loop below is the one
+    // place that acts on it.
     let watcher = {
         let state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -181,7 +194,18 @@ pub fn serve(home: &Path, idle: Duration, ask: Option<Duration>) -> Result<Serve
     // is removed by exactly one place: here.
     let _ = watcher.join();
     remove_own(&sock, dev, ino);
+    // The connection threads are detached, so the process would end them with
+    // their answers unsent; the socket is gone first, so no new call comes.
+    wait_for_calls(&state.active, DRAIN);
     Ok(Served::Idle)
+}
+
+/// Waits until no connection is `active`, or for `bound` at most.
+fn wait_for_calls(active: &AtomicUsize, bound: Duration) {
+    let due = Instant::now() + bound;
+    while active.load(Ordering::Acquire) > 0 && Instant::now() < due {
+        std::thread::sleep(POLL);
+    }
 }
 
 /// Opens the host pipe: one reader thread on stdin, and the writer the asks
@@ -209,6 +233,9 @@ struct State {
     harnesses: Harnesses,
     /// Our own hello: the answer of `/v1/hello` and the report of a mismatch.
     hello: HelloReply,
+    /// The executable this engine runs, and the stamp it had when it started.
+    exe: Option<PathBuf>,
+    exe_stamp: Option<context::Stamp>,
     /// The host pipe, when this engine was started with one.
     host: Option<Arc<Host>>,
     /// The clock the idle window is measured on.
@@ -230,6 +257,12 @@ impl State {
     /// Notes that a request just arrived, so the idle window starts over.
     fn touch(&self) {
         self.last.store(self.now(), Ordering::Relaxed);
+    }
+
+    /// Whether the executable file of this engine is no longer the one it
+    /// started from: a rebuild under us, or a file that is gone. One stat.
+    fn exe_changed(&self) -> bool {
+        self.exe.as_deref().is_some_and(|path| context::stamp_changed(path, self.exe_stamp))
     }
 }
 
@@ -628,7 +661,18 @@ fn hook(body: &[u8], state: &State, stream: &mut UnixStream) {
     let Ok(request) = serde_json::from_slice::<HookRequest>(body) else {
         return respond(stream, BAD, E_JSON);
     };
+    // The binary on disk is not the one this engine runs: this call gets the
+    // mismatch, and the engine stops, so the next one starts from the new binary.
+    if state.exe_changed() {
+        respond_json(stream, &HookResponse { reply: None, mismatch: Some(state.hello.clone()) });
+        // Set once the answer is in the socket, so a client reads it before the
+        // accept loop ends; the loop looks at the flag on its next step.
+        state.stop.store(true, Ordering::Release);
+        return;
+    }
     // A call from another environment would be answered with this home's store.
+    // The build is not compared: a change of this engine's own binary is caught
+    // above, and the protocol version governs what a client and engine share.
     if request.hello.proto_major != PROTO_MAJOR || request.hello.env != state.hello.env {
         return respond_json(stream, &HookResponse { reply: None, mismatch: Some(state.hello.clone()) });
     }
@@ -832,6 +876,119 @@ mod tests {
         assert_eq!(parsed.length, Some(7));
         assert_eq!(read_body(&mut to, &mut buf, head_end + 4, 7, due).unwrap(), b"{\"a\":1}");
         writer.join().unwrap();
+    }
+
+    /// The state of an engine serving `home`, reporting `build`, from the
+    /// executable at `exe` (stamped as it is now), with no host pipe.
+    fn engine(home: &Path, build: &str, exe: Option<&Path>) -> State {
+        State {
+            home: home.to_path_buf(),
+            harnesses: Harnesses::new(home),
+            hello: HelloReply {
+                proto_major: PROTO_MAJOR,
+                proto_minor: PROTO_MINOR,
+                build: build.to_owned(),
+                env: "env".to_owned(),
+                pid: std::process::id(),
+            },
+            exe: exe.map(Path::to_path_buf),
+            exe_stamp: exe.and_then(context::stamp),
+            host: None,
+            start: Instant::now(),
+            last: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+        }
+    }
+
+    /// A temp home with a folder under it that is no repository, so a hook that
+    /// does run finds no project and answers nothing.
+    fn home(name: &str) -> (rvow_git::git::testrepo::NamedTempDir, std::path::PathBuf) {
+        let tmp = rvow_git::git::testrepo::NamedTempDir::new(name);
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        (tmp, cwd)
+    }
+
+    /// Sends one `/v1/hook` body of `build` in `cwd` to the engine and reads back
+    /// the answer it writes.
+    fn call(state: &State, build: &str, cwd: &Path) -> HookResponse {
+        let body = serde_json::json!({
+            "hello": {
+                "proto_major": PROTO_MAJOR,
+                "proto_minor": PROTO_MINOR,
+                "build": build,
+                "env": state.hello.env,
+                "ui": "pane",
+            },
+            "call": {"harness": "json", "event": "status", "input": {"cwd": cwd}},
+        })
+        .to_string();
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        // The timeout goes on before the answer: a half whose peer is gone
+        // refuses it on macOS.
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        hook(body.as_bytes(), state, &mut server);
+        drop(server);
+        let mut text = String::new();
+        client.read_to_string(&mut text).unwrap();
+        let json = text.split_once("\r\n\r\n").map_or(text.as_str(), |(_, body)| body);
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn engine_build_hook_answers_a_call_of_its_own_build() {
+        let (tmp, cwd) = home("engine-build-same");
+        let state = engine(tmp.path(), "0.0.1+1a2b3c4d", None);
+
+        assert!(call(&state, "0.0.1+1a2b3c4d", &cwd).reply.is_some(), "a call of this build runs");
+        assert!(call(&state, "0.0.1+1a2b3c4d", &cwd).reply.is_some(), "and the engine keeps answering");
+        assert!(!state.stop.load(Ordering::Acquire), "an engine whose binary did not change stays up");
+    }
+
+    #[test]
+    fn engine_build_hook_serves_a_client_of_another_build() {
+        let (tmp, cwd) = home("engine-build-other");
+        let state = engine(tmp.path(), "0.0.1+1a2b3c4d", None);
+
+        assert!(call(&state, "0.0.0", &cwd).reply.is_some(), "a client of another build is served");
+        assert!(!state.stop.load(Ordering::Acquire), "another build is no reason to stop");
+    }
+
+    #[test]
+    fn engine_build_stop_waits_for_the_calls_in_flight() {
+        let active = Arc::new(AtomicUsize::new(1));
+        let done = Arc::clone(&active);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            done.fetch_sub(1, Ordering::Release);
+        });
+        let start = Instant::now();
+        wait_for_calls(&active, Duration::from_secs(5));
+        assert_eq!(active.load(Ordering::Acquire), 0, "the call in flight finished before the engine went on");
+        assert!(start.elapsed() < Duration::from_secs(2), "it waited only for that call");
+        worker.join().unwrap();
+
+        let stuck = AtomicUsize::new(1);
+        let start = Instant::now();
+        wait_for_calls(&stuck, Duration::from_millis(200));
+        assert!(start.elapsed() >= Duration::from_millis(200), "a stuck call is waited for up to the bound");
+        assert!(start.elapsed() < Duration::from_secs(2), "and no longer");
+    }
+
+    #[test]
+    fn engine_build_hook_stops_when_the_binary_file_changed() {
+        let (tmp, cwd) = home("engine-build-changed");
+        let bin = tmp.path().join("rvow");
+        std::fs::write(&bin, b"one").unwrap();
+        let state = engine(tmp.path(), "0.0.1+1a2b3c4d", Some(&bin));
+        assert!(call(&state, "0.0.1+1a2b3c4d", &cwd).reply.is_some(), "the binary is still the one it started from");
+
+        std::fs::write(&bin, b"another binary entirely").unwrap();
+        let answer = call(&state, "0.0.1+1a2b3c4d", &cwd);
+        assert!(answer.reply.is_none(), "the new binary answers the next call, not this one");
+        assert!(answer.mismatch.is_some(), "the client gets the engine's own hello back");
+        assert!(state.stop.load(Ordering::Acquire), "the engine stops so the new binary serves the next call");
     }
 
     #[test]
