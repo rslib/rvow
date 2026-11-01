@@ -160,8 +160,9 @@ test("Keep is asked once, records the factor the hook sent, and the call runs ag
   assert.deepEqual(t.sent("pre-1.in")?.user_made?.yolo, []);
   assert.deepEqual(t.sent("pre-2.in")?.user_made?.yolo, [UNSEEN]);
   assert.equal(t.argv().filter((l) => l.startsWith("hook claude pre-tool-use")).length, 2);
-  // The status line is drawn again, since the tier it shows changed.
-  await until(() => t.argv().some((l) => l.startsWith("hook claude status")));
+  // The status line is drawn again, since the tier it shows changed. The fake logs the call
+  // before it writes `status.in`, so wait for the record itself.
+  await until(() => t.sent("status.in")?.user_made !== undefined);
   assert.deepEqual(t.sent("status.in")?.user_made?.yolo, [UNSEEN]);
 });
 
