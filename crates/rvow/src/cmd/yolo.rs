@@ -32,6 +32,8 @@ pub fn yolo(tier: Option<Option<Tier>>, length: Option<&str>) -> Result<Reply> {
             r.line(format!("yolo {} is on for {} more minutes; the gate still checks at push", on.tier.name(), on.minutes_left()));
             r.set("tier", on.tier.name());
             r.set("minutes", on.minutes_left());
+            r.set("at", on.at);
+            r.set("until", on.until);
             r.help("Run `rvow yolo off` to end it sooner");
         }
         None => {

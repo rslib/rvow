@@ -5,6 +5,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Changed
+
+- Ask once in the Claude mod and pi about a yolo tier that `! rvow yolo` switched on during the session, when that tier would let a denied call or a held stop through.
+  Keep makes the tier count as one from `/rvow-yolo`, and Turn off runs `rvow yolo off`.
+- Show a yolo tier that the hooks do not count as `[yolo <tier> unseen]` in the status line, and hold the stop as the hooks do.
+  Before, the status line showed the tier as on while the hooks ignored it.
+- Count a yolo tier as the user's only when its start and end time equal those of the user's own switch.
+  Before, a file written up to 60 seconds after `/rvow-yolo` counted, so a copied rvow binary could switch a tier back on in that window.
+- Make a running engine stop after its binary changes, such as after `cargo install`, so the hooks no longer run the old code.
+- Name `/rvow-yolo <tier>` in every yolo denial.
+
+### Added
+
+- Print `at` and `until` in `rvow yolo` when a tier is on.
+
 ## [0.0.1] - 2026-10-31
 
 ### Changed

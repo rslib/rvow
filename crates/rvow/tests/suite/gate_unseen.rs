@@ -112,6 +112,14 @@ impl Fx {
     }
 }
 
+/// The `at` and `until`, in ms, that `rvow yolo` printed for the switch it sealed.
+fn times(out: &str) -> (u64, u64) {
+    let field = |key: &str| {
+        out.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse().ok()).unwrap_or_else(|| panic!("no {key} in {out}"))
+    };
+    (field("at: "), field("until: "))
+}
+
 #[test]
 fn unseen_accept_from_a_copied_binary_keeps_edits_denied() {
     let fx = Fx::new("copy");
@@ -150,16 +158,37 @@ fn unseen_yolo_from_a_copied_binary_is_off() {
     let fx = Fx::new("yolo");
     fx.run(RVOW, &["accept", &fx.id, "--yes"]);
     let since = now();
-    fx.run(&fx.copy(), &["yolo", "auto", "--for", "1h"]);
+    let (at, until) = times(&fx.run(&fx.copy(), &["yolo", "auto", "--for", "1h"]));
     let confirm = json!({"command": "rvow confirm --accept --all"});
     let seen = |yolo: Value| Some(json!({"since": since, "changes": [], "yolo": yolo}));
     let denied = fx.call("Bash", confirm.clone(), seen(json!([])));
     assert!(denied.is_some_and(|(d, r)| d == "deny" && r.contains("rvow confirm")), "a yolo the user did not turn on is off");
-    let at = now();
-    let short = seen(json!([{"tier": "auto", "at": since, "until": at + 60_000}]));
+    let short = seen(json!([{"tier": "auto", "at": at, "until": at + 60_000}]));
     assert!(fx.call("Bash", confirm.clone(), short).is_some(), "a yolo that runs past the user's end is off");
-    assert_eq!(fx.call("Bash", confirm.clone(), seen(json!([{"tier": "auto", "at": since, "until": at + 3_600_000}]))), None);
+    assert_eq!(fx.call("Bash", confirm.clone(), seen(json!([{"tier": "auto", "at": at, "until": until}]))), None);
     assert_eq!(fx.call("Bash", confirm, None), None, "a harness that sends no record keeps the old behavior");
+}
+
+#[test]
+fn unseen_yolo_copied_binary_right_after_the_user_is_off() {
+    let fx = Fx::new("yolo-after");
+    fx.run(RVOW, &["accept", &fx.id, "--yes"]);
+    let since = now();
+    let (at, until) = times(&fx.run(RVOW, &["yolo", "auto", "--for", "1h"]));
+    let confirm = json!({"command": "rvow confirm --accept --all"});
+    let mine = json!([{"tier": "auto", "at": at, "until": until}]);
+    let seen = |yolo: Value| Some(json!({"since": since, "changes": [], "yolo": yolo}));
+    assert_eq!(fx.call("Bash", confirm.clone(), seen(mine.clone())), None, "the user's own switch counts");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let copy = fx.copy();
+    let (copied_at, copied_until) = times(&fx.run(&copy, &["yolo", "auto", "--for", "1h"]));
+    assert!(copied_at > at, "the copy switched the tier on later: {copied_at} after {at}");
+    assert_ne!(copied_until, until, "the copy sealed another end time");
+    let denied = fx.call("Bash", confirm, seen(mine));
+    assert!(
+        denied.is_some_and(|(d, r)| d == "deny" && r.contains("rvow confirm")),
+        "a switch made a moment after the user's is not the user's"
+    );
 }
 
 #[test]

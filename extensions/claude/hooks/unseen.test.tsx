@@ -12,7 +12,14 @@ type UserMade = {
   runs: { at: number; until: number }[]
 }
 
-/** A fake rvow that answers every call with exit 0; returns the `user_made` of each pre-tool-use call. */
+/** The start and end a fake `rvow yolo` prints, as the real one prints what it sealed. */
+const YOLO_AT = 1_700_000_000_000
+const YOLO_UNTIL = YOLO_AT + 30 * 60_000
+
+/**
+ * A fake rvow that answers every call with exit 0, and `rvow yolo` with the times it switched on;
+ * returns the `user_made` of each pre-tool-use call.
+ */
 function fakeRvow(on: On) {
   const seen: UserMade[] = []
   on('session.cwd', async () => ({ value: '/tmp' }))
@@ -21,6 +28,8 @@ function fakeRvow(on: On) {
   on('process.run', async (_$, e) => {
     if (e.argv[1] === 'hook' && e.argv[3] === 'pre-tool-use' && e.init?.stdin)
       seen.push(JSON.parse(e.init.stdin).user_made)
+    if (e.argv[1] === 'yolo')
+      return { value: procResult(0, `tier: ${e.argv[2]}\nat: ${YOLO_AT}\nuntil: ${YOLO_UNTIL}\n`) }
     return { value: procResult(0, '') }
   })
   on('tool.call', { tool: 'Edit' }, async () => ({ result: 'ok' }))
@@ -69,12 +78,11 @@ test('an accept in the dialog is recorded', async ($, on) => {
 
 test('a yolo tier the user types is recorded with its end', async ($, on) => {
   const seen = fakeRvow(on)
-  const before = Date.now()
   await $.command.run(cmd('rvow-yolo', 'auto 30m'))
   await $.tool.call(EDIT)
   const [y] = seen.at(-1)?.yolo ?? []
   expect(y?.tier).toBe('auto')
-  expect(y?.at).toBeGreaterThanOrEqual(before)
+  expect(y?.at).toBe(YOLO_AT)
   expect((y?.until ?? 0) - (y?.at ?? 0)).toBe(30 * 60_000)
 })
 

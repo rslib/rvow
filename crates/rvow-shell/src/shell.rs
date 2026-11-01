@@ -488,7 +488,7 @@ fn sub_denial(sub: &str, args: &[String]) -> Option<Denial> {
         ),
         "yolo" => denial(
             Rule::YoloFile,
-            "rvow yolo relaxes the hooks and belongs to the user; ask the user to run `! rvow yolo <tier>`".into(),
+            "rvow yolo relaxes the hooks and belongs to the user; ask the user to type `/rvow-yolo <tier>`".into(),
         ),
         "hook" => denial(
             Rule::WitnessFile,
@@ -717,7 +717,7 @@ pub fn bash_rule(cmd: &str) -> Option<Denial> {
     }
     let names_yolo = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == YOLO_FILE);
     if names_yolo && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
-        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to type `/rvow-yolo <tier>`"));
     }
     let names_lease = w.iter().any(|x| !x.contains(char::is_whitespace) && base_name(x) == LEASE_FILE);
     if names_lease && !only_reads(&invs, cmd) && !sh.commands.first().and_then(|c| c.first()).is_some_and(|x| base_name(x) == "rvow") {
@@ -1692,6 +1692,18 @@ mod tests {
             "python3 -c \"import subprocess; subprocess.Popen(['rvow', 'daemon', '--host-pipe'])\"",
         ] {
             assert_eq!(rule_of(cmd), Some(Rule::OwnerCommand), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn yolo_denial_names_the_slash_command() {
+        let cmd = bash_rule("rvow yolo bypass --for 30m").expect("rvow yolo");
+        assert_eq!(cmd.rule, Rule::YoloFile);
+        let file = bash_rule("echo bypass > yolo.json").expect("write yolo.json");
+        assert_eq!(file.rule, Rule::YoloFile);
+        for d in [cmd, file] {
+            assert!(d.reason.contains("/rvow-yolo <tier>"), "{}", d.reason);
+            assert!(!d.reason.contains("! rvow yolo"), "{}", d.reason);
         }
     }
 

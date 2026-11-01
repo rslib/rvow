@@ -73,12 +73,16 @@ import {
   refinePrompt,
   splitListing,
   TABS,
+  UNSEEN_YOLO_OPTIONS,
+  type UnseenYolo,
   unrecordedDrift,
+  unseenYoloQuestion,
   YOLO,
   YOLO_DESCRIPTION,
   YOLO_SCHEMA,
   YOLO_TIERS,
   yoloArgv,
+  yoloTimes,
 } from './format'
 
 type AcceptMemory = Record<string, { review: string; reason: string }>
@@ -387,6 +391,8 @@ type HookOutput = {
     permissionDecisionReason?: unknown
     additionalContext?: unknown
   }
+  /** The yolo tier this session does not count, which the mod asks the user about. */
+  unseen_yolo?: unknown
   changes?: unknown
   plans?: RvowPlan[]
   backlog?: RvowPlan[]
@@ -497,8 +503,60 @@ function bashOutcome(
 }
 
 async function refreshStatus($: EngineInterface) {
-  const out = await hook($, 'status', {})
+  const out = await hook($, 'status', { user_made: user })
   $.ui.status(typeof out?.status === 'string' ? out.status : undefined)
+}
+
+/**
+ * The question about each yolo file this session asked the user about, by its `at`, so one unseen
+ * tier asks once and a call that comes while the dialog is open waits for the same answer.
+ */
+const yoloAsked = new Map<number, Promise<'kept' | 'off' | undefined>>()
+
+/** The `unseen_yolo` field of a reply: the tier the session does not count, or undefined when none. */
+function unseenYolo(out: HookOutput | undefined): UnseenYolo | undefined {
+  const field = out?.unseen_yolo
+  if (!isRecord(field)) return undefined
+  const { tier, at, until } = field
+  if (typeof tier !== 'string' || typeof at !== 'number' || typeof until !== 'number')
+    return undefined
+  return { tier, at, until }
+}
+
+/**
+ * Asks the user about the yolo tier a reply reports as unseen, once per yolo file in this session:
+ * `kept` when they keep it, which puts it in the user record so the hook counts it, `off` when they
+ * turn it off, and undefined when the file was asked about already or they never answered.
+ */
+async function askUnseenYolo(
+  $: EngineInterface,
+  out: HookOutput | undefined,
+): Promise<'kept' | 'off' | undefined> {
+  const on = unseenYolo(out)
+  if (!on) return undefined
+  const asked = yoloAsked.get(on.at)
+  // Only the first call turns yolo off; a later one runs again only when the user kept the tier.
+  if (asked) return (await asked) === 'kept' ? 'kept' : undefined
+  const question = (async (): Promise<'kept' | 'off' | undefined> => {
+    let answer: string
+    try {
+      answer = await askUser($, unseenYoloQuestion(on), UNSEEN_YOLO_OPTIONS)
+    } catch {
+      return undefined
+    }
+    if (answer === 'Keep') {
+      user.yolo.push(on)
+      return 'kept'
+    }
+    return answer === 'Turn off' ? 'off' : undefined
+  })()
+  yoloAsked.set(on.at, question)
+  return question
+}
+
+/** Switches yolo off with `rvow yolo off`, as the yolo tool does, and shows how it went. */
+async function yoloOff($: EngineInterface) {
+  await settle($, await rvow($, ['yolo', 'off']))
 }
 
 /** Fetches the view into `$.state` so render hooks read it synchronously, then the status line. */
@@ -526,29 +584,27 @@ async function refresh($: EngineInterface) {
   await refreshStatus($)
 }
 
-/** Runs `rvow <argv>` with one bounded wait. */
-/** The milliseconds of a yolo length such as `30m`, `2h` or `90s`; 2 hours when it is missing. */
-function lengthMs(length: string | undefined): number {
-  const m = /^(\d+)(s|m|h)$/.exec(length ?? '2h')
-  if (!m) return 2 * 3_600_000
-  return Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[m[2] as 's' | 'm' | 'h']
-}
-
 /**
- * Records a run of `rvow <argv>` that started at `at` and ended with `ok` in the user record. The mod
- * runs accept, confirm and yolo only after the user's dialog answer or the user's own command. An
- * accept records its id, also when it fails, since the user asked for it; a confirm records only the
- * span of a run that accepted, since the mod does not know which change it touched.
+ * Records a run of `rvow <argv>` that started at `at` and ended with `ok`, the output it printed being
+ * `out`, in the user record. The mod runs accept, confirm and yolo only after the user's dialog
+ * answer or the user's own command. An accept records its id, also when it fails, since the user
+ * asked for it; a confirm records only the span of a run that accepted, since the mod does not know
+ * which change it touched; a yolo records the `at` and `until` the run printed, which are the values
+ * it sealed into the file, and records nothing when the output carries none, so the unseen yolo
+ * dialog asks the user about that tier.
  */
-function noteUser(argv: string[], at: number, ok: boolean) {
+function noteUser(argv: string[], at: number, ok: boolean, out: string) {
   const [verb, arg] = argv
   if (verb === 'accept' && arg && !user.changes.includes(arg)) user.changes.push(arg)
   if (verb === 'confirm' && ok && argv.includes('--accept'))
     user.runs.push({ at, until: Date.now() })
-  if (verb === 'yolo' && ok && arg && arg !== 'off')
-    user.yolo.push({ tier: arg, at, until: at + lengthMs(argv[3]) })
+  if (verb === 'yolo' && ok && arg && arg !== 'off') {
+    const times = yoloTimes(out)
+    if (times) user.yolo.push({ tier: arg, at: times.at, until: times.until })
+  }
 }
 
+/** Runs `rvow <argv>` with one bounded wait. */
 async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
   const at = Date.now()
   try {
@@ -556,7 +612,7 @@ async function rvow($: EngineInterface, argv: string[]): Promise<RvowNotice> {
       cwd: await $.session.cwd(),
       timeoutMs: ACCEPT_MS,
     })
-    noteUser(argv, at, r.exitCode === 0)
+    noteUser(argv, at, r.exitCode === 0, r.stdout)
     // stderr holds the live output of check runs; it shows only when there is no result.
     const text = r.stdout.trim() || r.stderr.trim().split('\n').slice(-STDERR_LINES).join('\n')
     return { tone: r.exitCode === 0 ? 'ok' : 'fail', text: text || 'no output' }
@@ -571,7 +627,7 @@ async function tellOut($: EngineInterface, argv: string[]) {
   try {
     const cwd = await $.session.cwd()
     const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 600_000 })
-    noteUser(argv, at, ran.exitCode === 0)
+    noteUser(argv, at, ran.exitCode === 0, ran.stdout)
     const out = ran.stdout.trim() || ran.stderr.trim()
     await refresh($)
     return { ok: ran.exitCode === 0, out }
@@ -594,7 +650,7 @@ async function tellLong($: EngineInterface, argv: string[]) {
       else stderr += next.value.text
       next = await child.next()
     }
-    noteUser(argv, at, next.value.code === 0)
+    noteUser(argv, at, next.value.code === 0, stdout)
     await refresh($)
     return { ok: next.value.code === 0, out: stdout.trim() || stderr.trim() }
   } catch (err) {
@@ -1229,6 +1285,7 @@ export const register: Register = (on) => {
     user.changes = []
     user.yolo = []
     user.runs = []
+    yoloAsked.clear()
     const started = await next(e)
     await $.command.register({
       name: 'rvow-accept',
@@ -1315,7 +1372,7 @@ export const register: Register = (on) => {
     const cwd = await $.session.cwd()
     const at = Date.now()
     const ran = await $.process.run([BIN, ...argv], { cwd, timeoutMs: 60_000 })
-    noteUser(argv, at, ran.exitCode === 0)
+    noteUser(argv, at, ran.exitCode === 0, ran.stdout)
     await refresh($)
     return { result: ran.stdout || ran.stderr }
   })
@@ -1476,14 +1533,16 @@ export const register: Register = (on) => {
     }
     if (!CHECKED.test(e.tool)) return next(e)
     const { tool, tool_use_id, agentId, consent, ...args } = e as Record<string, unknown>
-    const pre = await runHook($, 'pre-tool-use', {
+    // The same call is asked once more after a Keep, so it is built once and kept.
+    const call = {
       tool_name: tool,
       tool_input: args,
       session_id: sessionId,
       agent_id: typeof agentId === 'string' ? agentId : undefined,
       tool_use_id,
       user_made: user,
-    })
+    }
+    const pre = await runHook($, 'pre-tool-use', call)
     // A broken rvow must not turn the checks off: a tool that writes waits until it works.
     if (pre.error !== undefined) {
       warnBroken($, pre.error)
@@ -1498,7 +1557,15 @@ export const register: Register = (on) => {
       failing = false
       await refreshStatus($)
     }
-    const out = pre.out
+    let out = pre.out
+    // A yolo tier the session does not count is the user's to keep or turn off. A Keep puts it in the
+    // record, so the hook counts it: this same call is asked once more and that answer is the one used.
+    const unseen = await askUnseenYolo($, out)
+    if (unseen === 'kept') {
+      const again = await runHook($, 'pre-tool-use', call)
+      if (again.error === undefined) out = again.out
+      await refreshStatus($)
+    } else if (unseen === 'off') await yoloOff($)
     const decision = out?.hookSpecificOutput
     if (decision?.permissionDecision === 'deny') {
       return { deny: String(decision.permissionDecisionReason) }
@@ -1599,8 +1666,17 @@ export const register: Register = (on) => {
       session_id: e.session_id,
       agent_id: e.agent_id,
       stop_hook_active: e.stop_hook_active,
+      user_made: user,
     }
-    const reason = (await hook($, 'stop', who))?.reason
+    let out = await hook($, 'stop', who)
+    // A Keep puts the unseen tier in the record, so the stop hook is asked once more for its reason.
+    const unseen = await askUnseenYolo($, out)
+    if (unseen === 'kept') {
+      const again = await runHook($, 'stop', who)
+      if (again.error === undefined) out = again.out
+      await refreshStatus($)
+    } else if (unseen === 'off') await yoloOff($)
+    const reason = out?.reason
     if (typeof reason !== 'string' || !reason || blocks >= MAX_BLOCKS) {
       blocks = 0
       return result

@@ -57,11 +57,16 @@ import {
   cut,
   FAST_MS,
   GATE_MS,
+  keepYolo,
   recordChanges,
   recordYolo,
   run,
   SLOW_MS,
   shortReview,
+  UNSEEN_YOLO_OPTIONS,
+  type UnseenYolo,
+  unseenYolo,
+  unseenYoloPrompt,
 } from "./tools.ts";
 import {
   askPendingAmendments,
@@ -342,6 +347,13 @@ type State = {
   modal: boolean;
 };
 
+/** The user's answer about an unseen yolo tier: keep it (`kept` when an earlier call already did), turn it off, or none. */
+type UnseenAnswer =
+  | { kind: "keep"; on: UnseenYolo }
+  | { kind: "kept" }
+  | { kind: "off" }
+  | undefined;
+
 export default function (pi: ExtensionAPI) {
   // A judge child session sets RVOW_JUDGE=1: it registers no command, tool or
   // hook, so the judge runs with read-only tools and no rvow extension.
@@ -364,6 +376,8 @@ export default function (pi: ExtensionAPI) {
   const engine = createEngineSession();
   // What the user did in this session; the agent's own tool calls never add to it.
   const userMade = createUserMade();
+  // The `at` of every yolo file this session asked about: one answer per file, and none asked twice.
+  const askedYolo = new Map<number, Promise<UnseenAnswer>>();
   // Fail-open stays: a broken rvow never locks the agent out, but the user is told once per session.
   const enforcementOff = (ctx: ExtensionContext) => (why: string) => {
     if (offShown) return;
@@ -457,7 +471,8 @@ export default function (pi: ExtensionAPI) {
     const generation = epoch;
     const [view, status] = await Promise.all([
       hook("view", ctx.cwd, {}, SLOW_MS, true, background.signal),
-      hook("status", ctx.cwd, {}, SLOW_MS, false, background.signal),
+      // The status line shows a yolo tier as unseen when this record does not count it.
+      hook("status", ctx.cwd, { user_made: userMade }, SLOW_MS, false, background.signal),
     ]);
     if (generation !== epoch) return;
     const v = normalize(view);
@@ -1141,6 +1156,39 @@ export default function (pi: ExtensionAPI) {
     else if (typeof out?.reason === "string" && ctx.hasUI) ctx.ui.notify(out.reason, "warning");
   });
 
+  // A yolo tier the hooks do not count is the user's to keep or turn off, since only a dialog or a
+  // slash command records their switch. The question names the tier, and the ask is once per file.
+  // A call that comes while the dialog is open waits for the same answer; only the first call turns
+  // yolo off, and a later one runs again only when the user kept the tier.
+  async function askUnseenYolo(ctx: ExtensionContext, reply: unknown): Promise<UnseenAnswer> {
+    const on = unseenYolo(reply);
+    if (on === undefined) return undefined;
+    const asked = askedYolo.get(on.at);
+    if (asked) {
+      const prior = await asked;
+      return prior?.kind === "keep" ? { kind: "kept" } : undefined;
+    }
+    const question = (async (): Promise<UnseenAnswer> => {
+      // Without a person to ask, the call stays denied and this file is never asked about again.
+      if (!ctx.hasUI) return undefined;
+      const picked = await ctx.ui
+        .select(unseenYoloPrompt(on), UNSEEN_YOLO_OPTIONS)
+        .catch(() => undefined);
+      if (picked === UNSEEN_YOLO_OPTIONS[0]) return { kind: "keep", on };
+      return picked === UNSEEN_YOLO_OPTIONS[1] ? { kind: "off" } : undefined;
+    })();
+    askedYolo.set(on.at, question);
+    return question;
+  }
+
+  /** Turn the yolo switch off for the user, as the yolo command runs it, and redraw the status line. */
+  async function turnYoloOff(ctx: ExtensionContext): Promise<void> {
+    const r = await run(["yolo", "off"], ctx.cwd, "", SLOW_MS);
+    if (!r) return void ctx.ui.notify(`Cannot run '${BIN}'.`, "error");
+    ctx.ui.notify(r.out.trim() || "rvow yolo off: done", r.code === 0 ? "info" : "error");
+    later(() => refresh(ctx));
+  }
+
   // The hook's verdict on one call: the reason to block it, or undefined to allow it. A hook that fails
   // blocks a tool that can write, and lets a read-only one through, until a later call works.
   async function gate(
@@ -1148,28 +1196,28 @@ export default function (pi: ExtensionAPI) {
     toolName: string,
     input: Record<string, unknown>,
     toolUseId?: string,
+    // The run after a Keep asks nothing, so a reply that still names the tier cannot loop.
+    rerun = false,
   ): Promise<string | undefined> {
     let failed: string | undefined;
-    const out = (
-      await hook(
-        "pre-tool-use",
-        ctx.cwd,
-        {
-          tool_name: CLAUDE_NAMES[toolName] ?? toolName,
-          tool_input: input,
-          session_id: ctx.sessionManager?.getSessionId?.(),
-          agent_id: leaseAgent,
-          tool_use_id: toolUseId,
-          user_made: userMade,
-        },
-        FAST_MS,
-        false,
-        undefined,
-        (why) => {
-          failed = why;
-        },
-      )
-    )?.hookSpecificOutput;
+    const reply = await hook(
+      "pre-tool-use",
+      ctx.cwd,
+      {
+        tool_name: CLAUDE_NAMES[toolName] ?? toolName,
+        tool_input: input,
+        session_id: ctx.sessionManager?.getSessionId?.(),
+        agent_id: leaseAgent,
+        tool_use_id: toolUseId,
+        user_made: userMade,
+      },
+      FAST_MS,
+      false,
+      undefined,
+      (why) => {
+        failed = why;
+      },
+    );
     if (failed !== undefined) {
       const first = hookFailed === undefined;
       hookFailed = failed;
@@ -1184,7 +1232,21 @@ export default function (pi: ExtensionAPI) {
       hookFailed = undefined;
       if (ctx.hasUI) ctx.ui.setStatus("rvow", undefined);
     }
+    const out = reply?.hookSpecificOutput;
     const reason = String(out?.permissionDecisionReason ?? "rvow: denied");
+    // A tier the user keeps is in the record now, so the same call runs again under it and that
+    // reply is the verdict. A tier turned off, or an answer not given, leaves the denial as it was.
+    const answer = rerun ? undefined : await askUnseenYolo(ctx, reply);
+    if (answer?.kind === "keep" || answer?.kind === "kept") {
+      if (answer.kind === "keep") keepYolo(userMade, answer.on);
+      const again = await gate(ctx, toolName, input, toolUseId, true);
+      later(() => refresh(ctx));
+      return again;
+    }
+    if (answer?.kind === "off") {
+      await turnYoloOff(ctx);
+      return out?.permissionDecision === "allow" ? undefined : reason;
+    }
     if (out?.permissionDecision === "deny") return reason;
     // After repeated denials rvow asks the user once; without a person to ask, the call stays denied.
     if (out?.permissionDecision === "ask") {
@@ -1345,11 +1407,23 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_before_settle", async (event, ctx) => {
-    // The CLI gives each reason once per session, so it needs the session id.
-    const who = { session_id: ctx.sessionManager?.getSessionId?.(), agent_id: leaseAgent };
-    const reason = (
-      await hook("stop", ctx.cwd, who, BOUND_MS, false, undefined, enforcementOff(ctx))
-    )?.reason;
+    // The CLI gives each reason once per session, so it needs the session id; the record tells it
+    // whether the user is the one who switched a yolo tier on.
+    const who = {
+      session_id: ctx.sessionManager?.getSessionId?.(),
+      agent_id: leaseAgent,
+      user_made: userMade,
+    };
+    const stop = () => hook("stop", ctx.cwd, who, BOUND_MS, false, undefined, enforcementOff(ctx));
+    let reply = await stop();
+    // A tier the user keeps is in the record now, so the stop runs again under it and that reply is
+    // the verdict. A tier turned off, or an answer not given, holds the stop with the first reason.
+    const answer = await askUnseenYolo(ctx, reply);
+    if (answer?.kind === "keep" || answer?.kind === "kept") {
+      if (answer.kind === "keep") keepYolo(userMade, answer.on);
+      reply = await stop();
+    } else if (answer?.kind === "off") await turnYoloOff(ctx);
+    const reason = reply?.reason;
     if (typeof reason !== "string" || !reason) {
       continues = 0;
       return;
@@ -1582,9 +1656,10 @@ export default function (pi: ExtensionAPI) {
       } catch (error) {
         return ctx.ui.notify(`${(error as Error).message}; try /rvow-yolo auto 30m`, "info");
       }
-      const at = Date.now();
+      // The times the CLI printed are the ones it sealed, so the hook counts exactly those; see
+      // `recordYolo`. A run that printed no `at` or no `until` records nothing.
       const done = await decide(ctx, argv);
-      if (done?.code === 0 && tier && tier !== "off") recordYolo(userMade, tier, at, length);
+      if (done?.code === 0 && tier && tier !== "off") recordYolo(userMade, tier, done.out);
     },
   );
 

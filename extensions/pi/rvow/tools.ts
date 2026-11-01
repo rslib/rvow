@@ -73,16 +73,65 @@ export function createUserMade(): UserMade {
   return { since: Date.now(), changes: [], yolo: [] };
 }
 
-/** The length of a yolo run in ms: `30m`, `2h` or `45s`, and 2 hours when there is none. */
-export function yoloMs(length: string | undefined): number {
-  const m = /^(\d+)([smh])$/.exec(length ?? "");
-  if (!m) return 2 * 3_600_000;
-  return Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[m[2] as "s" | "m" | "h"];
+/** The `key: <ms>` line of `rvow yolo` output: the start `at` or the end `until` of the switch it
+ *  sealed, as the file holds them. An indented or repeated line is not one of the top-level fields. */
+function yoloMsField(stdout: string, key: "at" | "until"): number | undefined {
+  const found = [...stdout.matchAll(new RegExp(`^${key}: (\\d+)$`, "gm"))];
+  const [only] = found;
+  if (found.length !== 1 || !only?.[1]) return undefined;
+  const ms = Number(only[1]);
+  return Number.isSafeInteger(ms) ? ms : undefined;
 }
 
-/** Record that the user switched a yolo tier on at `at`. */
-export function recordYolo(made: UserMade, tier: string, at: number, length?: string): void {
-  made.yolo.push({ tier, at, until: at + yoloMs(length) });
+/** The times `rvow yolo <tier>` printed for the switch it sealed, or undefined when the output has
+ *  no `at` or no `until`: off, a tier already on outside this run, or a run that failed. */
+function yoloTimes(stdout: string): { at: number; until: number } | undefined {
+  const at = yoloMsField(stdout, "at");
+  const until = yoloMsField(stdout, "until");
+  if (at === undefined || until === undefined) return undefined;
+  return { at, until };
+}
+
+/** Record that the user switched a yolo tier on, with the times `rvow yolo` itself printed: the
+ *  hook counts the tier only when `at` and `until` equal the ones in the file. Output with no `at`
+ *  or no `until` records nothing, so the unseen yolo dialog asks instead. */
+export function recordYolo(made: UserMade, tier: string, stdout: string): void {
+  const times = yoloTimes(stdout);
+  if (times) made.yolo.push({ tier, at: times.at, until: times.until });
+}
+
+/** A yolo tier that the hook reported it does not count, from the top-level `unseen_yolo` field of
+ *  a hook reply: the tier of the file, when it was switched on and when it ends. */
+export type UnseenYolo = { tier: string; at: number; until: number };
+
+/** The unseen yolo tier of a hook reply, or undefined when the reply has none. */
+export function unseenYolo(reply: unknown): UnseenYolo | undefined {
+  const field = (reply as { unseen_yolo?: unknown } | undefined)?.unseen_yolo;
+  if (!field || typeof field !== "object") return undefined;
+  const { tier, at, until } = field as Record<string, unknown>;
+  if (typeof tier !== "string" || !tier) return undefined;
+  if (typeof at !== "number" || !Number.isFinite(at)) return undefined;
+  if (typeof until !== "number" || !Number.isFinite(until)) return undefined;
+  return { tier, at, until };
+}
+
+/** Record the unseen tier as the user's, with the file's own times, which is what the hook counts. */
+export function keepYolo(made: UserMade, on: UnseenYolo): void {
+  made.yolo.push({ tier: on.tier, at: on.at, until: on.until });
+}
+
+/** The two answers of the unseen yolo dialog: keep the tier, or turn it off. */
+export const UNSEEN_YOLO_OPTIONS = ["Keep", "Turn off"];
+
+/** The time of day a yolo run ends, for the unseen yolo question. */
+function clock(at: number): string {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** The question the unseen yolo dialog asks: only a dialog or a slash command counts as the user's. */
+export function unseenYoloPrompt(on: UnseenYolo): string {
+  return `yolo ${on.tier} is on until ${clock(on.until)}, but rvow did not see you switch it on (only /rvow-yolo or the yolo dialog count). If you did not run \`rvow yolo\`, the agent did. Keep it or turn it off?`;
 }
 
 /** The changes that the amendments `ids` of a `rvow confirm` listing belong to, or every listed one without `ids`. */

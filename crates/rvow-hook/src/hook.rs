@@ -672,7 +672,7 @@ fn glob_denial(call: &Call, cmd: &str, cwd: &Path, top: Option<&Path>, trust: Op
             );
         }
         if name == YOLO_FILE {
-            return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+            return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to type `/rvow-yolo <tier>`"));
         }
         if name == LEASE_FILE {
             return denial(
@@ -707,7 +707,7 @@ fn cache_denial(project: &Project, cwd: &Path, file: &str) -> Option<Denial> {
         );
     }
     if is(YOLO_FILE) {
-        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to run `! rvow yolo <tier>`"));
+        return denial(Rule::YoloFile, format!("{YOLO_FILE} is the user's switch; ask the user to type `/rvow-yolo <tier>`"));
     }
     if is(LEASE_FILE) {
         return denial(
@@ -956,9 +956,6 @@ struct UserYolo {
     until: u64,
 }
 
-/// How long after the user's command a yolo file may say it was switched on.
-const YOLO_SKEW_MS: u64 = 60_000;
-
 impl UserMade {
     fn from(project: &Project, input: &Value) -> Option<UserMade> {
         let record = witness::merged(project, input.get("user_made")?);
@@ -988,9 +985,11 @@ impl UserMade {
 
     /// The tier `on` when the user switched it on, or when it was on before the session began.
     /// A file from before the switch time was recorded has 0, so it counts as before.
+    /// The tier, its start and its end must equal the user's switch, so that a
+    /// copy of the rvow binary that writes the sealed file right after the user
+    /// cannot turn a tier on behind them.
     fn yolo(&self, on: yolo::On) -> Option<yolo::On> {
-        let theirs =
-            |y: &UserYolo| y.tier == on.tier && on.at + 1_000 >= y.at && on.at <= y.at + YOLO_SKEW_MS && on.until <= y.until + YOLO_SKEW_MS;
+        let theirs = |y: &UserYolo| y.tier == on.tier && on.at == y.at && on.until == y.until;
         (on.at < self.since || self.yolo.iter().any(theirs)).then_some(on)
     }
 
@@ -1037,13 +1036,46 @@ fn unseen_denial(call: &Call, input: &Value, seen: &UserMade) -> Result<Option<D
     Ok(None)
 }
 
+/// The yolo switch of a project read against what the harness saw the user do in
+/// this session: the tier the hooks count, and the tier the file holds that they
+/// do not count, which is only reported so the mod can ask the user about it.
+/// A tier is not counted when it was switched on since the session started and
+/// no dialog or slash command of the user put it in the record, since a copy of
+/// the rvow binary can write the sealed file.
+#[derive(Debug, Clone, Copy)]
+struct Yolo {
+    /// The tier that the rules of this call, this stop and the status line follow.
+    counted: Option<Tier>,
+    /// The valid tier of the file that the session does not count.
+    unseen: Option<yolo::On>,
+}
+
+impl Yolo {
+    /// The switch of `project`, counted as before for a harness that sends no `user_made`.
+    fn of(project: &Project, seen: Option<&UserMade>) -> Yolo {
+        let none = Yolo { counted: None, unseen: None };
+        let Some(on) = yolo::active(project) else { return none };
+        match seen.map_or(Some(on), |s| s.yolo(on)) {
+            Some(on) => Yolo { counted: Some(on.tier), unseen: None },
+            None => Yolo { counted: None, unseen: Some(on) },
+        }
+    }
+}
+
+/// The top-level `unseen_yolo` field of a reply: the tier the session does not
+/// count, so the mod can ask the user to keep it or turn it off.
+fn unseen_yolo_field(on: yolo::On) -> Value {
+    json!({"tier": on.tier.name(), "at": on.at, "until": on.until})
+}
+
 /// Claude Code `PreToolUse`: a deny or ask response, or `None` to allow.
 /// A rule in audit mode lets the call through and is only counted. After
 /// `BACKSTOP` denials in a row the next one is a question for the user.
 pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Value>> {
     let session = input.get("session_id").and_then(Value::as_str);
     let seen = UserMade::from(project, input);
-    let tier = yolo::active(project).and_then(|on| seen.as_ref().map_or(Some(on), |s| s.yolo(on))).map(|on| on.tier);
+    let switch = Yolo::of(project, seen.as_ref());
+    let tier = switch.counted;
     let call = Call::new(project);
     let unseen = match &seen {
         Some(s) => unseen_denial(&call, input, s)?,
@@ -1052,7 +1084,7 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
     let found = unseen.map_or_else(|| denial_in(&call, input), |d| Ok(Some(Found::deny(d))))?;
     // The auto tier lets the agent accept and confirm; every other owner-only call stays denied.
     let command = input.get("tool_input").and_then(|t| t.get("command")).and_then(Value::as_str);
-    let mode = |f: &Found| {
+    let mode_at = |f: &Found, tier: Option<Tier>| {
         let d = &f.denial;
         if f.audit {
             // A relaxed lease audits an edit outside its files.
@@ -1063,10 +1095,11 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
             yolo::mode_of(d.rule, tier)
         }
     };
+    let mode = |f: &Found| mode_at(f, tier);
     if let Some(f) = found.as_ref().filter(|f| mode(f) == Mode::Audit) {
         stats::record(project, Hook::PreToolUse, Outcome::Audit, Some(f.denial.rule), session);
     }
-    let Some(d) = found.filter(|f| mode(f) == Mode::Enforce).map(|f| f.denial) else {
+    let Some(found) = found.filter(|f| mode(f) == Mode::Enforce) else {
         if let Some(s) = session {
             streak::reset(project, s);
             record_changes(project, s, input);
@@ -1085,6 +1118,10 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         let _ = observed::pre(project, call.home(), input);
         return Ok(None);
     };
+    // The tier the file holds but this session does not count is reported when it
+    // would have let the call through, so the mod can ask the user about it.
+    let unseen = switch.unseen.filter(|on| mode_at(&found, Some(on.tier)) == Mode::Audit);
+    let d = found.denial;
     let denied = session.map(|s| streak::add(project, s));
     let asked = !d.rule.tampering() && denied.is_some_and(|n| n > streak::BACKSTOP);
     if asked && let Some(s) = session {
@@ -1105,11 +1142,15 @@ pub fn claude_pre_tool_use(project: &Project, input: &Value) -> Result<Option<Va
         (Outcome::Deny, "deny", format!("rvow: {}", d.reason))
     };
     stats::record(project, Hook::PreToolUse, outcome, Some(d.rule), session);
-    Ok(Some(json!({"hookSpecificOutput": {
+    let mut reply = json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
         "permissionDecisionReason": reason,
-    }})))
+    }});
+    if let Some(on) = unseen {
+        reply["unseen_yolo"] = unseen_yolo_field(on);
+    }
+    Ok(Some(reply))
 }
 
 /// Claude Code `PreToolUse` when the hook itself failed: a deny for a tool
@@ -1613,12 +1654,27 @@ fn open_items(project: &Project, home: &Path, cwd: &Path, session: Option<&str>,
 /// One line for a status bar: proved tasks, drift and pending amendments of
 /// the branch's active changes, or `None` when the branch has none.
 pub fn status_line(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
+    status_line_with(project, home, cwd, Yolo::of(project, None))
+}
+
+/// `status_line` for one hook call: a yolo tier that the call's `user_made` does
+/// not count shows as unseen, so the user sees that the hooks ignore it.
+pub fn status_line_for(project: &Project, home: &Path, cwd: &Path, input: &Value) -> Result<Option<String>> {
+    let seen = UserMade::from(project, input);
+    status_line_with(project, home, cwd, Yolo::of(project, seen.as_ref()))
+}
+
+fn status_line_with(project: &Project, home: &Path, cwd: &Path, yolo: Yolo) -> Result<Option<String>> {
     let line = status_line_inner(project, home, cwd)?;
-    Ok(match (line, yolo::active(project)) {
-        (line, None) => line,
-        (Some(line), Some(on)) => Some(format!("{line} [yolo {}]", on.tier.name())),
-        (None, Some(on)) => Some(format!("rvow [yolo {}]", on.tier.name())),
-    })
+    let suffix = match (yolo.counted, yolo.unseen) {
+        (Some(tier), _) => format!(" [yolo {}]", tier.name()),
+        (None, Some(on)) => format!(" [yolo {} unseen]", on.tier.name()),
+        (None, None) => return Ok(line),
+    };
+    Ok(Some(match line {
+        Some(line) => format!("{line}{suffix}"),
+        None => format!("rvow{suffix}"),
+    }))
 }
 
 fn status_line_inner(project: &Project, home: &Path, cwd: &Path) -> Result<Option<String>> {
@@ -1693,9 +1749,14 @@ fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change
     if !stop_needs_specs(input) {
         return Ok(None);
     }
-    if yolo::active(project).is_some_and(|on| on.tier == Tier::Bypass) {
+    let seen = UserMade::from(project, input);
+    let switch = Yolo::of(project, seen.as_ref());
+    if switch.counted == Some(Tier::Bypass) {
         return Ok(None);
     }
+    // A bypass tier that the file holds but the session does not count holds
+    // nothing back; it is only reported, so the mod can ask the user about it.
+    let unseen = switch.unseen.filter(|on| on.tier == Tier::Bypass);
     let session = input.get("session_id").and_then(Value::as_str);
     // A change that no call of the session recorded, such as a background job's, still counts.
     if let (Some(s), Ok(top)) = (session, git::toplevel(&cwd)) {
@@ -1709,7 +1770,7 @@ fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change
         return Ok(None);
     }
     let Some(session) = session else {
-        return Ok(stop_hold(items).map(|h| (blocked_reason(&h.text), h.kind)));
+        return Ok(stop_hold(items).map(|h| (blocked_reason(&h.text, unseen), h.kind)));
     };
     // The keys of every item that is open now, and the ones of those that this
     // session was not told yet: only a new one holds the stop back.
@@ -1736,12 +1797,17 @@ fn stop_decision(project: &Project, home: &Path, input: &Value, living: &[change
     let Some(hold) = stop_hold(kept) else {
         return Ok(None);
     };
-    Ok(Some((blocked_reason(&hold.text), hold.kind)))
+    Ok(Some((blocked_reason(&hold.text, unseen), hold.kind)))
 }
 
-/// The block response of one reason.
-fn blocked_reason(text: &str) -> Value {
-    json!({"decision": "block", "reason": format!("rvow: {text}")})
+/// The block response of one reason, with the yolo tier the session does not
+/// count when that tier would have let the stop go.
+fn blocked_reason(text: &str, unseen: Option<yolo::On>) -> Value {
+    let mut reply = json!({"decision": "block", "reason": format!("rvow: {text}")});
+    if let Some(on) = unseen {
+        reply["unseen_yolo"] = unseen_yolo_field(on);
+    }
+    reply
 }
 
 #[cfg(test)]
@@ -1986,6 +2052,161 @@ mod tests {
         assert_eq!(status_line(&p, &home, &repo).unwrap(), None);
         let c = change::new(&p, "T", "main", true).unwrap();
         assert_eq!(status_line(&p, &home, &repo).unwrap(), Some(format!("rvow {}: plan waits for accept", c.id)));
+    }
+
+    /// A repository with a plan on `src/lib.rs` that is not accepted yet: an
+    /// edit of that file is denied, and its reason names the change.
+    fn backlog_fixture() -> (crate::git::testrepo::TempDir, Project, PathBuf, String) {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", true).unwrap();
+        (tmp, p, repo, c.id.to_string())
+    }
+
+    /// What the harness saw the user do in a session that started at `since`: the
+    /// yolo tiers `kept` were switched on by the user, and no other one was.
+    fn seen_yolo(since: u64, kept: &[yolo::On]) -> Value {
+        let kept: Vec<Value> = kept.iter().map(|on| json!({"tier": on.tier.name(), "at": on.at, "until": on.until})).collect();
+        json!({"since": since, "changes": [], "yolo": kept})
+    }
+
+    /// The pre-tool-use answer of one write of `file` in session `s1`, with
+    /// `user_made` when the harness sent one.
+    fn write_seen(p: &Project, repo: &Path, file: &str, seen: Option<Value>) -> Option<Value> {
+        let mut input = json!({
+            "cwd": repo.to_str().unwrap(),
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_input": {"file_path": file, "content": "ok"},
+        });
+        if let Some(seen) = seen {
+            input["user_made"] = seen;
+        }
+        claude_pre_tool_use(p, &input).unwrap()
+    }
+
+    fn tier_on(p: &Project, tier: Tier) -> yolo::On {
+        yolo::set(p, tier, std::time::Duration::from_secs(3_600)).unwrap()
+    }
+
+    #[test]
+    fn unseen_yolo_reports_an_audit_tier_that_would_let_the_edit_through() {
+        let (_tmp, p, repo, id) = backlog_fixture();
+        let on = tier_on(&p, Tier::Audit);
+        // The session began when the tier was switched on, so it does not count it.
+        let out = write_seen(&p, &repo, "src/lib.rs", Some(seen_yolo(on.at, &[]))).expect("an edit before accept is denied");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains(&id), "{reason}");
+        assert_eq!(out["unseen_yolo"]["tier"], "audit", "{out}");
+        assert_eq!(out["unseen_yolo"]["at"].as_u64(), Some(on.at), "{out}");
+        assert_eq!(out["unseen_yolo"]["until"].as_u64(), Some(on.until), "{out}");
+    }
+
+    #[test]
+    fn unseen_yolo_is_not_reported_to_a_harness_that_sends_no_user_made() {
+        let (_tmp, p, repo, _id) = backlog_fixture();
+        tier_on(&p, Tier::Audit);
+        // The tier counts for a harness with no record, so an owner command stays denied
+        // and the reply is the one of today: no `unseen_yolo` field.
+        let call = json!({
+            "cwd": repo.to_str().unwrap(),
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rvow confirm --accept --all"},
+        });
+        let out = claude_pre_tool_use(&p, &call).unwrap().expect("an owner command stays denied under an audit tier");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(out.get("unseen_yolo").is_none(), "{out}");
+    }
+
+    #[test]
+    fn unseen_yolo_is_not_reported_when_no_rule_holds_the_call() {
+        let (tmp, p, repo, _id) = backlog_fixture();
+        let on = tier_on(&p, Tier::Audit);
+        let scratch = tmp.0.join("scratch/a.txt");
+        let out = write_seen(&p, &repo, scratch.to_str().unwrap(), Some(seen_yolo(on.at, &[])));
+        assert_eq!(out, None, "a file outside the repository is no work of it");
+    }
+
+    #[test]
+    fn unseen_yolo_a_counted_tier_is_the_one_the_rules_follow() {
+        let (_tmp, p, repo, _id) = backlog_fixture();
+        let on = tier_on(&p, Tier::Audit);
+        let out = write_seen(&p, &repo, "src/lib.rs", Some(seen_yolo(on.at, &[on])));
+        assert_eq!(out, None, "a tier the user switched on audits the edit");
+    }
+
+    #[test]
+    fn unseen_yolo_exact_entry_of_the_file_counts() {
+        let (_tmp, p, repo, _id) = backlog_fixture();
+        let on = tier_on(&p, Tier::Audit);
+        let out = write_seen(&p, &repo, "src/lib.rs", Some(seen_yolo(on.at, &[on])));
+        assert_eq!(out, None, "the tier, start and end equal the user's switch");
+    }
+
+    #[test]
+    fn unseen_yolo_exact_entry_from_thirty_seconds_earlier_does_not_count() {
+        let (_tmp, p, repo, id) = backlog_fixture();
+        let on = tier_on(&p, Tier::Audit);
+        let earlier = yolo::On { tier: on.tier, at: on.at - 30_000, until: on.until - 30_000 };
+        let out =
+            write_seen(&p, &repo, "src/lib.rs", Some(seen_yolo(earlier.at, &[earlier]))).expect("a tier the user did not switch stays off");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny", "{out}");
+        let reason = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains(&id), "{reason}");
+        assert_eq!(out["unseen_yolo"]["tier"], "audit", "{out}");
+        assert_eq!(out["unseen_yolo"]["at"].as_u64(), Some(on.at), "{out}");
+        assert_eq!(out["unseen_yolo"]["until"].as_u64(), Some(on.until), "{out}");
+    }
+
+    #[test]
+    fn unseen_yolo_exact_entry_one_millisecond_off_does_not_count() {
+        let (_tmp, p, repo, _id) = backlog_fixture();
+        let on = tier_on(&p, Tier::Audit);
+        for off in [yolo::On { at: on.at + 1, ..on }, yolo::On { until: on.until - 1, ..on }] {
+            let out = write_seen(&p, &repo, "src/lib.rs", Some(seen_yolo(on.at, &[off])));
+            let out = out.unwrap_or_else(|| panic!("a tier 1 ms off {off:?} stays off"));
+            assert_eq!(out["unseen_yolo"]["at"].as_u64(), Some(on.at), "{out}");
+        }
+    }
+
+    #[test]
+    fn unseen_yolo_the_status_line_marks_a_tier_the_session_does_not_count() {
+        let tmp = crate::git::testrepo::TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = crate::git::testrepo::repo_with_commit(&tmp.0, "r");
+        let p = crate::store::init(&repo, &home, crate::store::Mode::Home).unwrap();
+        let c = change::new(&p, "T", "main", false).unwrap();
+        let on = tier_on(&p, Tier::Bypass);
+        let status = |seen: Option<Value>| {
+            let mut input = json!({"cwd": repo.to_str().unwrap()});
+            if let Some(seen) = seen {
+                input["user_made"] = seen;
+            }
+            status_line_for(&p, &home, &repo, &input).unwrap()
+        };
+        let waiting = format!("rvow {}: plan waits for accept", c.id);
+        assert_eq!(status(None), Some(format!("{waiting} [yolo bypass]")), "a harness with no record sees the tier as before");
+        assert_eq!(status(Some(seen_yolo(on.at, &[]))), Some(format!("{waiting} [yolo bypass unseen]")));
+        assert_eq!(status(Some(seen_yolo(on.at, &[on]))), Some(format!("{waiting} [yolo bypass]")), "the user kept the tier");
+    }
+
+    #[test]
+    fn unseen_yolo_reports_an_uncounted_bypass_tier_when_the_stop_holds() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        edits_out(&p, &repo, "s1");
+        let on = tier_on(&p, Tier::Bypass);
+        let input = json!({"cwd": repo.to_str().unwrap(), "session_id": "s1", "user_made": seen_yolo(on.at, &[])});
+        let out = claude_stop(&p, &home, &input).unwrap().expect("an open task holds the stop");
+        assert!(out["reason"].as_str().unwrap().contains(&task), "{out}");
+        assert_eq!(out["unseen_yolo"]["tier"], "bypass", "{out}");
+        assert_eq!(out["unseen_yolo"]["at"].as_u64(), Some(on.at), "{out}");
+        assert_eq!(out["unseen_yolo"]["until"].as_u64(), Some(on.until), "{out}");
     }
 
     #[test]

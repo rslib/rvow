@@ -184,3 +184,5 @@ mod verify_runners;
 mod worktrees;
 #[path = "suite/yolo.rs"]
 mod yolo;
+#[path = "suite/yolo_times.rs"]
+mod yolo_times;

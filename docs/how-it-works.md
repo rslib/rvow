@@ -607,7 +607,8 @@ The check looks at where a call writes.
 A call that writes nothing in the repository goes on, such as `ssh`, a file in `/tmp` or a scratch folder, or a script run from there.
 A script that edits the repository is not seen before it runs, so the gate and the provenance check catch it as drift.
 
-- A yolo tier switched on since the session started counts only when you switched it on with `/rvow-yolo` or the yolo dialog.
+- A yolo tier switched on since the session started counts only when you switched it on with `/rvow-yolo` or the yolo dialog, or kept it in the unseen yolo dialog.
+  The mod and pi record the start and end time that `rvow yolo` prints, and the yolo file must match them exactly, so a copied binary cannot switch a tier on again a moment later.
 - An accept under a yolo `auto` tier that you switched on counts, so a run with no dialog still works.
 - An accept or a yolo tier from before the session started counts.
 - A harness that sends no `user_made` field keeps the old rules.
@@ -616,7 +617,11 @@ A script that edits the repository is not seen before it runs, so the gate and t
 
 `! rvow yolo <tier> [--for 2h]` relaxes the hooks for a while.
 In the Claude mod and in pi, type `/rvow-yolo <tier> [30m]` instead, and the agent is told once.
-There, a tier that `! rvow yolo` switches on during the session does not count, since the mod cannot tell it from a copied binary (see [What the user made](#what-the-user-made)).
+There, a tier that `! rvow yolo` switches on during the session does not count at first, since the mod cannot tell it from a copied binary (see [What the user made](#what-the-user-made)).
+
+When that tier would let a denied call or a held stop through, the mod or pi asks you once for each switch: keep the tier or turn it off.
+A kept tier counts as one from `/rvow-yolo`, and no answer leaves it off.
+If you did not run `rvow yolo`, the agent did, so choose Turn off.
 
 - The default length is 2 hours and the longest is 24.
 - It ends by itself, and `! rvow yolo off` ends it at once.
@@ -632,6 +637,7 @@ There, a tier that `! rvow yolo` switches on during the session does not count, 
 | `bypass` | Every hook only audits, and a stop is never held back. |
 
 The status line shows `[yolo <tier>]` and the brief says so once.
+A tier that the hooks do not count shows as `[yolo <tier> unseen]`.
 `rvow stats` counts what each tier let through.
 
 > [!NOTE]
@@ -734,6 +740,13 @@ If the host quits, an open question ends as cancelled and the next one uses the 
 The engine runs in the environment of the hook that started it.
 A client sends a hash of the variables the hooks read, and an engine with another hash answers with a mismatch, so the client falls back to `rvow hook`.
 `RVOW_ENGINE=off` keeps a hook from starting an engine, and the test suite sets it.
+
+### A new binary
+
+The engine's build is the version plus a stamp of its own binary file, its modified time and length.
+The engine reports its build but does not refuse a client of another build.
+When the binary file changes, such as after `cargo install`, the engine answers the next call with a mismatch and stops.
+The next hook then starts an engine from the new binary.
 
 ## Measuring the hooks
 

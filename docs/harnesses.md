@@ -51,13 +51,22 @@ rvow prints the decision:
 `"decision"` is `allow`, `deny` or `ask`.
 A deny or an ask has a `"reason"` for the agent; an ask is a question for the user, and a harness that cannot ask treats it as a deny.
 
+A deny can also carry `"unseen_yolo": {"tier": "audit", "at": 1760000000000, "until": 1760003600000}`.
+rvow adds it only when the call has `user_made` and a yolo tier that is not in the record would have let the call through.
+
+Ask the user once for each `at` to keep the tier or turn it off.
+To keep it, add the object to `user_made.yolo` and run the hook again for the same call.
+To turn it off, run `rvow yolo off`.
+
 ### post-tool-use, session-start and stop
 
 Each event reads `cwd` too.
 
 - `post-tool-use` takes `session_id`, `agent_id` and `tool_use_id`, so rvow records the files the call changed, and prints `{}`.
 - `session-start` takes `session_id` and `source` (`startup`, `resume`, `clear`, `compact` or `fork`), and prints `{"context": "..."}` with the brief for the agent, or `{}` when the session already has the same brief.
-- `stop` takes `session_id`, `agent_id` and `stop_hook_active`, and prints `{"decision": "block", "reason": "..."}` when the session must go on, else `{}`; the same reason is not given twice in a row.
+- `stop` takes `session_id`, `agent_id`, `stop_hook_active` and `user_made`, and prints `{"decision": "block", "reason": "..."}` when the session must go on, else `{}`; the same reason is not given twice in a row.
+  A block can carry `"unseen_yolo"` for a `bypass` tier that is not in the record, as a deny of `pre-tool-use` can.
+- `status` takes `user_made` and prints `{"status": "..."}`, the line for a status bar; a yolo tier that is not in the record shows as `[yolo <tier> unseen]`.
 
 ## Wire a harness
 

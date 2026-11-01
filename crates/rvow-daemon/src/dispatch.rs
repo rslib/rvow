@@ -96,7 +96,11 @@ pub fn answer_hook_at(home: Option<&Path>, harness: Harness, event: HookEvent, t
                 (Some(stats::Hook::LeaseEnd), timed(&mut steps, stats::Step::Rules, || hooks::claude_lease_end(&p, &input)))
             }
             (_, HookEvent::View) => (None, view::view(&p, &home, &cwd)),
-            (_, HookEvent::Status) => (None, hooks::status_line(&p, &home, &cwd).map(|s| s.map(|s| serde_json::json!({ "status": s })))),
+            // The status line reads what the session saw the user do, so a yolo
+            // tier the hooks ignore shows as unseen.
+            (_, HookEvent::Status) => {
+                (None, hooks::status_line_for(&p, &home, &cwd, &input).map(|s| s.map(|s| serde_json::json!({ "status": s }))))
+            }
         };
         if let Some(hook) = counted {
             count_duration(&p, hook, &input, start, &steps);
@@ -165,7 +169,9 @@ fn answer(harness: Harness, event: HookEvent, out: Option<serde_json::Value>) ->
         }),
         Harness::Json => Some(match event {
             HookEvent::PreToolUse => match at(&out, "/hookSpecificOutput/permissionDecision") {
-                Some(d) => json!({"decision": d, "reason": at(&out, "/hookSpecificOutput/permissionDecisionReason")}),
+                Some(d) => {
+                    with_unseen_yolo(json!({"decision": d, "reason": at(&out, "/hookSpecificOutput/permissionDecisionReason")}), &out)
+                }
                 None => json!({"decision": "allow"}),
             },
             HookEvent::PostToolUse | HookEvent::SessionStart => match at(&out, "/hookSpecificOutput/additionalContext") {
@@ -173,12 +179,20 @@ fn answer(harness: Harness, event: HookEvent, out: Option<serde_json::Value>) ->
                 None => json!({}),
             },
             HookEvent::Stop => match at(&out, "/decision") {
-                Some(d) => json!({"decision": d, "reason": at(&out, "/reason")}),
+                Some(d) => with_unseen_yolo(json!({"decision": d, "reason": at(&out, "/reason")}), &out),
                 None => json!({}),
             },
             HookEvent::Status | HookEvent::View | HookEvent::LeaseBind | HookEvent::LeaseEnd => out.unwrap_or_else(|| json!({})),
         }),
     }
+}
+
+/// `reply` with the `unseen_yolo` field of the engine's answer `out`, when it has one.
+fn with_unseen_yolo(mut reply: serde_json::Value, out: &Option<serde_json::Value>) -> serde_json::Value {
+    if let Some(unseen) = out.as_ref().and_then(|v| v.get("unseen_yolo")) {
+        reply["unseen_yolo"] = unseen.clone();
+    }
+    reply
 }
 
 /// Starts `rvow reprove` detached when a finished change has stale tasks, so
@@ -339,5 +353,20 @@ mod tests {
         if let Some(out) = pre_tool_use(&home, &call) {
             assert!(!out.contains("\"permissionDecision\":\"deny\""), "the accepted plan lets the edit through: {out}");
         }
+    }
+
+    #[test]
+    fn unseen_yolo_reaches_a_json_harness() {
+        let unseen = json!({"tier": "audit", "at": 1, "until": 2});
+        let deny =
+            json!({"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "rvow: no"}, "unseen_yolo": unseen});
+        let pre = answer(Harness::Json, HookEvent::PreToolUse, Some(deny)).unwrap();
+        assert_eq!(pre, json!({"decision": "deny", "reason": "rvow: no", "unseen_yolo": unseen}));
+        let block = json!({"decision": "block", "reason": "rvow: wait", "unseen_yolo": unseen});
+        let stop = answer(Harness::Json, HookEvent::Stop, Some(block)).unwrap();
+        assert_eq!(stop, json!({"decision": "block", "reason": "rvow: wait", "unseen_yolo": unseen}));
+        let plain = json!({"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "rvow: no"}});
+        let pre = answer(Harness::Json, HookEvent::PreToolUse, Some(plain)).unwrap();
+        assert!(pre.get("unseen_yolo").is_none(), "{pre}");
     }
 }

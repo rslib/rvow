@@ -452,6 +452,25 @@ export const YOLO_SCHEMA = {
   additionalProperties: false,
 }
 
+/** A yolo tier a hook reply reports as unseen: one the session does not count, with its file. */
+export type UnseenYolo = { tier: string; at: number; until: number }
+
+/** The answers of the unseen yolo dialog: keep the tier the hooks ignore, or switch yolo off. */
+export const UNSEEN_YOLO_OPTIONS = ['Keep', 'Turn off'] as const
+
+/**
+ * The question about a yolo tier that is on but that the session did not see the user switch on, so
+ * the hooks ignore it: its end, how a tier gets counted, and who else may have written it.
+ */
+export function unseenYoloQuestion(on: { tier: string; until: number }): string {
+  const end = new Date(on.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const what = YOLO_TIERS[on.tier as keyof typeof YOLO_TIERS]
+  return [
+    `yolo ${on.tier} is on until ${end}, but rvow did not see you switch it on (only /rvow-yolo or the yolo dialog count). If you did not run \`rvow yolo\`, the agent did. Keep it or turn it off?`,
+    `${on.tier}${what ? `: ${what}` : ''}.`,
+  ].join('\n\n')
+}
+
 /** The `rvow yolo` arguments for a tool call, or the reason that the call is refused. */
 export function yoloArgv(input: Record<string, unknown>): string[] | string {
   const unknown = Object.keys(input).filter((k) => k !== 'tier' && k !== 'for')
@@ -469,6 +488,19 @@ export function yoloArgv(input: Record<string, unknown>): string[] | string {
   }
   return ['yolo', tier, '--for', length]
 }
+
+/**
+ * The `at` and `until` a `rvow yolo` run printed, in ms: the exact values it sealed into the yolo
+ * file, which the hook matches an entry of the user record against. Undefined when the output
+ * carries neither, as an older rvow or a run that switched nothing on prints none.
+ */
+export function yoloTimes(out: string): { at: number; until: number } | undefined {
+  const at = /^at: (\d+)$/m.exec(out)?.[1]
+  const until = /^until: (\d+)$/m.exec(out)?.[1]
+  if (at === undefined || until === undefined) return undefined
+  return { at: Number(at), until: Number(until) }
+}
+
 export const EDIT_HINT = 'Edit the text each answer changes.'
 
 export type Asked = {

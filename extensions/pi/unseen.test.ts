@@ -19,7 +19,11 @@ cat > /dev/null
 case "$1" in
   review) echo "review text" ;;
   accept) echo "accepted" ;;
-  yolo) printf 'tier: %s\\nminutes: 30\\n' "$2" ;;
+  yolo)
+    case "$2" in
+      auto) printf 'tier: auto\\nminutes: 30\\nat: 1700000000000\\nuntil: 1700001800000\\n' ;;
+      *) printf 'tier: %s\\nminutes: 120\\nat: 1700000000000\\nuntil: 1700007200000\\n' "$2" ;;
+    esac ;;
 esac
 `,
 );
@@ -123,12 +127,12 @@ test("the accept command on an accepted change records it and says so", async ()
 test("a yolo tier the user turns on is in the record", async () => {
   const t = setup();
   await t.fire("session_start");
-  const before = Date.now();
   await t.command("rvow-yolo", "auto 30m");
   await t.tool("rvow_yolo", { tier: "bypass" });
   const [cmd, dialog] = (await t.call("bash", probe)).user_made.yolo;
   assert.equal(cmd?.tier, "auto");
-  assert.ok((cmd?.at ?? 0) >= before);
+  // The record holds the times that `rvow yolo` printed, which are the ones it sealed.
+  assert.equal(cmd?.at, 1_700_000_000_000);
   assert.equal((cmd?.until ?? 0) - (cmd?.at ?? 0), 30 * 60_000);
   assert.equal(dialog?.tier, "bypass");
   assert.equal((dialog?.until ?? 0) - (dialog?.at ?? 0), 2 * 3_600_000);

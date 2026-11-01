@@ -413,7 +413,8 @@ export function declareDialogTools(pi: Pick<ExtensionAPI, "getActiveTools" | "se
 export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate) {
   const queue = serialQueue();
   const acceptMemory = createAcceptMemory();
-  const result = async (
+  /** The binary's own answer: a call that cannot run counts as a failed one. */
+  const call = async (
     args: string[],
     cwd: string,
     signal: AbortSignal | undefined,
@@ -421,7 +422,9 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
   ) => {
     if (signal?.aborted) throw new Error("rvow: cancelled before execution");
     const value = await execute(args, cwd, "", timeout, signal);
-    const output = value ?? { code: 1, out: "rvow: cannot run the configured binary" };
+    return value ?? { code: 1, out: "rvow: cannot run the configured binary" };
+  };
+  const reply = (args: string[], output: { code: number; out: string }) => {
     const details = parseOutput(args, output.code, output.out);
     const text =
       output.out.length <= MODEL_TEXT_CAP
@@ -434,6 +437,12 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
       ...(output.code !== 0 ? { isError: true } : {}),
     };
   };
+  const result = async (
+    args: string[],
+    cwd: string,
+    signal: AbortSignal | undefined,
+    timeout: number,
+  ) => reply(args, await call(args, cwd, signal, timeout));
   pi.registerTool({
     name: "rvow_view",
     label: "rvow view",
@@ -748,10 +757,12 @@ export function registerTypedTools(pi: ExtensionAPI, execute = run, gate?: Gate)
             details: { kind: "failure" as const, code: 1, error: "declined", stdout: "" },
           };
       }
-      const at = Date.now();
-      const done = await queue(() => result(args, ctx.cwd, signal, SLOW_MS));
+      const output = await queue(() => call(args, ctx.cwd, signal, SLOW_MS));
+      const done = reply(args, output);
+      // The times the CLI printed are the ones it sealed, so the hook counts exactly those; see
+      // `recordYolo`. A run that printed no `at` or no `until` records nothing.
       if (gate && on && tier && done.details.kind === "yolo")
-        recordYolo(gate.made, tier, at, args[2] === "--for" ? args[3] : undefined);
+        recordYolo(gate.made, tier, output.out);
       return done;
     },
   });
