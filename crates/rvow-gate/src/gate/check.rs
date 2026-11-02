@@ -1,21 +1,18 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::rc::Rc;
 
 use serde_json::Value;
 
-use super::rerun::changed_files;
 use super::signature::{amendment_ancestor, bound_confirm_payload, signature_ok};
-use super::{Options, Report};
+use super::{Asked, Options, Report};
 use crate::amend;
 use crate::change::{self, CapSpec, LEDGER, PROPOSAL, Stage, TASKS};
 use crate::diag::Severity;
 use crate::drift;
 use crate::error::Result;
 use crate::fingerprint::globset;
-use crate::git;
 use crate::ledger::{self, Kind};
 use crate::proof::{self, Active, Now, State};
 use crate::record;
@@ -78,7 +75,8 @@ pub fn check_record(project: &Project, living: &[CapSpec], r: &mut Report) -> Re
 }
 
 pub fn check_change(project: &Project, c: &Active, now: &Now, opts: &Options, r: &mut Report) -> Result<()> {
-    check_change_only(project, c, now, opts, None, r)
+    let asked = Asked::new(now.top, &now.config.base);
+    check_change_only(project, c, now, opts, None, &asked, r)
 }
 
 /// Like `check_change`, checking the proofs of the tasks in `only` alone when it is set.
@@ -88,10 +86,12 @@ pub(crate) fn check_change_only(
     now: &Now,
     opts: &Options,
     only: Option<&[String]>,
+    asked: &Asked,
     r: &mut Report,
 ) -> Result<()> {
-    if let Ok(home) = crate::store::home_dir() {
-        drift::fetch_missing_grammars(project, now.top, &home, now.config, c);
+    let home = crate::store::home_dir().ok();
+    if let Some(home) = &home {
+        drift::fetch_missing_grammars(project, now.top, home, now.config, c);
     }
     let id = &c.dir.id;
     for (path, d) in c.loaded.errors() {
@@ -104,7 +104,7 @@ pub(crate) fn check_change_only(
             Severity::Warning => r.warnings.push(line),
         }
     }
-    for item in drift::drift(project, now.top, now.config, c)?.into_iter().filter(|i| i.class.blocks()) {
+    for item in drift::drift_asked(project, home.as_deref(), now.config, c, now.living, asked)?.into_iter().filter(|i| i.class.blocks()) {
         r.work(format!("{id}: {} drift: {}; record it with rvow amend --reason and ask the user to confirm", item.class.name(), item.what));
     }
     for p in amend::pending(std::slice::from_ref(c)) {
@@ -152,10 +152,12 @@ pub(crate) fn check_change_only(
 /// A done change counts toward scope only while its work is not in the base:
 /// its archive HEAD, or its vow base when no HEAD was recorded, must not be
 /// a strict ancestor of the merge base. No point or an unknown commit counts,
-/// so a missing object never breaks the gate. `seen` holds the answer per
-/// point, so a run asks git about each one once.
-fn done_counts(top: &Path, events: &[ledger::Event], mb: &str, seen: &mut HashMap<String, bool>) -> bool {
-    point_counts(top, done_point(events), mb, seen)
+/// so a missing object never breaks the gate.
+fn done_counts(asked: &Asked, events: &[ledger::Event]) -> Result<bool> {
+    match done_point(events) {
+        None => Ok(true),
+        Some(point) => asked.outside_merge_base(point),
+    }
 }
 
 /// The commit a done change is judged by: its archive HEAD, else its vow base.
@@ -165,40 +167,27 @@ fn done_point(events: &[ledger::Event]) -> Option<&str> {
     head.or(vow_base)
 }
 
-/// `done_counts` for a point already read from the ledger.
-fn point_counts(top: &Path, point: Option<&str>, mb: &str, seen: &mut HashMap<String, bool>) -> bool {
-    let Some(point) = point else { return true };
-    if point == mb {
-        return true;
-    }
-    if let Some(&known) = seen.get(point) {
-        return known;
-    }
-    let counts = git::run(top, &["merge-base", "--is-ancestor", point, mb]).is_err();
-    seen.insert(point.to_string(), counts);
-    counts
-}
-
-/// Whether the work of a change of another branch is part of this stacked
-/// branch: the tip of that branch is an ancestor of HEAD and not an ancestor
-/// of the merge base `mb`. A branch with no tip does not count. `seen` holds
-/// the answer per branch, so each branch is resolved once.
-fn stacked_counts(top: &Path, other: &str, mb: &str, seen: &mut HashMap<String, bool>) -> bool {
-    if let Some(&known) = seen.get(other) {
-        return known;
-    }
-    let counts = git::branch_tip(top, other).is_some_and(|tip| {
-        git::run(top, &["merge-base", "--is-ancestor", &tip, "HEAD"]).is_ok()
-            && git::run(top, &["merge-base", "--is-ancestor", &tip, mb]).is_err()
-    });
-    seen.insert(other.to_string(), counts);
-    counts
-}
-
 /// The `files:` globs of every task in scope: the queue's tasks, the files
 /// their baseline took in, and the tasks and taken-in files of every done
 /// change whose work is not in the base yet, plus those of another branch's
 /// change stacked under this one.
+pub(crate) fn scope_globs_asked(
+    project: &Project,
+    asked: &Asked,
+    branch: &str,
+    living: &[CapSpec],
+    queue: &[&Active],
+) -> Result<Vec<String>> {
+    let mut globs: Vec<String> = queue.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())).collect();
+    for c in queue {
+        globs.extend(drift::outside_of(c.baseline()).iter().map(|p| globset::escape(p)));
+    }
+    globs.extend(store_globs_asked(project, asked, branch, living)?);
+    Ok(globs)
+}
+
+/// `scope_globs` over a merge base the caller already read.
+#[cfg(test)]
 pub(crate) fn scope_globs(
     project: &Project,
     top: &Path,
@@ -207,12 +196,7 @@ pub(crate) fn scope_globs(
     queue: &[&Active],
     mb: &str,
 ) -> Result<Vec<String>> {
-    let mut globs: Vec<String> = queue.iter().flat_map(|c| c.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned())).collect();
-    for c in queue {
-        globs.extend(drift::outside_of(c.baseline()).iter().map(|p| globset::escape(p)));
-    }
-    globs.extend(store_globs(project, top, branch, living, mb)?);
-    Ok(globs)
+    scope_globs_asked(project, &Asked::at(top, mb), branch, living, queue)
 }
 
 /// One active or done change as the store-wide scope reads it, with no git
@@ -281,17 +265,18 @@ fn scan_key(project: &Project) -> Result<(String, bool)> {
 /// The store-wide part of `scope_globs`: the done changes of the branch whose
 /// work is not in the base, and the changes of another branch that stack
 /// here. The parse of the store is kept while no change file moves; the git
-/// questions run on each call.
-pub(crate) fn store_globs(project: &Project, top: &Path, branch: &str, living: &[CapSpec], mb: &str) -> Result<Vec<String>> {
+/// answers live in `asked`, so each one is asked once per command.
+pub(crate) fn store_globs_asked(project: &Project, asked: &Asked, branch: &str, living: &[CapSpec]) -> Result<Vec<String>> {
     let scanned = scanned(project, living)?;
     let mut globs = Vec::new();
-    let mut points: HashMap<String, bool> = HashMap::new();
-    let mut seen: HashMap<String, bool> = HashMap::new();
     for c in scanned.iter() {
         let counts = if c.branch == branch {
-            c.active || point_counts(top, c.point.as_deref(), mb, &mut points)
+            match &c.point {
+                Some(point) if !c.active => asked.outside_merge_base(point)?,
+                _ => true,
+            }
         } else {
-            stacked_counts(top, &c.branch, mb, &mut seen)
+            asked.stacked(&c.branch)?
         };
         if counts {
             if c.branch == branch {
@@ -301,6 +286,12 @@ pub(crate) fn store_globs(project: &Project, top: &Path, branch: &str, living: &
         }
     }
     Ok(globs)
+}
+
+/// `store_globs_asked` over a merge base the caller already read.
+#[cfg(test)]
+pub(crate) fn store_globs(project: &Project, top: &Path, branch: &str, living: &[CapSpec], mb: &str) -> Result<Vec<String>> {
+    store_globs_asked(project, &Asked::at(top, mb), branch, living)
 }
 
 /// The parsed active and done changes, from this thread's last scan when no
@@ -342,33 +333,34 @@ fn scan_store(project: &Project, living: &[CapSpec]) -> Result<Vec<Scanned>> {
 
 pub(super) fn check_scope(
     project: &Project,
-    top: &Path,
-    base: &str,
+    asked: &Asked,
     branch: &str,
     living: &[CapSpec],
     queue: &[&Active],
     r: &mut Report,
 ) -> Result<()> {
-    let Some(base_ref) = git::base_ref(top, base) else {
+    let Some(base) = asked.base() else { return Ok(()) };
+    let Some(base_ref) = asked.base_ref() else {
         r.work(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
     };
-    let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
     for c in queue {
         let vowed = c.vow().and_then(|v| v.data.get("base_commit")).and_then(Value::as_str).unwrap_or("");
-        if !vowed.is_empty() && git::run(top, &["merge-base", "--is-ancestor", vowed, &mb]).is_err() {
+        if !vowed.is_empty() && !asked.is_ancestor_of_merge(vowed)? {
             r.work(format!(
                 "{}: the merge base with {base_ref} is not after the base recorded at accept; {base} moved backwards",
                 c.dir.id
             ));
         }
     }
-    let set = globset(&scope_globs(project, top, branch, living, queue, &mb)?)?;
+    let set = globset(&scope_globs_asked(project, asked, branch, living, queue)?)?;
     let repo_dir = format!("{REPO_DIR}/");
-    let outside: Vec<String> = changed_files(top, &mb)?
-        .into_iter()
+    let outside: Vec<String> = asked
+        .changed_since_merge()?
+        .iter()
         .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
         .filter(|f| !set.is_match(f))
+        .cloned()
         .collect();
     if !outside.is_empty() {
         r.work(format!("{} changed files lie outside every task's files: {}", outside.len(), list(&outside)));
@@ -381,14 +373,7 @@ pub(super) fn check_scope(
 /// the base outside the rvow tree and outside every done change of the branch
 /// fails, naming the waiting plan. Shell work done before accept must not
 /// push clean.
-pub(super) fn check_backlog_scope(
-    project: &Project,
-    top: &Path,
-    base: &str,
-    branch: &str,
-    living: &[CapSpec],
-    r: &mut Report,
-) -> Result<()> {
+pub(super) fn check_backlog_scope(project: &Project, asked: &Asked, branch: &str, living: &[CapSpec], r: &mut Report) -> Result<()> {
     let (all, _) = change::list(project)?;
     let mut waiting: Vec<String> = Vec::new();
     let mut done: Vec<(&change::ChangeDir, change::Loaded)> = Vec::new();
@@ -412,31 +397,31 @@ pub(super) fn check_backlog_scope(
     }
     waiting.sort();
     let plans = waiting.join(", ");
-    let Some(base_ref) = git::base_ref(top, base) else {
+    let Some(base) = asked.base() else { return Ok(()) };
+    if asked.base_ref().is_none() {
         r.work(format!("neither origin/{base} nor {base} exists; set base in config.toml"));
         return Ok(());
-    };
-    let mb = git::run(top, &["merge-base", "HEAD", &base_ref])?;
+    }
     let mut done_globs: Vec<String> = Vec::new();
-    let mut points: HashMap<String, bool> = HashMap::new();
     for (d, loaded) in &done {
         let (events, _) = ledger::read(&d.path.join(LEDGER))?;
-        if done_counts(top, &events, &mb, &mut points) {
+        if done_counts(asked, &events)? {
             done_globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
         }
     }
-    let mut seen: HashMap<String, bool> = HashMap::new();
     for (_, loaded) in &other {
-        if stacked_counts(top, &loaded.proposal.branch, &mb, &mut seen) {
+        if asked.stacked(&loaded.proposal.branch)? {
             done_globs.extend(loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()));
         }
     }
     let set = globset(&done_globs)?;
     let repo_dir = format!("{REPO_DIR}/");
-    let mut differed: Vec<String> = changed_files(top, &mb)?
-        .into_iter()
+    let mut differed: Vec<String> = asked
+        .changed_since_merge()?
+        .iter()
         .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
         .filter(|f| !set.is_match(f))
+        .cloned()
         .collect();
     differed.sort();
     for f in differed.iter().take(MAX_LISTED) {
@@ -451,6 +436,7 @@ pub(super) fn check_backlog_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git;
     use crate::git::testrepo::*;
     use crate::store::{Mode, init};
     use std::path::PathBuf;

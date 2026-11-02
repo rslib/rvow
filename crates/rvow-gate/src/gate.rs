@@ -22,7 +22,7 @@ mod signature;
 
 use check::check_backlog_scope;
 use check::check_scope;
-use rerun::{Lazy, Reran, Scope, changed_files, prove_data};
+use rerun::{Lazy, Reran, Scope, prove_data};
 
 #[cfg(test)]
 use crate::change::Stage;
@@ -103,6 +103,147 @@ pub struct Options {
     pub out: Option<PathBuf>,
 }
 
+/// The answers one command asks git: the base ref, the merge base, the changed
+/// files, the ancestor answers and the ignored listing are each asked once,
+/// since HEAD and the refs do not move while the command runs. It lives for that
+/// one command and never longer, because the next one may see a moved HEAD.
+pub(crate) struct Asked<'a> {
+    top: &'a Path,
+    /// The base branch to measure from; `None` when the caller gave the merge base.
+    base: Option<&'a str>,
+    base_ref: std::cell::OnceCell<Option<String>>,
+    merge_base: std::cell::OnceCell<Result<String>>,
+    since_merge: std::cell::OnceCell<Result<Vec<String>>>,
+    since_head: std::cell::OnceCell<Result<Vec<String>>>,
+    points: std::cell::RefCell<std::collections::HashMap<String, bool>>,
+    stacked: std::cell::RefCell<std::collections::HashMap<String, bool>>,
+    ignored: std::cell::OnceCell<Result<Vec<String>>>,
+}
+
+impl<'a> Asked<'a> {
+    pub(crate) fn new(top: &'a Path, base: &'a str) -> Asked<'a> {
+        Asked {
+            top,
+            base: Some(base),
+            base_ref: std::cell::OnceCell::new(),
+            merge_base: std::cell::OnceCell::new(),
+            since_merge: std::cell::OnceCell::new(),
+            since_head: std::cell::OnceCell::new(),
+            points: std::cell::RefCell::new(std::collections::HashMap::new()),
+            stacked: std::cell::RefCell::new(std::collections::HashMap::new()),
+            ignored: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The answers of a command that read the merge base itself.
+    #[cfg(test)]
+    pub(crate) fn at(top: &'a Path, mb: &str) -> Asked<'a> {
+        let asked = Asked { base: None, ..Asked::new(top, "") };
+        let _ = asked.merge_base.set(Ok(mb.to_string()));
+        asked
+    }
+
+    pub(crate) fn top(&self) -> &'a Path {
+        self.top
+    }
+
+    /// The base branch this gate measures from; `None` for a caller that gave the
+    /// merge base.
+    pub(crate) fn base(&self) -> Option<&'a str> {
+        self.base
+    }
+
+    /// The base branch ref, asked on the first need.
+    pub(crate) fn base_ref(&self) -> Option<&str> {
+        self.base_ref.get_or_init(|| self.base.and_then(|base| git::base_ref(self.top, base))).as_deref()
+    }
+
+    /// The merge base of HEAD and the base ref, asked on the first need.
+    pub(crate) fn merge_base(&self) -> Result<&str> {
+        let known = self.merge_base.get_or_init(|| match self.base_ref() {
+            Some(base_ref) => git::run(self.top, &["merge-base", "HEAD", base_ref]),
+            None => Err(Error::new(
+                "base",
+                "there is no base branch to measure from",
+                "set base in config.toml to the branch the work lands on",
+            )),
+        });
+        shared(known).map(String::as_str)
+    }
+
+    /// The files that differ from the merge base, asked on the first need.
+    pub(crate) fn changed_since_merge(&self) -> Result<&[String]> {
+        let top = self.top;
+        let known = self.since_merge.get_or_init(|| {
+            let mb = self.merge_base()?;
+            rerun::changed_files(top, mb)
+        });
+        shared(known).map(Vec::as_slice)
+    }
+
+    /// The files that differ from HEAD, asked on the first need. Nothing writes
+    /// to this repository between two asks of one command: a rerun runs in its
+    /// own worktree.
+    pub(crate) fn changed_since_head(&self) -> Result<&[String]> {
+        let known = self.since_head.get_or_init(|| rerun::changed_files(self.top, "HEAD"));
+        shared(known).map(Vec::as_slice)
+    }
+
+    /// Whether `point` is an ancestor of the merge base, asked once per point.
+    pub(crate) fn is_ancestor_of_merge(&self, point: &str) -> Result<bool> {
+        let mb = self.merge_base()?;
+        if let Some(&known) = self.points.borrow().get(point) {
+            return Ok(known);
+        }
+        let known = git::run(self.top, &["merge-base", "--is-ancestor", point, mb]).is_ok();
+        self.points.borrow_mut().insert(point.to_string(), known);
+        Ok(known)
+    }
+
+    /// Whether the work at `point` is not in the base yet, so it counts toward
+    /// scope: a point equal to the merge base is not, and a strict ancestor of it
+    /// is not. A point with no object counts.
+    pub(crate) fn outside_merge_base(&self, point: &str) -> Result<bool> {
+        if point == self.merge_base()? {
+            return Ok(true);
+        }
+        Ok(!self.is_ancestor_of_merge(point)?)
+    }
+
+    /// Whether the work of another branch is part of this stacked branch: its tip
+    /// is an ancestor of HEAD and not of the merge base. A branch with no tip does
+    /// not count. Asked once per branch.
+    pub(crate) fn stacked(&self, other: &str) -> Result<bool> {
+        let mb = self.merge_base()?;
+        if let Some(&known) = self.stacked.borrow().get(other) {
+            return Ok(known);
+        }
+        let counts = git::branch_tip(self.top, other).is_some_and(|tip| {
+            git::run(self.top, &["merge-base", "--is-ancestor", &tip, "HEAD"]).is_ok()
+                && git::run(self.top, &["merge-base", "--is-ancestor", &tip, mb]).is_err()
+        });
+        self.stacked.borrow_mut().insert(other.to_string(), counts);
+        Ok(counts)
+    }
+
+    /// The files git ignores in the tree, asked on the first need.
+    pub(crate) fn ignored(&self) -> Result<&[String]> {
+        let known = self.ignored.get_or_init(|| {
+            git::run(self.top, &["ls-files", "--others", "--ignored", "--exclude-standard"])
+                .map(|listing| listing.lines().map(String::from).collect())
+        });
+        shared(known).map(Vec::as_slice)
+    }
+}
+
+/// A kept answer, or a fresh error when the ask failed: an error is not shared.
+fn shared<T>(known: &Result<T>) -> Result<&T> {
+    match known {
+        Ok(value) => Ok(value),
+        Err(e) => Err(Error::new(e.code, e.message.as_str(), e.fix.as_str())),
+    }
+}
+
 /// Checks the active changes of the current branch.
 pub fn gate(project: &Project, home: &Path, cwd: &Path, opts: Options, echo: &mut dyn Write) -> Result<Report> {
     gate_for(project, home, cwd, opts, Reach::default(), Caching { use_cache: true, record: true }, echo)
@@ -141,9 +282,20 @@ fn gate_for(
 
     let config = config::load(project, home)?;
     let runners = config::runners(project)?;
+    let asked = Asked::new(&top, &config.base);
     let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
-    let work =
-        Work { project, home, cwd, top: &top, branch: branch.as_deref(), queue: &queue, now: &now, opts: &opts, reach, living: &living };
+    let work = Work {
+        project,
+        home,
+        cwd,
+        branch: branch.as_deref(),
+        queue: &queue,
+        now: &now,
+        opts: &opts,
+        reach,
+        living: &living,
+        asked: &asked,
+    };
     check_work(&work, &mut r)?;
 
     let env: Vec<(String, String)> = if opts.rerun { config.rerun_env.clone().into_iter().collect() } else { Vec::new() };
@@ -171,7 +323,7 @@ fn gate_for(
         }
         // A task whose proof is current and whose files are all committed was proved on this very content,
         // so a push does not run it again. `--out` still reruns every task, since it records the runs.
-        let uncommitted = if opts.out.is_none() && use_cache && !policy.rerun_proven { changed_files(&top, "HEAD").ok() } else { None };
+        let uncommitted = if opts.out.is_none() && use_cache && !policy.rerun_proven { asked.changed_since_head().ok() } else { None };
         // A proof is trusted only when its seal checks under the key in the rvow home.
         let seal_key = if uncommitted.is_some() { crate::seal::read_key(home) } else { None };
         let mut plan = Vec::new();
@@ -201,7 +353,7 @@ fn gate_for(
                 };
                 let proven = match &uncommitted {
                     Some(dirty) => {
-                        let ignored = ignored_in_scope(&top, t, &links)?;
+                        let ignored = ignored_in_scope(&asked, t, &links)?;
                         let trusted = proof::state(c, t, &plan_now)? == proof::State::Proved
                             && fingerprint::globset(&t.files).is_ok_and(|set| !dirty.iter().any(|f| set.is_match(f)))
                             && ignored.is_none();
@@ -355,13 +507,13 @@ fn gate_for(
     {
         r.warnings.extend(cache.warnings().iter().cloned());
     }
-    let dirty = if check_on { changed_files(&top, "HEAD")? } else { Vec::new() };
+    let dirty: &[String] = if check_on { asked.changed_since_head()? } else { &[] };
     for step in &config.checks {
         if !scope.wants(step)? {
             continue;
         }
         let cmd = step.run();
-        let clean = clean_in_scope(step, &dirty)?;
+        let clean = clean_in_scope(step, dirty)?;
         let key = if !check_on {
             None
         } else if clean {
@@ -420,13 +572,13 @@ struct Work<'a> {
     project: &'a Project,
     home: &'a Path,
     cwd: &'a Path,
-    top: &'a Path,
     branch: Option<&'a str>,
     queue: &'a [&'a Active],
     now: &'a Now<'a>,
     opts: &'a Options,
     reach: Reach<'a>,
     living: &'a [change::CapSpec],
+    asked: &'a Asked<'a>,
 }
 
 /// The checks that judge unfinished work: each task's state, the drift no
@@ -434,11 +586,11 @@ struct Work<'a> {
 /// every task and the work written before accept. `Report::work` decides
 /// whether a problem here fails or only warns.
 fn check_work(w: &Work, r: &mut Report) -> Result<()> {
-    let Work { project, home, cwd, top, branch, queue, now, opts, reach, living } = *w;
+    let Work { project, home, cwd, branch, queue, now, opts, reach, living, asked, .. } = *w;
     let Reach { target, only } = reach;
     let selected = || queue.iter().filter(|c| target.is_none_or(|id| &c.dir.id == id));
     for c in selected() {
-        check::check_change_only(project, c, now, opts, only, r)?;
+        check::check_change_only(project, c, now, opts, only, asked, r)?;
     }
     // A judge note is advice, and finding one builds the whole review packet,
     // which hashes every input of every task: a push, which must take seconds,
@@ -451,10 +603,10 @@ fn check_work(w: &Work, r: &mut Report) -> Result<()> {
     let Some(branch) = branch else { return Ok(()) };
     if queue.is_empty() {
         if target.is_none() {
-            check_backlog_scope(project, top, &now.config.base, branch, living, r)?;
+            check_backlog_scope(project, asked, branch, living, r)?;
         }
     } else {
-        check_scope(project, top, &now.config.base, branch, living, queue, r)?;
+        check_scope(project, asked, branch, living, queue, r)?;
     }
     Ok(())
 }
@@ -528,17 +680,18 @@ pub fn push_gate(project: &Project, home: &Path, cwd: &Path, refs: &str, echo: &
     r.changes = queue.len();
     let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
     let opts = Options::default();
+    let asked = Asked::new(&top, &config.base);
     let work = Work {
         project,
         home,
         cwd,
-        top: &top,
         branch: branch.as_deref(),
         queue: &queue,
         now: &now,
         opts: &opts,
         reach: Reach::default(),
         living: &living,
+        asked: &asked,
     };
     check_work(&work, &mut r)?;
     settle(&mut r, land, branch.as_deref());
@@ -625,13 +778,10 @@ fn settle(r: &mut Report, land: bool, branch: Option<&str>) {
 /// The first git-ignored file that matches `t`'s `files:` outside every
 /// `rerun_links` folder. The rerun worktree sees a linked folder, so a file
 /// there does not stop the trust.
-fn ignored_in_scope(top: &Path, t: &crate::tasks::Task, links: &[String]) -> Result<Option<String>> {
+fn ignored_in_scope(asked: &Asked, t: &crate::tasks::Task, links: &[String]) -> Result<Option<String>> {
     let set = fingerprint::globset(&t.files)?;
-    let listing = git::run(top, &["ls-files", "--others", "--ignored", "--exclude-standard"])?;
-    Ok(listing
-        .lines()
-        .map(String::from)
-        .find(|path| set.is_match(path) && !links.iter().any(|l| path == l || path.starts_with(&format!("{l}/")))))
+    let linked = |path: &str| links.iter().any(|l| path == l || path.strip_prefix(l.as_str()).is_some_and(|rest| rest.starts_with('/')));
+    Ok(asked.ignored()?.iter().find(|path| set.is_match(path) && !linked(path)).cloned())
 }
 
 /// Each judge finding for the current packet as a gate warning. The gate result
@@ -700,6 +850,7 @@ mod tests {
     use crate::git::testrepo::*;
     use crate::proof::prove;
     use crate::proof::tests::accepted;
+    use crate::store::{Mode, init};
 
     /// The local sha of a push, and of a delete.
     const SHA: &str = "1234567890123456789012345678901234567890";
@@ -1114,6 +1265,80 @@ mod tests {
         std::fs::write(repo.join("out.txt"), "ok, edited").unwrap();
         let _ = run_gate(&p, &home, &repo, Options::default());
         assert_eq!(runs(), 2, "another content runs the check again");
+    }
+
+    /// A change of `n` relaxed tasks over `{prefix}1.txt`, `{prefix}2.txt` and so
+    /// on, vowed and moved to active/, with the ids the vow minted.
+    fn relaxed_change(p: &Project, home: &Path, repo: &Path, title: &str, prefix: &str, n: usize) -> Vec<String> {
+        let c = change::new(p, title, "main", false).unwrap();
+        let mut tasks = String::new();
+        let mut specs = String::new();
+        for i in 1..=n {
+            let file = format!("{prefix}{i}.txt");
+            tasks.push_str(&format!(
+                "- TSK-new{i} Write {file}\n  covers: REQ-new{i}\n  verify: grep -q ok {file} && echo 'test result: ok. 1 passed; 0 failed;'\n  files: {file}\n  mode: relaxed\n"
+            ));
+            specs.push_str(&format!(
+                "## ADD REQ-new{i} Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN {file} holds ok\n"
+            ));
+        }
+        std::fs::write(c.path.join("tasks.md"), tasks).unwrap();
+        std::fs::write(c.path.join("specs/out.md"), specs).unwrap();
+        let prepared = crate::vow::prepare(p, home, c, repo, &mut std::io::sink()).unwrap();
+        crate::vow::commit(p, prepared)
+            .unwrap()
+            .minted
+            .into_iter()
+            .filter(|(from, _)| from.starts_with("TSK-"))
+            .map(|(_, id)| id.to_string())
+            .collect()
+    }
+
+    /// Two accepted changes of relaxed tasks, every task proved and its files
+    /// committed, with one uncommitted file and one git-ignored file in the tree:
+    /// the drift, the scope and the ignored listing of a gate all run over them.
+    fn two_relaxed_changes() -> (TempDir, Project, PathBuf) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "-q", "-m", "ignore"]);
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let first = relaxed_change(&p, &home, &repo, "A", "a", 2);
+        let second = relaxed_change(&p, &home, &repo, "B", "b", 1);
+        for file in ["a1.txt", "a2.txt", "b1.txt"] {
+            std::fs::write(repo.join(file), "ok").unwrap();
+        }
+        git(&repo, &["add", "a1.txt", "a2.txt", "b1.txt"]);
+        git(&repo, &["commit", "-q", "-m", "work"]);
+        for task in first.iter().chain(&second) {
+            assert!(crate::proof::prove(&p, &home, &repo, task, &mut std::io::sink()).unwrap().proved, "{task} was not proved");
+        }
+        std::fs::write(repo.join("stray.txt"), "x").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "x").unwrap();
+        (tmp, p, repo)
+    }
+
+    /// One gate asks git about the base, the merge base and the ignored files
+    /// once, however many changes and tasks it judges.
+    #[test]
+    fn gate_git_starts_of_one_gate() {
+        let (tmp, p, repo) = two_relaxed_changes();
+        let home = tmp.0.join("home");
+        let before = git::spawns();
+        let r = run_gate(&p, &home, &repo, Options::default());
+        let plain = git::spawns() - before;
+        let outside = r.failures.iter().any(|f| f.contains("stray.txt"));
+        assert!(outside, "the drift and the scope both ran: {r:?}");
+        let before = git::spawns();
+        let r = run_gate(&p, &home, &repo, Options { strict: true, rerun: true, out: None });
+        let rerun = git::spawns() - before;
+        assert!(r.failures.iter().any(|f| f.contains("stray.txt")), "{r:?}");
+        // One gate of this fixture started 40 git processes before the answers were shared.
+        assert!(plain <= 29, "{plain} git starts of one gate, was 40");
+        // The rerun plan started 44, asking the ignored listing once per task.
+        assert!(rerun <= 29, "{rerun} git starts of one gate with the rerun plan, was 44");
     }
 
     #[test]

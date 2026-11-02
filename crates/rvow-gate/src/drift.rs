@@ -11,6 +11,7 @@ use crate::change::{DELTAS, DESIGN, PROPOSAL, TASKS};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::fingerprint::globset;
+use crate::gate::Asked;
 use crate::proof::Active;
 use crate::proposal::parse_proposal;
 use crate::spec::{DeltaOp, parse_deltas};
@@ -496,32 +497,27 @@ pub const OUTSIDE: &str = "outside-scope file ";
 /// The changed files outside every task's files, for a change with a relaxed
 /// task: the task may reach past its plan, so the file is logged and confirmed
 /// once instead of failing the gate. A change of strict tasks has none.
-pub(crate) fn outside_paths(
-    project: &Project,
-    top: &Path,
-    config: &Config,
-    change: &Active,
-    living: &[crate::change::CapSpec],
-) -> Result<Vec<String>> {
+pub(crate) fn outside_paths(project: &Project, change: &Active, living: &[crate::change::CapSpec], asked: &Asked) -> Result<Vec<String>> {
     if !change.loaded.tasks.iter().any(|t| t.mode == crate::tasks::Mode::Relaxed) {
         return Ok(Vec::new());
     }
-    let Some(base_ref) = crate::git::base_ref(top, &config.base) else {
+    if asked.base_ref().is_none() {
         return Ok(Vec::new());
-    };
-    let mb = crate::git::run(top, &["merge-base", "HEAD", &base_ref])?;
+    }
     let repo_dir = format!("{REPO_DIR}/");
     let taken = outside_of(change.baseline());
     let own = globset(&change.loaded.tasks.iter().flat_map(|t| t.files.iter().cloned()).collect::<Vec<_>>())?;
-    let mut outside: Vec<String> = crate::gate::rerun::changed_files(top, &mb)?
-        .into_iter()
+    let mut outside: Vec<String> = asked
+        .changed_since_merge()?
+        .iter()
         .filter(|f| !(project.meta.mode == Mode::Repo && f.starts_with(&repo_dir)))
         .filter(|f| !own.is_match(f))
-        .filter(|f| !taken.iter().any(|path| path == f))
+        .filter(|f| !taken.iter().any(|path| path == *f))
+        .cloned()
         .collect();
     // The scan of every change in the store runs only when a file is left.
     if !outside.is_empty() {
-        let scope = crate::gate::check::scope_globs(project, top, &change.loaded.proposal.branch, living, &[change], &mb)?;
+        let scope = crate::gate::check::scope_globs_asked(project, asked, &change.loaded.proposal.branch, living, &[change])?;
         let set = globset(&scope)?;
         outside.retain(|f| !set.is_match(f));
     }
@@ -550,6 +546,19 @@ pub fn drift_over(
     change: &Active,
     living: &[crate::change::CapSpec],
 ) -> Result<Vec<Item>> {
+    drift_asked(project, home, config, change, living, &Asked::new(top, &config.base))
+}
+
+/// `drift_over` over the git answers that the caller's command already asked.
+pub(crate) fn drift_asked(
+    project: &Project,
+    home: Option<&Path>,
+    config: &Config,
+    change: &Active,
+    living: &[crate::change::CapSpec],
+    asked: &Asked,
+) -> Result<Vec<Item>> {
+    let top = asked.top();
     let Some(base) = change.baseline() else {
         return Ok(Vec::new());
     };
@@ -591,7 +600,7 @@ pub fn drift_over(
         out.push(item(Class::Confirm, what));
     }
 
-    for path in outside_paths(project, top, config, change, living)? {
+    for path in outside_paths(project, change, living, asked)? {
         out.push(item(Class::Confirm, format!("{OUTSIDE}{path}")));
     }
 

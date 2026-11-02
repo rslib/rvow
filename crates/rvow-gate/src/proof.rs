@@ -183,20 +183,21 @@ pub struct Now<'a> {
     pub config: &'a Config,
     pub env: Env,
     pub living: &'a [CapSpec],
-    files: std::cell::OnceCell<Vec<String>>,
+    files: std::cell::RefCell<Vec<fingerprint::Candidate>>,
+    listed: std::cell::Cell<bool>,
     cached: bool,
 }
 
 impl<'a> Now<'a> {
-    /// A `Now` that lists the files again on every `inputs` call.
+    /// A `Now` that lists the files again on every call.
     pub fn new(top: &'a Path, config: &'a Config, env: Env, living: &'a [CapSpec]) -> Now<'a> {
-        Now { top, config, env, living, files: std::cell::OnceCell::new(), cached: false }
+        Now { top, config, env, living, files: std::cell::RefCell::new(Vec::new()), listed: std::cell::Cell::new(false), cached: false }
     }
 
     /// A `Now` that lists the files once and reuses the list, for a caller
-    /// that runs no command between two `inputs` calls.
+    /// that runs no command between two calls.
     pub fn cached(top: &'a Path, config: &'a Config, env: Env, living: &'a [CapSpec]) -> Now<'a> {
-        Now { top, config, env, living, files: std::cell::OnceCell::new(), cached: true }
+        Now { top, config, env, living, files: std::cell::RefCell::new(Vec::new()), listed: std::cell::Cell::new(false), cached: true }
     }
 
     pub fn inputs(&self, task: &Task) -> Result<fingerprint::Inputs> {
@@ -204,11 +205,32 @@ impl<'a> Now<'a> {
         if !self.cached {
             return fingerprint::inputs(self.top, &globs);
         }
-        if let Some(files) = self.files.get() {
-            return fingerprint::inputs_in(self.top, files, &globs);
+        fingerprint::inputs_in(self.top, self.listing()?.as_slice(), &globs)
+    }
+
+    /// The worktree hash, from the same listing the inputs of this call use.
+    pub fn tree(&self, project: &Project) -> Result<String> {
+        if !self.cached {
+            return fingerprint::worktree(self.top, project);
         }
-        let list = fingerprint::candidate_files(self.top)?;
-        fingerprint::inputs_in(self.top, self.files.get_or_init(|| list), &globs)
+        fingerprint::worktree_in(self.top, project, self.listing()?.as_slice())
+    }
+
+    /// Drops the kept listing, so the call after a command lists the files again.
+    pub fn relist(&self) {
+        self.listed.set(false);
+    }
+
+    /// The kept listing, made on the first call that needs it.
+    fn listing(&self) -> Result<std::cell::Ref<'_, Vec<fingerprint::Candidate>>> {
+        {
+            let mut kept = self.files.borrow_mut();
+            if !self.listed.get() {
+                *kept = fingerprint::candidates(self.top)?;
+                self.listed.set(true);
+            }
+        }
+        Ok(self.files.borrow())
     }
 }
 
@@ -704,9 +726,9 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     }
     let config = config::load(project, home)?;
     crate::drift::fetch_missing_grammars(project, &top, home, &config, change);
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
     let inputs = now.inputs(task)?;
-    let tree = fingerprint::worktree(&top, project)?;
+    let tree = now.tree(project)?;
     let runners = config::runners(project)?;
     let plan = crate::template::plan(&runners, task)?;
     if let Some(path) = plan.missing_need(&top) {
@@ -721,6 +743,8 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
     let started = ledger::now_ms();
     let mut watch = Watch { inner: echo, reconfigured: false };
     let outcome = runner::run(&cmd, &top, &plan.env, task.timeout.or(plan.timeout).unwrap_or(config.timeout()), &mut watch)?;
+    // The check may have written files, so the listing after it is a new one.
+    now.relist();
     // The run may have read files that changed under it, so its result
     // stands for neither the old content nor the new one.
     if now.inputs(task)?.hash != inputs.hash {
@@ -755,6 +779,11 @@ pub fn prove(project: &Project, home: &Path, cwd: &Path, input: &str, echo: &mut
         })
         .transpose()?;
     let private_check = crate::hardening::run_private(project, home, &top, task, task.timeout.unwrap_or(config.timeout()))?;
+    // The mutants and private checks ran commands of their own, so the files
+    // this proof records are listed again.
+    if mutants.is_some() || private_check.is_some() {
+        now.relist();
+    }
     let private_policy = private_check.as_ref().map(|c| c.digest.clone());
     let proved = outcome.passed()
         && outcome.tests_run != Some(0)
@@ -900,7 +929,7 @@ pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo:
     let changes = active(project, &living)?;
     let (change, task) = find_task(&changes, input)?;
     let config = config::load(project, home)?;
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
     let State::Stale(reasons) = state_for(project, home, change, task, &now)? else { return Ok(None) };
     if reasons.iter().any(|r| !matches!(*r, "inputs-changed" | "dependency-changed")) {
         return Ok(None);
@@ -933,6 +962,8 @@ pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo:
     if !built.passed() || artifact_hashes(&top, &plan.artifacts).as_ref() != Some(&recorded) {
         return Ok(None);
     }
+    // The build may have written files, so the listing after it is a new one.
+    now.relist();
     let inputs = now.inputs(task)?;
     let thash = task_hash(task);
     let reqs = covered(task, &change.loaded, &living);
@@ -950,7 +981,7 @@ pub fn revalidate(project: &Project, home: &Path, cwd: &Path, input: &str, echo:
     data.insert("duration_ms".into(), built.duration_ms.into());
     data.insert("inputs".into(), inputs.hash.clone().into());
     data.insert("input_files".into(), inputs.files.into());
-    data.insert("worktree".into(), fingerprint::worktree(&top, project)?.into());
+    data.insert("worktree".into(), now.tree(project)?.into());
     data.insert("depends".into(), json!(dependency_inputs(&change.loaded.tasks, task, &now)));
     data.insert("env".into(), json!(now.env));
     data.insert("env_key".into(), env_key.clone().into());
@@ -1022,7 +1053,7 @@ pub fn decide(project: &Project, home: &Path, cwd: &Path, input: &str, pick: Pic
         ));
     }
     let config = config::load(project, home)?;
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
     if !matches!(state_for(project, home, change, task, &now)?, State::Stale(_)) {
         return Err(Error::new(
             "decide",
@@ -1048,7 +1079,7 @@ pub fn undecided(project: &Project, home: &Path, cwd: &Path) -> Result<Vec<(Stri
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
     let branch = git::branch(&top)?.unwrap_or_default();
     let mut out = Vec::new();
     for c in on_branch(&changes, &branch) {
@@ -1134,7 +1165,9 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let drift_home = crate::store::home_dir().ok();
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let asked = crate::gate::Asked::new(&top, &config.base);
     let branch = git::branch(&top)?;
     let mut out = Vec::new();
     for c in &changes {
@@ -1156,7 +1189,7 @@ pub fn status(project: &Project, home: &Path, cwd: &Path, all: bool) -> Result<V
             branch: c.branch().unwrap_or("").to_string(),
             tasks,
             problems,
-            drift: crate::drift::drift(project, &top, &config, c)?,
+            drift: crate::drift::drift_asked(project, drift_home.as_deref(), &config, c, &living, &asked)?,
             pending: crate::amend::pending(std::slice::from_ref(c)),
         });
     }
@@ -1181,7 +1214,7 @@ fn stale_over(project: &Project, home: &Path, cwd: &Path, background: bool) -> R
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let config = config::load(project, home)?;
-    let now = Now::new(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
     let branch = git::branch(&top)?.unwrap_or_default();
     let mut out = Vec::new();
     for c in on_branch(&changes, &branch) {
@@ -1626,5 +1659,60 @@ pub(crate) mod tests {
         let e = decide(&p, &home, &repo, &task, Pick::Now).unwrap_err();
         assert_eq!(e.code, "decide");
         assert!(e.message.contains("is not stale"), "{e}");
+    }
+
+    /// One prove lists the files once before its check and once after it.
+    #[test]
+    fn prove_git_starts_of_one_prove() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        let before = git::spawns();
+        let r = prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap();
+        let n = git::spawns() - before;
+        assert!(r.proved, "{:?}", r.outcome);
+        assert!(n <= 6, "{n} git starts of one prove, was 8");
+    }
+
+    /// `accepted`, with three tasks that each ran once, so a status reads the
+    /// inputs of every one of them.
+    fn accepted_three() -> (TempDir, Project, PathBuf) {
+        let tmp = TempDir::new();
+        let home = tmp.0.join("home");
+        let repo = repo_with_commit(&tmp.0, "r");
+        let p = init(&repo, &home, Mode::Home).unwrap();
+        let c = change::new(&p, "Out", "main", false).unwrap();
+        let mut tasks = String::new();
+        let mut specs = String::new();
+        for n in 1..=3 {
+            tasks.push_str(&format!(
+                "- TSK-new{n} Write ok\n  covers: REQ-new{n}\n  verify: grep -q ok out.txt && echo 'test result: ok. 1 passed; 0 failed;'\n  files: out.txt\n"
+            ));
+            specs.push_str(&format!(
+                "## ADD REQ-new{n} Out\nrvow SHALL write ok.\n### Scenario: s\n- WHEN it runs\n- THEN out.txt holds ok\n"
+            ));
+        }
+        std::fs::write(c.path.join("tasks.md"), tasks).unwrap();
+        std::fs::write(c.path.join("specs/out.md"), specs).unwrap();
+        let prepared = vow::prepare(&p, &home, c, &repo, &mut std::io::sink()).unwrap();
+        let minted = vow::commit(&p, prepared).unwrap().minted;
+        let tasks: Vec<String> = minted.into_iter().filter(|(from, _)| from.starts_with("TSK-")).map(|(_, id)| id.to_string()).collect();
+        for task in &tasks {
+            prove(&p, &home, &repo, task, &mut std::io::sink()).unwrap();
+        }
+        (tmp, p, repo)
+    }
+
+    /// One status lists the files once, however many tasks its change holds.
+    #[test]
+    fn status_git_starts_of_one_status() {
+        let (tmp, p, repo) = accepted_three();
+        let home = tmp.0.join("home");
+        let before = git::spawns();
+        let s = status(&p, &home, &repo, false).unwrap();
+        let n = git::spawns() - before;
+        assert_eq!(s[0].tasks.len(), 3);
+        assert_eq!(s[0].tasks[0].state, State::Failed);
+        assert!(n <= 4, "{n} git starts of one status, was 6");
     }
 }

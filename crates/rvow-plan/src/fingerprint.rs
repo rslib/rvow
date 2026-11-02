@@ -23,21 +23,34 @@ const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/";
 /// this clears the map and keeps the newest.
 const HASH_LIMIT: usize = 8192;
 
+/// One candidate file of `top`: its path, and whether git leaves it untracked.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Candidate {
+    pub rel: String,
+    pub untracked: bool,
+}
+
+impl AsRef<str> for Candidate {
+    fn as_ref(&self) -> &str {
+        &self.rel
+    }
+}
+
 /// Tracked files plus untracked files that git does not ignore.
 pub fn candidate_files(top: &Path) -> Result<Vec<String>> {
-    Ok(candidates(top)?.into_iter().map(|(rel, _)| rel).collect())
+    Ok(candidates(top)?.into_iter().map(|file| file.rel).collect())
 }
 
 /// Every candidate file of `top`, each with whether git leaves it untracked.
 /// One `ls-files` listing answers both lists `worktree` needs, since `-t` tags
 /// an untracked file with `?`; the sort and the dedup keep the order the two
 /// listings of the old code gave.
-fn candidates(top: &Path) -> Result<Vec<(String, bool)>> {
+pub fn candidates(top: &Path) -> Result<Vec<Candidate>> {
     let out = git::run(top, &["ls-files", "-co", "-t", "--exclude-standard"])?;
-    let mut files: Vec<(String, bool)> = Vec::new();
+    let mut files: Vec<Candidate> = Vec::new();
     for line in out.lines() {
         let Some((rel, untracked)) = tagged(line) else { continue };
-        files.push((rel.to_string(), untracked));
+        files.push(Candidate { rel: rel.to_string(), untracked });
     }
     files.sort();
     files.dedup();
@@ -199,15 +212,15 @@ pub fn inputs(top: &Path, globs: &[String]) -> Result<Inputs> {
 }
 
 /// Hashes, from a given candidate list, every file that matches `globs`.
-pub fn inputs_in(top: &Path, files: &[String], globs: &[String]) -> Result<Inputs> {
+pub fn inputs_in<T: AsRef<str>>(top: &Path, files: &[T], globs: &[String]) -> Result<Inputs> {
     let set = globset(globs)?;
     let mut list = String::new();
     let mut count = 0;
     let mut lfs_pointers = Vec::new();
-    for rel in files.iter().filter(|f| set.is_match(f)) {
+    for rel in files.iter().map(|file| file.as_ref()).filter(|rel| set.is_match(rel)) {
         let (hash, lfs) = file_hash(top, rel)?;
         if lfs {
-            lfs_pointers.push(rel.clone());
+            lfs_pointers.push(rel.to_string());
         }
         list.push_str(rel);
         list.push('\0');
@@ -225,18 +238,24 @@ pub fn inputs_in(top: &Path, files: &[String], globs: &[String]) -> Result<Input
 /// (`rvow/`) is skipped: each prove appends to its ledger, so keeping it
 /// would make every fingerprint differ.
 pub fn worktree(top: &Path, project: &Project) -> Result<String> {
+    worktree_in(top, project, &candidates(top)?)
+}
+
+/// `worktree` over a candidate list the caller already made, so one listing
+/// answers the inputs and the tree of the same worktree.
+pub fn worktree_in(top: &Path, project: &Project, files: &[Candidate]) -> Result<String> {
     let skip_repo = project.meta.mode == Mode::Repo;
     let prefix = format!("{REPO_DIR}/");
     let mut list = String::new();
-    for (rel, untracked) in candidates(top)? {
-        if skip_repo && (rel == REPO_DIR || rel.starts_with(&prefix)) {
+    for file in files {
+        if skip_repo && (file.rel == REPO_DIR || file.rel.starts_with(&prefix)) {
             continue;
         }
-        let (hash, _) = file_hash(top, &rel)?;
-        list.push_str(&rel);
+        let (hash, _) = file_hash(top, &file.rel)?;
+        list.push_str(&file.rel);
         list.push('\0');
         list.push_str(&hash);
-        if untracked {
+        if file.untracked {
             list.push_str("\0untracked");
         }
         list.push('\n');
