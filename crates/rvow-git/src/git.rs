@@ -711,14 +711,68 @@ pub mod testrepo {
         assert!(ok.status.success(), "git {args:?}: {ok:?}");
     }
 
+    /// The template repository that `repo_with_commit` copies. Bump the version
+    /// when the template's content changes, so no process copies an old one.
+    const TEMPLATE_NAME: &str = "rvow-testrepo-template-v1";
+    static TEMPLATE: OnceLock<PathBuf> = OnceLock::new();
+
+    /// The template, shared by every test process: nextest runs each test in its
+    /// own process, so a template per process would still start git per test.
+    /// A process builds it in its own folder and renames it into place, so no
+    /// process ever sees a half-built template.
+    fn template() -> &'static Path {
+        TEMPLATE.get_or_init(|| {
+            let shared = std::env::temp_dir().join(TEMPLATE_NAME);
+            if shared.join("a.txt").is_file() {
+                return shared;
+            }
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let own = std::env::temp_dir().join(format!("{TEMPLATE_NAME}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&own);
+            std::fs::create_dir_all(&own).unwrap();
+            git(&own, &["init", "-q", "-b", "main"]);
+            std::fs::write(own.join("a.txt"), "a").unwrap();
+            git(&own, &["add", "a.txt"]);
+            git(&own, &["commit", "-q", "-m", "init"]);
+            if std::fs::rename(&own, &shared).is_err() {
+                remove_tree(&own);
+            }
+            shared
+        })
+    }
+
+    /// A repository on `main` with one commit and a clean worktree, copied from
+    /// the template without starting a process.
     pub fn repo_with_commit(parent: &Path, name: &str) -> PathBuf {
         let dir = parent.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-q", "-b", "main"]);
-        std::fs::write(dir.join("a.txt"), "a").unwrap();
-        git(&dir, &["add", "a.txt"]);
-        git(&dir, &["commit", "-q", "-m", "init"]);
+        copy_tree(template(), &dir);
         dir
+    }
+
+    /// Copies a folder, which holds a git repository, with plain file calls.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let (src, dst) = (entry.path(), to.join(entry.file_name()));
+            let kind = entry.file_type().unwrap();
+            if kind.is_symlink() {
+                copy_symlink(&src, &dst);
+            } else if kind.is_dir() {
+                copy_tree(&src, &dst);
+            } else {
+                std::fs::copy(&src, &dst).unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn copy_symlink(src: &Path, dst: &Path) {
+        std::os::unix::fs::symlink(std::fs::read_link(src).unwrap(), dst).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn copy_symlink(src: &Path, dst: &Path) {
+        std::fs::copy(src, dst).unwrap();
     }
 }
 
@@ -1103,5 +1157,37 @@ mod tests {
         drop(first);
         let second = env_lock();
         drop(second);
+    }
+
+    #[test]
+    fn testrepo_template_second_repo_starts_no_git() {
+        let tmp = TempDir::new();
+        repo_with_commit(&tmp.0, "warm");
+        let before = spawns();
+        let second = repo_with_commit(&tmp.0, "second");
+        assert_eq!(spawns(), before, "the second fixture repository starts no git");
+        assert_eq!(std::fs::read_to_string(second.join("a.txt")).unwrap(), "a");
+    }
+
+    #[test]
+    fn testrepo_template_copy_is_a_full_repo() {
+        let tmp = TempDir::new();
+        let repo = repo_with_commit(&tmp.0, "r");
+        assert_eq!(run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "main");
+        assert_eq!(run(&repo, &["log", "--format=%s"]).unwrap(), "init");
+        assert_eq!(run(&repo, &["status", "--porcelain"]).unwrap(), "");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a");
+    }
+
+    #[test]
+    fn testrepo_template_copies_are_independent() {
+        let tmp = TempDir::new();
+        let one = repo_with_commit(&tmp.0, "one");
+        let two = repo_with_commit(&tmp.0, "two");
+        std::fs::write(one.join("b.txt"), "b").unwrap();
+        git(&one, &["add", "b.txt"]);
+        git(&one, &["commit", "-q", "-m", "second"]);
+        assert_eq!(run(&one, &["log", "--format=%s"]).unwrap(), "second\ninit");
+        assert_eq!(run(&two, &["log", "--format=%s"]).unwrap(), "init");
     }
 }
