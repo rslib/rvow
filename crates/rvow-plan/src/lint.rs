@@ -292,10 +292,12 @@ pub fn questions(texts: &[(String, String)]) -> Vec<Question> {
             if fenced {
                 continue;
             }
-            let plain = prose(line);
-            for (start, _) in plain.match_indices(CLARIFICATION) {
-                let rest = &plain[start + CLARIFICATION.len()..];
-                let body = rest.split(']').next().unwrap_or("");
+            for (start, _) in line.match_indices(CLARIFICATION) {
+                if in_code(&line[..start]) {
+                    continue;
+                }
+                let rest = &line[start + CLARIFICATION.len()..];
+                let body = &rest[..close_outside_code(rest)];
                 let marker = format!("{CLARIFICATION}{body}]");
                 let body = body.strip_prefix(':').unwrap_or(body);
                 let mut parts = body.split('|').map(str::trim);
@@ -316,6 +318,15 @@ pub fn questions(texts: &[(String, String)]) -> Vec<Question> {
         }
     }
     out
+}
+
+fn in_code(before: &str) -> bool {
+    before.matches('`').count() % 2 == 1
+}
+
+/// The offset of the first `]` outside a code span, or the length of `rest`.
+fn close_outside_code(rest: &str) -> usize {
+    rest.match_indices(']').map(|(i, _)| i).find(|&i| !in_code(&rest[..i])).unwrap_or(rest.len())
 }
 
 /// Every `[NEEDS CLARIFICATION` marker, as (path, line).
@@ -579,5 +590,17 @@ rvow SHALL run.
         let quoted =
             vec![("design.md".to_string(), "`[NEEDS CLARIFICATION]` marks a question.\n```\n[NEEDS CLARIFICATION: x]\n```\n".to_string())];
         assert_eq!(clarifications(&quoted), []);
+    }
+
+    #[test]
+    fn questions_keep_code_spans() {
+        let line = "`[NEEDS CLARIFICATION: x]` [NEEDS CLARIFICATION: Use `a`, `b[0]` or `c`? | recommended: `a` | options: `b[0]`; `c` | why: picks the `rvow` store]";
+        let q = questions(&[("p.md".to_string(), line.to_string())]);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].question, "Use `a`, `b[0]` or `c`?");
+        assert_eq!(q[0].recommended.as_deref(), Some("`a`"));
+        assert_eq!(q[0].options, ["`b[0]`", "`c`"]);
+        assert_eq!(q[0].why.as_deref(), Some("picks the `rvow` store"));
+        assert!(line.contains(&q[0].marker) && q[0].marker.starts_with("[NEEDS CLARIFICATION: Use"), "{}", q[0].marker);
     }
 }
