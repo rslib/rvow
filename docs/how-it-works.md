@@ -316,6 +316,10 @@ A failure recorded before worktree fingerprints existed has none and does not co
 A failure that timed out before any test ran does not count as flaky either, because it shows only that the machine was stuck.
 A timeout after some tests ran still counts.
 
+A new pass does not clear a flaky mark, so the user decides with `rvow decide <task> keep`, strict or relaxed.
+The keep covers the failures of the newest proof's run key from before it, and a failure after it marks the task flaky again.
+`now` and `archive` are refused for a flaky task, because a new proof would not clear the mark.
+
 ### Mutants
 
 A task can also set `mutants:`, an extra check that runs after `verify:` passes.

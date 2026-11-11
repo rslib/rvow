@@ -1,6 +1,6 @@
 # rvow decide
 
-Record the user's decision about a stale relaxed task (user only)
+Record the user's decision about a stale relaxed task or a flaky one (user only)
 
 ## Usage
 
@@ -13,7 +13,7 @@ rvow decide [OPTIONS] [TASK] [PICK]
 | Argument | Description |
 | --- | --- |
 | `<TASK>` | The task id or a unique prefix of it |
-| `<PICK>` | Prove it again now, prove it again at archive, or keep the proof that stands One of `now`, `archive`, `keep`. |
+| `<PICK>` | Prove it again now, prove it again at archive, or keep the proof that stands; a flaky task takes only keep One of `now`, `archive`, `keep`. |
 
 ## Options
 

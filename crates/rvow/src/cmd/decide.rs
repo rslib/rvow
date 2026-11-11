@@ -14,7 +14,7 @@ fn next(pick: Pick, task: &str) -> String {
     }
 }
 
-/// Records the user's decision about the stale relaxed task `task`.
+/// Records the user's decision about the stale relaxed or flaky task `task`.
 pub fn decide(task: &str, pick: Pick) -> Result<Reply> {
     let home = store::home_dir()?;
     let p = project(&home)?;

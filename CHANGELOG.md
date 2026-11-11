@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Added
 
 - Print `at` and `until` in `rvow yolo` when a tier is on.
+- Let the user clear a flaky task with `rvow decide <task> keep`, strict or relaxed.
+  The keep covers the failures before it, and a new failure marks the task flaky again.
 
 ## [0.0.1] - 2026-10-31
 

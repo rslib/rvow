@@ -295,12 +295,12 @@ enum Cmd {
         #[arg(long, conflicts_with = "decision")]
         full: bool,
     },
-    /// Record the user's decision about a stale relaxed task (user only)
+    /// Record the user's decision about a stale relaxed task or a flaky one (user only)
     Decide {
         /// The task id or a unique prefix of it.
         #[arg(required_unless_present = "list", conflicts_with = "list")]
         task: Option<String>,
-        /// Prove it again now, prove it again at archive, or keep the proof that stands.
+        /// Prove it again now, prove it again at archive, or keep the proof that stands; a flaky task takes only keep.
         #[arg(value_enum, required_unless_present = "list", conflicts_with = "list")]
         pick: Option<PickArg>,
         /// List the stale relaxed tasks that wait for the user's decision.

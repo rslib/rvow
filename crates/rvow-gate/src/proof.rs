@@ -317,9 +317,14 @@ fn state_with_policy(change: &Active, task: &Task, now: &Now, policy: Option<&st
     }
     let key = str_of(last, "key");
     let last_tree = last.data.get("worktree").and_then(Value::as_str).unwrap_or("");
+    // The user's keep of a flaky proof covers the failures of its key before it.
+    let kept = change.events.iter().rposition(|e| {
+        e.kind == Kind::Decide && str_of(e, "task") == id && str_of(e, "key") == key && str_of(e, "choice") == Pick::Keep.name()
+    });
     let flaky = !last_tree.is_empty()
-        && change.events.iter().any(|e| {
-            e.kind == Kind::Prove
+        && change.events.iter().enumerate().any(|(i, e)| {
+            kept.is_none_or(|k| i > k)
+                && e.kind == Kind::Prove
                 && str_of(e, "task") == id
                 && str_of(e, "key") == key
                 && !is_proved(e)
@@ -1037,14 +1042,37 @@ pub fn decision(change: &Active, task: &Task, now: &Now) -> Result<Option<Pick>>
     Ok(decision_at(change, &task.id.to_string(), last_at, &now.inputs(task)?.hash))
 }
 
-/// Records the user's decision about the stale relaxed task `input` and returns
-/// its id. A strict task takes no decision: its proof must be current.
+/// Records the user's decision about the stale relaxed task `input`, or their
+/// keep of the flaky task `input`, and returns its id. A stale strict task
+/// takes no decision: its proof must be current.
 pub fn decide(project: &Project, home: &Path, cwd: &Path, input: &str, pick: Pick) -> Result<String> {
     let top = git::toplevel(cwd)?;
     let (living, _) = change::load_living(project)?;
     let changes = active(project, &living)?;
     let (change, task) = find_task(&changes, input)?;
     let id = task.id.to_string();
+    let config = config::load(project, home)?;
+    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
+    let state = state_for(project, home, change, task, &now)?;
+    if state == State::Flaky {
+        if pick != Pick::Keep {
+            return Err(Error::new(
+                "decide",
+                format!("{id} is flaky; only keep clears it"),
+                format!("run rvow decide {id} keep, or fix the flake and run rvow prove {id}"),
+            ));
+        }
+        let key = last_run(change, task).map_or("", |(_, e)| str_of(e, "key"));
+        let mut data = Map::new();
+        data.insert("task".into(), id.clone().into());
+        data.insert("choice".into(), pick.name().into());
+        data.insert("key".into(), key.into());
+        data.insert("inputs".into(), now.inputs(task)?.hash.into());
+        let lock = project.lock()?;
+        let seal = crate::seal::key(home)?;
+        ledger::append_sealed(&change.dir.path.join(LEDGER), &lock, Kind::Decide, data, Some(&seal))?;
+        return Ok(id);
+    }
     if task.mode != Mode::Relaxed {
         return Err(Error::new(
             "decide",
@@ -1052,9 +1080,7 @@ pub fn decide(project: &Project, home: &Path, cwd: &Path, input: &str, pick: Pic
             format!("run rvow prove {id} once its files are final"),
         ));
     }
-    let config = config::load(project, home)?;
-    let now = Now::cached(&top, &config, fingerprint::env(&top, &config)?, &living);
-    if !matches!(state_for(project, home, change, task, &now)?, State::Stale(_)) {
+    if !matches!(state, State::Stale(_)) {
         return Err(Error::new(
             "decide",
             format!("{id} is not stale, so it takes no decision"),
@@ -1425,6 +1451,45 @@ pub(crate) mod tests {
         std::fs::write(&flag, "go\n").unwrap();
         assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
         assert_eq!(state_of(&p, &home, &repo), "flaky");
+    }
+
+    #[test]
+    fn flaky_keep_counts_as_proved_until_a_new_failure() {
+        let (tmp, p, repo, task) = accepted();
+        let home = tmp.0.join("home");
+        let active_dir = std::fs::read_dir(p.root.join("active")).unwrap().next().unwrap().unwrap().path();
+        let tasks = active_dir.join("tasks.md");
+        let flag = tmp.0.join("flaky-flag");
+        let flaky = format!("test -f {} && echo 'test result: ok. 1 passed; 0 failed;'", flag.display());
+        let text = std::fs::read_to_string(&tasks).unwrap();
+        let verify_line = text.lines().find(|l| l.contains("verify:")).unwrap().to_string();
+        std::fs::write(&tasks, text.replace(&verify_line, &format!("  verify: {flaky}"))).unwrap();
+        std::fs::write(repo.join("out.txt"), "ok").unwrap();
+        assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(&flag, "go\n").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert_eq!(state_of(&p, &home, &repo), "flaky");
+
+        for pick in [Pick::Now, Pick::Archive] {
+            let e = decide(&p, &home, &repo, &task, pick).unwrap_err();
+            assert_eq!(e.code, "decide");
+            assert_eq!(e.message, format!("{task} is flaky; only keep clears it"), "{}", pick.name());
+        }
+        assert_eq!(decide(&p, &home, &repo, &task, Pick::Keep).unwrap(), task, "a strict flaky task takes keep");
+        assert_eq!(state_of(&p, &home, &repo), "proved");
+        let opts = crate::gate::Options { strict: true, rerun: false, out: None };
+        let r = crate::gate::gate(&p, &home, &repo, opts, &mut std::io::sink()).unwrap();
+        // The fixture's verify edit is drift of its own; only the flake is checked.
+        assert!(!format!("{r:?}").contains("is flaky"), "the strict gate takes a kept flaky proof: {r:?}");
+
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert_eq!(state_of(&p, &home, &repo), "proved", "a pass after the keep keeps it");
+
+        std::fs::remove_file(&flag).unwrap();
+        assert!(!prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        std::fs::write(&flag, "go\n").unwrap();
+        assert!(prove(&p, &home, &repo, &task, &mut std::io::sink()).unwrap().proved);
+        assert_eq!(state_of(&p, &home, &repo), "flaky", "a failure after the keep counts again");
     }
 
     /// The state of the only task when its change holds `events` instead of the ledger.
