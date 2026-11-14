@@ -59,6 +59,21 @@ pub enum Outcome {
     },
 }
 
+/// What `rvow uninstall` did with one piece that `rvow install` wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    Removed(PathBuf),
+    /// Nothing of rvow is there.
+    Absent(PathBuf),
+    /// The user edited the file, so it stays.
+    KeptEdit(PathBuf),
+    /// rvow removed its hook at `path` and moved the user's hook back from `prev`.
+    Restored {
+        path: PathBuf,
+        prev: PathBuf,
+    },
+}
+
 /// The pi agent folder: `PI_CODING_AGENT_DIR` when set (pi honours it), else
 /// `<home>/.pi/agent`.
 pub fn pi_dir(home: Option<&Path>) -> Option<PathBuf> {
@@ -76,22 +91,41 @@ pub fn mod_dir() -> Option<PathBuf> {
 /// Removes the rvow marketplace an older install wrote at `old`, when `old` is
 /// not `current`. A folder that does not hold the rvow marketplace stays.
 pub fn remove_old_mod(old: &Path, current: &Path) -> Result<Option<PathBuf>> {
-    if old == current {
-        return Ok(None);
-    }
-    let ours = std::fs::read_to_string(old.join(".claude-plugin/marketplace.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .is_some_and(|m| m.get("name").and_then(Value::as_str) == Some("rvow"));
-    if !ours {
+    if old == current || !is_rvow_marketplace(old) {
         return Ok(None);
     }
     std::fs::remove_dir_all(old).map_err(|e| Error::io(old, e))?;
     Ok(Some(old.to_path_buf()))
 }
 
+fn is_rvow_marketplace(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join(".claude-plugin/marketplace.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|m| m.get("name").and_then(Value::as_str) == Some("rvow"))
+}
+
+/// Removes the mod marketplace that `claude_mod` wrote in `dir`. rvow owns
+/// every file there, so the whole folder goes; a folder that does not hold
+/// the rvow marketplace stays.
+pub fn remove_claude_mod(dir: &Path) -> Result<Removal> {
+    if !is_rvow_marketplace(dir) {
+        return Ok(Removal::Absent(dir.to_path_buf()));
+    }
+    std::fs::remove_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    if let Some(parent) = dir.parent() {
+        remove_if_empty(parent);
+    }
+    Ok(Removal::Removed(dir.to_path_buf()))
+}
+
+/// Removes `dir` when it is an empty folder; anything else stays.
+fn remove_if_empty(dir: &Path) {
+    let _ = std::fs::remove_dir(dir);
+}
+
 /// `text` as one shell word in single quotes; a single quote inside becomes `'\''`.
-pub(crate) fn shell_quote(text: &str) -> String {
+pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
@@ -145,18 +179,7 @@ pub fn skill(claude_dir: &Path, text: &str) -> Result<Outcome> {
         if old == full {
             return Ok(Outcome::Unchanged(path));
         }
-        let (old_front, old_body) = split_front_matter(&old);
-        let unedited = old_body.split_once('\n').is_some_and(|(first, rest)| {
-            if let Some(hash) = first.strip_prefix("<!-- rvow-managed skill-sha256:").and_then(|s| s.strip_suffix(" -->")) {
-                hash == sha256_hex(format!("{old_front}{rest}").as_bytes())
-            } else {
-                // Legacy markers did not cover front matter, so only matching front matter is safe to refresh.
-                old_front == split_front_matter(text).0
-                    && first.strip_prefix("<!-- rvow-managed sha256:").and_then(|s| s.strip_suffix(" -->"))
-                        == Some(sha256_hex(rest.as_bytes()).as_str())
-            }
-        });
-        if !unedited {
+        if !skill_unedited(&old, text) {
             return Ok(Outcome::KeptEdit(path));
         }
     }
@@ -165,6 +188,41 @@ pub fn skill(claude_dir: &Path, text: &str) -> Result<Outcome> {
     }
     std::fs::write(&path, full).map_err(|e| Error::io(&path, e))?;
     Ok(Outcome::Written(path))
+}
+
+/// Whether the installed skill `old` still matches its own marker. `text` is
+/// the current rendered skill, which a legacy marker needs.
+fn skill_unedited(old: &str, text: &str) -> bool {
+    let (old_front, old_body) = split_front_matter(old);
+    old_body.split_once('\n').is_some_and(|(first, rest)| {
+        if let Some(hash) = first.strip_prefix("<!-- rvow-managed skill-sha256:").and_then(|s| s.strip_suffix(" -->")) {
+            hash == sha256_hex(format!("{old_front}{rest}").as_bytes())
+        } else {
+            // Legacy markers did not cover front matter, so only matching front matter is safe to refresh.
+            old_front == split_front_matter(text).0
+                && first.strip_prefix("<!-- rvow-managed sha256:").and_then(|s| s.strip_suffix(" -->"))
+                    == Some(sha256_hex(rest.as_bytes()).as_str())
+        }
+    })
+}
+
+/// Removes the skill that `skill` or `pi_skill` wrote under `dir`, unless the
+/// user edited it. `text` is the current rendered skill.
+pub fn remove_skill(dir: &Path, text: &str) -> Result<Removal> {
+    let path = dir.join("skills/rvow/SKILL.md");
+    let old = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Removal::Absent(path)),
+        Err(e) => return Err(Error::io(&path, e)),
+    };
+    if old != marked_skill(text) && !skill_unedited(&old, text) {
+        return Ok(Removal::KeptEdit(path));
+    }
+    std::fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
+    if let Some(parent) = path.parent() {
+        remove_if_empty(parent);
+    }
+    Ok(Removal::Removed(path))
 }
 
 fn marked_skill(text: &str) -> String {
@@ -344,14 +402,33 @@ pub fn register_claude_mod(claude: &Path, dir: &Path) -> Result<Vec<String>> {
     Ok(done)
 }
 
+/// Uninstalls the rvow plugin and removes the rvow marketplace from Claude
+/// Code, each only when Claude Code lists it. Returns what it did.
+pub fn unregister_claude_mod(claude: &Path) -> Result<Vec<String>> {
+    let mut done = Vec::new();
+    let plugins: Vec<Value> = serde_json::from_str(&run_claude(claude, &["plugin", "list", "--json"])?).unwrap_or_default();
+    if plugins.iter().any(|v| v.get("id").and_then(Value::as_str) == Some("rvow@rvow")) {
+        run_claude(claude, &["plugin", "uninstall", "rvow@rvow"])?;
+        done.push("uninstalled the rvow plugin; run /reload-plugins in Claude Code, or restart it".into());
+    }
+    let markets: Vec<Value> = serde_json::from_str(&run_claude(claude, &["plugin", "marketplace", "list", "--json"])?).unwrap_or_default();
+    if markets.iter().any(|m| m.get("name").and_then(Value::as_str) == Some("rvow")) {
+        run_claude(claude, &["plugin", "marketplace", "remove", "rvow"])?;
+        done.push("removed the rvow marketplace".into());
+    }
+    Ok(done)
+}
+
+fn pi_unedited(old: &str) -> bool {
+    old.split_once('\n')
+        .is_some_and(|(first, rest)| first.strip_prefix("// rvow-managed sha256:").is_some_and(|hash| hash == sha256_hex(rest.as_bytes())))
+}
+
 pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
     let legacy = pi_dir.join("extensions/rvow.ts");
     match std::fs::read_to_string(&legacy) {
         Ok(old) => {
-            let unedited = old.split_once('\n').is_some_and(|(first, rest)| {
-                first.strip_prefix("// rvow-managed sha256:").is_some_and(|hash| hash == sha256_hex(rest.as_bytes()))
-            });
-            if !unedited {
+            if !pi_unedited(&old) {
                 return Ok(Outcome::KeptEdit(legacy));
             }
         }
@@ -364,10 +441,7 @@ pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
         let path = dir.join(name);
         match std::fs::read_to_string(&path) {
             Ok(old) => {
-                let unedited = old.split_once('\n').is_some_and(|(first, rest)| {
-                    first.strip_prefix("// rvow-managed sha256:").is_some_and(|hash| hash == sha256_hex(rest.as_bytes()))
-                });
-                if !unedited {
+                if !pi_unedited(&old) {
                     return Ok(Outcome::KeptEdit(path));
                 }
             }
@@ -389,6 +463,40 @@ pub fn pi_extension(pi_dir: &Path) -> Result<Outcome> {
         Err(e) => return Err(Error::io(&legacy, e)),
     }
     Ok(if changed { Outcome::Written(dir) } else { Outcome::Unchanged(dir) })
+}
+
+/// Removes the pi extension that `pi_extension` wrote under `pi_dir`, with
+/// the files of older versions. When one file there is not an unedited rvow
+/// file, every file stays, since pi cannot load half an extension.
+pub fn remove_pi_extension(pi_dir: &Path) -> Result<Removal> {
+    let dir = pi_dir.join("extensions/rvow");
+    let mut paths = vec![pi_dir.join("extensions/rvow.ts")];
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                paths.push(entry.map_err(|e| Error::io(&dir, e))?.path());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(&dir, e)),
+    }
+    let mut found = Vec::new();
+    for path in paths {
+        match std::fs::read_to_string(&path) {
+            Ok(old) if pi_unedited(&old) => found.push(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A folder, a binary file or the user's own file is not rvow's.
+            _ => return Ok(Removal::KeptEdit(path)),
+        }
+    }
+    if found.is_empty() {
+        return Ok(Removal::Absent(dir));
+    }
+    for path in &found {
+        std::fs::remove_file(path).map_err(|e| Error::io(path, e))?;
+    }
+    remove_if_empty(&dir);
+    Ok(Removal::Removed(dir))
 }
 
 /// A settings hook command that runs `rvow hook claude <event>` or the neutral `rvow hook <event>`.
@@ -602,6 +710,39 @@ pub fn pre_push(top: &Path, rvow: &Path) -> Result<Outcome> {
     })
 }
 
+/// Removes the gate that `pre_push` wrote in the hooks of the git common dir
+/// `common`, with its record, and moves back the hook it moved aside. A
+/// pre-push hook without the rvow mark stays.
+pub fn remove_pre_push(common: &Path) -> Result<Removal> {
+    let hooks = common.join("hooks");
+    let record = hooks.join(PRE_PUSH_RECORD);
+    let had_record = match std::fs::remove_file(&record) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(Error::io(&record, e)),
+    };
+    let path = hooks.join("pre-push");
+    if !std::fs::read(&path).is_ok_and(|script| String::from_utf8_lossy(&script).contains(PRE_PUSH_MARK)) {
+        return Ok(if had_record { Removal::Removed(record) } else { Removal::Absent(path) });
+    }
+    let prev = hooks.join(format!("pre-push{PRE_PUSH_PREV_SUFFIX}"));
+    if std::fs::symlink_metadata(&prev).is_ok() {
+        std::fs::rename(&prev, &path).map_err(|e| Error::io(&prev, e))?;
+        return Ok(Removal::Restored { path, prev });
+    }
+    std::fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
+    Ok(Removal::Removed(path))
+}
+
+/// The pre-push hook under `core.hooksPath` of the work tree `top` that still
+/// runs the rvow gate. Another hook manager owns it, so the user removes the line.
+pub fn hook_manager_gate(top: &Path) -> Option<PathBuf> {
+    let dir = git::run(top, &["config", "--get", "core.hooksPath"]).ok().filter(|d| !d.is_empty())?;
+    let path = top.join(dir).join("pre-push");
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.lines().any(|l| l.contains("rvow") && l.contains(" gate --push")).then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,6 +922,72 @@ mod tests {
         }
         let err = register_claude_mod(&failing, &dir).unwrap_err();
         assert!(err.fix.starts_with("run it by hand: claude plugin"), "{err:?}");
+    }
+
+    #[test]
+    fn unregister_asks_claude_only_for_what_it_lists() {
+        let tmp = TempDir::new();
+        let log = tmp.0.join("log");
+        let fake = tmp.0.join("claude");
+        let script = |listed: &str| {
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {log}\ncase \"$*\" in\n  'plugin list --json') echo '{listed}' ;;\n  'plugin marketplace list --json') echo '[{{\"name\":\"rvow\"}}]' ;;\nesac\n",
+                log = log.display()
+            )
+        };
+        std::fs::write(&fake, script("[{\"id\":\"rvow@rvow\"}]")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let done = unregister_claude_mod(&fake).unwrap();
+        assert!(done[0].starts_with("uninstalled") && done[1].starts_with("removed"), "{done:?}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.contains("plugin uninstall rvow@rvow") && calls.contains("plugin marketplace remove rvow"), "{calls}");
+
+        std::fs::write(&fake, script("[]")).unwrap();
+        std::fs::remove_file(&log).unwrap();
+        let done = unregister_claude_mod(&fake).unwrap();
+        assert_eq!(done, ["removed the rvow marketplace"]);
+        assert!(!std::fs::read_to_string(&log).unwrap().contains("plugin uninstall"));
+    }
+
+    #[test]
+    fn remove_claude_mod_takes_only_the_rvow_marketplace() {
+        let tmp = TempDir::new();
+        let dir = tmp.0.join("rvow/claude-plugin");
+        claude_mod(&dir, &tmp.0.join("bin/rvow"), TEST_SKILL).unwrap();
+        assert_eq!(remove_claude_mod(&dir).unwrap(), Removal::Removed(dir.clone()));
+        assert!(!tmp.0.join("rvow").exists(), "the empty parent goes too");
+        let other = tmp.0.join("other");
+        std::fs::create_dir_all(other.join(".claude-plugin")).unwrap();
+        std::fs::write(other.join(".claude-plugin/marketplace.json"), "{\"name\":\"mine\"}").unwrap();
+        assert_eq!(remove_claude_mod(&other).unwrap(), Removal::Absent(other.clone()));
+        assert!(other.is_dir());
+    }
+
+    #[test]
+    fn remove_pi_extension_keeps_every_file_when_one_is_edited() {
+        let tmp = TempDir::new();
+        pi_extension(&tmp.0).unwrap();
+        let index = tmp.0.join("extensions/rvow/index.ts");
+        std::fs::write(&index, std::fs::read_to_string(&index).unwrap() + "// mine\n").unwrap();
+        assert_eq!(remove_pi_extension(&tmp.0).unwrap(), Removal::KeptEdit(index));
+        assert!(tmp.0.join("extensions/rvow/engine.ts").is_file());
+        std::fs::remove_file(tmp.0.join("extensions/rvow/index.ts")).unwrap();
+        assert_eq!(remove_pi_extension(&tmp.0).unwrap(), Removal::Removed(tmp.0.join("extensions/rvow")));
+        assert!(!tmp.0.join("extensions/rvow").exists());
+    }
+
+    #[test]
+    fn remove_pre_push_keeps_a_hook_without_the_mark() {
+        let tmp = TempDir::new();
+        let hooks = tmp.0.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-push"), "#!/bin/sh\necho mine\n").unwrap();
+        assert_eq!(remove_pre_push(&tmp.0).unwrap(), Removal::Absent(hooks.join("pre-push")));
+        assert_eq!(std::fs::read_to_string(hooks.join("pre-push")).unwrap(), "#!/bin/sh\necho mine\n");
     }
 
     #[test]

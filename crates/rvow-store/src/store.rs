@@ -40,10 +40,15 @@ pub struct Project {
     pub meta: Meta,
 }
 
+/// The file where `record_home` writes the rvow home, or `None` without HOME.
+pub fn home_pointer() -> Option<PathBuf> {
+    pointer_path(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref())
+}
+
 /// Records `home` so processes without `RVOW_HOME` in their environment find
 /// the same store. Returns the pointer file, or `None` without a home folder.
 pub fn record_home(home: &Path) -> Result<Option<PathBuf>> {
-    let Some(path) = pointer_path(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref()) else {
+    let Some(path) = home_pointer() else {
         return Ok(None);
     };
     let text = format!("{}\n", home.display());
@@ -182,7 +187,21 @@ pub fn remember_gate(home: &Path, common: &Path) {
     }
     repos.push(common.to_path_buf());
     repos.sort();
-    let Ok(text) = serde_json::to_string(&repos) else {
+    write_gate_repos(home, &repos);
+}
+
+/// Forgets the gate at `common`, which `rvow uninstall` removed.
+pub fn forget_gate(home: &Path, common: &Path) {
+    let mut repos = gate_repos(home);
+    let before = repos.len();
+    repos.retain(|path| path != common);
+    if repos.len() != before {
+        write_gate_repos(home, &repos);
+    }
+}
+
+fn write_gate_repos(home: &Path, repos: &[PathBuf]) {
+    let Ok(text) = serde_json::to_string(repos) else {
         return;
     };
     let tmp = home.join(format!("{GATE_REPOS_FILE}.{}.tmp", std::process::id()));

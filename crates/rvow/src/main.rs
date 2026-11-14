@@ -159,6 +159,15 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// Remove what rvow install wrote: the skill, the Claude Code hooks, the pi extension and the pre-push gate.
+    Uninstall {
+        /// Also remove the pre-push gate of every repository where rvow install wrote one.
+        #[arg(long)]
+        all: bool,
+        /// Also delete the rvow home with every plan and proof in it. This cannot be undone.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Report on a plan before accept: findings, checks that cannot run, open questions.
     Check {
         /// The change id; default: every open change on this branch.
@@ -577,6 +586,7 @@ fn dispatch(cmd: Cmd, toon: bool) -> ExitCode {
             };
         }
         Cmd::Install { claude, scope, all } => setup::install(claude, scope, all),
+        Cmd::Uninstall { all, purge } => setup::uninstall(all, purge),
         Cmd::Check { change } => plan::check(change.as_deref()),
         Cmd::Clarify { change, json } => plan::clarify(change.as_deref(), json),
         Cmd::Claim { change } => plan::claim(&change),

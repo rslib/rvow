@@ -237,6 +237,189 @@ fn refresh_gate(r: &mut Reply, common: &Path, rvow: &Path) -> Result<bool> {
     Ok(refreshed)
 }
 
+fn report_removal(r: &mut Reply, what: &str, o: install::Removal) {
+    r.line(match o {
+        install::Removal::Removed(p) => format!("{what}: removed {}", p.display()),
+        install::Removal::Absent(p) => format!("{what}: none at {}", p.display()),
+        install::Removal::KeptEdit(p) => format!("{what}: kept {}, which you edited; delete it by hand", p.display()),
+        install::Removal::Restored { path, prev } => {
+            format!("{what}: removed the gate and moved your hook back from {} to {}", prev.display(), path.display())
+        }
+    });
+}
+
+pub fn uninstall(all: bool, purge: bool) -> Result<Reply> {
+    let mut r = Reply::new();
+    let rvow_home = store::home_dir()?;
+    let home = env_dir("HOME").ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
+    let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
+    let skill = crate::skill::render()?;
+    uninstall_mod(&mut r, &rvow_home)?;
+    uninstall_settings(&mut r, "Claude Code hooks", &claude.join("settings.json"))?;
+    if let Ok(top) = git::toplevel(&cwd()?) {
+        let project = top.join(".claude/settings.json");
+        if project.is_file() {
+            uninstall_settings(&mut r, "Claude Code project hooks", &project)?;
+        }
+    }
+    report_removal(&mut r, "skill", install::remove_skill(&claude, &skill)?);
+    let pi = install::pi_dir(Some(&home)).unwrap_or_else(|| home.join(".pi/agent"));
+    report_removal(&mut r, "pi extension", install::remove_pi_extension(&pi)?);
+    report_removal(&mut r, "pi skill", install::remove_skill(&pi, &skill)?);
+    // The purge deletes the list of gates, and a gate pins the binary, so a gate left behind would fail every push.
+    if all || purge {
+        uninstall_all_gates(&mut r, &rvow_home);
+    } else {
+        match git::toplevel(&cwd()?) {
+            Ok(top) => uninstall_gate(&mut r, &rvow_home, &top)?,
+            Err(_) => r.line("pre-push gate: skipped, not in a git repository"),
+        }
+        let left = store::gate_repos(&rvow_home).len();
+        if left > 0 {
+            r.line(format!("pre-push gates: {left} other repositories still have one; run rvow uninstall --all to remove them"));
+        }
+    }
+    if purge {
+        purge_home(&mut r, &rvow_home, &home)?;
+    } else {
+        r.line(format!("plans: kept in {}; run rvow uninstall --purge to delete them", rvow_home.display()));
+    }
+    let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Error::io(Path::new("rvow"), e))?;
+    let cargo_bin = env_dir("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")).join("bin");
+    if exe.parent().is_some_and(|dir| dir.canonicalize().is_ok_and(|d| cargo_bin.canonicalize().is_ok_and(|c| c == d))) {
+        r.line("binary: to remove it, run: cargo uninstall rvow");
+    } else {
+        r.line(format!("binary: to remove it, run: rm {}", install::shell_quote(&exe.display().to_string())));
+    }
+    let text = std::mem::take(&mut r.text);
+    Ok(Reply::lines(text))
+}
+
+fn uninstall_mod(r: &mut Reply, rvow_home: &Path) -> Result<()> {
+    let dir = install::mod_dir().ok_or_else(|| Error::new("no-home", "HOME is not set", "set HOME"))?;
+    let old = rvow_home.join(install::MARKETPLACE_DIR);
+    let installed = [&dir, &old].iter().any(|d| d.join(".claude-plugin/marketplace.json").is_file());
+    // Claude Code is asked only when a marketplace is on disk, so a settings install never starts claude.
+    if installed {
+        match which("claude") {
+            Some(claude) => match install::unregister_claude_mod(&claude) {
+                Ok(done) => {
+                    for d in done {
+                        r.line(format!("Claude Code: {d}"));
+                    }
+                }
+                Err(e) => {
+                    r.line(format!("Claude Code: {}", e.message));
+                    r.line(format!("  {}", e.fix));
+                }
+            },
+            None => {
+                r.line("Claude Code: claude is not on PATH; to unload the mod, run once:");
+                r.line("  claude plugin uninstall rvow@rvow");
+                r.line("  claude plugin marketplace remove rvow");
+            }
+        }
+    }
+    report_removal(r, "Claude Code mod", install::remove_claude_mod(&dir)?);
+    if old != dir
+        && let install::Removal::Removed(p) = install::remove_claude_mod(&old)?
+    {
+        r.line(format!("old Claude Code mod: removed {}", p.display()));
+    }
+    Ok(())
+}
+
+fn uninstall_settings(r: &mut Reply, what: &str, path: &Path) -> Result<()> {
+    match install::remove_claude_settings(path)? {
+        install::Outcome::Written(p) => r.line(format!("{what}: removed the rvow hooks from {}", p.display())),
+        _ if std::fs::read_to_string(path).is_ok_and(|t| t.contains("hook claude")) => {
+            r.line(format!("{what}: {} is not valid JSON; remove its rvow hooks by hand", path.display()));
+        }
+        _ => r.line(format!("{what}: none in {}", path.display())),
+    }
+    Ok(())
+}
+
+fn uninstall_gate(r: &mut Reply, rvow_home: &Path, top: &Path) -> Result<()> {
+    let common = PathBuf::from(git::run(top, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
+    report_removal(r, "pre-push gate", install::remove_pre_push(&common)?);
+    if let Some(path) = install::hook_manager_gate(top) {
+        r.line(format!("pre-push gate: another hook manager owns {}; delete its rvow gate line", path.display()));
+    }
+    store::forget_gate(rvow_home, &common);
+    Ok(())
+}
+
+/// Removes every gate that `rvow install` remembered, and the gates of
+/// indexed repositories that an install before the record wrote.
+fn uninstall_all_gates(r: &mut Reply, rvow_home: &Path) {
+    let mut commons = store::gate_repos(rvow_home);
+    for common in store::indexed_repos(rvow_home) {
+        if !commons.contains(&common) && install::has_gate(&common) {
+            commons.push(common);
+        }
+    }
+    let (mut removed, mut failed) = (0, 0);
+    for common in &commons {
+        let repo = install::work_tree(common).unwrap_or(common);
+        if !common.is_dir() {
+            r.line(format!("pre-push gate: {} is gone; skipped", repo.display()));
+            store::forget_gate(rvow_home, common);
+            continue;
+        }
+        // One broken repository must not stop the others, so its error becomes a line.
+        match install::remove_pre_push(common) {
+            Ok(o) => {
+                if matches!(o, install::Removal::Removed(_) | install::Removal::Restored { .. }) {
+                    removed += 1;
+                }
+                report_removal(r, "pre-push gate", o);
+                store::forget_gate(rvow_home, common);
+            }
+            Err(e) => {
+                failed += 1;
+                r.line(format!("pre-push gate: {}: {}", repo.display(), e.message));
+            }
+        }
+        if let Some(path) = install::work_tree(common).and_then(install::hook_manager_gate) {
+            r.line(format!("pre-push gate: another hook manager owns {}; delete its rvow gate line", path.display()));
+        }
+    }
+    r.line(format!("pre-push gates: {removed} removed, {failed} failed"));
+}
+
+fn purge_home(r: &mut Reply, rvow_home: &Path, home: &Path) -> Result<()> {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if !rvow_home.is_absolute() || real(home).starts_with(real(rvow_home)) {
+        return Err(Error::new(
+            "purge",
+            format!("the rvow home {} is relative or holds your home folder {}", rvow_home.display(), home.display()),
+            "delete the rvow files in it by hand",
+        ));
+    }
+    match std::fs::remove_dir_all(rvow_home) {
+        Ok(()) => r.line(format!("plans: deleted {}", rvow_home.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => r.line(format!("plans: none at {}", rvow_home.display())),
+        Err(e) => return Err(Error::io(rvow_home, e)),
+    }
+    // The pointer stays when it names another home, which still holds plans.
+    if let Some(pointer) = store::home_pointer()
+        && std::fs::read_to_string(&pointer).is_ok_and(|t| Path::new(t.trim()) == rvow_home)
+    {
+        match std::fs::remove_file(&pointer) {
+            Ok(()) => {
+                r.line(format!("home pointer: removed {}", pointer.display()));
+                if let Some(dir) = pointer.parent() {
+                    let _ = std::fs::remove_dir(dir);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(&pointer, e)),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

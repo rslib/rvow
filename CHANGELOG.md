@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Print `at` and `until` in `rvow yolo` when a tier is on.
 - Let the user clear a flaky task with `rvow decide <task> keep`, strict or relaxed.
   The keep covers the failures before it, and a new failure marks the task flaky again.
+- Add `rvow uninstall` to remove the skill, the Claude Code mod or hooks, the pi extension and the pre-push gate.
+  It keeps your plans unless you pass `--purge`, and `--all` removes the gate of every repository.
 
 ## [0.0.1] - 2026-10-31
 

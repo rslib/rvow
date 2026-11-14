@@ -74,6 +74,15 @@ After you upgrade rvow, run `rvow install` again.
 It refreshes the skill, the Claude Code mod and the pi extension.
 It keeps a file that you edited and says so.
 
+## Uninstalling
+
+`rvow uninstall` removes the skill, the Claude Code mod or hooks, the pi extension and the pre-push gate of the current repository.
+It puts back a pre-push hook that `rvow install` moved aside and keeps a file that you edited.
+Your plans stay.
+`--all` removes the gate of every repository where `rvow install` wrote one.
+`--purge` does the same and also deletes the rvow home with your plans.
+It then prints the command that removes the binary.
+
 ## Next steps
 
 - `rvow install` adds the skill, the Claude Code mod, the pi extension and the pre-push gate.

@@ -26,6 +26,7 @@ Every rvow command. Each page comes from `rvow docs`, so it matches `rvow <comma
 | [`brief`](brief.md) | Print the short generated brief for this branch |
 | [`next`](next.md) | Print the next task of this branch |
 | [`install`](install.md) | Install the skill, the Claude Code hooks, the pi extension and the pre-push gate |
+| [`uninstall`](uninstall.md) | Remove what rvow install wrote: the skill, the Claude Code hooks, the pi extension and the pre-push gate |
 | [`check`](check.md) | Report on a plan before accept: findings, checks that cannot run, open questions |
 | [`claim`](claim.md) | Move a backlog plan to the current branch, so it can be accepted here |
 | [`clarify`](clarify.md) | List the open questions of a plan, each with its recommended answer |
